@@ -32,7 +32,7 @@ pub fn boot(source: elaborate::Source, lib: &part::PartLib) -> Result<doc::Doc, 
 
 #[cfg(test)]
 mod tests {
-    use super::command::{Command, Transaction};
+    use super::command::{suggested_resolutions, Command, Resolution, Transaction};
     use super::doc::{DecayReason, Doc, Point, Provenance, MM};
     use super::elaborate::{psu_module, GenDirective, Source};
     use super::history::History;
@@ -393,5 +393,169 @@ mod tests {
             && *r == DecayReason::RedundantWithDefault));
         assert!(!d.overrides.contains_key(&dec), "ineffective hint should be GC'd");
         assert!(dist(pos(d, "dec"), Point::mm(0, 0)) <= PLACE_TOL as f64);
+    }
+
+    // ---- M4: resolution UX — acting on ReconReport entries ----
+
+    /// psu_module(2) with dec[0] pinned at (5,5), then a hard Fix at (8,8) lands on
+    /// dec[0]: the canonical pin-vs-constraint conflict.
+    fn pin_conflict_doc() -> History {
+        let lib = part_library();
+        let mut h = pin_or_nudge_doc(2);
+        let dec0 = EntityId::new("psu.dec[0]");
+        h.commit(Transaction::one(Command::Pin(dec0.clone(), Point::mm(5, 5))), &lib, "pin")
+            .unwrap();
+        let mut src = psu_module(2);
+        src.push(GenDirective::Fix { path: "psu.dec[0]".into(), pos: Point::mm(8, 8) });
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "fix").unwrap();
+        assert!(h.doc().report.pin_conflicts.contains(&dec0));
+        h
+    }
+
+    #[test]
+    fn resolve_orphan_drops_dead_override() {
+        let lib = part_library();
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(psu_module(3))), &lib, "psu3").unwrap();
+        let dec1 = EntityId::new("psu.dec[1]");
+        h.commit(Transaction::one(Command::Pin(dec1.clone(), Point::mm(42, 7))), &lib, "pin")
+            .unwrap();
+        // Shrink so dec[1] disappears -> its override is orphaned.
+        h.commit(Transaction::one(Command::SetSource(psu_module(1))), &lib, "psu1").unwrap();
+        assert!(h.doc().report.orphaned.contains(&dec1));
+        assert!(h.doc().overrides.contains_key(&dec1));
+
+        h.commit(
+            Transaction::one(Command::Resolve(dec1.clone(), Resolution::DropOrphan)),
+            &lib,
+            "resolve orphan",
+        )
+        .unwrap();
+        let d = h.doc();
+        assert!(!d.overrides.contains_key(&dec1), "orphaned override should be dropped");
+        assert!(!d.report.orphaned.contains(&dec1), "orphan entry should be gone");
+        assert!(d.report.is_clean(), "report should be clean after resolving the only issue");
+    }
+
+    #[test]
+    fn accept_constraint_clears_conflicting_pin() {
+        let lib = part_library();
+        let mut h = pin_conflict_doc();
+        let dec0 = EntityId::new("psu.dec[0]");
+
+        h.commit(
+            Transaction::one(Command::Resolve(dec0.clone(), Resolution::AcceptConstraint)),
+            &lib,
+            "accept constraint",
+        )
+        .unwrap();
+        let d = h.doc();
+        // Part sits at the Fix position, as Fixed, with no override and a clean report.
+        assert_eq!(d.components[&dec0].pos.value, Point::mm(8, 8));
+        assert_eq!(d.components[&dec0].pos.prov, Provenance::Fixed);
+        assert!(!d.overrides.contains_key(&dec0), "no pin override should remain");
+        assert!(d.report.is_clean(), "report should be clean after accepting the constraint");
+    }
+
+    #[test]
+    fn re_pin_moves_pin_and_is_the_users_call() {
+        let lib = part_library();
+        let mut h = pin_conflict_doc();
+        let dec0 = EntityId::new("psu.dec[0]");
+
+        // Re-pin to a position that still differs from the Fix: the pin is kept and
+        // moved, the Fix still wins physically, so the conflict deliberately persists.
+        h.commit(
+            Transaction::one(Command::Resolve(dec0.clone(), Resolution::RePin(Point::mm(20, 20)))),
+            &lib,
+            "re-pin",
+        )
+        .unwrap();
+        let d = h.doc();
+        let ov = d.overrides.get(&dec0).expect("re-pinned override should remain");
+        assert_eq!(ov.pos, Some(Point::mm(20, 20)));
+        assert_eq!(d.components[&dec0].pos.value, Point::mm(8, 8), "Fix still wins");
+        assert!(d.report.pin_conflicts.contains(&dec0), "re-pin onto a non-Fix point still conflicts");
+
+        // Re-pinning onto the Fix point itself makes the pin redundant, not conflicting.
+        h.commit(
+            Transaction::one(Command::Resolve(dec0.clone(), Resolution::RePin(Point::mm(8, 8)))),
+            &lib,
+            "re-pin onto fix",
+        )
+        .unwrap();
+        let d = h.doc();
+        assert!(!d.report.pin_conflicts.contains(&dec0), "no longer conflicting");
+        assert!(d.report.redundant_pins.contains(&dec0), "now redundant with the Fix");
+    }
+
+    #[test]
+    fn drop_redundant_pin_unpins_it() {
+        let lib = part_library();
+        let mut h = pin_or_nudge_doc(2);
+        let dec0 = EntityId::new("psu.dec[0]");
+        // Pin at the default position: explicit but pointless -> flagged redundant.
+        h.commit(Transaction::one(Command::Pin(dec0.clone(), Point::mm(10, 0))), &lib, "pin")
+            .unwrap();
+        assert!(h.doc().report.redundant_pins.contains(&dec0));
+
+        h.commit(
+            Transaction::one(Command::Resolve(dec0.clone(), Resolution::DropRedundant)),
+            &lib,
+            "drop redundant",
+        )
+        .unwrap();
+        let d = h.doc();
+        assert!(!d.overrides.contains_key(&dec0), "redundant pin should be dropped");
+        assert!(!d.report.redundant_pins.contains(&dec0), "redundant entry should be gone");
+        assert!(d.report.is_clean());
+        // Position is unchanged (it was redundant), now solver-driven.
+        assert_eq!(d.components[&dec0].pos.value, Point::mm(10, 0));
+        assert_eq!(d.components[&dec0].pos.prov, Provenance::Free);
+    }
+
+    #[test]
+    fn resolve_validates_against_report_and_is_atomic() {
+        let lib = part_library();
+        let mut h = pin_or_nudge_doc(2);
+        let dec0 = EntityId::new("psu.dec[0]");
+        // No outstanding issue: a clean report.
+        assert!(h.doc().report.is_clean());
+        let before = super::project::render(h.doc());
+
+        // Each resolution rejects an entity its category does not flag; head untouched.
+        for res in [Resolution::DropOrphan, Resolution::AcceptConstraint, Resolution::DropRedundant]
+        {
+            let r = h.commit(
+                Transaction::one(Command::Resolve(dec0.clone(), res)),
+                &lib,
+                "bogus resolve",
+            );
+            assert!(r.is_err(), "resolving a non-issue must fail");
+        }
+        assert_eq!(before, super::project::render(h.doc()), "failed resolves leave head untouched");
+    }
+
+    #[test]
+    fn suggested_resolutions_enumerate_and_apply() {
+        let lib = part_library();
+        let mut h = pin_conflict_doc();
+        let dec0 = EntityId::new("psu.dec[0]");
+
+        let sugg = suggested_resolutions(&h.doc().report);
+        // A pin conflict offers two routes: accept-constraint (ready) and re-pin (needs input).
+        assert_eq!(sugg.len(), 2);
+        assert!(sugg.iter().all(|s| s.entity == dec0));
+        let ready: Vec<&Command> = sugg.iter().filter_map(|s| s.command.as_ref()).collect();
+        assert_eq!(ready.len(), 1, "accept-constraint is ready; re-pin needs a position");
+        assert!(matches!(
+            ready[0],
+            Command::Resolve(id, Resolution::AcceptConstraint) if *id == dec0
+        ));
+
+        // The suggested command actually clears the issue when committed.
+        h.commit(Transaction::one(ready[0].clone()), &lib, "apply suggestion").unwrap();
+        assert!(h.doc().report.is_clean());
+        assert!(suggested_resolutions(&h.doc().report).is_empty());
     }
 }
