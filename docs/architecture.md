@@ -318,6 +318,76 @@ region conflict *spatially*; no text merge can reason about it. Mitigations enab
 
 ---
 
+## 7. Error handling: structured diagnostics (the stability pattern)
+
+Stability is a founding goal — "a crash or panic is not a pleasant user experience" — and it has
+**two layers** that are easy to conflate:
+
+1. **No invalid states.** The command algebra (§2) guarantees a transaction either commits a valid
+   document or aborts whole. There is no half-applied state, so the crash-on-bad-API class is
+   designed out. *This layer was already real;* the error model does not change it.
+2. **How the reasons surface.** Every fallible operation yields **structured diagnostics** instead
+   of panicking or returning flat strings. This is the layer this section defines, and the pattern
+   every future subsystem follows. The north star is `rustc`: text that a human reads fluently *and*
+   a tool can parse, and which reports **everything wrong in one pass**, not just the first fault.
+
+**Audiences, and why there is only one rendering problem.** Agents work against the API and text
+surfaces (CLI, scripting); humans work through a GUI that passes errors up to display (red
+highlights, popups). Both consume the *same* structured value: the GUI reads its `Location` to
+highlight the offending entity; the CLI/agent reads the rendered text. So the rule is **structured
+internally, rendered at the edge** — never pre-formatted prose buried in a `String`.
+
+### The vocabulary (`diagnostic` module)
+
+- **`Diagnostic`** — `severity` + a stable, closed-set **`code`** (`"E_UNKNOWN_PIN"`,
+  `"W_HINT_DECAYED"`) + a human `message` + a **`Location`** + optional `help`. The `code` is the
+  agent/CLI parse anchor: tooling greps the code, so messages can be reworded freely.
+- **`Location` is semantic-first.** Because of model-as-truth (§5), most issues locate by *model
+  identity* — `Entity`/`Net`/`Pin`/`Trace`/`Via` — which is exactly what a GUI highlights. `Span
+  { line, col }` is the textual location only the text front-end supplies (today: line number from
+  the parser; column is best-effort).
+- **`Severity` is seriousness, not blocking.** A pin-vs-constraint conflict is an `Error` (genuinely
+  wrong, surfaced loudly, kept until resolved) yet rides on a *valid* document — it does not abort
+  the commit that produced it. What decides blocking is the **channel**, not the severity.
+- **`Diagnose` trait + `render`.** Domain results that callers consume as *data* (`route::Violation`,
+  `doc::ReconReport`) stay typed and implement `Diagnose` → `Diagnostic` for *rendering*.
+  `Diagnostic` is the presentation lingua franca, not a replacement for them. `render` emits
+  deterministic rustc-style text (errors before warnings, then by code/location — byte-stable and
+  diffable, which agents rely on).
+
+### Two channels, one vocabulary
+
+- **Hard faults** — a transaction that cannot build a valid model returns `Err(Vec<Diagnostic>)` and
+  aborts atomically. **Collect-all**: elaboration accumulates every independent fault it can find in
+  one pass rather than bailing on the first (`command::apply`, `elaborate`, `text::parse` all do
+  this). The text parser reports every malformed line; elaboration reports every unknown pin/part.
+- **Findings on a valid model** — reconciliation (`ReconReport`), ERC, DRC (`Key::Drc` →
+  `Vec<Violation>`), and the floating-pad check (`Key::Floating`) attach diagnostics to a document
+  that *did* elaborate. "Can this tape out?" = "are there any `Error`-severity diagnostics across
+  either channel?" (`diagnostic::has_errors`).
+
+### Error recovery / cascade suppression
+
+Collect-all without recovery would spew noise. The policy (rustc's): an **independent** mistake is
+reported individually (every unknown *pin* on a real component), but a **poisoned entity** — an
+instance that failed to build or was never declared — is reported **once**, and every downstream
+reference to it is suppressed (`elaborate`'s `reported_missing` set). So a single missing component
+yields one diagnostic, not one per net that referenced it.
+
+### Status
+
+Implemented across the mutation/query path: `command`/`history`/`elaborate`/`text` (hard-fault
+channel, collect-all), `query` ERC + floating + DRC-via-`Diagnose`, and `ReconReport`/`Violation`
+`Diagnose` impls. The production panic surface is down to a handful of *invariant/misuse* asserts
+(the `QueryValue::as_*` accessors, two solver "exists by construction" unwraps) — none reachable by
+user/agent input. **Follow-ups:** (1) the `kicad` import layer still returns `Result<_, String>` —
+a natural next application of the pattern (data-ingestion surface, not the runtime mutation path);
+(2) real text spans (column tracking) in the parser; (3) fuzzy "did you mean" suggestions (the
+`help:` line currently lists candidate names verbatim); (4) designing out the `as_*` accessor panics
+via a typed query key.
+
+---
+
 ## Open questions / hard parts (carry these forward)
 
 - **The reconciliation / minimal-perturbation engine** is the single load-bearing risk. Precise

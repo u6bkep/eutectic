@@ -41,7 +41,7 @@ impl History {
         txn: Transaction,
         lib: &PartLib,
         label: impl Into<String>,
-    ) -> Result<usize, String> {
+    ) -> Result<usize, Vec<crate::diagnostic::Diagnostic>> {
         self.tick += 1;
         let next = apply(self.doc(), &txn, lib, self.tick)?;
         let parent = Some(self.head);

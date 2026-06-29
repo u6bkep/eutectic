@@ -17,6 +17,7 @@
 
 use ecad_core::autoroute::autoroute;
 use ecad_core::command::{Command, Transaction};
+use ecad_core::diagnostic::render;
 use ecad_core::doc::{Point, MM};
 use ecad_core::elaborate::{GenDirective as G, Source};
 use ecad_core::export::{excellon_drill, gerber_set, netlist, placement_csv, svg};
@@ -449,18 +450,14 @@ fn main() {
     let mut eng = Engine::new();
     let erc = eng.query(doc, &lib, Key::Erc);
     println!("  ERC violations: {}", erc.as_erc().len());
-    for v in erc.as_erc() {
-        println!("    {v:?}");
-    }
+    print!("{}", render(erc.as_erc()));
     // Connectivity completeness (issue 0001): every pad that is on no net and not
     // marked no-connect. With pad-identity keying, ALL six IOVDD / three DVDD pads
     // are accounted for; what remains here is genuinely unconnected pads (unused
     // GPIOs etc.) that a finished design would route or NC — surfaced, not silent.
     let floats = eng.query(doc, &lib, Key::Floating);
     println!("  floating pads: {}", floats.as_floating().len());
-    for v in floats.as_floating().iter() {
-        println!("    {v}");
-    }
+    print!("{}", render(floats.as_floating()));
 
     // Stage 4: route + DRC
     let rules = DesignRules::default();

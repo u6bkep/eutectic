@@ -19,6 +19,7 @@
 //! Only tier-3 (pure, deterministic, cheap-to-compare) lives here. Tier-2 solver
 //! state is deliberately NOT a query — see docs/architecture.md.
 
+use crate::diagnostic::{Diagnostic, Location};
 use crate::doc::{Doc, InputId, PinRef};
 use crate::id::NetId;
 use crate::part::{PartLib, PinRole};
@@ -43,19 +44,19 @@ pub enum Key {
 #[derive(Clone, Debug, PartialEq)]
 pub enum QueryValue {
     Netlist(BTreeMap<NetId, Vec<(PinRef, PinRole)>>),
-    Erc(Vec<String>),
-    Floating(Vec<String>),
+    Erc(Vec<Diagnostic>),
+    Floating(Vec<Diagnostic>),
     Drc(Vec<Violation>),
 }
 
 impl QueryValue {
-    pub fn as_erc(&self) -> &[String] {
+    pub fn as_erc(&self) -> &[Diagnostic] {
         match self {
             QueryValue::Erc(v) => v,
             _ => panic!("not an Erc value"),
         }
     }
-    pub fn as_floating(&self) -> &[String] {
+    pub fn as_floating(&self) -> &[Diagnostic] {
         match self {
             QueryValue::Floating(v) => v,
             _ => panic!("not a Floating value"),
@@ -211,7 +212,11 @@ impl Engine {
                 for (nid, pins) in &nl {
                     let drivers = pins.iter().filter(|(_, r)| r.is_driver()).count();
                     if drivers >= 2 {
-                        errs.push(format!("net `{nid}`: {drivers} drivers contend"));
+                        errs.push(Diagnostic::error(
+                            "E_MULTIPLE_DRIVERS",
+                            format!("net `{nid}`: {drivers} drivers contend"),
+                            Location::Net(nid.clone()),
+                        ));
                     }
                 }
                 QueryValue::Erc(errs)
@@ -238,10 +243,17 @@ impl Engine {
                     for pad in &def.pins {
                         let pr = PinRef::new(&c.id, &pad.number);
                         if !connected.contains(&pr) && !doc.no_connects.contains(&pr) {
-                            floats.push(format!(
-                                "floating pad: `{}` pad `{}` ({}) is on no net and not marked no-connect",
-                                c.id, pad.number, pad.name
-                            ));
+                            floats.push(
+                                Diagnostic::error(
+                                    "E_FLOATING_PAD",
+                                    format!(
+                                        "`{}` pad `{}` ({}) is on no net and not marked no-connect",
+                                        c.id, pad.number, pad.name
+                                    ),
+                                    Location::Pin(pr.clone()),
+                                )
+                                .with_help("connect it to a net, or declare it no-connect"),
+                            );
                         }
                     }
                 }

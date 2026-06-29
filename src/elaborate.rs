@@ -11,9 +11,10 @@
 //!   - an override whose target no longer exists is *surfaced as a conflict*,
 //!     never silently dropped.
 
+use crate::diagnostic::{Diagnostic, Location};
 use crate::doc::*;
 use crate::id::{EntityId, NetId};
-use crate::part::{Dir, PartLib};
+use crate::part::{Dir, PartDef, PartLib};
 use crate::solve::{dist, solve, Constraint, Problem, Rect, PLACE_TOL};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -69,26 +70,52 @@ pub struct Elaborated {
 }
 
 /// Elaborate a source program into materialized instances + connectivity,
-/// applying ID-keyed overrides. Returns an error (aborting the whole elaboration)
-/// on a structural fault — this is what makes a transaction atomic.
+/// applying ID-keyed overrides. On a structural fault the whole elaboration aborts
+/// (atomic transaction) and returns **all** independent faults it found in one pass
+/// (collect-all), suppressing only the cascade from a poisoned entity. Findings on
+/// a *valid* model (reconciliation outcomes) ride in the returned [`Elaborated`]'s
+/// [`ReconReport`], not in this error channel.
 pub fn elaborate(
     source: &Source,
     overrides: &BTreeMap<EntityId, Override>,
     lib: &PartLib,
-) -> Result<Elaborated, String> {
+) -> Result<Elaborated, Vec<Diagnostic>> {
     let mut components: BTreeMap<EntityId, Component> = BTreeMap::new();
     let mut nets: BTreeMap<NetId, Net> = BTreeMap::new();
     let mut order = 0i64; // deterministic default placement counter
 
+    // Collect-all: accumulate structural faults instead of returning the first.
+    // `reported_missing` is the cascade-suppression set — an entity that does not
+    // exist (failed to instantiate, or never declared) is reported once, and all
+    // later references to it are silenced so the real fault isn't buried.
+    let mut errors: Vec<Diagnostic> = Vec::new();
+    let mut reported_missing: BTreeSet<EntityId> = BTreeSet::new();
+
     // Pass 1: instances.
     for d in source {
         if let GenDirective::Instance { path, part } = d {
-            if !lib.contains_key(part) {
-                return Err(format!("unknown part `{part}` for `{path}`"));
-            }
             let id = EntityId::new(path.clone());
+            if !lib.contains_key(part) {
+                errors.push(
+                    Diagnostic::error(
+                        "E_UNKNOWN_PART",
+                        format!("instance `{path}` uses unknown part `{part}`"),
+                        Location::Entity(id.clone()),
+                    )
+                    .with_help(known_parts(lib)),
+                );
+                // Poison: the instance does not exist, so suppress its cascade.
+                reported_missing.insert(id);
+                continue;
+            }
             if components.contains_key(&id) {
-                return Err(format!("duplicate instance `{path}`"));
+                // The first definition wins; the entity exists, so it is NOT poisoned.
+                errors.push(Diagnostic::error(
+                    "E_DUPLICATE_INSTANCE",
+                    format!("duplicate instance `{path}`"),
+                    Location::Entity(id),
+                ));
+                continue;
             }
             // Default placement: a free DOF, laid out in a row.
             let pos = Dof {
@@ -107,10 +134,10 @@ pub fn elaborate(
     for d in source {
         if let GenDirective::Place { path, pos } = d {
             let id = EntityId::new(path.clone());
-            let c = components
-                .get_mut(&id)
-                .ok_or_else(|| format!("Place targets unknown instance `{path}`"))?;
-            c.pos.value = *pos;
+            if note_missing(&id, &components, &mut reported_missing, &mut errors, "place") {
+                continue;
+            }
+            components.get_mut(&id).expect("note_missing confirmed presence").pos.value = *pos;
         }
     }
 
@@ -119,11 +146,19 @@ pub fn elaborate(
     for d in source {
         if let GenDirective::Rotate { path, deg } = d {
             let id = EntityId::new(path.clone());
-            let c = components
-                .get_mut(&id)
-                .ok_or_else(|| format!("Rotate targets unknown instance `{path}`"))?;
-            c.orient = Orient::from_deg(*deg)
-                .ok_or_else(|| format!("Rotate `{path}` by {deg}deg: only 0/90/180/270 supported"))?;
+            if note_missing(&id, &components, &mut reported_missing, &mut errors, "rotate") {
+                continue;
+            }
+            match Orient::from_deg(*deg) {
+                Some(o) => {
+                    components.get_mut(&id).expect("note_missing confirmed presence").orient = o
+                }
+                None => errors.push(Diagnostic::error(
+                    "E_BAD_ROTATION",
+                    format!("rotate `{path}` by {deg}deg: only 0/90/180/270 supported"),
+                    Location::Entity(id),
+                )),
+            }
         }
     }
 
@@ -132,32 +167,34 @@ pub fn elaborate(
     let mut fixmap: BTreeMap<EntityId, Point> = BTreeMap::new();
     let mut board: Option<Rect> = None;
     let mut relational: Vec<Constraint> = Vec::new();
-    let check = |id: &EntityId| -> Result<(), String> {
-        if components.contains_key(id) {
-            Ok(())
-        } else {
-            Err(format!("constraint references unknown instance `{id}`"))
-        }
-    };
     for d in source {
         match d {
             GenDirective::Fix { path, pos } => {
                 let id = EntityId::new(path.clone());
-                check(&id)?;
+                if note_missing(&id, &components, &mut reported_missing, &mut errors, "fix") {
+                    continue;
+                }
                 fixmap.insert(id, *pos);
             }
             GenDirective::Board { min, max } => board = Some(Rect { min: *min, max: *max }),
             GenDirective::Near { a, b, within } => {
                 let (a, b) = (EntityId::new(a.clone()), EntityId::new(b.clone()));
-                check(&a)?;
-                check(&b)?;
+                // Evaluate both so both are reported if both are missing.
+                let am = note_missing(&a, &components, &mut reported_missing, &mut errors, "near");
+                let bm = note_missing(&b, &components, &mut reported_missing, &mut errors, "near");
+                if am || bm {
+                    continue;
+                }
                 relational.push(Constraint::Near { a, b, within: *within });
             }
             GenDirective::NearPin { a, b_comp, b_pin, within } => {
                 let aid = EntityId::new(a.clone());
                 let bid = EntityId::new(b_comp.clone());
-                check(&aid)?;
-                check(&bid)?;
+                let am = note_missing(&aid, &components, &mut reported_missing, &mut errors, "nearpin");
+                let bm = note_missing(&bid, &components, &mut reported_missing, &mut errors, "nearpin");
+                if am || bm {
+                    continue;
+                }
                 // Pre-rotate the target pin's local offset by b's orientation; the
                 // result is a constant offset the solver adds to b's position.
                 let bc = &components[&bid];
@@ -165,37 +202,63 @@ pub fn elaborate(
                 // A selector may name several pads (a power rail); for a geometric
                 // anchor we target the first by pad order — deterministic and enough
                 // for a placement hint.
-                let num = bdef.resolve_selector(b_pin).into_iter().next().ok_or_else(|| {
-                    format!("NearPin: `{b_comp}` ({}) has no pin `{b_pin}`", bc.part)
-                })?;
-                // A discrete pad always has an offset; an interface signal could be
-                // present in `signals` but absent from `offsets` (a malformed
-                // InterfaceDef) — surface that as an elaboration error, not a panic.
-                let off = bdef.pin_offset(&num).ok_or_else(|| {
-                    format!("NearPin: `{b_comp}` ({}) pin `{b_pin}` has no offset", bc.part)
-                })?;
-                let b_off = bc.orient.rotate(off);
-                relational.push(Constraint::NearPin { a: aid, b: bid, b_off, within: *within });
+                match bdef.resolve_selector(b_pin).into_iter().next() {
+                    // A discrete pad always has an offset; an interface signal could
+                    // be in `signals` but absent from `offsets` (a malformed
+                    // InterfaceDef) — surface that, never panic.
+                    Some(num) => match bdef.pin_offset(&num) {
+                        Some(off) => relational.push(Constraint::NearPin {
+                            a: aid,
+                            b: bid,
+                            b_off: bc.orient.rotate(off),
+                            within: *within,
+                        }),
+                        None => errors.push(Diagnostic::error(
+                            "E_PIN_NO_OFFSET",
+                            format!("nearpin: `{b_comp}` pin `{b_pin}` has no offset"),
+                            Location::Entity(bid),
+                        )),
+                    },
+                    None => errors.push(
+                        Diagnostic::error(
+                            "E_UNKNOWN_PIN",
+                            format!("nearpin: `{b_comp}` (part `{}`) has no pin `{b_pin}`", bc.part),
+                            Location::Entity(bid),
+                        )
+                        .with_help(available_pins(bdef)),
+                    ),
+                }
             }
             GenDirective::MinSep { a, b, gap } => {
                 let (a, b) = (EntityId::new(a.clone()), EntityId::new(b.clone()));
-                check(&a)?;
-                check(&b)?;
+                let am = note_missing(&a, &components, &mut reported_missing, &mut errors, "minsep");
+                let bm = note_missing(&b, &components, &mut reported_missing, &mut errors, "minsep");
+                if am || bm {
+                    continue;
+                }
                 relational.push(Constraint::MinSep { a, b, gap: *gap });
             }
             GenDirective::AlignX { nodes } => {
                 let nodes: Vec<EntityId> = nodes.iter().map(|n| EntityId::new(n.clone())).collect();
+                let mut any_missing = false;
                 for n in &nodes {
-                    check(n)?;
+                    any_missing |=
+                        note_missing(n, &components, &mut reported_missing, &mut errors, "alignx");
                 }
-                relational.push(Constraint::AlignX { nodes });
+                if !any_missing {
+                    relational.push(Constraint::AlignX { nodes });
+                }
             }
             GenDirective::AlignY { nodes } => {
                 let nodes: Vec<EntityId> = nodes.iter().map(|n| EntityId::new(n.clone())).collect();
+                let mut any_missing = false;
                 for n in &nodes {
-                    check(n)?;
+                    any_missing |=
+                        note_missing(n, &components, &mut reported_missing, &mut errors, "aligny");
                 }
-                relational.push(Constraint::AlignY { nodes });
+                if !any_missing {
+                    relational.push(Constraint::AlignY { nodes });
+                }
             }
             _ => {}
         }
@@ -204,35 +267,84 @@ pub fn elaborate(
     // Pass 3: connections. A selector resolves against the part: a functional name
     // fans out to every pad with that name (so a six-pad power rail gets six
     // members), a pad number picks one pad. An unresolvable selector — a typo or a
-    // pin the part doesn't have — aborts elaboration rather than dangling silently.
+    // pin the part doesn't have — is reported (each, they don't cascade) and the
+    // member is skipped; a reference to a missing component is cascade-suppressed.
     let mut no_connects: BTreeSet<PinRef> = BTreeSet::new();
     for d in source {
         match d {
             GenDirective::ConnectInterface { a, b } => {
-                connect_interface(&components, lib, a, b, &mut nets)?;
+                let aid = EntityId::new(a.0.clone());
+                let bid = EntityId::new(b.0.clone());
+                let am = note_missing(&aid, &components, &mut reported_missing, &mut errors, "connect");
+                let bm = note_missing(&bid, &components, &mut reported_missing, &mut errors, "connect");
+                if am || bm {
+                    continue;
+                }
+                connect_interface(&components, lib, a, b, &mut nets, &mut errors);
             }
             GenDirective::ConnectPins { net, pins } => {
                 let id = NetId::new(net.clone());
-                let mut members = Vec::new();
-                for (comp, sel) in pins {
-                    members.extend(resolve_member(
-                        &components, lib, comp, sel, &format!("net `{net}`"),
-                    )?);
-                }
                 let entry = nets.entry(id.clone()).or_insert_with(|| Net {
                     id,
                     name: net.clone(),
                     members: BTreeSet::new(),
                 });
-                entry.members.extend(members);
+                for (comp, sel) in pins {
+                    let cid = EntityId::new(comp.clone());
+                    let ctx = format!("net `{net}`");
+                    if note_missing(&cid, &components, &mut reported_missing, &mut errors, &ctx) {
+                        continue;
+                    }
+                    let def = &lib[&components[&cid].part];
+                    let nums = def.resolve_selector(sel);
+                    if nums.is_empty() {
+                        errors.push(
+                            Diagnostic::error(
+                                "E_UNKNOWN_PIN",
+                                format!("{ctx}: `{comp}` (part `{}`) has no pin `{sel}`", components[&cid].part),
+                                Location::Entity(cid.clone()),
+                            )
+                            .with_help(available_pins(def)),
+                        );
+                        continue;
+                    }
+                    for n in nums {
+                        entry.members.insert(PinRef::new(&cid, &n));
+                    }
+                }
             }
             GenDirective::NoConnect { pins } => {
                 for (comp, sel) in pins {
-                    no_connects.extend(resolve_member(&components, lib, comp, sel, "no-connect")?);
+                    let cid = EntityId::new(comp.clone());
+                    if note_missing(&cid, &components, &mut reported_missing, &mut errors, "no-connect") {
+                        continue;
+                    }
+                    let def = &lib[&components[&cid].part];
+                    let nums = def.resolve_selector(sel);
+                    if nums.is_empty() {
+                        errors.push(
+                            Diagnostic::error(
+                                "E_UNKNOWN_PIN",
+                                format!("no-connect: `{comp}` (part `{}`) has no pin `{sel}`", components[&cid].part),
+                                Location::Entity(cid.clone()),
+                            )
+                            .with_help(available_pins(def)),
+                        );
+                        continue;
+                    }
+                    for n in nums {
+                        no_connects.insert(PinRef::new(&cid, &n));
+                    }
                 }
             }
             _ => {}
         }
+    }
+
+    // Collect-all gate: if the model could not be built cleanly, abort the whole
+    // transaction with every fault found. The partial model above is discarded.
+    if !errors.is_empty() {
+        return Err(errors);
     }
 
     // Pass 4: place everything with the least-change solver, then reconcile
@@ -336,31 +448,44 @@ pub fn elaborate(
     Ok(Elaborated { components, nets, no_connects, report })
 }
 
-/// Resolve a `(comp path, selector)` connection reference into concrete
-/// [`PinRef`]s. Validates that the instance exists, its part is known, and the
-/// selector names at least one pad — fanning a functional name out to every
-/// matching pad. An empty resolution is an error (`ctx` names the offending site),
-/// which is what makes a typo'd or missing pin a hard fault instead of a silent
-/// dangling member.
-fn resolve_member(
+/// Record (once) that a referenced entity does not exist, and report it as a
+/// structural fault. Returns `true` if `id` is missing (so the caller skips it).
+/// The `reported_missing` set is the cascade-suppression mechanism: an entity is
+/// reported the *first* time it's found missing, and later references are silenced
+/// so the genuine fault (its failed/absent instantiation) isn't buried under noise.
+fn note_missing(
+    id: &EntityId,
     components: &BTreeMap<EntityId, Component>,
-    lib: &PartLib,
-    comp: &str,
-    sel: &str,
+    reported_missing: &mut BTreeSet<EntityId>,
+    errors: &mut Vec<Diagnostic>,
     ctx: &str,
-) -> Result<Vec<PinRef>, String> {
-    let cid = EntityId::new(comp.to_string());
-    let c = components
-        .get(&cid)
-        .ok_or_else(|| format!("{ctx} references unknown instance `{comp}`"))?;
-    let def = lib
-        .get(&c.part)
-        .ok_or_else(|| format!("{ctx}: instance `{comp}` has unknown part `{}`", c.part))?;
-    let nums = def.resolve_selector(sel);
-    if nums.is_empty() {
-        return Err(format!("{ctx}: `{comp}` (part `{}`) has no pin `{sel}`", c.part));
+) -> bool {
+    if components.contains_key(id) {
+        return false;
     }
-    Ok(nums.iter().map(|n| PinRef::new(&cid, n)).collect())
+    if reported_missing.insert(id.clone()) {
+        errors.push(Diagnostic::error(
+            "E_UNKNOWN_INSTANCE",
+            format!("{ctx} references unknown instance `{id}`"),
+            Location::Entity(id.clone()),
+        ));
+    }
+    true
+}
+
+/// A `help:` line listing a part's distinct functional pin names — the candidates
+/// for an unresolved selector (the "did you mean" surface; fuzzy matching later).
+fn available_pins(def: &PartDef) -> String {
+    let mut names: Vec<&str> = def.pins.iter().map(|p| p.name.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+    format!("available pins: {}", names.join(", "))
+}
+
+/// A `help:` line listing the known part names — candidates for an unknown part.
+fn known_parts(lib: &PartLib) -> String {
+    let names: Vec<&str> = lib.keys().map(String::as_str).collect();
+    format!("known parts: {}", names.join(", "))
 }
 
 /// Build a solver problem from base placements + overrides + constraints.
@@ -402,49 +527,72 @@ fn assemble_problem(
 /// Connect two interface ports using the interface type's mate map. The mate map
 /// is the single place the tx<->rx crossing is defined, so connecting two ports
 /// always produces correctly-crossed nets — the swap footgun is unrepresentable.
+///
+/// Both components are assumed present (the caller cascade-checks them); any port /
+/// type / drive fault is pushed onto `errors` (the transaction aborts on it), and a
+/// fault that prevents wiring returns early without producing partial nets.
 fn connect_interface(
     components: &BTreeMap<EntityId, Component>,
     lib: &PartLib,
     a: &(String, String),
     b: &(String, String),
     nets: &mut BTreeMap<NetId, Net>,
-) -> Result<(), String> {
+    errors: &mut Vec<Diagnostic>,
+) {
     let (ap, aport) = a;
     let (bp, bport) = b;
     let aid = EntityId::new(ap.clone());
     let bid = EntityId::new(bp.clone());
-    let ac = components
-        .get(&aid)
-        .ok_or_else(|| format!("connect: unknown instance `{ap}`"))?;
-    let bc = components
-        .get(&bid)
-        .ok_or_else(|| format!("connect: unknown instance `{bp}`"))?;
+    let ac = &components[&aid];
+    let bc = &components[&bid];
     let adef = &lib[&ac.part];
     let bdef = &lib[&bc.part];
-    let aiface = adef
-        .interfaces
-        .get(aport)
-        .ok_or_else(|| format!("`{}` has no interface port `{aport}`", ac.part))?;
-    let biface = bdef
-        .interfaces
-        .get(bport)
-        .ok_or_else(|| format!("`{}` has no interface port `{bport}`", bc.part))?;
+    let (Some(aiface), Some(biface)) = (adef.interfaces.get(aport), bdef.interfaces.get(bport))
+    else {
+        if !adef.interfaces.contains_key(aport) {
+            errors.push(Diagnostic::error(
+                "E_UNKNOWN_INTERFACE",
+                format!("`{ap}` (part `{}`) has no interface port `{aport}`", ac.part),
+                Location::Entity(aid),
+            ));
+        }
+        if !bdef.interfaces.contains_key(bport) {
+            errors.push(Diagnostic::error(
+                "E_UNKNOWN_INTERFACE",
+                format!("`{bp}` (part `{}`) has no interface port `{bport}`", bc.part),
+                Location::Entity(bid),
+            ));
+        }
+        return;
+    };
     if aiface.type_name != biface.type_name {
-        return Err(format!(
-            "interface type mismatch: {} vs {}",
-            aiface.type_name, biface.type_name
+        errors.push(Diagnostic::error(
+            "E_INTERFACE_MISMATCH",
+            format!("interface type mismatch: {} vs {}", aiface.type_name, biface.type_name),
+            Location::Entity(aid),
         ));
+        return;
     }
 
     for (sa, sb) in &aiface.mate {
         let da = aiface.signals.get(sa).copied();
         let db = biface.signals.get(sb).copied();
         let (Some(da), Some(db)) = (da, db) else {
-            return Err(format!("interface `{}` mate references missing signal", aiface.type_name));
+            errors.push(Diagnostic::error(
+                "E_INTERFACE_SIGNAL",
+                format!("interface `{}` mate references a missing signal", aiface.type_name),
+                Location::Entity(aid.clone()),
+            ));
+            continue;
         };
         // Direction sanity: a mated pair must be drive/receive, not both drivers.
         if matches!((da, db), (Dir::Out, Dir::Out)) {
-            return Err(format!("drive conflict mating {sa}<->{sb}"));
+            errors.push(Diagnostic::error(
+                "E_DRIVE_CONFLICT",
+                format!("drive conflict mating {sa}<->{sb}"),
+                Location::Entity(aid.clone()),
+            ));
+            continue;
         }
         let net_name = format!("{ap}.{aport}.{sa}");
         let nid = NetId::new(net_name.clone());
@@ -456,7 +604,6 @@ fn connect_interface(
         net.members.insert(PinRef::new(&aid, &format!("{aport}.{sa}")));
         net.members.insert(PinRef::new(&bid, &format!("{bport}.{sb}")));
     }
-    Ok(())
 }
 
 // ---- source-building helpers (a stand-in for the textual generative layer) ----

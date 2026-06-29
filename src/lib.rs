@@ -17,6 +17,7 @@
 
 pub mod autoroute;
 pub mod command;
+pub mod diagnostic;
 pub mod doc;
 pub mod elaborate;
 pub mod export;
@@ -31,7 +32,10 @@ pub mod solve;
 pub mod text;
 
 /// Build a root document from a generative source by elaborating it once.
-pub fn boot(source: elaborate::Source, lib: &part::PartLib) -> Result<doc::Doc, String> {
+pub fn boot(
+    source: elaborate::Source,
+    lib: &part::PartLib,
+) -> Result<doc::Doc, Vec<diagnostic::Diagnostic>> {
     let mut h = history::History::new(doc::Doc::default());
     h.commit(command::Transaction::one(command::Command::SetSource(source)), lib, "boot")?;
     Ok(h.doc().clone())
@@ -215,7 +219,8 @@ mod tests {
         let floats = eng.query(h.doc(), &lib, Key::Floating);
         let floats = floats.as_floating();
         assert_eq!(floats.len(), 1, "only GND floats: {floats:?}");
-        assert!(floats[0].contains("GND"), "got {:?}", floats[0]);
+        assert_eq!(floats[0].code, "E_FLOATING_PAD");
+        assert!(floats[0].message.contains("GND"), "got {:?}", floats[0]);
 
         // Marking GND no-connect clears it.
         let mut src = dup_power_source();
@@ -240,7 +245,50 @@ mod tests {
             },
         ];
         let err = h.commit(Transaction::one(Command::SetSource(src)), &lib, "s").unwrap_err();
-        assert!(err.contains("TYPO") && err.contains("u1"), "got {err}");
+        assert!(err.iter().any(|d| d.code == "E_UNKNOWN_PIN"), "got {err:?}");
+        let text = super::diagnostic::render(&err);
+        assert!(text.contains("TYPO") && text.contains("u1"), "got {text}");
+    }
+
+    /// Collect-all: independent faults are *all* reported in one elaboration, not
+    /// just the first — the rustc-style shape we want long-term.
+    #[test]
+    fn elaboration_collects_all_independent_faults() {
+        let lib = dup_power_lib();
+        let mut h = History::new(Default::default());
+        let src = vec![
+            GenDirective::Instance { path: "u1".into(), part: "PWRCHIP".into() },
+            GenDirective::Instance { path: "u2".into(), part: "PWRCHIP".into() },
+            GenDirective::ConnectPins { net: "a".into(), pins: vec![("u1".into(), "TYPO1".into())] },
+            GenDirective::ConnectPins { net: "b".into(), pins: vec![("u2".into(), "TYPO2".into())] },
+        ];
+        let errs = h.commit(Transaction::one(Command::SetSource(src)), &lib, "s").unwrap_err();
+        assert_eq!(errs.iter().filter(|d| d.code == "E_UNKNOWN_PIN").count(), 2, "both typos: {errs:?}");
+        let text = super::diagnostic::render(&errs);
+        assert!(text.contains("TYPO1") && text.contains("TYPO2"), "got {text}");
+    }
+
+    /// Cascade suppression: a missing instance referenced many times is reported
+    /// *once*, so the real fault isn't buried under its downstream noise.
+    #[test]
+    fn missing_instance_reported_once_cascade_suppressed() {
+        let lib = dup_power_lib();
+        let mut h = History::new(Default::default());
+        let src = vec![
+            GenDirective::Instance { path: "u1".into(), part: "PWRCHIP".into() },
+            GenDirective::Near { a: "ghost".into(), b: "u1".into(), within: MM },
+            GenDirective::ConnectPins {
+                net: "a".into(),
+                pins: vec![("ghost".into(), "VDD".into()), ("u1".into(), "VDD".into())],
+            },
+            GenDirective::ConnectPins { net: "b".into(), pins: vec![("ghost".into(), "GND".into())] },
+        ];
+        let errs = h.commit(Transaction::one(Command::SetSource(src)), &lib, "s").unwrap_err();
+        assert_eq!(
+            errs.iter().filter(|d| d.code == "E_UNKNOWN_INSTANCE").count(),
+            1,
+            "missing `ghost` reported once, cascade suppressed: {errs:?}"
+        );
     }
 
     #[test]

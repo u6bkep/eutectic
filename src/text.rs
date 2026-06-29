@@ -68,6 +68,7 @@
 //! pin psu.dec[0] (5.5mm, 3mm)
 //! ```
 
+use crate::diagnostic::{Diagnostic, Location};
 use crate::doc::{Doc, Nm, Override, Point, Strength, MM};
 use crate::elaborate::{GenDirective, Source};
 use crate::id::EntityId;
@@ -168,14 +169,17 @@ fn fmt_len(v: Nm) -> String {
 // ----------------------------------------------------------------------------
 
 /// Parse canonical (or human-authored) text back into tier-1 state. Comments
-/// (`#`...) and blank lines are skipped. Returns `Err` with the offending line on
-/// any malformed input; never panics.
-pub fn parse(text: &str) -> Result<Parsed, String> {
+/// (`#`...) and blank lines are skipped. Never panics. *Collect-all*: every
+/// malformed line is reported (located by line number via [`Location::Span`]), so
+/// one parse surfaces all syntax errors at once; on any error the whole parse fails
+/// with `Err(Vec<Diagnostic>)` and no partial state escapes.
+pub fn parse(text: &str) -> Result<Parsed, Vec<Diagnostic>> {
     let mut source: Source = Vec::new();
     let mut overrides: BTreeMap<EntityId, Override> = BTreeMap::new();
+    let mut errors: Vec<Diagnostic> = Vec::new();
 
     for (i, raw) in text.lines().enumerate() {
-        let lineno = i + 1;
+        let lineno = (i + 1) as u32;
         // Strip comments and surrounding whitespace.
         let line = match raw.split_once('#') {
             Some((code, _)) => code,
@@ -185,14 +189,23 @@ pub fn parse(text: &str) -> Result<Parsed, String> {
         if line.is_empty() {
             continue;
         }
-        match parse_line(line).map_err(|e| format!("line {lineno}: {e} (in `{line}`)"))? {
-            Item::Directive(d) => source.push(d),
-            Item::Override(id, ov) => {
+        match parse_line(line) {
+            Ok(Item::Directive(d)) => source.push(d),
+            Ok(Item::Override(id, ov)) => {
                 overrides.insert(id, ov);
             }
+            Err(e) => errors.push(Diagnostic::error(
+                "E_PARSE",
+                format!("{e} (in `{line}`)"),
+                Location::Span { line: lineno, col: 1 },
+            )),
         }
     }
-    Ok((source, overrides))
+    if errors.is_empty() {
+        Ok((source, overrides))
+    } else {
+        Err(errors)
+    }
 }
 
 enum Item {
@@ -696,21 +709,31 @@ mod tests {
 
     #[test]
     fn parse_error_unknown_directive() {
-        let e = parse("frobnicate a b").unwrap_err();
+        let e = crate::diagnostic::render(&parse("frobnicate a b").unwrap_err());
         assert!(e.contains("unknown directive"), "got: {e}");
         assert!(e.contains("frobnicate"), "error should name the offending line: {e}");
     }
 
     #[test]
     fn parse_error_bad_coordinate() {
-        let e = parse("place foo (3mm)").unwrap_err();
-        assert!(e.contains("line 1"), "error should carry the line number: {e}");
+        let e = crate::diagnostic::render(&parse("place foo (3mm)").unwrap_err());
+        assert!(e.contains("1:1"), "error should carry the line location: {e}");
     }
 
     #[test]
     fn parse_error_bad_pin_ref() {
-        let e = parse("net VBUS nodotpin").unwrap_err();
+        let e = crate::diagnostic::render(&parse("net VBUS nodotpin").unwrap_err());
         assert!(e.contains("<comp>"), "got: {e}");
+    }
+
+    /// Collect-all: several malformed lines are all reported in one parse, each
+    /// located by line number — not just the first.
+    #[test]
+    fn parse_collects_all_line_errors() {
+        let diags = parse("frobnicate x\ninst u1 LDO\nplace foo (3mm)").unwrap_err();
+        assert_eq!(diags.len(), 2, "both bad lines reported: {diags:?}");
+        let text = crate::diagnostic::render(&diags);
+        assert!(text.contains("1:1") && text.contains("3:1"), "located by line: {text}");
     }
 
     #[test]

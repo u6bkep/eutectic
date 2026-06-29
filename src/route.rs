@@ -136,6 +136,32 @@ pub enum Violation {
     Unrouted { net: NetId, islands: usize },
 }
 
+/// DRC violations stay a typed domain result (the autorouter consumes them as
+/// data); this renders them into the shared diagnostic vocabulary for display.
+impl crate::diagnostic::Diagnose for Violation {
+    fn diagnostics(&self) -> Vec<crate::diagnostic::Diagnostic> {
+        use crate::diagnostic::{Diagnostic, Location};
+        let d = match self {
+            Violation::Clearance { a, b, layer } => Diagnostic::error(
+                "E_DRC_CLEARANCE",
+                format!("nets `{a}` and `{b}` are closer than clearance on {layer:?}"),
+                Location::Net(a.clone()),
+            ),
+            Violation::MinWidth { trace, width } => Diagnostic::error(
+                "E_DRC_MIN_WIDTH",
+                format!("trace `{trace}` width {width}nm is below the minimum"),
+                Location::Trace(*trace),
+            ),
+            Violation::Unrouted { net, islands } => Diagnostic::error(
+                "E_DRC_UNROUTED",
+                format!("net `{net}` is not fully routed ({islands} disconnected islands)"),
+                Location::Net(net.clone()),
+            ),
+        };
+        vec![d]
+    }
+}
+
 /// Run the design-rule check over a document's routing. Pure and deterministic:
 /// the only inputs are the routed copper (tier-2), the placement geometry (for pad
 /// world positions, via `lib`), and the resolved netlist (`netlist`, which fixes

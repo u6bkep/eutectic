@@ -10,6 +10,7 @@
 //! engine keys on. This diff *is* the minimal-perturbation machinery made visible
 //! to the derived layer.
 
+use crate::diagnostic::{Diagnostic, Location};
 use crate::doc::*;
 use crate::elaborate::{elaborate, Source};
 use crate::id::{EntityId, TraceId, ViaId};
@@ -92,7 +93,7 @@ impl Transaction {
 /// Apply a transaction to a document. `tick` is the monotonic global revision
 /// used to stamp whichever inputs changed. Returns the new doc, or an error
 /// (leaving the caller's original untouched — atomicity).
-pub fn apply(doc: &Doc, txn: &Transaction, lib: &PartLib, tick: u64) -> Result<Doc, String> {
+pub fn apply(doc: &Doc, txn: &Transaction, lib: &PartLib, tick: u64) -> Result<Doc, Vec<Diagnostic>> {
     // Work on a candidate clone; only the return value is observed by the caller.
     let mut next = doc.clone();
 
@@ -115,42 +116,78 @@ pub fn apply(doc: &Doc, txn: &Transaction, lib: &PartLib, tick: u64) -> Result<D
                 next.source = source;
                 next.overrides = overrides;
             }
-            Command::Resolve(id, res) => apply_resolution(&mut next, id, res)?,
+            Command::Resolve(id, res) => apply_resolution(&mut next, id, res).map_err(|d| vec![d])?,
             Command::AddTrace(id, trace) => {
                 if next.traces.contains_key(id) {
-                    return Err(format!("AddTrace: id `{id}` already exists"));
+                    return Err(vec![Diagnostic::error(
+                        "E_TRACE_ID_TAKEN",
+                        format!("AddTrace: id `{id}` already exists"),
+                        Location::Trace(*id),
+                    )]);
                 }
                 if trace.path.len() < 2 {
-                    return Err(format!("AddTrace `{id}`: a trace needs at least two points"));
+                    return Err(vec![Diagnostic::error(
+                        "E_TRACE_TOO_SHORT",
+                        format!("AddTrace `{id}`: a trace needs at least two points"),
+                        Location::Trace(*id),
+                    )]);
                 }
                 if trace.width <= 0 {
-                    return Err(format!("AddTrace `{id}`: width must be positive"));
+                    return Err(vec![Diagnostic::error(
+                        "E_TRACE_WIDTH",
+                        format!("AddTrace `{id}`: width must be positive"),
+                        Location::Trace(*id),
+                    )]);
                 }
                 if !next.nets.contains_key(&trace.net) {
-                    return Err(format!("AddTrace `{id}`: unknown net `{}`", trace.net));
+                    return Err(vec![Diagnostic::error(
+                        "E_UNKNOWN_NET",
+                        format!("AddTrace `{id}`: unknown net `{}`", trace.net),
+                        Location::Net(trace.net.clone()),
+                    )]);
                 }
                 next.traces.insert(*id, trace.clone());
             }
             Command::RemoveTrace(id) => {
                 if next.traces.remove(id).is_none() {
-                    return Err(format!("RemoveTrace: no trace `{id}`"));
+                    return Err(vec![Diagnostic::error(
+                        "E_NO_TRACE",
+                        format!("RemoveTrace: no trace `{id}`"),
+                        Location::Trace(*id),
+                    )]);
                 }
             }
             Command::AddVia(id, via) => {
                 if next.vias.contains_key(id) {
-                    return Err(format!("AddVia: id `{id}` already exists"));
+                    return Err(vec![Diagnostic::error(
+                        "E_VIA_ID_TAKEN",
+                        format!("AddVia: id `{id}` already exists"),
+                        Location::Via(*id),
+                    )]);
                 }
                 if via.drill <= 0 || via.pad <= 0 {
-                    return Err(format!("AddVia `{id}`: drill and pad must be positive"));
+                    return Err(vec![Diagnostic::error(
+                        "E_VIA_GEOMETRY",
+                        format!("AddVia `{id}`: drill and pad must be positive"),
+                        Location::Via(*id),
+                    )]);
                 }
                 if !next.nets.contains_key(&via.net) {
-                    return Err(format!("AddVia `{id}`: unknown net `{}`", via.net));
+                    return Err(vec![Diagnostic::error(
+                        "E_UNKNOWN_NET",
+                        format!("AddVia `{id}`: unknown net `{}`", via.net),
+                        Location::Net(via.net.clone()),
+                    )]);
                 }
                 next.vias.insert(*id, via.clone());
             }
             Command::RemoveVia(id) => {
                 if next.vias.remove(id).is_none() {
-                    return Err(format!("RemoveVia: no via `{id}`"));
+                    return Err(vec![Diagnostic::error(
+                        "E_NO_VIA",
+                        format!("RemoveVia: no via `{id}`"),
+                        Location::Via(*id),
+                    )]);
                 }
             }
         }
@@ -219,30 +256,46 @@ fn positions_changed(a: &Doc, b: &Doc) -> bool {
 /// category is an error, which aborts the whole transaction (atomicity). This is
 /// what makes a resolution distinct from the raw `ClearOverride`/`Pin` primitives
 /// it shares a mutation with — it must target a genuinely outstanding issue.
-fn apply_resolution(next: &mut Doc, id: &EntityId, res: &Resolution) -> Result<(), String> {
+fn apply_resolution(next: &mut Doc, id: &EntityId, res: &Resolution) -> Result<(), Diagnostic> {
     match res {
         Resolution::DropOrphan => {
             if !next.report.orphaned.contains(id) {
-                return Err(format!("Resolve DropOrphan: `{id}` is not an orphaned override"));
+                return Err(Diagnostic::error(
+                    "E_NOT_ORPHAN",
+                    format!("Resolve DropOrphan: `{id}` is not an orphaned override"),
+                    Location::Entity(id.clone()),
+                ));
             }
             next.overrides.remove(id);
         }
         Resolution::AcceptConstraint => {
             if !next.report.pin_conflicts.contains(id) {
-                return Err(format!("Resolve AcceptConstraint: `{id}` is not a pin conflict"));
+                return Err(Diagnostic::error(
+                    "E_NOT_CONFLICT",
+                    format!("Resolve AcceptConstraint: `{id}` is not a pin conflict"),
+                    Location::Entity(id.clone()),
+                ));
             }
             next.overrides.remove(id);
         }
         Resolution::RePin(p) => {
             if !next.report.pin_conflicts.contains(id) {
-                return Err(format!("Resolve RePin: `{id}` is not a pin conflict"));
+                return Err(Diagnostic::error(
+                    "E_NOT_CONFLICT",
+                    format!("Resolve RePin: `{id}` is not a pin conflict"),
+                    Location::Entity(id.clone()),
+                ));
             }
             next.overrides
                 .insert(id.clone(), Override { pos: Some(*p), strength: Strength::Pin });
         }
         Resolution::DropRedundant => {
             if !next.report.redundant_pins.contains(id) {
-                return Err(format!("Resolve DropRedundant: `{id}` is not a redundant pin"));
+                return Err(Diagnostic::error(
+                    "E_NOT_REDUNDANT",
+                    format!("Resolve DropRedundant: `{id}` is not a redundant pin"),
+                    Location::Entity(id.clone()),
+                ));
             }
             next.overrides.remove(id);
         }

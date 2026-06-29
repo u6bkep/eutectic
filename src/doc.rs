@@ -191,6 +191,55 @@ impl ReconReport {
     }
 }
 
+/// Reconciliation outcomes are *findings on a valid document* (see
+/// `diagnostic.rs`): they ride alongside a doc that successfully elaborated, never
+/// aborting the commit that produced them. Severity reflects seriousness, not
+/// blocking — a pin conflict is an `Error` (genuinely wrong, surfaced loudly, kept
+/// until resolved) even though it does not stop the commit; decay/redundancy are
+/// advisory `Warning`s.
+impl crate::diagnostic::Diagnose for ReconReport {
+    fn diagnostics(&self) -> Vec<crate::diagnostic::Diagnostic> {
+        use crate::diagnostic::{Diagnostic, Location};
+        let mut out = Vec::new();
+        for (id, reason) in &self.decayed {
+            let why = match reason {
+                DecayReason::RedundantWithDefault => "equalled the generated/solved default",
+                DecayReason::OverriddenByConstraint => "was overridden by a hard constraint",
+            };
+            out.push(Diagnostic::warning(
+                "W_HINT_DECAYED",
+                format!("hint on `{id}` {why}; garbage-collected"),
+                Location::Entity(id.clone()),
+            ));
+        }
+        for id in &self.pin_conflicts {
+            out.push(
+                Diagnostic::error(
+                    "E_PIN_CONFLICT",
+                    format!("pin on `{id}` contradicts a hard constraint"),
+                    Location::Entity(id.clone()),
+                )
+                .with_help("accept the constraint (clear the pin), or re-pin to a new position"),
+            );
+        }
+        for id in &self.redundant_pins {
+            out.push(Diagnostic::warning(
+                "W_PIN_REDUNDANT",
+                format!("pin on `{id}` no longer changes the outcome"),
+                Location::Entity(id.clone()),
+            ));
+        }
+        for id in &self.orphaned {
+            out.push(Diagnostic::error(
+                "E_ORPHAN_OVERRIDE",
+                format!("override targets `{id}`, which no longer exists"),
+                Location::Entity(id.clone()),
+            ));
+        }
+        out
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DecayReason {
     /// The hint equalled the generated/solved default.
