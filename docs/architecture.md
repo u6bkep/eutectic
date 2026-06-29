@@ -434,6 +434,11 @@ feasible sets tightly, and *reports* infeasibility rather than proving global op
 - No router.
 - The end-to-end PoC target (a single-PCB chip-down rework of the RP2350-Zero SWD-probe carrier)
   needs: real parts/footprints with pin geometry, a netlist→placement→route flow, and fab output.
+  **Footprint *geometry* import now exists** (see "Prototype status (footprint import)" below): real
+  KiCad `.kicad_mod` files (incl. the PoC's JST-SH headers and the QFN ICs) parse into `PartDef`s
+  with per-pad pin offsets. What's still missing for the PoC: electrical roles/interfaces (a
+  footprint carries none — they come from the schematic *symbol*), and the netlist→placement→route→fab
+  flow.
 
 ## Prototype status (text front-end)
 
@@ -612,3 +617,40 @@ an infeasible set (two `Fix`ed nodes a `Near` cannot reconcile) reported `!conve
 residual; a `MinSep` larger than the board reported; an unconstrained node staying bit-exactly at its
 anchor; determinism (same `Problem` twice → identical positions/flag/iters). The full M1–M4 suite
 (44 tests) stays green under the tighter solver. Zero new dependencies.
+
+## Prototype status (footprint import)
+
+The `kicad` module imports real KiCad footprints (`.kicad_mod`) into the part model, so the
+built-in toy library is no longer the only source of parts with pin geometry. A `.kicad_mod` is a
+single S-expression; we hand-roll a tiny tokenizer + recursive reader (zero dependencies — no
+serde/sexp crates) and lift out the bits we model.
+
+- **API:** `import_footprint(text: &str) -> Result<PartDef, String>` and the file wrapper
+  `import_footprint_file(path: &str)`. Both modern `(footprint "name" ...)` and legacy
+  `(module name ...)` headers are accepted; pad names may be quoted or bare.
+- **What is imported is geometry, not electrics.** One `PinDef` per `pad`, named by the pad's
+  number/name, positioned at the pad's `(at x y [angle])` converted mm→nm (decimal mm parsed by
+  hand into integer nm, half-away-from-zero rounding — no float, preserving the fixed-point
+  invariant; the rotation angle is ignored for the offset). Everything else (silkscreen, courtyard,
+  fab, 3D models, sizes, layers, zones) is ignored.
+- **Role-less by design (the key limitation).** A footprint carries **no electrical roles** —
+  whether a pad is power, input, or passive comes from the *schematic symbol*, not the footprint.
+  So every imported pin is `PinRole::Passive` and `interfaces` is empty. Pairing an imported
+  footprint with role/interface information from a symbol is future work and a PoC prerequisite.
+- **Mapping decisions:** pads that **share a name** (e.g. two `MP` mounting pads, or a split
+  thermal pad reusing one number) keep the **first** occurrence — a duplicate pin name would
+  silently break `pin_offset`/`pin_role`, which resolve by first match. **Unnamed pads** (`name ==
+  ""`, used for thermal/exposed pads and mechanical features) are **skipped** (no electrical
+  identity).
+
+**Verified on real PoC footprints** (from the Orbiter_Ultra.pretty library): the JST-SH headers and
+the QFN ICs parse correctly — e.g. `JST_SH_BM03B-SRSS-TB_1x03-1MP_P1.00mm_Vertical` → 4 pins
+(`1,2,3,MP`; the two `MP` pads dedupe, the exposed pad is skipped) with pad 1 at
+`(-1000000, 1325000)` nm; `Texas_X2QFN-12` → 12 pins; `QFN-80-1EP` → 81 pins (80 + the named EP;
+its unnamed thermal sub-pads skipped).
+
+Tested (8 new unit tests, 52 total): an embedded JST-SH-like fixture (name, pad count, specific
+offsets in nm, all-`Passive`/no-interface); shared-pad dedup; unnamed-pad skipping; legacy
+`(module ...)` + bare pad names + ignored rotation angle; quoted name with spaces/parens; sub-nm
+fractional rounding; a battery of malformed inputs that return `Err` without panicking; and an
+existence-guarded smoke test against a real on-disk footprint. Zero new dependencies.
