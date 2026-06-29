@@ -22,6 +22,7 @@
 use crate::doc::{Doc, InputId, PinRef};
 use crate::id::NetId;
 use crate::part::{PartLib, PinRole};
+use crate::route::{check_drc, DesignRules, Violation};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -30,12 +31,15 @@ pub enum Key {
     Netlist,
     /// Electrical-rules check, computed *from* the resolved netlist.
     Erc,
+    /// Design-rules check over the routed copper: clearance, min width, ratsnest.
+    Drc,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum QueryValue {
     Netlist(BTreeMap<NetId, Vec<(PinRef, PinRole)>>),
     Erc(Vec<String>),
+    Drc(Vec<Violation>),
 }
 
 impl QueryValue {
@@ -49,6 +53,12 @@ impl QueryValue {
         match self {
             QueryValue::Netlist(m) => m,
             _ => panic!("not a Netlist value"),
+        }
+    }
+    pub fn as_drc(&self) -> &[Violation] {
+        match self {
+            QueryValue::Drc(v) => v,
+            _ => panic!("not a Drc value"),
         }
     }
 }
@@ -87,7 +97,7 @@ impl Engine {
     /// Query a value, bringing the engine's notion of "now" up to the document's
     /// latest input revision first.
     pub fn query(&mut self, doc: &Doc, lib: &PartLib, key: Key) -> QueryValue {
-        self.current_rev = doc.conn_rev.max(doc.geom_rev);
+        self.current_rev = doc.conn_rev.max(doc.geom_rev).max(doc.route_rev);
         self.eval(doc, lib, key);
         self.memos[&key].value.clone()
     }
@@ -193,6 +203,33 @@ impl Engine {
                     }
                 }
                 QueryValue::Erc(errs)
+            }
+            Key::Drc => {
+                // DRC reads three things, recorded as dependencies:
+                //   - the routed copper (Routing input) — what is being checked;
+                //   - placement geometry (Geometry input) — pads move with parts,
+                //     so clearance/ratsnest incidence depends on positions;
+                //   - the resolved netlist (Netlist query) — fixes which pins each
+                //     net must join for the ratsnest, and groups copper by net.
+                // Recording Netlist as a *query* dependency (not raw Connectivity)
+                // means a connectivity edit whose resolved netlist is unchanged is
+                // firewalled by early cutoff — DRC is not recomputed.
+                deps.push(Dep::Input {
+                    which: InputId::Routing,
+                    rev: doc.input_rev(InputId::Routing),
+                });
+                deps.push(Dep::Input {
+                    which: InputId::Geometry,
+                    rev: doc.input_rev(InputId::Geometry),
+                });
+                self.eval(doc, lib, Key::Netlist);
+                deps.push(Dep::Query {
+                    key: Key::Netlist,
+                    changed_at: self.memos[&Key::Netlist].changed_at,
+                });
+                let nl = self.memos[&Key::Netlist].value.as_netlist().clone();
+                let rules = DesignRules::default();
+                QueryValue::Drc(check_drc(doc, lib, &nl, &rules))
             }
         }
     }

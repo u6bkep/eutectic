@@ -58,3 +58,39 @@ impl fmt::Display for NetId {
         write!(f, "{}", self.0)
     }
 }
+
+/// Stable identity for a routed trace. A plain monotone integer rather than a
+/// path string: a trace has no natural hierarchical name, and both a hand edit
+/// and a future autorouter mint ids the same way (caller-assigned, like KiCad's
+/// per-object UUIDs). Distinct newtype so the routing namespace stays separate.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TraceId(pub u64);
+
+impl fmt::Debug for TraceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "t{}", self.0)
+    }
+}
+
+impl fmt::Display for TraceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "t{}", self.0)
+    }
+}
+
+/// Stable identity for a via. Mirrors [`TraceId`]; separate type so a trace id
+/// and a via id can never be confused.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ViaId(pub u64);
+
+impl fmt::Debug for ViaId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "v{}", self.0)
+    }
+}
+
+impl fmt::Display for ViaId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "v{}", self.0)
+    }
+}

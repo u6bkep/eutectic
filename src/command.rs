@@ -12,8 +12,9 @@
 
 use crate::doc::*;
 use crate::elaborate::{elaborate, Source};
-use crate::id::EntityId;
+use crate::id::{EntityId, TraceId, ViaId};
 use crate::part::PartLib;
+use crate::route::{Trace, Via};
 
 #[derive(Clone, Debug)]
 pub enum Command {
@@ -39,6 +40,20 @@ pub enum Command {
     /// validated against the *current* report: resolving an entity that the report
     /// does not actually flag aborts the transaction. See [`Resolution`].
     Resolve(EntityId, Resolution),
+    /// Add a routed trace under a caller-supplied stable id. This is the
+    /// hand-routing / agent-routing API: the `Trace` carries its own provenance
+    /// (`Pinned` for a hand/agent edit, `Free` for a future autorouter). Validated:
+    /// the trace's net must exist, the polyline must have >= 2 points, the width
+    /// must be positive, and the id must be free — any failure aborts the whole
+    /// transaction (atomicity), so a dangling trace can never commit.
+    AddTrace(TraceId, Trace),
+    /// Remove a trace by id (errors if absent).
+    RemoveTrace(TraceId),
+    /// Add a via under a caller-supplied stable id. Same validation shape as
+    /// [`Command::AddTrace`]: known net, positive drill/pad, free id.
+    AddVia(ViaId, Via),
+    /// Remove a via by id (errors if absent).
+    RemoveVia(ViaId),
 }
 
 /// How to resolve a single [`ReconReport`] entry. Each variant lowers to an
@@ -101,6 +116,43 @@ pub fn apply(doc: &Doc, txn: &Transaction, lib: &PartLib, tick: u64) -> Result<D
                 next.overrides = overrides;
             }
             Command::Resolve(id, res) => apply_resolution(&mut next, id, res)?,
+            Command::AddTrace(id, trace) => {
+                if next.traces.contains_key(id) {
+                    return Err(format!("AddTrace: id `{id}` already exists"));
+                }
+                if trace.path.len() < 2 {
+                    return Err(format!("AddTrace `{id}`: a trace needs at least two points"));
+                }
+                if trace.width <= 0 {
+                    return Err(format!("AddTrace `{id}`: width must be positive"));
+                }
+                if !next.nets.contains_key(&trace.net) {
+                    return Err(format!("AddTrace `{id}`: unknown net `{}`", trace.net));
+                }
+                next.traces.insert(*id, trace.clone());
+            }
+            Command::RemoveTrace(id) => {
+                if next.traces.remove(id).is_none() {
+                    return Err(format!("RemoveTrace: no trace `{id}`"));
+                }
+            }
+            Command::AddVia(id, via) => {
+                if next.vias.contains_key(id) {
+                    return Err(format!("AddVia: id `{id}` already exists"));
+                }
+                if via.drill <= 0 || via.pad <= 0 {
+                    return Err(format!("AddVia `{id}`: drill and pad must be positive"));
+                }
+                if !next.nets.contains_key(&via.net) {
+                    return Err(format!("AddVia `{id}`: unknown net `{}`", via.net));
+                }
+                next.vias.insert(*id, via.clone());
+            }
+            Command::RemoveVia(id) => {
+                if next.vias.remove(id).is_none() {
+                    return Err(format!("RemoveVia: no via `{id}`"));
+                }
+            }
         }
     }
 
@@ -123,8 +175,10 @@ pub fn apply(doc: &Doc, txn: &Transaction, lib: &PartLib, tick: u64) -> Result<D
     // skip work precisely.
     let connectivity_changed = next.nets != doc.nets || part_shape_changed(doc, &next);
     let geometry_changed = positions_changed(doc, &next);
+    let routing_changed = next.traces != doc.traces || next.vias != doc.vias;
     next.conn_rev = if connectivity_changed { tick } else { doc.conn_rev };
     next.geom_rev = if geometry_changed { tick } else { doc.geom_rev };
+    next.route_rev = if routing_changed { tick } else { doc.route_rev };
 
     Ok(next)
 }

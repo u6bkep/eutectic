@@ -430,8 +430,12 @@ feasible sets tightly, and *reports* infeasibility rather than proving global op
   attribute now exist — see "Prototype status (physical parts)" below; the solver still does not
   *optimise* over orientation.)
 - Query dependencies are recorded explicitly, not auto-tracked; inputs are coarse
-  (`conn_rev`/`geom_rev`).
-- No router.
+  (`conn_rev`/`geom_rev`/`route_rev`).
+- **Routing representation + DRC now exist** (see "Prototype status (routing core)" below):
+  provenance-tagged trace/via/layer facts live in the `Doc` (tier 2), routing commands
+  mutate them atomically, and DRC is a tier-3 query (clearance, min-width, ratsnest). The
+  **autorouter itself is the next step** — it will write `Free` trace DOFs on top of this
+  representation, treating `Pinned` traces as fixed obstacles.
 - The end-to-end PoC target (a single-PCB chip-down rework of the RP2350-Zero SWD-probe carrier)
   needs: real parts/footprints with pin geometry, a netlist→placement→route flow, and fab output.
   **Footprint *geometry* import now exists** (see "Prototype status (footprint import)" below): real
@@ -759,3 +763,84 @@ all three artifacts. Tested (7 new unit tests, 64 total): netlist nets/pins for 
 P&P header + exact rows + row count + a rotated component's rotation column; SVG outline (explicit
 board *and* bbox fallback), component ids, labels, and pads; `fmt_mm` sign/fraction handling; and
 determinism (each exporter called twice yields identical strings). Zero new dependencies.
+
+## Prototype status (routing core)
+
+Lays the **foundation of the routing subsystem**: a provenance-tagged trace/via representation
+(tier-2 materialized state) plus a DRC checker (tier-3 query). The **autorouter is deliberately
+deferred** to a later milestone — this milestone is the representation it will write onto and the
+DRC query it will validate against. Still zero-dependency; all geometry is integer nm.
+
+**Representation (`route` module, stored in `Doc`).** Routed copper lives in the document alongside
+component placement, in the same tier and with the same `Provenance` ladder:
+- **`Layer`** — `Top` / `Bottom` outer copper plus `Inner(u8)` so the model extends to multilayer
+  without a rework; ordered by physical stack-up depth (which is what via spans test).
+- **`Trace`** — a `NetId`, a `Layer`, a centreline polyline (`Vec<Point>`), a `width` (nm), and a
+  `Provenance`. **`Pinned`** = hand/agent-routed (the autorouter will treat it as a fixed obstacle);
+  **`Free`** = reserved for the future autorouter's regen-able output. One provenance bit, exactly as
+  §1 prescribes — not a separate "auto vs manual" subsystem.
+- **`Via`** — a centre `Point`, the `from`/`to` layers it spans, its `NetId`, `drill`/`pad` sizes,
+  and a `Provenance`.
+- Both live in `Doc` as `traces: BTreeMap<TraceId, Trace>` and `vias: BTreeMap<ViaId, Via>`, mirroring
+  how placement lives in the doc. New id newtypes `id::TraceId(u64)` / `id::ViaId(u64)` — a trace has
+  no natural hierarchical name, so ids are caller-minted monotone integers (KiCad-UUID style), assigned
+  the same way by a hand edit or a future autorouter.
+
+**Commands (sole mutation surface).** `Command::{AddTrace, RemoveTrace, AddVia, RemoveVia}` carry a
+caller-supplied stable id and (for adds) the fact itself; the hand/agent-routing API passes
+`Provenance::Pinned`. Validation is atomic (unknown net, degenerate polyline `<2` points, non-positive
+width/drill/pad, duplicate or missing id all abort the whole transaction). A new coarse input revision
+**`route_rev`** (with `InputId::Routing`) is bumped by `apply` when `traces`/`vias` change, parallel to
+`conn_rev`/`geom_rev` — so a route edit bumps *only* `route_rev`, and a placement nudge that touches no
+copper does not bump it.
+
+**DRC (`Key::Drc` query, modelled on ERC).** `query::QueryValue::Drc(Vec<route::Violation>)` returns a
+canonical (sorted, de-duped) violation set from `route::check_drc`. Three checks:
+- **Min width** — every `Trace.width >= rules.min_trace_width`.
+- **Clearance** — copper of *different* nets must be `>= min_clearance`, **edge to edge** (the
+  threshold adds the traces' half-widths / via pad radii). Covers trace-vs-trace (same layer),
+  trace-vs-pad, and (bonus) via-vs-trace / via-vs-pad / via-vs-via with layer-span tests. Comparisons
+  are exact `i128` against *squared* thresholds (a point↔segment distance kept as a rational
+  `num/den`, and an integer segment-intersection test) — no floats, so the violation set is
+  byte-stable.
+- **Connectivity completeness (ratsnest)** — a **union-find** over each net's pins + traces + vias,
+  joined by geometric **incidence** within `DesignRules.touch_tol` (default 0.01 mm): a pin touches a
+  trace whose polyline passes within tol of the pad point, a pin touches a coincident via, same-layer
+  traces that touch fuse, and a via fuses copper across the layers it spans. A net is fully routed iff
+  all its pins land in one component; otherwise an `Unrouted { net, islands }` flags how many
+  disconnected groups remain.
+- **Design rules** — `route::DesignRules { min_clearance, min_trace_width, touch_tol }` with generic
+  2-layer defaults (0.15 mm clearance/width). The DRC query uses `DesignRules::default()`; wiring these
+  to a per-board/source process definition is the documented one-line follow-up.
+
+**Wired into the incremental engine.** `Drc` records three dependencies: the `Routing` input and the
+`Geometry` input (pads move with components) directly, and the **`Netlist` query** (not raw
+`Connectivity`) for the ratsnest pin set. Recording Netlist as a *query* dep is the firewall: a
+connectivity edit whose resolved netlist is unchanged is cut off and does **not** recompute DRC.
+`Engine::query` now folds `route_rev` into the current revision.
+
+**Modelling decisions / simplifications (documented honestly):**
+- **Pads are points.** A footprint import carries no pad *size*, so a pad is its `pin_world` centre
+  (radius 0) for both clearance and incidence; pads are treated as present on **all layers**
+  (through-hole assumption). Trace/via copper *does* carry width/pad size in the clearance threshold.
+- **A "touch" is incidence within `touch_tol`**, not an overlap area; hand-placed integer coordinates
+  make exact-coincident endpoints distance 0, and the tolerance absorbs deliberate near-misses.
+- **Clearance violations are keyed by `(net, net, layer)`** (de-duped), not by location — multiple
+  breaches of the same pair on the same layer collapse to one entry (keeps the set small and stable for
+  early cutoff; a location-bearing variant is a future refinement).
+- **Unassigned copper is ignored for clearance** (only net-member pads and net-bearing traces/vias are
+  checked); orphaning of traces when their net disappears under a source edit is **not** handled yet.
+
+**Tested (9 new unit tests, 78 total):** a clean hand-routed two-pin net passes; an unrouted net flags
+`Unrouted{islands:2}`; a different-net same-layer clearance breach is caught (exact violation asserted);
+a too-narrow trace is caught; a two-layer route joined by a via passes the ratsnest (and fails without
+the via); adding a trace bumps **only** `route_rev` and re-runs DRC (turning the net clean); a routing
+edit does **not** re-run ERC/Netlist (input isolation); a non-routing edit whose netlist value is
+unchanged does **not** recompute DRC (early-cutoff firewall, like the ERC test); and routing commands
+validate atomically. The existing 69 tests stay green. Zero new dependencies.
+
+**Explicitly deferred (next agent / later work):** the **autorouter** (writes `Free` trace DOFs onto
+this representation, treats `Pinned` traces as obstacles); **serializing routes** in the text
+front-end (`text` module — routes are not yet part of the canonical tier-1/tier-2 text projection);
+and **rendering traces** in the export SVG / Gerber (`export` module — copper geometry now exists in
+the model, but emitting it is out of scope here).

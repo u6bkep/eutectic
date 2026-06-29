@@ -15,7 +15,8 @@
 //! for canonical, byte-stable serialization (the git story). Persistent
 //! structural-sharing maps (`im`) are the production swap for a cheap version DAG.
 
-use crate::id::{EntityId, NetId};
+use crate::id::{EntityId, NetId, TraceId, ViaId};
+use crate::route::{Trace, Via};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Fixed-point coordinate in nanometres. Integers so positions compare exactly
@@ -194,18 +195,29 @@ pub struct Doc {
     pub components: BTreeMap<EntityId, Component>,
     /// tier 2: materialized connectivity.
     pub nets: BTreeMap<NetId, Net>,
+    /// tier 2: materialized routed copper. Like placement, this is solver/hand
+    /// state (not a derived query): a `Pinned` trace is hand/agent-authored, a
+    /// `Free` one is a future autorouter's regen-able output. Mutated only through
+    /// the command algebra; DRC reads it as a query input (`route_rev`).
+    pub traces: BTreeMap<TraceId, Trace>,
+    pub vias: BTreeMap<ViaId, Via>,
     /// Structured outcome of override reconciliation (decay/conflicts/orphans).
     pub report: ReconReport,
     /// Coarse input revisions for the query engine.
     pub conn_rev: u64,
     pub geom_rev: u64,
+    /// Bumped when routed copper (traces/vias) changes, parallel to conn/geom so
+    /// DRC can be skipped precisely (a placement nudge that touches no copper does
+    /// not bump this; a route edit bumps only this).
+    pub route_rev: u64,
 }
 
-/// The two coarse inputs the derived queries depend on.
+/// The coarse inputs the derived queries depend on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum InputId {
     Connectivity,
     Geometry,
+    Routing,
 }
 
 impl Doc {
@@ -213,6 +225,7 @@ impl Doc {
         match which {
             InputId::Connectivity => self.conn_rev,
             InputId::Geometry => self.geom_rev,
+            InputId::Routing => self.route_rev,
         }
     }
 }

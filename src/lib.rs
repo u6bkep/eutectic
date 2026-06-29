@@ -6,7 +6,8 @@
 //!   instances/nets; derived tier lives in `query`).
 //! - `command` — the sole mutation surface: atomic transactions.
 //! - `history` — the version DAG (undo / branch / replay).
-//! - `query` — hand-rolled incremental query engine (Netlist, ERC).
+//! - `query` — hand-rolled incremental query engine (Netlist, ERC, DRC).
+//! - `route` — routed copper representation (trace/via/layer) + the DRC kernel.
 //! - `elaborate` — generative source -> instances + ID-keyed override reconcile.
 //! - `part` — typed pins & interfaces (makes the serial swap unrepresentable).
 //! - `project` — deterministic text projection (agent/git view).
@@ -23,6 +24,7 @@ pub mod kicad;
 pub mod part;
 pub mod project;
 pub mod query;
+pub mod route;
 pub mod solve;
 pub mod text;
 
@@ -39,9 +41,10 @@ mod tests {
     use super::doc::{DecayReason, Doc, Nm, Point, Provenance, MM};
     use super::elaborate::{psu_module, GenDirective, Source};
     use super::history::History;
-    use super::id::EntityId;
+    use super::id::{EntityId, NetId, TraceId, ViaId};
     use super::part::part_library;
     use super::query::{Engine, Key};
+    use super::route::{Layer, Trace, Via, Violation};
     use super::solve::{dist, solve, Constraint, Problem, Rect, PLACE_TOL};
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -714,5 +717,224 @@ mod tests {
         assert_eq!(s1.converged, s2.converged);
         assert_eq!(s1.iters, s2.iters);
         assert!(s1.converged, "the feasible 3-decoupler set must converge");
+    }
+
+    // ---- routing-core: trace/via representation + DRC ----
+
+    const W: Nm = 200_000; // 0.2 mm, comfortably above the 0.15 mm width rule.
+
+    /// reg(LDO)@(0,0) and dec(Cap)@(10,0), VOUT and p1 joined on net VBUS. Pin
+    /// world positions follow from the part library: reg.VOUT = (2mm,0) (LDO VOUT
+    /// offset +2mm), dec.p1 = (9mm,0) (Cap p1 offset -1mm). A trace from (2,0) to
+    /// (9,0) therefore lands on both pads.
+    fn two_pin_design() -> Source {
+        vec![
+            GenDirective::Instance { path: "reg".into(), part: "LDO".into() },
+            GenDirective::Instance { path: "dec".into(), part: "Cap".into() },
+            GenDirective::Place { path: "reg".into(), pos: Point::mm(0, 0) },
+            GenDirective::Place { path: "dec".into(), pos: Point::mm(10, 0) },
+            GenDirective::ConnectPins {
+                net: "VBUS".into(),
+                pins: vec![("reg".into(), "VOUT".into()), ("dec".into(), "p1".into())],
+            },
+        ]
+    }
+
+    fn routed(src: Source) -> History {
+        let lib = part_library();
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "src").unwrap();
+        h
+    }
+
+    fn trace(net: &str, layer: Layer, path: Vec<Point>, width: Nm) -> Trace {
+        Trace { net: NetId::new(net), layer, path, width, prov: Provenance::Pinned }
+    }
+
+    /// A correctly hand-routed two-pin net passes DRC clean.
+    #[test]
+    fn drc_clean_on_routed_two_pin_net() {
+        let lib = part_library();
+        let mut h = routed(two_pin_design());
+        let t = trace("VBUS", Layer::Top, vec![Point::mm(2, 0), Point::mm(9, 0)], W);
+        h.commit(Transaction::one(Command::AddTrace(TraceId(1), t)), &lib, "route").unwrap();
+        let mut eng = Engine::new();
+        let v = eng.query(h.doc(), &lib, Key::Drc);
+        assert!(v.as_drc().is_empty(), "clean route should pass: {:?}", v.as_drc());
+    }
+
+    /// An unrouted net is flagged by the ratsnest check (its two pins form two
+    /// disconnected islands).
+    #[test]
+    fn drc_flags_unrouted_net() {
+        let lib = part_library();
+        let h = routed(two_pin_design());
+        let mut eng = Engine::new();
+        let v = eng.query(h.doc(), &lib, Key::Drc);
+        assert_eq!(
+            v.as_drc(),
+            &[Violation::Unrouted { net: NetId::new("VBUS"), islands: 2 }]
+        );
+    }
+
+    /// Two traces on different nets, same layer, closer than the clearance rule.
+    #[test]
+    fn drc_catches_clearance() {
+        let lib = part_library();
+        // Two single-pin nets (ratsnest trivially satisfied) so only clearance fires.
+        let src = vec![
+            GenDirective::Instance { path: "reg".into(), part: "LDO".into() },
+            GenDirective::Place { path: "reg".into(), pos: Point::mm(0, 0) },
+            GenDirective::ConnectPins { net: "A".into(), pins: vec![("reg".into(), "VOUT".into())] },
+            GenDirective::ConnectPins { net: "B".into(), pins: vec![("reg".into(), "GND".into())] },
+        ];
+        let mut h = routed(src);
+        // Parallel 0.2mm-wide traces 0.1mm apart: 0.1mm < 0.15 + 0.1 + 0.1 = 0.35mm.
+        let a = trace("A", Layer::Top, vec![Point::mm(0, 0), Point::mm(10, 0)], W);
+        let b = trace("B", Layer::Top, vec![Point { x: 0, y: MM / 10 }, Point { x: 10 * MM, y: MM / 10 }], W);
+        h.commit(Transaction::one(Command::AddTrace(TraceId(1), a)), &lib, "a").unwrap();
+        h.commit(Transaction::one(Command::AddTrace(TraceId(2), b)), &lib, "b").unwrap();
+        let mut eng = Engine::new();
+        let v = eng.query(h.doc(), &lib, Key::Drc);
+        assert_eq!(
+            v.as_drc(),
+            &[Violation::Clearance { a: NetId::new("A"), b: NetId::new("B"), layer: Layer::Top }]
+        );
+    }
+
+    /// A trace narrower than the minimum width rule is caught (and still routes the
+    /// net, so the ratsnest stays clean — only the width fires).
+    #[test]
+    fn drc_catches_min_width() {
+        let lib = part_library();
+        let mut h = routed(two_pin_design());
+        let t = trace("VBUS", Layer::Top, vec![Point::mm(2, 0), Point::mm(9, 0)], MM / 10); // 0.1mm
+        h.commit(Transaction::one(Command::AddTrace(TraceId(1), t)), &lib, "thin").unwrap();
+        let mut eng = Engine::new();
+        let v = eng.query(h.doc(), &lib, Key::Drc);
+        assert_eq!(v.as_drc(), &[Violation::MinWidth { trace: TraceId(1), width: MM / 10 }]);
+    }
+
+    /// A two-layer route joined by a via passes the ratsnest: the via unions copper
+    /// across the layers it spans (bonus — exercises vias + multilayer).
+    #[test]
+    fn drc_via_joins_two_layers() {
+        let lib = part_library();
+        let mut h = routed(two_pin_design());
+        // Top trace pad->via, bottom trace via->pad, via bridging Top..Bottom at (5,0).
+        let top = trace("VBUS", Layer::Top, vec![Point::mm(2, 0), Point::mm(5, 0)], W);
+        let bot = trace("VBUS", Layer::Bottom, vec![Point::mm(5, 0), Point::mm(9, 0)], W);
+        let via = Via {
+            net: NetId::new("VBUS"),
+            at: Point::mm(5, 0),
+            from: Layer::Top,
+            to: Layer::Bottom,
+            drill: 300_000,
+            pad: 600_000,
+            prov: Provenance::Pinned,
+        };
+        h.commit(Transaction::one(Command::AddTrace(TraceId(1), top)), &lib, "top").unwrap();
+        h.commit(Transaction::one(Command::AddTrace(TraceId(2), bot)), &lib, "bot").unwrap();
+        let mut eng = Engine::new();
+        // Without the via the two layers are disconnected: ratsnest fails.
+        assert!(!eng.query(h.doc(), &lib, Key::Drc).as_drc().is_empty());
+        h.commit(Transaction::one(Command::AddVia(ViaId(1), via)), &lib, "via").unwrap();
+        let v = eng.query(h.doc(), &lib, Key::Drc);
+        assert!(v.as_drc().is_empty(), "via should bridge the layers: {:?}", v.as_drc());
+    }
+
+    /// Adding a trace bumps `route_rev` (and only that), and re-runs DRC — turning
+    /// an unrouted net clean.
+    #[test]
+    fn add_trace_bumps_route_rev_and_reruns_drc() {
+        let lib = part_library();
+        let mut h = routed(two_pin_design());
+        let mut eng = Engine::new();
+        let v = eng.query(h.doc(), &lib, Key::Drc);
+        assert!(!v.as_drc().is_empty(), "unrouted net should flag");
+        let d0 = eng.count(Key::Drc);
+        let (conn0, geom0, route0) =
+            (h.doc().conn_rev, h.doc().geom_rev, h.doc().route_rev);
+
+        let t = trace("VBUS", Layer::Top, vec![Point::mm(2, 0), Point::mm(9, 0)], W);
+        h.commit(Transaction::one(Command::AddTrace(TraceId(1), t)), &lib, "route").unwrap();
+        // Only the routing input moved.
+        assert!(h.doc().route_rev > route0, "route_rev must bump");
+        assert_eq!(h.doc().conn_rev, conn0, "a route edit must not bump conn_rev");
+        assert_eq!(h.doc().geom_rev, geom0, "a route edit must not bump geom_rev");
+
+        let v = eng.query(h.doc(), &lib, Key::Drc);
+        assert!(v.as_drc().is_empty(), "now routed: {:?}", v.as_drc());
+        assert_eq!(eng.count(Key::Drc), d0 + 1, "DRC must recompute after a route edit");
+    }
+
+    /// A routing edit re-runs DRC but does NOT touch ERC/Netlist: the new routing
+    /// input is isolated to the queries that read it.
+    #[test]
+    fn routing_edit_does_not_recompute_erc() {
+        let lib = part_library();
+        let mut h = routed(two_pin_design());
+        let mut eng = Engine::new();
+        eng.query(h.doc(), &lib, Key::Erc);
+        eng.query(h.doc(), &lib, Key::Drc);
+        let (e0, n0) = (eng.count(Key::Erc), eng.count(Key::Netlist));
+
+        let t = trace("VBUS", Layer::Top, vec![Point::mm(2, 0), Point::mm(9, 0)], W);
+        h.commit(Transaction::one(Command::AddTrace(TraceId(1), t)), &lib, "route").unwrap();
+        eng.query(h.doc(), &lib, Key::Erc);
+        eng.query(h.doc(), &lib, Key::Drc);
+        assert_eq!(eng.count(Key::Erc), e0, "a route edit must not re-run ERC");
+        assert_eq!(eng.count(Key::Netlist), n0, "a route edit must not re-run Netlist");
+    }
+
+    /// A non-routing edit whose resolved netlist is unchanged does NOT recompute
+    /// DRC: it is firewalled by early cutoff through the Netlist dependency, while
+    /// the geometry and routing inputs are untouched. (Mirrors the ERC early-cutoff
+    /// test.) Here an *unconnected* spare's part type is swapped Cap→LDO: this bumps
+    /// conn_rev (the component set's shapes changed) so Netlist re-runs, but its
+    /// value is identical, its position is unchanged, and no copper moved.
+    #[test]
+    fn non_routing_edit_does_not_recompute_drc() {
+        let lib = part_library();
+        let spare = |part: &str| {
+            let mut s = two_pin_design();
+            s.push(GenDirective::Instance { path: "spare".into(), part: part.into() });
+            s
+        };
+        let mut h = routed(spare("Cap"));
+        let t = trace("VBUS", Layer::Top, vec![Point::mm(2, 0), Point::mm(9, 0)], W);
+        h.commit(Transaction::one(Command::AddTrace(TraceId(1), t)), &lib, "route").unwrap();
+        let mut eng = Engine::new();
+        eng.query(h.doc(), &lib, Key::Drc);
+        let (n0, d0) = (eng.count(Key::Netlist), eng.count(Key::Drc));
+        let (geom0, route0) = (h.doc().geom_rev, h.doc().route_rev);
+
+        // Swap the unconnected spare's part type: connectivity-affecting (shape), but
+        // geometry- and routing-neutral, and netlist-value-neutral.
+        h.commit(Transaction::one(Command::SetSource(spare("LDO"))), &lib, "swap").unwrap();
+        assert_eq!(h.doc().geom_rev, geom0, "swap must not move geometry");
+        assert_eq!(h.doc().route_rev, route0, "swap must not change routing");
+
+        eng.query(h.doc(), &lib, Key::Drc);
+        assert_eq!(eng.count(Key::Netlist), n0 + 1, "Netlist re-runs (conn_rev bumped)");
+        assert_eq!(eng.count(Key::Drc), d0, "DRC must be cut off (its result is unchanged)");
+    }
+
+    /// Routing commands are validated and atomic: an unknown net, a degenerate
+    /// polyline, and removing an absent trace all abort without mutating state.
+    #[test]
+    fn routing_commands_validate_atomically() {
+        let lib = part_library();
+        let mut h = routed(two_pin_design());
+        let before = h.doc().traces.len();
+        // Unknown net.
+        let bad = trace("NOPE", Layer::Top, vec![Point::mm(0, 0), Point::mm(1, 0)], W);
+        assert!(h.commit(Transaction::one(Command::AddTrace(TraceId(1), bad)), &lib, "x").is_err());
+        // Degenerate polyline.
+        let stub = trace("VBUS", Layer::Top, vec![Point::mm(0, 0)], W);
+        assert!(h.commit(Transaction::one(Command::AddTrace(TraceId(1), stub)), &lib, "x").is_err());
+        // Remove a trace that does not exist.
+        assert!(h.commit(Transaction::one(Command::RemoveTrace(TraceId(9))), &lib, "x").is_err());
+        assert_eq!(h.doc().traces.len(), before, "no failed command mutated the doc");
     }
 }
