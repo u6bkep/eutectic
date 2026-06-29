@@ -420,8 +420,8 @@ feasibility guarantee. A production tool needs a real geometric constraint solve
 decomposition / Newton). This is the deliberate prototype-scope tradeoff, not a design position.
 
 **Open limitations / next prototype targets (M4 candidates):**
-- **No resolution UX** for conflicts/orphans (accept-constraint, re-pin, delete) — surfacing
-  exists, acting on it doesn't.
+- **Resolution UX** for conflicts/orphans now exists (see "Prototype status (resolution UX)"
+  below); what remains is presenting it in a GUI and richer multi-issue batching.
 - Solver is approximate relaxation (see above); no `Near`-to-a-*pin* (pins have no independent
   position yet), no rotation/orientation DOF, no keepouts.
 - Query dependencies are recorded explicitly, not auto-tracked; inputs are coarse
@@ -470,3 +470,41 @@ a `<comp>.<pin>` reference splits at the last dot so hierarchical paths (`psu.de
 replaces source+overrides in one atomic transaction (a malformed document aborts the commit, so the
 file is never a back door to an inconsistent state). Zero new dependencies — the parser is
 hand-rolled (line-based).
+
+## Prototype status (resolution UX)
+
+M2/M3 made reconciliation *surface* outcomes in a structured `ReconReport` (decayed hints,
+`pin_conflicts`, `redundant_pins`, `orphaned`) but gave no way to **act** on them — the top open
+limitation. This milestone closes that gap, keeping the architectural rule that the command algebra
+is the **sole** mutation surface: every resolution is an ordinary atomic transaction down the same
+`command::apply` path, not a side channel.
+
+- **`Command::Resolve(EntityId, Resolution)`** — one new command variant plus a `Resolution` enum,
+  rather than several discrete commands. Chosen because the resolution vocabulary is a closed set
+  keyed by report-entry kind: a single command keeps the `Command` surface from sprawling, lets the
+  discoverability helper return `(EntityId, Resolution)` pairs uniformly, and groups all
+  report-acting intent in one place. Variants:
+  - `DropOrphan` — drop an override whose target entity no longer exists (`orphaned`).
+  - `AcceptConstraint` — clear a pin contradicted by a hard `Fix` (`pin_conflicts`), so the part
+    sits at the Fix position with no lingering conflict.
+  - `RePin(Point)` — keep the pin but move it (`pin_conflicts`); the Fix still wins physically, so
+    this may remain a conflict (or go redundant if re-pinned onto the Fix) — deliberately the
+    user's call. Equivalent to a fresh `Pin`, but validated as a conflict response.
+  - `DropRedundant` — un-pin a pin the solver would satisfy anyway (`redundant_pins`).
+- **Validated against the live report.** A `Resolve` aborts the transaction unless the entity is
+  actually flagged in the matching category. This is what distinguishes a resolution from the raw
+  `ClearOverride`/`Pin` primitives it shares a mutation with: it must target a genuinely outstanding
+  issue. After the mutation, the normal re-elaborate/re-reconcile pass produces a fresh report — so
+  a successfully resolved entry simply isn't flagged again (no bookkeeping of "resolved" state).
+- **Discoverability:** `command::suggested_resolutions(&ReconReport) -> Vec<Suggestion>` enumerates,
+  per actionable entry, the ready-to-apply command(s) plus a short rationale — so a GUI/agent can
+  list "here's what you can do about each issue." A `pin_conflicts` entry yields two suggestions
+  (accept-constraint, ready; re-pin, `command: None` because it needs a user-supplied position).
+  `decayed` entries are omitted: a decayed hint is already GC'd at commit, so nothing remains to act
+  on.
+
+Tested (6 new unit tests, 35 total): each report condition (orphan, pin-vs-`Fix` conflict, redundant
+pin) constructed, resolved, and asserted gone with the resulting state correct (e.g. accept-constraint
+leaves the part `Fixed` at the Fix position, no override, clean report); re-pin shown to be the user's
+call (persists or goes redundant); invalid resolves rejected atomically; and the suggested command
+applied end-to-end to clear the report. Zero new dependencies.
