@@ -570,11 +570,22 @@ path; fab output deterministic with a pour. **Scope note:** the custom-pad / rou
 bounding-box-collapse fidelity debt was *not* repaid here — true `G02`/`G03` arc export needs the
 arc-capable `Shape2D` (the deferred representation extension), and routing complex *pads* through
 region fills would churn the existing aperture-flash path; both are left as focused follow-ups (the
-bounding-box pad flash is conservative, not a regression). **Remaining:** solder mask as the dual
-(stage 6). The DRC pass is `O(N²)` (broadphase spatial index deferred — see performance notes);
-arc-exact boundaries and the 3D-`Solid` boolean are deferred but representable. (Floating/unnetted pads
-are not yet knocked out of a pour; SMD-pad-to-pour is all-layer like the rest of the pin model; Gerber
-is not yet viewer-validated — 0009 — noted limits.)
+bounding-box pad flash is conservative, not a regression). **Stage 6 done (the family is complete):**
+solder mask is the **dual** of the pour, and falls out of the same offset. `export::gerber_mask(side)`
+emits the `F.Mask`/`B.Mask` layer as the **openings** — every component pad on that side flashed as
+its copper aperture inflated by `DesignRules::mask_expansion` (the fab inverts to coverage); through-
+hole pads open on both sides, vias are tented. The fab fileset (`gerber_set`) now ships
+`board-F_Mask.gbr` / `board-B_Mask.gbr` alongside the copper, edge-cuts, and drill. So the one
+offset+boolean kernel now serves pours (offset + difference) **and** mask (offset only) — exactly the
+"getting this right gives us both" the design aimed for; paste stencil is the same with a *reduction*
+when wanted. **0004's copper-pour / plane / mask family is now complete end-to-end** (author → DRC
+connect+clearance → Gerber/SVG fab output) for 2-layer boards; the separate **multilayer-routing** half
+of 0004 (a router that lays inner-layer copper, the stackup driving real layer count) stays in 0008's
+orbit. The DRC pass is `O(N²)` (broadphase spatial index deferred — see performance notes); arc-exact
+boundaries and the 3D-`Solid` boolean are deferred but representable. (Noted limits: custom-pad /
+rounded-outline still flash as bounding boxes — awaits arc-capable `Shape2D`; floating/unnetted pads
+not yet knocked out of a pour; SMD-pad↔pour incidence is all-layer like the rest of the pin model;
+Gerber not yet viewer-validated — 0009.)
 
 ---
 

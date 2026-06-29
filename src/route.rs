@@ -108,6 +108,10 @@ pub struct DesignRules {
     /// have distance 0; this small slop absorbs deliberate near-misses without
     /// fusing genuinely separate copper.
     pub touch_tol: Nm,
+    /// Solder-mask expansion: how much larger the mask opening is than the pad copper,
+    /// per side (the pad is inflated by this to get the opening). A generic value;
+    /// production reads it from the stack-up/process.
+    pub mask_expansion: Nm,
 }
 
 impl Default for DesignRules {
@@ -116,6 +120,7 @@ impl Default for DesignRules {
             min_clearance: 150_000,        // 0.15 mm
             min_trace_width: 150_000,      // 0.15 mm
             touch_tol: MM / 100,           // 0.01 mm
+            mask_expansion: 50_000,        // 0.05 mm
         }
     }
 }

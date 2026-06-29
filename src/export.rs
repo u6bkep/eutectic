@@ -20,7 +20,7 @@
 use crate::doc::{Doc, Nm, Point, MM};
 use crate::geom::{BoardShape, Shape2D};
 use crate::part::{pad_copper_world, pin_world, PadLayers, PartDef, PartLib};
-use crate::route::{Layer, Trace, Via};
+use crate::route::{DesignRules, Layer, Trace, Via};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Format a fixed-point nanometre coordinate as a millimetre decimal string with
@@ -457,10 +457,16 @@ fn copper_layers(doc: &Doc, lib: &PartLib) -> Vec<Layer> {
 
 /// Every component pad copper region that flashes on `layer`, as `(world centre,
 /// aperture)`, in `(EntityId, pin-declaration, copper-region)` order. Each pad's
-/// real geometry is transformed to world space and reduced to a flashable aperture;
+/// real geometry is transformed to world space, inflated by `inflate` (0 for copper;
+/// the mask expansion for a solder-mask opening), and reduced to a flashable aperture;
 /// a region flashes only on the layers it occupies. Toy-library pins (`pad: None`)
 /// contribute nothing.
-fn component_pad_flashes(doc: &Doc, lib: &PartLib, layer: Layer) -> Vec<(Point, Aperture)> {
+fn component_pad_flashes(
+    doc: &Doc,
+    lib: &PartLib,
+    layer: Layer,
+    inflate: Nm,
+) -> Vec<(Point, Aperture)> {
     let mut out = Vec::new();
     for c in doc.components.values() {
         let Some(def) = lib.get(&c.part) else { continue };
@@ -470,7 +476,9 @@ fn component_pad_flashes(doc: &Doc, lib: &PartLib, layer: Layer) -> Vec<(Point, 
                 if !pad_on_layer(copper.layers, layer) {
                     continue;
                 }
-                if let Some((center, ap)) = shape_flash(&pad_copper_world(c, copper)) {
+                if let Some((center, ap)) =
+                    shape_flash(&pad_copper_world(c, copper).inflated(inflate))
+                {
                     out.push((center, ap));
                 }
             }
@@ -487,7 +495,7 @@ fn component_pad_flashes(doc: &Doc, lib: &PartLib, layer: Layer) -> Vec<(Point, 
 pub fn gerber_layer(doc: &Doc, lib: &PartLib, layer: Layer) -> String {
     let traces: Vec<&Trace> = doc.traces.values().filter(|t| t.layer == layer).collect();
     let vias: Vec<&Via> = doc.vias.values().filter(|v| v.spans(layer)).collect();
-    let pads = component_pad_flashes(doc, lib, layer);
+    let pads = component_pad_flashes(doc, lib, layer, 0);
 
     // Aperture table: distinct apertures, codes from 10 in `Ord` order.
     let mut aps: BTreeSet<Aperture> = BTreeSet::new();
@@ -626,14 +634,61 @@ pub fn excellon_drill(doc: &Doc) -> String {
     out
 }
 
+/// The solder-mask Gerber for one outer side (`Top`→`F.Mask`, `Bottom`→`B.Mask`).
+/// The mask layer is emitted as the **openings**: every component pad on that side is
+/// flashed as its copper aperture **inflated by the mask expansion** (the fab inverts
+/// to the mask coverage). This is the dual of the pour — the same offset (a
+/// `Shape2D` radius bump), no knockout. Through-hole pads open on both sides; vias are
+/// tented (not opened) by default. Same deterministic aperture-table + flash layout
+/// as a copper layer, minus traces/regions.
+pub fn gerber_mask(doc: &Doc, lib: &PartLib, side: Layer) -> String {
+    let expansion = DesignRules::default().mask_expansion;
+    let openings = component_pad_flashes(doc, lib, side, expansion);
+
+    let mut aps: BTreeSet<Aperture> = BTreeSet::new();
+    for (_, a) in &openings {
+        aps.insert(*a);
+    }
+    let codes: BTreeMap<Aperture, u32> =
+        aps.iter().enumerate().map(|(i, a)| (*a, 10 + i as u32)).collect();
+
+    let mut out = String::new();
+    out.push_str(&format!("G04 {} *\n", mask_file(side)));
+    out.push_str("%FSLAX46Y46*%\n");
+    out.push_str("%MOMM*%\n");
+    for (a, code) in &codes {
+        out.push_str(&format!("%ADD{}{}*%\n", code, a.template()));
+    }
+    out.push_str("G01*\n");
+    for (p, a) in &openings {
+        let code = codes[a];
+        out.push_str(&format!("D{code}*\n"));
+        out.push_str(&format!("X{}Y{}D03*\n", gbr_coord(p.x), gbr_coord(p.y)));
+    }
+    out.push_str("M02*\n");
+    out
+}
+
+/// The KiCad-style mask-layer filename token: `F_Mask` / `B_Mask`. Defined only for
+/// the outer sides (mask is an outer-surface layer).
+fn mask_file(side: Layer) -> &'static str {
+    match side {
+        Layer::Bottom => "B_Mask",
+        _ => "F_Mask",
+    }
+}
+
 /// The full deterministic fab fileset: one Gerber per copper layer (`board-F_Cu.gbr`
-/// …) in stack-up order, the `board-Edge_Cuts.gbr` outline, and the `board.drl`
-/// Excellon drill program. `(filename, content)` pairs; no timestamps, stable order.
+/// …) in stack-up order, the two solder masks (`board-F_Mask.gbr` / `board-B_Mask.gbr`),
+/// the `board-Edge_Cuts.gbr` outline, and the `board.drl` Excellon drill program.
+/// `(filename, content)` pairs; no timestamps, stable order.
 pub fn gerber_set(doc: &Doc, lib: &PartLib) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for layer in copper_layers(doc, lib) {
         out.push((format!("board-{}.gbr", layer_file(layer)), gerber_layer(doc, lib, layer)));
     }
+    out.push(("board-F_Mask.gbr".to_string(), gerber_mask(doc, lib, Layer::Top)));
+    out.push(("board-B_Mask.gbr".to_string(), gerber_mask(doc, lib, Layer::Bottom)));
     out.push(("board-Edge_Cuts.gbr".to_string(), gerber_edge_cuts(doc, lib)));
     out.push(("board.drl".to_string(), excellon_drill(doc)));
     out
@@ -864,7 +919,14 @@ psu.reg,LDO,0.000000,0.000000,0
         let names: Vec<&str> = set.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(
             names,
-            vec!["board-F_Cu.gbr", "board-B_Cu.gbr", "board-Edge_Cuts.gbr", "board.drl"]
+            vec![
+                "board-F_Cu.gbr",
+                "board-B_Cu.gbr",
+                "board-F_Mask.gbr",
+                "board-B_Mask.gbr",
+                "board-Edge_Cuts.gbr",
+                "board.drl",
+            ]
         );
     }
 
@@ -1029,5 +1091,45 @@ psu.reg,LDO,0.000000,0.000000,0
         let (doc, lib) = poured_board();
         assert_eq!(gerber_set(&doc, &lib), gerber_set(&doc, &lib));
         assert_eq!(svg(&doc, &lib), svg(&doc, &lib));
+    }
+
+    // --- solder mask (0004 stage 6) ---------------------------------------
+
+    #[test]
+    fn solder_mask_opens_over_pads_with_expansion() {
+        // padded_board has an F.Cu rect pad 0.6x1.2 and a circle pad 0.8. The mask
+        // opening inflates each by 0.05mm per side: rect → 0.7x1.3, circle → 0.9.
+        let (doc, lib) = padded_board();
+        let f = gerber_mask(&doc, &lib, Layer::Top);
+        assert!(f.contains("F_Mask"));
+        assert!(f.contains("R,0.700000X1.300000*%"), "expanded rect opening:\n{f}");
+        assert!(f.contains("C,0.900000*%"), "expanded circle opening:\n{f}");
+        assert_eq!(f.matches("D03*").count(), 2, "one opening per pad");
+        // No bottom-side pads ⇒ no openings on B_Mask.
+        assert_eq!(gerber_mask(&doc, &lib, Layer::Bottom).matches("D03*").count(), 0);
+    }
+
+    #[test]
+    fn through_hole_pad_opens_both_masks() {
+        let mut lib = part_library();
+        let fp = crate::kicad::import_footprint(
+            r#"(footprint "TH" (pad "1" thru_hole circle (at 0 0) (size 1.5 1.5) (drill 0.8) (layers "*.Cu")))"#,
+        )
+        .unwrap();
+        lib.insert("TH".into(), fp);
+        let mut h = History::new(Default::default());
+        h.commit(
+            Transaction::one(Command::SetSource(vec![
+                G::Instance { path: "j".into(), part: "TH".into() },
+                G::Place { path: "j".into(), pos: Point::mm(5, 5) },
+            ])),
+            &lib,
+            "th",
+        )
+        .unwrap();
+        let doc = h.doc();
+        // A through-hole pad is exposed on both faces, so it opens on both masks.
+        assert_eq!(gerber_mask(doc, &lib, Layer::Top).matches("D03*").count(), 1);
+        assert_eq!(gerber_mask(doc, &lib, Layer::Bottom).matches("D03*").count(), 1);
     }
 }
