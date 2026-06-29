@@ -70,8 +70,8 @@ pub struct Trace {
 }
 
 /// A via: a plated point connecting copper across the layers it spans (`from`..`to`,
-/// inclusive). Pads are points in this prototype, so a via is its centre `at`, a
-/// `drill`, and a `pad` (annular copper diameter).
+/// inclusive). Modelled by its centre `at`, a `drill`, and a `pad` (annular copper
+/// diameter) — a disc of that diameter on every layer the via spans.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Via {
     pub net: NetId,
@@ -190,9 +190,9 @@ pub fn check_drc(
         }
     }
 
-    // World position of every net-member pad, kept per net (pads are points; a
-    // footprint carries no pad size, so radius is 0 — documented simplification).
-    // Through-hole assumption: a pad participates on every layer.
+    // World position (pad *centre*) of every net-member pad, per net. The ratsnest
+    // joins pads by incidence at these points; clearance, separately, uses the pads'
+    // real copper geometry. Through-hole assumption: a pad participates on every layer.
     let mut net_pads: BTreeMap<NetId, Vec<Point>> = BTreeMap::new();
     for (nid, pins) in netlist {
         let mut pts = Vec::new();

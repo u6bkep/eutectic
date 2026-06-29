@@ -544,8 +544,8 @@ determinism, both validation faults. **Scoping note:** the DRC *consumption* of 
 clearance (incl. pour-vs-pour shorts) and connectivity-through-the-fill — is folded into the next
 stage, because both need the same "region-incidence-with-copper" primitive (is a pad inside / within
 clearance of the fill); building it once avoids duplicate machinery, and the knockout's
-clearance-correctness is already proven by the stage-3 tests. Pours have no consumer yet, so nothing
-regresses. **Stage 4 done:** pours are now real copper in DRC. Two new region primitives:
+clearance-correctness is already proven by the stage-3 tests. (At stage 3 pours had no consumer yet,
+so deferring the wiring regressed nothing.) **Stage 4 done:** pours are now real copper in DRC. Two new region primitives:
 `region::regions_within(a, b, thr)` (do two regions overlap or come within `thr` edge-to-edge — exact
 i128 segment distance) and `Region::islands()` (split a fill into connected filled components — each
 CCW ring an island, holes attached by containment). DRC wiring: (1) **clearance** — pour-vs-pour: two
@@ -729,8 +729,10 @@ feasible sets tightly, and *reports* infeasibility rather than proving global op
   deterministically from a `Doc`. The **router** now exists (see "Prototype status (autorouter)"),
   and **Gerber/drill output now exists too** (see "Prototype status (Gerber/fab output)"): RS-274X
   per copper layer + `Edge.Cuts` + an Excellon drill program, emitted deterministically from routed
-  copper, with footprint pads flashing as copper (render-only pad geometry — DRC still treats pads as
-  points). It is **not yet validated against a real Gerber viewer**. What's still missing for the PoC:
+  copper, with footprint pads flashing as copper, plus copper-pour region fills and solder mask. (Pad
+  copper is now *real* geometry that DRC checks edge-to-edge — see §8 — not a render-only point; only a
+  roundrect/custom pad's Gerber *aperture* is still a conservative bounding box.) It is **not yet
+  validated against a real Gerber viewer**. What's still missing for the PoC:
   typed `InterfaceDef`s inferred from symbols (the join produces discrete roled pins, not interfaces
   yet), and serializing routes in the canonical text projection.
 
@@ -926,9 +928,10 @@ serde/sexp crates) and lift out the bits we model.
   number/name, positioned at the pad's `(at x y [angle])` converted mm→nm (decimal mm parsed by
   hand into integer nm, half-away-from-zero rounding — no float, preserving the fixed-point
   invariant; the rotation angle is ignored for the offset). The pad's **shape + `(size w h)`** are
-  also captured into `PinDef.pad: Option<Pad>` — **render-only** copper geometry for fab output (see
-  "Prototype status (Gerber/fab output)"); DRC/the solver ignore it and keep treating pads as points.
-  Everything else (silkscreen, courtyard, fab, 3D models, layers, zones) is ignored.
+  also captured into `PinDef.pad: Option<PadGeo>` — **real** copper geometry (§8): DRC checks it
+  edge-to-edge, it flashes to Gerber and is knocked out of pours, and the placement solver derives a
+  part's courtyard from it. Everything else (silkscreen, 3D models, explicit zones in the source
+  footprint) is ignored on import.
 - **Role-less by design (footprint alone).** A footprint carries **no electrical roles** —
   whether a pad is power, input, or passive comes from the *schematic symbol*, not the footprint.
   So an imported footprint *on its own* gives every pin `PinRole::Passive` and an empty `interfaces`.

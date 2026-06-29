@@ -276,16 +276,15 @@ impl Region {
 
     /// Axis-aligned bounding box `(min, max)` over all vertices, or `None` if empty.
     pub fn bbox(&self) -> Option<(Point, Point)> {
-        let mut it = self.rings.iter().flatten().copied();
-        let first = it.next()?;
+        let mut pts = self.rings.iter().flatten().copied();
+        let first = pts.next()?;
         let (mut min, mut max) = (first, first);
-        for p in self.rings.iter().flatten().copied() {
+        for p in pts {
             min.x = min.x.min(p.x);
             min.y = min.y.min(p.y);
             max.x = max.x.max(p.x);
             max.y = max.y.max(p.y);
         }
-        let _ = it;
         Some((min, max))
     }
 
