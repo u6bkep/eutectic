@@ -275,9 +275,6 @@ fn pt_seg_d2(p: Point, a: Point, b: Point) -> (i128, i128) {
     }
 }
 
-/// Is the squared distance from point `p` to segment `a`–`b` strictly `< thr2`?
-/// Tested as `num < thr2·den` (no fraction min, so no cross-multiplying two large
-/// numerators — that would overflow i128 at board scale).
 /// The point on segment `a`–`b` closest to `p`: project, clamp the parameter to
 /// `[0, 1]`, round to nm. f64 intermediate (the parameter is rational) — fine for the
 /// approximate board-containment pull-back; integer endpoints stay exact at t∈{0,1}.
@@ -291,6 +288,9 @@ fn closest_on_segment(p: Point, a: Point, b: Point) -> Point {
     Point { x: (a.x as f64 + t * vx).round() as Nm, y: (a.y as f64 + t * vy).round() as Nm }
 }
 
+/// Is the squared distance from point `p` to segment `a`–`b` strictly `< thr2`?
+/// Tested as `num < thr2·den` (no fraction min, so no cross-multiplying two large
+/// numerators — that would overflow i128 at board scale).
 fn pt_seg_within2(p: Point, a: Point, b: Point, thr2: i128) -> bool {
     let (num, den) = pt_seg_d2(p, a, b);
     num < thr2 * den
