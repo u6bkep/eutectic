@@ -558,11 +558,23 @@ disconnected — surfaced honestly as remaining `Unrouted` islands. A region-onl
 staleness. Tests: pour connects two GND pads (vs unrouted without it), a full-width foreign trace
 splits the pour into two islands (pads stay unrouted), overlapping GND/PWR pours short. **0004's
 copper-pour half is now functional end-to-end for DRC** (planes for GND/power on 2 layers); the
-multilayer-routing half stays in 0008's orbit. **Remaining:** Gerber `G36/G37` region-fill + arc
-export (stage 5); solder mask as the dual (stage 6). The DRC pass is `O(N²)` (broadphase spatial index
-deferred — see performance notes); arc-exact boundaries and the 3D-`Solid` boolean are deferred but
-representable. (Floating/unnetted pads are not yet knocked out of a pour; SMD-pad-to-pour is all-layer
-like the rest of the pin model — noted limits.)
+multilayer-routing half stays in 0008's orbit. **Stage 5 done:** pours reach fab output. Each pour
+fill is emitted per layer as an RS-274X `G36`/`G37` **region fill** — the outer ring(s) and hole rings
+as contours in one region statement, so the knockouts come out as voids (a fill is already a
+tessellated polygon, so no arcs needed). `copper_layers` includes pour layers (an inner-layer pour
+gets its own Gerber). SVG draws each pour as a translucent layer-coloured `<path>` with even-odd fill
+(holes read as voids), under the components/traces. The shared `export::pour_fills_of` builds the
+membership netlist and calls `route::pour_fills`, so DRC and fab see identical fills. Tests: Gerber
+emits `G36`/`G37` with outer + knockout-hole contours (bottom layer has none); SVG draws the pour
+path; fab output deterministic with a pour. **Scope note:** the custom-pad / rounded-outline
+bounding-box-collapse fidelity debt was *not* repaid here — true `G02`/`G03` arc export needs the
+arc-capable `Shape2D` (the deferred representation extension), and routing complex *pads* through
+region fills would churn the existing aperture-flash path; both are left as focused follow-ups (the
+bounding-box pad flash is conservative, not a regression). **Remaining:** solder mask as the dual
+(stage 6). The DRC pass is `O(N²)` (broadphase spatial index deferred — see performance notes);
+arc-exact boundaries and the 3D-`Solid` boolean are deferred but representable. (Floating/unnetted pads
+are not yet knocked out of a pour; SMD-pad-to-pour is all-layer like the rest of the pin model; Gerber
+is not yet viewer-validated — 0009 — noted limits.)
 
 ---
 

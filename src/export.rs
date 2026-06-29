@@ -205,6 +205,32 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> String {
         }
     }
 
+    // Copper pour fills, under the components/traces: one translucent `<path>` per
+    // pour (outer + hole subpaths, even-odd fill so knockouts read as voids), in the
+    // pour's layer colour. Deterministic (pours iterate in source/net/layer order).
+    for pf in pour_fills_of(doc, lib) {
+        let mut d = String::new();
+        for ring in &pf.fill.rings {
+            if ring.len() < 3 {
+                continue;
+            }
+            for (i, p) in ring.iter().enumerate() {
+                let cmd = if i == 0 { "M" } else { "L" };
+                d.push_str(&format!("{cmd}{},{} ", fmt_mm(p.x), fmt_mm(flip(p.y))));
+            }
+            d.push_str("Z ");
+        }
+        if !d.is_empty() {
+            out.push_str(&format!(
+                "  <path class=\"pour pour-{}\" data-net=\"{}\" d=\"{}\" fill=\"{}\" fill-opacity=\"0.25\" fill-rule=\"evenodd\" stroke=\"none\"/>\n",
+                layer_class(pf.layer),
+                xml_escape(&pf.net.0),
+                d.trim_end(),
+                layer_color(pf.layer),
+            ));
+        }
+    }
+
     // One group per component: pads, an origin marker, and an id label.
     for c in doc.components.values() {
         out.push_str(&format!("  <g class=\"component\" data-id=\"{}\">\n", xml_escape(c.id.as_str())));
@@ -289,6 +315,21 @@ fn layer_color(l: Layer) -> &'static str {
 /// any. A real [`BoardShape`] now — rounded/concave outlines and cutouts, not a rect.
 fn source_board(doc: &Doc) -> Option<BoardShape> {
     crate::elaborate::board_shape(&doc.source)
+}
+
+/// The derived copper-pour fills, for export. Builds the membership netlist from the
+/// materialized nets (roles are irrelevant to pours) and calls the shared
+/// [`crate::route::pour_fills`]. Pure — same inputs, same fills.
+fn pour_fills_of(doc: &Doc, lib: &PartLib) -> Vec<crate::route::PourFill> {
+    use crate::part::PinRole;
+    let netlist = doc
+        .nets
+        .iter()
+        .map(|(nid, net)| {
+            (nid.clone(), net.members.iter().map(|pr| (pr.clone(), PinRole::Passive)).collect())
+        })
+        .collect();
+    crate::route::pour_fills(doc, lib, &netlist, &crate::route::DesignRules::default())
 }
 
 /// Bounding box of all placed/routed geometry (pad world points, trace vertices,
@@ -397,7 +438,7 @@ fn layer_file(l: Layer) -> String {
 /// The copper layers to emit: the outer copper (`Top`/`Bottom`, always present —
 /// component pads occupy them under the all-layer pad model) plus any layer a trace
 /// sits on or a via terminates on, in physical stack-up order.
-fn copper_layers(doc: &Doc) -> Vec<Layer> {
+fn copper_layers(doc: &Doc, lib: &PartLib) -> Vec<Layer> {
     let mut set: BTreeSet<Layer> = BTreeSet::new();
     set.insert(Layer::Top);
     set.insert(Layer::Bottom);
@@ -407,6 +448,9 @@ fn copper_layers(doc: &Doc) -> Vec<Layer> {
     for v in doc.vias.values() {
         set.insert(v.from);
         set.insert(v.to);
+    }
+    for pf in pour_fills_of(doc, lib) {
+        set.insert(pf.layer);
     }
     set.into_iter().collect()
 }
@@ -490,6 +534,27 @@ pub fn gerber_layer(doc: &Doc, lib: &PartLib, layer: Layer) -> String {
         out.push_str(&format!("X{}Y{}D03*\n", gbr_coord(p.x), gbr_coord(p.y)));
     }
 
+    // Copper pour fills on this layer as RS-274X region fills. A fill's outer rings
+    // and hole rings are emitted as contours inside one `G36`/`G37` block; the region
+    // fill rule treats a contour nested in another as a hole, so the knockouts come
+    // out as voids. (A pour fill is already a tessellated polygon, so no arcs needed.)
+    for pf in pour_fills_of(doc, lib).iter().filter(|p| p.layer == layer) {
+        if pf.fill.rings.iter().all(|r| r.len() < 3) {
+            continue;
+        }
+        out.push_str("G36*\n");
+        for ring in &pf.fill.rings {
+            if ring.len() < 3 {
+                continue;
+            }
+            for (i, p) in ring.iter().chain(ring.first()).enumerate() {
+                let op = if i == 0 { "D02" } else { "D01" };
+                out.push_str(&format!("X{}Y{}{}*\n", gbr_coord(p.x), gbr_coord(p.y), op));
+            }
+        }
+        out.push_str("G37*\n");
+    }
+
     out.push_str("M02*\n");
     out
 }
@@ -566,7 +631,7 @@ pub fn excellon_drill(doc: &Doc) -> String {
 /// Excellon drill program. `(filename, content)` pairs; no timestamps, stable order.
 pub fn gerber_set(doc: &Doc, lib: &PartLib) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    for layer in copper_layers(doc) {
+    for layer in copper_layers(doc, lib) {
         out.push((format!("board-{}.gbr", layer_file(layer)), gerber_layer(doc, lib, layer)));
     }
     out.push(("board-Edge_Cuts.gbr".to_string(), gerber_edge_cuts(doc, lib)));
@@ -896,5 +961,73 @@ psu.reg,LDO,0.000000,0.000000,0
         let top = gerber_layer(doc, &lib, Layer::Top);
         assert!(top.matches("D01*").count() > 0);
         assert_eq!(gerber_set(doc, &lib), gerber_set(doc, &lib));
+    }
+
+    // --- copper pour export (0004 stage 5) --------------------------------
+
+    /// A 20x20 board with a GND pour on F.Cu and a foreign SIG pad (knocked out).
+    fn poured_board() -> (Doc, PartLib) {
+        use crate::elaborate::RegionDecl;
+        use crate::geom::Role;
+        let mut lib = part_library();
+        let pad = crate::kicad::import_footprint(
+            r#"(footprint "P1" (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu")))"#,
+        )
+        .unwrap();
+        lib.insert("P1".into(), pad);
+        let outline = Shape2D::polygon(vec![
+            Point::mm(0, 0),
+            Point::mm(20, 0),
+            Point::mm(20, 20),
+            Point::mm(0, 20),
+        ]);
+        let src = vec![
+            board_rect(Point::mm(0, 0), Point::mm(20, 20)),
+            G::Instance { path: "g".into(), part: "P1".into() },
+            G::Instance { path: "s".into(), part: "P1".into() },
+            G::Place { path: "g".into(), pos: Point::mm(5, 5) },
+            G::Place { path: "s".into(), pos: Point::mm(15, 5) },
+            G::ConnectPins { net: "GND".into(), pins: vec![("g".into(), "1".into())] },
+            G::ConnectPins { net: "SIG".into(), pins: vec![("s".into(), "1".into())] },
+            G::Region(RegionDecl {
+                shape: outline,
+                role: Role::Conductor,
+                net: Some("GND".into()),
+                layer: Layer::Top,
+            }),
+        ];
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "pour").unwrap();
+        (h.doc().clone(), lib)
+    }
+
+    #[test]
+    fn gerber_emits_pour_region_fill() {
+        let (doc, lib) = poured_board();
+        let top = gerber_layer(&doc, &lib, Layer::Top);
+        assert!(top.contains("G36*"), "pour region opens:\n{top}");
+        assert!(top.contains("G37*"), "pour region closes");
+        // Outer board contour + a knockout hole around the SIG pad ⇒ ≥2 contours
+        // (≥2 D02 moves) inside the single G36/G37 block.
+        let block = top.split("G36*").nth(1).unwrap().split("G37*").next().unwrap();
+        assert!(block.matches("D02*").count() >= 2, "outer + hole contours:\n{block}");
+        // The bottom layer carries no pour.
+        assert!(!gerber_layer(&doc, &lib, Layer::Bottom).contains("G36*"));
+    }
+
+    #[test]
+    fn svg_draws_pour_with_holes() {
+        let (doc, lib) = poured_board();
+        let s = svg(&doc, &lib);
+        assert!(s.contains("class=\"pour pour-top\""), "pour path present:\n{s}");
+        assert!(s.contains("fill-rule=\"evenodd\""), "holes via even-odd");
+        assert!(s.contains("data-net=\"GND\""));
+    }
+
+    #[test]
+    fn fab_with_pour_is_deterministic() {
+        let (doc, lib) = poured_board();
+        assert_eq!(gerber_set(&doc, &lib), gerber_set(&doc, &lib));
+        assert_eq!(svg(&doc, &lib), svg(&doc, &lib));
     }
 }
