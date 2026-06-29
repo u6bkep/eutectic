@@ -388,6 +388,80 @@ via a typed query key.
 
 ---
 
+## 8. Geometry: purposed regions (the physical model)
+
+The physical side of the model — copper, the board body, holes, keep-outs — is **not** "2D shapes
+on named layers" (KiCad's model). That is a *2.5D projection* of a 3D reality, and encoding meaning
+as a magic layer name (`F.Cu`, `Edge.Cuts`, `F.CrtYd`) is stringly-typed semantics that doesn't
+generalize. The reframe: **everything physical is a region of space with a purpose.**
+
+### The unit
+
+```
+Feature { role: Role, material: Option<Material>, extent: Extent }
+Extent  = Prism { shape: Shape2D, z: ZRange }   // the 2.5D common case
+        | Solid { … }                            // reserved: arbitrary 3D (mesh/brep)
+```
+
+- **`Shape2D` = a skeleton inflated by a radius** (Minkowski ⊕ disc): `Stroke{points, r}` (a point⊕r
+  = disc, a segment⊕r = capsule/oval, a polyline⊕w/2 = a trace) and `Polygon{points, r}` (r=0 sharp,
+  rect⊕r = rounded rect, arbitrary filled). One shape type subsumes every pad primitive *and* traces
+  *and* via annuli — clearance is uniform: `skeleton_distance(a,b) − rₐ − r_b ≥ clearance`, computed
+  in exact i128 (the segment-distance kernel already used for traces). Compound pads (BMP581) are a
+  *union of features*; clearance is the min over the union.
+- **z is real**, backed by a **stackup** (named slabs with thickness + material; sensible defaults —
+  1.6 mm board, 1 oz copper). **A "layer" is just a named z-slab**, never a primitive. Clearance is
+  "roles have a rule ∧ z-ranges overlap ∧ 2D shapes within distance"; with discrete slabs "z overlaps"
+  collapses to "same layer", recovering ordinary 2.5D behaviour — but the model isn't limited to it.
+  Below-surface bodies (a module in a cutout, low-profile USB-C) live at *negative z*, which a fixed
+  layer enum cannot express.
+
+### Roles stay few and physical
+
+`Conductor | Substrate | Void | Keepout(kind) | Marking | MaskOpening | Datum`. Richness comes from
+**geometry + composition (footprints)**, not from proliferating roles — the rule that keeps this from
+sprawling:
+
+- *drill / board cutout / milled pocket* → `Void` (a drill is not special; it is one void among many)
+- *board outline* → the boundary of a `Substrate` prism (an arbitrary CAD-imported polygon)
+- *courtyard / mechanical clearance* → `Keepout` (3D extent, for interference detection)
+- *fiducial* → a footprint with `Marking` + `MaskOpening` features (no new role)
+- *mouse-bite* → a footprint with `Void` perforations and **no** `Conductor`
+- *thermal relief* → a `Conductor` pad whose `Shape2D` *is* the spoke-and-gap geometry
+
+The `Role` enum stays extensible, but we resist growing it: a named PCB feature is a composition over
+the base set, not a new kind.
+
+### Why this is the right foundation
+
+- **2.5D is the default *view*, not the storage.** A normal project uses stackup defaults and edits
+  in the familiar layer view; z is filled in automatically. A future 3D router/editor reads the same
+  model without the 2.5D lens. **3D-printed (polymer/metal) boards become representable** via
+  `Extent::Solid` — *reserved, not built*: the data model won't have to be thrown away, but the
+  solvers (router/placement/DRC) stay 2.5D for now (true-3D solving is a research project).
+- **Simulation falls out of honest geometry.** A `Conductor` carries real cross-section (width ×
+  *thickness*, from the stackup z-range) and a `Material` (resistivity, permittivity, thermal), so
+  trace resistance `R = ρ·L/A`, impedance, and thermal become computable later *from the same
+  geometry* — no separate sim model. Design constraint: never discard thickness or material.
+- **It closes complaint #2.** A CAD-imported outline + cutouts become tier-1 authoritative facts
+  (`Substrate`/`Void`), exactly what constraint-based "fit the parts into this MCAD shape" reads from.
+- **The open routing tickets become consequences, not separate fights:** pad-as-real-copper (0006)
+  is just `Conductor` features with extent; the fine-pitch router lie (0003) goes away once its
+  obstacle model and DRC share honest feature clearance; courtyard/overlap avoidance (0005) is the
+  `Keepout` role.
+
+### Status / plan
+
+Design of record (this section). Implementation is staged: **(1)** the `geom` core — `Shape2D`,
+`ZRange`, `Extent::Prism`, `Role`, `Material`, `Feature`, the stackup + defaults, and the 2.5D
+clearance kernel (additive, self-contained); **(2)** pads → `Conductor` features + KiCad pad import
+(smd/thru-hole/custom-primitives/drill/layers) + render; **(3)** unified feature clearance in DRC
+(0006); **(4)** board outline / cutouts / keep-outs as features + router obstacle model (0005);
+**(5)** router honesty as the downstream consequence (0003). `Solid` and true-3D solving are out of
+scope; the representation merely keeps the door open.
+
+---
+
 ## Open questions / hard parts (carry these forward)
 
 - **The reconciliation / minimal-perturbation engine** is the single load-bearing risk. Precise

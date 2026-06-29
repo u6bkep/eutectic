@@ -19,6 +19,7 @@ pub mod autoroute;
 pub mod command;
 pub mod diagnostic;
 pub mod doc;
+pub mod geom;
 pub mod elaborate;
 pub mod export;
 pub mod history;
