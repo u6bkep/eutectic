@@ -452,7 +452,11 @@ the base set, not a new kind.
 
 ### Status / plan
 
-Design of record (this section). Implementation is staged: **(1)** the `geom` core — `Shape2D`,
+Design of record (this section). **Stages 1–2 implemented** (the `geom` core; pads
+are now real `PadGeo` copper + drill geometry, imported from KiCad — circle/rect/
+roundrect/oval exactly, custom→bounding-box, with pad rotation/drill/layers — and
+rendered to Gerber via bounding apertures). DRC/router still treat pads as points
+until stage 3. Implementation is staged: **(1)** the `geom` core — `Shape2D`,
 `ZRange`, `Extent::Prism`, `Role`, `Material`, `Feature`, the stackup + defaults, and the 2.5D
 clearance kernel (additive, self-contained); **(2)** pads → `Conductor` features + KiCad pad import
 (smd/thru-hole/custom-primitives/drill/layers) + render; **(3)** unified feature clearance in DRC

@@ -32,7 +32,8 @@
 //! headers are accepted; pad names may be quoted or bare.
 
 use crate::doc::{Nm, Point};
-use crate::part::{Pad, PadShape, PartDef, PinDef, PinRole};
+use crate::geom::Shape2D;
+use crate::part::{Drill, PadCopper, PadGeo, PadLayers, PartDef, PinDef, PinRole};
 use std::collections::BTreeMap;
 
 /// A parsed S-expression node: either a leaf atom or a parenthesised list.
@@ -272,10 +273,9 @@ pub fn import_footprint(text: &str) -> Result<PartDef, String> {
             .and_then(Sexp::as_atom)
             .ok_or_else(|| format!("pad {pad_name:?} (at ...) missing y"))?;
         let offset = Point { x: mm_to_nm(x)?, y: mm_to_nm(y)? };
-        // Pad copper geometry for fab output: the shape token (the 4th element of
-        // `(pad <name> <type> <shape> ...)`) and `(size w h)`. Render-only — it does
-        // not affect roles/offsets. A pad missing its size carries no geometry.
-        let pad = parse_pad_geometry(pad)?;
+        // Real pad copper + drill geometry, in component-local coords centred at the
+        // pad's `(at)`. The shape/size/drill/layers/rotation are all lifted here.
+        let pad = parse_pad_geometry(pad, offset)?;
         // A bare footprint has no functional naming: name == number == the pad id.
         pins.push(PinDef {
             name: pad_name.to_string(),
@@ -289,30 +289,151 @@ pub fn import_footprint(text: &str) -> Result<PartDef, String> {
     Ok(PartDef { name, pins, interfaces: BTreeMap::new() })
 }
 
-/// Lift a pad's copper geometry — its [`PadShape`] and `(size w h)` — out of a
-/// `(pad <name> <type> <shape> … (size w h) …)` node, for fab output only.
+/// Lift a pad's real copper + drill geometry out of a
+/// `(pad <name> <type> <shape> (at x y [angle]) (size w h) (layers …) (drill …) …)`
+/// node, in component-local coordinates centred at `center` (the pad's `(at)`).
 ///
-/// The shape is the 4th list element. The four shapes KiCad uses for copper pads
-/// map directly to [`PadShape`]; `custom`/`trapezoid`/`chamfered_rect` and any
-/// other token fall back to [`PadShape::Rect`] (the conservative bounding-box
-/// approximation — sufficient for flashing copper). A pad with **no** `(size …)`
-/// yields `None` (no geometry to flash), which is not an error.
-fn parse_pad_geometry(pad: &[Sexp]) -> Result<Option<Pad>, String> {
-    let Some(size) = pad.iter().find_map(|s| s.list_headed("size")) else {
+/// `circle`/`rect`/`roundrect`/`oval` build exact [`Shape2D`]s; `trapezoid`/`custom`/
+/// `chamfered_rect` and any other token fall back to the bounding rectangle — a
+/// conservative copper extent. (Full custom `(primitives …)` import is a follow-up;
+/// the [`PadGeo`] representation already supports compound pads as a union.) The pad
+/// `(at)` angle is baked into the geometry — exact for cardinal rotations, off-axis
+/// angles float-rotated and rounded to nm *at import* (like mm→nm). A pad with no
+/// `(size …)` and no `(drill …)` yields `None`.
+fn parse_pad_geometry(pad: &[Sexp], center: Point) -> Result<Option<PadGeo>, String> {
+    let pad_type = pad.get(2).and_then(Sexp::as_atom).unwrap_or("");
+    let shape_tok = pad.get(3).and_then(Sexp::as_atom).unwrap_or("");
+    let angle = pad
+        .iter()
+        .find_map(|s| s.list_headed("at"))
+        .and_then(|at| at.get(3))
+        .and_then(Sexp::as_atom)
+        .and_then(|a| a.parse::<f64>().ok())
+        .unwrap_or(0.0);
+
+    let drill = parse_drill(pad, center)?;
+    let layers = pad_layers(pad, pad_type);
+
+    let copper = if let Some(size) = pad.iter().find_map(|s| s.list_headed("size")) {
+        let w = mm_to_nm(size.get(1).and_then(Sexp::as_atom).ok_or("pad (size …) missing width")?)?;
+        let h = mm_to_nm(size.get(2).and_then(Sexp::as_atom).ok_or("pad (size …) missing height")?)?;
+        let base = match shape_tok {
+            "circle" => Shape2D::disc(center, w / 2),
+            "roundrect" => {
+                let rratio = pad
+                    .iter()
+                    .find_map(|s| s.list_headed("roundrect_rratio"))
+                    .and_then(|l| l.get(1))
+                    .and_then(Sexp::as_atom)
+                    .and_then(|a| a.parse::<f64>().ok())
+                    .unwrap_or(0.25);
+                let r = ((w.min(h) as f64) * rratio).round() as Nm;
+                Shape2D::round_rect(center, w, h, r)
+            }
+            "oval" => oval_shape(center, w, h),
+            // rect / trapezoid / custom / chamfered_rect / …: bounding rectangle.
+            _ => Shape2D::rect(center, w, h),
+        };
+        vec![PadCopper { shape: rotate_shape(base, center, angle), layers }]
+    } else {
+        Vec::new()
+    };
+
+    if copper.is_empty() && drill.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(PadGeo { copper, drill }))
+}
+
+/// An oval/pill pad of size `w`×`h` centred at `c`: a capsule along the longer axis
+/// (a circle when `w == h`).
+fn oval_shape(c: Point, w: Nm, h: Nm) -> Shape2D {
+    if w == h {
+        Shape2D::disc(c, w / 2)
+    } else if w > h {
+        let dx = (w - h) / 2;
+        Shape2D::capsule(Point { x: c.x - dx, y: c.y }, Point { x: c.x + dx, y: c.y }, h / 2)
+    } else {
+        let dy = (h - w) / 2;
+        Shape2D::capsule(Point { x: c.x, y: c.y - dy }, Point { x: c.x, y: c.y + dy }, w / 2)
+    }
+}
+
+/// Rotate a shape about `center` by `deg` (KiCad CCW degrees). Exact for the four
+/// cardinal angles; off-axis angles use float trig rounded to nm (import-time only).
+fn rotate_shape(s: Shape2D, center: Point, deg: f64) -> Shape2D {
+    let d = ((deg % 360.0) + 360.0) % 360.0;
+    if d == 0.0 {
+        return s;
+    }
+    s.map_points(|p| {
+        let (dx, dy) = (p.x - center.x, p.y - center.y);
+        let (rx, ry) = if d == 90.0 {
+            (-dy, dx)
+        } else if d == 180.0 {
+            (-dx, -dy)
+        } else if d == 270.0 {
+            (dy, -dx)
+        } else {
+            let r = d.to_radians();
+            let (sin, cos) = (r.sin(), r.cos());
+            (
+                ((dx as f64) * cos - (dy as f64) * sin).round() as Nm,
+                ((dx as f64) * sin + (dy as f64) * cos).round() as Nm,
+            )
+        };
+        Point { x: center.x + rx, y: center.y + ry }
+    })
+}
+
+/// Parse a pad's `(drill <d>)` (round) or `(drill oval <w> <h>)` (slot, along the
+/// longer axis), centred at `center`. `None` if the pad has no drill.
+fn parse_drill(pad: &[Sexp], center: Point) -> Result<Option<Drill>, String> {
+    let Some(d) = pad.iter().find_map(|s| s.list_headed("drill")) else {
         return Ok(None);
     };
-    let w = size.get(1).and_then(Sexp::as_atom).ok_or("pad (size …) missing width")?;
-    let h = size.get(2).and_then(Sexp::as_atom).ok_or("pad (size …) missing height")?;
-    let shape = match pad.get(3).and_then(Sexp::as_atom) {
-        Some("circle") => PadShape::Circle,
-        Some("rect") => PadShape::Rect,
-        Some("roundrect") => PadShape::RoundRect,
-        Some("oval") => PadShape::Oval,
-        // Unknown/complex shapes (custom, trapezoid, chamfered_rect, …): treat the
-        // pad as its bounding rectangle for flashing purposes.
-        _ => PadShape::Rect,
-    };
-    Ok(Some(Pad { size: (mm_to_nm(w)?, mm_to_nm(h)?), shape }))
+    match d.get(1).and_then(Sexp::as_atom) {
+        Some("oval") => {
+            let w = mm_to_nm(d.get(2).and_then(Sexp::as_atom).ok_or("drill oval missing w")?)?;
+            let h = mm_to_nm(d.get(3).and_then(Sexp::as_atom).ok_or("drill oval missing h")?)?;
+            let drill = if w >= h {
+                let dx = (w - h) / 2;
+                Drill::Slot {
+                    a: Point { x: center.x - dx, y: center.y },
+                    b: Point { x: center.x + dx, y: center.y },
+                    d: h,
+                }
+            } else {
+                let dy = (h - w) / 2;
+                Drill::Slot {
+                    a: Point { x: center.x, y: center.y - dy },
+                    b: Point { x: center.x, y: center.y + dy },
+                    d: w,
+                }
+            };
+            Ok(Some(drill))
+        }
+        Some(tok) => Ok(Some(Drill::Round { d: mm_to_nm(tok)? })),
+        None => Ok(None),
+    }
+}
+
+/// Which copper layer(s) a pad occupies: through-hole types span the board; otherwise
+/// read `(layers …)` (`*.Cu` ⇒ through, a lone `B.Cu` ⇒ bottom, else top).
+fn pad_layers(pad: &[Sexp], pad_type: &str) -> PadLayers {
+    if pad_type == "thru_hole" || pad_type == "np_thru_hole" {
+        return PadLayers::Through;
+    }
+    if let Some(l) = pad.iter().find_map(|s| s.list_headed("layers")) {
+        let toks: Vec<&str> = l.iter().skip(1).filter_map(Sexp::as_atom).collect();
+        if toks.iter().any(|t| t.starts_with("*.")) {
+            return PadLayers::Through;
+        }
+        if toks.contains(&"B.Cu") && !toks.contains(&"F.Cu") {
+            return PadLayers::Bottom;
+        }
+    }
+    PadLayers::Top
 }
 
 /// Convenience wrapper: read a `.kicad_mod` file from disk and import it.
@@ -569,7 +690,7 @@ pub fn join_symbol_footprint(symbol: &Symbol, footprint: &PartDef) -> JoinReport
                     number: pad.number.clone(),
                     role: sp.etype.role(),
                     offset: pad.offset,
-                    pad: pad.pad, // copper geometry always comes from the footprint
+                    pad: pad.pad.clone(), // copper geometry always comes from the footprint
                 });
             }
             None => {
@@ -579,7 +700,7 @@ pub fn join_symbol_footprint(symbol: &Symbol, footprint: &PartDef) -> JoinReport
                     number: pad.number.clone(),
                     role: PinRole::Passive,
                     offset: pad.offset,
-                    pad: pad.pad,
+                    pad: pad.pad.clone(),
                 });
             }
         }
@@ -746,23 +867,55 @@ mod tests {
     }
 
     #[test]
-    fn captures_pad_shape_and_size() {
-        use crate::part::PadShape;
+    fn captures_pad_geometry() {
         let p = import_footprint(JST_SH_1X03).unwrap();
-        // pad "1": roundrect, size 0.6 x 1.55 mm.
-        let pad1 = p.pins.iter().find(|pin| pin.name == "1").unwrap().pad.unwrap();
-        assert_eq!(pad1.shape, PadShape::RoundRect);
-        assert_eq!(pad1.size, (600_000, 1_550_000));
-        // A rect pad (FP_4) captures shape Rect and its size.
+        // pad "1": roundrect 0.6 x 1.55 mm → a single Polygon copper region whose
+        // bbox (radius included) is the full pad size, on the top layer.
+        let pad1 = p.pins.iter().find(|pin| pin.name == "1").unwrap().pad.clone().unwrap();
+        assert_eq!(pad1.copper.len(), 1);
+        assert!(matches!(pad1.copper[0].shape, Shape2D::Polygon { .. }));
+        assert_eq!(pad1.copper[0].layers, PadLayers::Top);
+        let (min, max) = pad1.copper[0].shape.bbox().unwrap();
+        assert_eq!((max.x - min.x, max.y - min.y), (600_000, 1_550_000));
+        // A rect pad (FP_4) captures a rectangle of its size.
         let r = import_footprint(FP_4).unwrap();
-        let a1 = r.pins.iter().find(|pin| pin.name == "1").unwrap().pad.unwrap();
-        assert_eq!(a1.shape, PadShape::Rect);
-        assert_eq!(a1.size, (500_000, 500_000));
+        let a1 = r.pins.iter().find(|pin| pin.name == "1").unwrap().pad.clone().unwrap();
+        let (min, max) = a1.copper[0].shape.bbox().unwrap();
+        assert_eq!((max.x - min.x, max.y - min.y), (500_000, 500_000));
         // Geometry rides through the symbol/footprint join (footprint is the source).
         let joined = import_part(SYM_LIB, FP_4).unwrap();
         let vdd = joined.pins.iter().find(|pin| pin.name == "VDD").unwrap();
-        assert_eq!(vdd.pad.unwrap().shape, PadShape::Rect);
-        assert_eq!(vdd.pad.unwrap().size, (500_000, 500_000));
+        let (min, max) = vdd.pad.clone().unwrap().copper[0].shape.bbox().unwrap();
+        assert_eq!((max.x - min.x, max.y - min.y), (500_000, 500_000));
+    }
+
+    #[test]
+    fn imports_through_hole_drill_oval_and_rotation() {
+        let src = r#"
+(footprint "X"
+  (pad "1" thru_hole circle (at 0 0) (size 1.5 1.5) (drill 0.8) (layers "*.Cu"))
+  (pad "2" smd oval (at 3 0) (size 2 1) (layers "F.Cu"))
+  (pad "3" smd rect (at 6 0 90) (size 2 1) (layers "B.Cu"))
+)"#;
+        let p = import_footprint(src).unwrap();
+
+        // Through-hole round pad: copper spans all layers, a round drill, disc copper.
+        let p1 = p.pins.iter().find(|x| x.name == "1").unwrap().pad.clone().unwrap();
+        assert_eq!(p1.copper[0].layers, PadLayers::Through);
+        assert_eq!(p1.drill, Some(Drill::Round { d: 800_000 }));
+        assert!(matches!(&p1.copper[0].shape, Shape2D::Stroke { points, .. } if points.len() == 1));
+
+        // Oval pad → a capsule (two-point stroke) on the top layer.
+        let p2 = p.pins.iter().find(|x| x.name == "2").unwrap().pad.clone().unwrap();
+        assert!(matches!(&p2.copper[0].shape, Shape2D::Stroke { points, .. } if points.len() == 2));
+        assert_eq!(p2.copper[0].layers, PadLayers::Top);
+        assert_eq!(p2.drill, None);
+
+        // Rect rotated 90°: a 2×1 pad's bbox becomes 1 wide × 2 tall; bottom layer.
+        let p3 = p.pins.iter().find(|x| x.name == "3").unwrap().pad.clone().unwrap();
+        assert_eq!(p3.copper[0].layers, PadLayers::Bottom);
+        let (min, max) = p3.copper[0].shape.bbox().unwrap();
+        assert_eq!((max.x - min.x, max.y - min.y), (1_000_000, 2_000_000));
     }
 
     #[test]

@@ -6,29 +6,50 @@
 //! wires individual signals, so connecting tx-to-tx is not expressible.
 
 use crate::doc::{Component, Nm, Point, MM};
+use crate::geom::Shape2D;
 use crate::part::Dir::*;
 use std::collections::BTreeMap;
 
-/// A pad's copper geometry, as spelled in a footprint's `(pad … <shape> (size w h))`.
-/// The four shapes the prototype recognises; an unrecognised footprint shape token
-/// is mapped to the nearest of these by the importer (documented there).
+/// Which copper layer(s) a pad's copper occupies. SMD pads sit on one outer layer;
+/// a plated through-hole's copper is `Through` (top + bottom, conceptually a barrel
+/// between). The board stackup resolves these to real z when the pad is placed
+/// (`geom::Stackup`); this is the layer-relative, stackup-independent form a
+/// reusable footprint carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PadShape {
-    Circle,
-    Rect,
-    RoundRect,
-    Oval,
+pub enum PadLayers {
+    Top,
+    Bottom,
+    Through,
 }
 
-/// Render-only pad copper geometry attached to a [`PinDef`]: the pad's `size`
-/// (width, height in nm) and its [`PadShape`]. This is **fab-output metadata
-/// only** — it exists so a footprint pad can *flash as copper* in Gerber. DRC and
-/// the autorouter deliberately keep treating a pad as its `pin_world` *point*
-/// (radius 0), so this field never changes connectivity or clearance.
+/// A drilled hole in a pad (a [`geom::Role::Void`](crate::geom::Role) once placed),
+/// in **component-local** coordinates — round, or a slot between two points.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Pad {
-    pub size: (Nm, Nm),
-    pub shape: PadShape,
+pub enum Drill {
+    Round { d: Nm },
+    Slot { a: Point, b: Point, d: Nm },
+}
+
+/// One copper region of a pad: a real [`Shape2D`] (so a custom/compound pad is a
+/// *union* of these — the BMP581 case) on a set of layers, in **component-local**
+/// coordinates (same frame as [`PinDef::offset`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PadCopper {
+    pub shape: Shape2D,
+    pub layers: PadLayers,
+}
+
+/// The physical copper + drill geometry of a pad, attached to a [`PinDef`], in
+/// component-local coordinates. `copper` is a union of regions (a simple pad has
+/// one; a compound pad has several); `drill` is the optional hole. Unlike the old
+/// render-only `Pad`, this is the *real* geometry — render uses it now, and DRC /
+/// the router consume it once migrated (it is the honest copper extent, no longer a
+/// point). World coordinates come from the component's position + cardinal
+/// orientation, applied with [`Shape2D::map_points`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PadGeo {
+    pub copper: Vec<PadCopper>,
+    pub drill: Option<Drill>,
 }
 
 /// Signal/pin electrical direction.
@@ -88,11 +109,11 @@ pub struct PinDef {
     /// Local position of the pin relative to the component origin, in nm. Combined
     /// with the component's position + orientation to get a world position.
     pub offset: Point,
-    /// Optional copper geometry for fab output ([`Pad`]). `Some` for an imported
-    /// footprint pad (shape + size); `None` for the toy `part_library` pins, which
-    /// carry no footprint. **Render-only** — DRC/the solver treat pads as points and
-    /// never read this (see [`Pad`]).
-    pub pad: Option<Pad>,
+    /// Optional real copper + drill geometry ([`PadGeo`]). `Some` for an imported
+    /// footprint pad; `None` for the toy `part_library` pins, which carry no
+    /// footprint. This is the honest copper extent (render uses it; DRC/router
+    /// consume it once migrated) — no longer a render-only simplification.
+    pub pad: Option<PadGeo>,
 }
 
 /// A typed interface (e.g. UART). Defined once; encodes the correct mating so
@@ -194,6 +215,18 @@ pub fn pin_world(comp: &Component, def: &PartDef, pin: &str) -> Option<Point> {
     let off = def.pin_offset(pin)?;
     let r = comp.orient.rotate(off);
     Some(Point { x: comp.pos.value.x + r.x, y: comp.pos.value.y + r.y })
+}
+
+/// Lift a component-local point into world space on a placed component: rotate by
+/// the cardinal orientation, translate to the component position. Exact (integer).
+pub fn to_world(comp: &Component, p: Point) -> Point {
+    let r = comp.orient.rotate(p);
+    Point { x: comp.pos.value.x + r.x, y: comp.pos.value.y + r.y }
+}
+
+/// World-frame copper shape of a pad region on a placed component.
+pub fn pad_copper_world(comp: &Component, c: &PadCopper) -> Shape2D {
+    c.shape.map_points(|p| to_world(comp, p))
 }
 
 pub type PartLib = BTreeMap<String, PartDef>;

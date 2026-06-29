@@ -19,7 +19,8 @@
 
 use crate::doc::{Doc, Nm, Point, MM};
 use crate::elaborate::GenDirective;
-use crate::part::{pin_world, Pad, PadShape, PartDef, PartLib};
+use crate::geom::Shape2D;
+use crate::part::{pad_copper_world, pin_world, PadLayers, PartDef, PartLib};
 use crate::route::{Layer, Trace, Via};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -340,14 +341,30 @@ impl Aperture {
     }
 }
 
-/// The aperture for a component pad. `RoundRect` and any unknown shape collapse to
-/// their bounding `Rect` (Gerber's basic apertures have no rounded-rectangle, and
-/// the corner radius is irrelevant to a copper flash at this fidelity).
-fn pad_aperture(p: &Pad) -> Aperture {
-    match p.shape {
-        PadShape::Circle => Aperture::Circle(p.size.0),
-        PadShape::Rect | PadShape::RoundRect => Aperture::Rect(p.size.0, p.size.1),
-        PadShape::Oval => Aperture::Obround(p.size.0, p.size.1),
+/// A flashable aperture for a world-frame pad copper [`Shape2D`], with its centre: a
+/// disc → `Circle`, a capsule → `Obround`, a polygon → its bounding `Rect`. Gerber's
+/// basic apertures have no rounded-rect or rotated/custom shape, so those collapse to
+/// the bounding box — a conservative copper flash at this (render-only) fidelity; the
+/// exact geometry lives in the model for DRC. `None` for an empty shape.
+fn shape_flash(s: &Shape2D) -> Option<(Point, Aperture)> {
+    let (min, max) = s.bbox()?;
+    let center = Point { x: (min.x + max.x) / 2, y: (min.y + max.y) / 2 };
+    let (w, h) = (max.x - min.x, max.y - min.y);
+    let ap = match s {
+        Shape2D::Stroke { points, radius } if points.len() == 1 => Aperture::Circle(2 * radius),
+        Shape2D::Stroke { .. } => Aperture::Obround(w, h),
+        Shape2D::Polygon { .. } => Aperture::Rect(w, h),
+    };
+    Some((center, ap))
+}
+
+/// Does a pad on `layers` flash on copper `layer`? Through-hole copper appears on
+/// every copper layer (annulus); an SMD pad only on its own outer layer.
+fn pad_on_layer(layers: PadLayers, layer: Layer) -> bool {
+    match layers {
+        PadLayers::Through => true,
+        PadLayers::Top => layer == Layer::Top,
+        PadLayers::Bottom => layer == Layer::Bottom,
     }
 }
 
@@ -385,19 +402,23 @@ fn copper_layers(doc: &Doc) -> Vec<Layer> {
     set.into_iter().collect()
 }
 
-/// Every component pad carrying copper geometry, as `(world position, aperture)`,
-/// in `(EntityId, pin-declaration)` order. Pads are points on **all** layers in
-/// this model (through-hole assumption), so the same set flashes on every copper
-/// layer. Toy-library pins (no footprint, `pad: None`) contribute nothing.
-fn component_pad_flashes(doc: &Doc, lib: &PartLib) -> Vec<(Point, Aperture)> {
+/// Every component pad copper region that flashes on `layer`, as `(world centre,
+/// aperture)`, in `(EntityId, pin-declaration, copper-region)` order. Each pad's
+/// real geometry is transformed to world space and reduced to a flashable aperture;
+/// a region flashes only on the layers it occupies. Toy-library pins (`pad: None`)
+/// contribute nothing.
+fn component_pad_flashes(doc: &Doc, lib: &PartLib, layer: Layer) -> Vec<(Point, Aperture)> {
     let mut out = Vec::new();
     for c in doc.components.values() {
-        if let Some(def) = lib.get(&c.part) {
-            for pin in &def.pins {
-                if let Some(pad) = pin.pad
-                    && let Some(w) = pin_world(c, def, &pin.number)
-                {
-                    out.push((w, pad_aperture(&pad)));
+        let Some(def) = lib.get(&c.part) else { continue };
+        for pin in &def.pins {
+            let Some(pad) = &pin.pad else { continue };
+            for copper in &pad.copper {
+                if !pad_on_layer(copper.layers, layer) {
+                    continue;
+                }
+                if let Some((center, ap)) = shape_flash(&pad_copper_world(c, copper)) {
+                    out.push((center, ap));
                 }
             }
         }
@@ -413,7 +434,7 @@ fn component_pad_flashes(doc: &Doc, lib: &PartLib) -> Vec<(Point, Aperture)> {
 pub fn gerber_layer(doc: &Doc, lib: &PartLib, layer: Layer) -> String {
     let traces: Vec<&Trace> = doc.traces.values().filter(|t| t.layer == layer).collect();
     let vias: Vec<&Via> = doc.vias.values().filter(|v| v.spans(layer)).collect();
-    let pads = component_pad_flashes(doc, lib);
+    let pads = component_pad_flashes(doc, lib, layer);
 
     // Aperture table: distinct apertures, codes from 10 in `Ord` order.
     let mut aps: BTreeSet<Aperture> = BTreeSet::new();

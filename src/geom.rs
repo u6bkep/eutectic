@@ -105,6 +105,36 @@ impl Shape2D {
         }
     }
 
+    /// Apply a point map (e.g. a placement transform: cardinal rotation + offset) to
+    /// every vertex, preserving the inflation radius. Used to lift a footprint-local
+    /// pad shape into world coordinates.
+    pub fn map_points(&self, f: impl Fn(Point) -> Point) -> Shape2D {
+        match self {
+            Shape2D::Stroke { points, radius } => {
+                Shape2D::Stroke { points: points.iter().copied().map(&f).collect(), radius: *radius }
+            }
+            Shape2D::Polygon { points, radius } => {
+                Shape2D::Polygon { points: points.iter().copied().map(&f).collect(), radius: *radius }
+            }
+        }
+    }
+
+    /// Axis-aligned bounding box `(min, max)`, inflated by the radius. Empty shapes
+    /// (no points) return `None`.
+    pub fn bbox(&self) -> Option<(Point, Point)> {
+        let pts = self.vertices();
+        let first = *pts.first()?;
+        let (mut min, mut max) = (first, first);
+        for p in pts {
+            min.x = min.x.min(p.x);
+            min.y = min.y.min(p.y);
+            max.x = max.x.max(p.x);
+            max.y = max.y.max(p.y);
+        }
+        let r = self.radius();
+        Some((Point { x: min.x - r, y: min.y - r }, Point { x: max.x + r, y: max.y + r }))
+    }
+
     /// The skeleton's segments (consecutive vertices; a polygon's boundary closes).
     /// A lone point yields one degenerate segment `(p, p)`.
     fn segments(&self) -> Vec<(Point, Point)> {
