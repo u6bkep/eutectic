@@ -1,21 +1,58 @@
-//! A deterministic least-change placement solver.
+//! A deterministic, convergence-based least-change placement solver.
 //!
-//! This is a relaxation/constraint-projection solver, deliberately simple:
-//! positions start at each node's anchor and only move to satisfy constraints, so
-//! an unconstrained part stays put (least change — the "why did it jump across the
-//! board" antidote). A weak pull toward the anchor keeps under-determined DOFs
-//! near where they were; relational constraints, applied after the anchor pull
-//! each iteration, win when they disagree.
+//! ## Method
 //!
-//! It is NOT a production geometric constraint solver (no DOF analysis, no
-//! decomposition, no guaranteed global optimum). It is enough to make "least
-//! change" and constraint-driven placement real, and to give the reconciliation
-//! layer a principled definition of an *ineffective* override: one that, when
-//! freed, the solver puts back in the same place.
+//! Projected Gauss-Seidel (a.k.a. sequential constraint projection / position-based
+//! relaxation) wrapped in a real convergence loop. Each *sweep* visits the
+//! constraints in their stable `Vec` order and projects the current positions onto
+//! each constraint's feasible set in turn (using the just-updated positions —
+//! Gauss-Seidel, not Jacobi), then clamps movable nodes into the board. A node is
+//! only moved by a constraint that is actually *violated*, and only by the minimal
+//! displacement that satisfies it, so:
+//!   - a part touched by no (violated) constraint never moves — it stays exactly at
+//!     its anchor (least change — the "why did it jump across the board" antidote);
+//!   - there is no anchor-spring penalty term fighting the constraints, so feasible
+//!     sets are satisfied *exactly* (to tolerance), not approximately.
 //!
-//! Determinism: no RNG, fixed iteration count, BTreeMap/Vec iteration order is
-//! stable, and the f64 working math is rounded to integer nm on output so stored
-//! values stay exact and canonical.
+//! Inequality constraints (`Near`, `MinSep`, `NearPin`) are handled by an implicit
+//! active set: the projection is a no-op while the constraint has slack and fires
+//! only when violated, which is exactly active-set handling for these one-sided
+//! distance constraints.
+//!
+//! ## Guarantees
+//!
+//! - **Iterate to convergence, not a fixed count.** The loop runs until the maximum
+//!   constraint residual drops below `RES_TOL`, or the maximum per-sweep node
+//!   movement drops below `MOVE_TOL` (a geometric stall: the projections can no
+//!   longer make progress), or a `MAX_ITERS` safety cap is hit. `Solution.converged`
+//!   records whether the residual tolerance was actually met; `Solution.iters`
+//!   records how many sweeps it took.
+//! - **Feasible sets are satisfied to a tight tolerance** (`RES_TOL`, 1 µm — about
+//!   two orders of magnitude tighter than the old fixed-iteration relaxation's
+//!   ~0.1–0.2 mm). The motivating case — three decouplers each `Near` a regulator
+//!   and pairwise `MinSep` apart — converges to within `RES_TOL` of every relation.
+//! - **Infeasibility is reported, not hidden.** When the loop ends without the
+//!   residual tolerance met (cap hit or geometric stall on a set that cannot be
+//!   satisfied — e.g. a `MinSep` larger than the board can fit, or two `Fix`ed nodes
+//!   a `Near` cannot reconcile), `Solution.converged` is `false` and
+//!   `Solution.unsatisfied` lists exactly which constraints are still violated and
+//!   by how much, instead of silently returning a wrong-but-plausible placement.
+//! - **Deterministic.** No RNG; stable `BTreeMap`/`Vec` iteration order; coincident
+//!   points break ties on a fixed axis; f64 working math is rounded to integer nm on
+//!   output. Same `Problem` in → identical `Solution` out, bit for bit.
+//!
+//! ## Honest limits
+//!
+//! This is *not* a research-grade general geometric constraint solver: there is no
+//! DOF analysis, no graph decomposition into independently-solvable subsystems, and
+//! no global-optimality claim for the least-change objective (projection yields a
+//! feasible point with minimal *local* corrections, not the global minimum-movement
+//! solution). `MinSep` makes the feasible region non-convex, so on a pathological
+//! start the projection can settle into a poor local configuration; for the
+//! prototype's well-separated scenes this does not bite. Convergence of projected
+//! Gauss-Seidel on coupled inequality systems is reliable in practice here but not
+//! formally guaranteed for every input — which is exactly why feasibility is
+//! *checked and reported* rather than assumed.
 
 use crate::doc::{Nm, Point};
 use crate::id::EntityId;
@@ -53,10 +90,38 @@ pub struct Problem {
     pub constraints: Vec<Constraint>,
 }
 
-const ITERS: usize = 300;
-/// Weak pull toward the anchor each iteration: small enough that constraints win,
-/// large enough that under-constrained DOFs settle back to their anchor.
-const ANCHOR_W: f64 = 0.10;
+/// A constraint the solver could not satisfy, with its residual (how far from
+/// satisfied, in nm; 0 means satisfied). Reported instead of silently returning a
+/// wrong placement.
+#[derive(Clone, Debug)]
+pub struct Unsatisfied {
+    pub constraint: Constraint,
+    pub residual: Nm,
+}
+
+/// The result of a solve. `positions` is the placement (always populated, rounded to
+/// integer nm); `converged` says whether every constraint met `RES_TOL`; `iters` is
+/// how many sweeps ran; `unsatisfied` lists the still-violated constraints when
+/// `!converged` (empty when converged).
+pub struct Solution {
+    pub positions: BTreeMap<EntityId, Point>,
+    pub converged: bool,
+    pub iters: usize,
+    pub unsatisfied: Vec<Unsatisfied>,
+}
+
+/// Safety cap on sweeps. Reached only when the system neither converges nor stalls
+/// (e.g. an oscillating infeasible set) — the result is then reported as unsatisfied.
+const MAX_ITERS: usize = 5000;
+/// Convergence tolerance on the max constraint residual, in nm. 1 µm — about two
+/// orders of magnitude tighter than the old fixed-iteration relaxation (~0.1–0.2 mm).
+const RES_TOL: f64 = 1_000.0;
+/// If the largest node movement in a whole sweep falls below this (nm) while the
+/// residual is still above `RES_TOL`, the projection has geometrically stalled: the
+/// remaining constraints cannot be satisfied. Tiny so a still-converging system is
+/// never mistaken for a stalled one (movement and residual shrink together).
+const MOVE_TOL: f64 = 1.0;
+
 /// Two placements within this distance are "the same" for effectiveness checks.
 pub const PLACE_TOL: Nm = 100_000; // 0.1 mm
 
@@ -66,29 +131,26 @@ pub fn dist(a: Point, b: Point) -> f64 {
     (dx * dx + dy * dy).sqrt()
 }
 
-pub fn solve(p: &Problem) -> BTreeMap<EntityId, Point> {
+pub fn solve(p: &Problem) -> Solution {
     let mut pos: BTreeMap<EntityId, (f64, f64)> = p
         .anchors
         .iter()
         .map(|(k, v)| (k.clone(), (v.x as f64, v.y as f64)))
         .collect();
-    let anchor = pos.clone();
 
-    for _ in 0..ITERS {
-        // Weak anchor pull (movable nodes only).
-        for (id, a) in &anchor {
-            if p.fixed.contains(id) {
-                continue;
-            }
-            let pp = pos.get_mut(id).unwrap();
-            pp.0 += ANCHOR_W * (a.0 - pp.0);
-            pp.1 += ANCHOR_W * (a.1 - pp.1);
-        }
-        // Relational constraints (hard projection; later ones win within an iter).
+    let mut iters = 0;
+    let mut converged = false;
+    for it in 1..=MAX_ITERS {
+        iters = it;
+        let before = pos.clone();
+
+        // Relational constraints (Gauss-Seidel: each projection sees the previous
+        // ones' updates within the same sweep).
         for c in &p.constraints {
             apply_constraint(c, &mut pos, &p.fixed);
         }
-        // Containment has the last word.
+        // Containment has the last word (movable nodes only; a fixed datum may sit
+        // outside the outline).
         if let Some(r) = &p.board {
             for (id, pp) in pos.iter_mut() {
                 if p.fixed.contains(id) {
@@ -98,11 +160,102 @@ pub fn solve(p: &Problem) -> BTreeMap<EntityId, Point> {
                 pp.1 = pp.1.clamp(r.min.y as f64, r.max.y as f64);
             }
         }
+
+        // Largest movement this sweep, and the worst remaining residual.
+        let mut max_move: f64 = 0.0;
+        for (id, &(x, y)) in &pos {
+            let (bx, by) = before[id];
+            let d = ((x - bx).powi(2) + (y - by).powi(2)).sqrt();
+            if d > max_move {
+                max_move = d;
+            }
+        }
+        let max_res = p
+            .constraints
+            .iter()
+            .map(|c| constraint_residual(c, &pos))
+            .fold(0.0_f64, f64::max);
+
+        if max_res <= RES_TOL {
+            converged = true;
+            break;
+        }
+        // Residual still high but nothing is moving any more: geometric stall — the
+        // remaining constraints are mutually infeasible. Stop and report them.
+        if max_move <= MOVE_TOL {
+            converged = false;
+            break;
+        }
     }
 
-    pos.into_iter()
-        .map(|(k, (x, y))| (k, Point { x: x.round() as i64, y: y.round() as i64 }))
-        .collect()
+    let positions = pos
+        .iter()
+        .map(|(k, &(x, y))| (k.clone(), Point { x: x.round() as i64, y: y.round() as i64 }))
+        .collect();
+
+    let unsatisfied = if converged {
+        Vec::new()
+    } else {
+        p.constraints
+            .iter()
+            .filter_map(|c| {
+                let r = constraint_residual(c, &pos);
+                (r > RES_TOL).then(|| Unsatisfied { constraint: c.clone(), residual: r.round() as Nm })
+            })
+            .collect()
+    };
+
+    Solution { positions, converged, iters, unsatisfied }
+}
+
+/// World point of `id` plus a local offset (used for pins rigidly attached to a node).
+fn point_of(pos: &BTreeMap<EntityId, (f64, f64)>, id: &EntityId, off: (f64, f64)) -> Option<(f64, f64)> {
+    pos.get(id).map(|p| (p.0 + off.0, p.1 + off.1))
+}
+
+/// How far a constraint is from satisfied, in nm (0.0 = satisfied). The residual the
+/// convergence loop drives to zero and the value reported on infeasibility.
+fn constraint_residual(c: &Constraint, pos: &BTreeMap<EntityId, (f64, f64)>) -> f64 {
+    let zero = (0.0, 0.0);
+    match c {
+        Constraint::Near { a, b, within } => sep_residual(pos, a, zero, b, zero, *within as f64, true),
+        Constraint::MinSep { a, b, gap } => sep_residual(pos, a, zero, b, zero, *gap as f64, false),
+        Constraint::NearPin { a, b, b_off, within } => {
+            sep_residual(pos, a, zero, b, (b_off.x as f64, b_off.y as f64), *within as f64, true)
+        }
+        Constraint::AlignX { nodes } => align_residual(pos, nodes, true),
+        Constraint::AlignY { nodes } => align_residual(pos, nodes, false),
+    }
+}
+
+/// Residual of a separation constraint: how far `dist(a+a_off, b+b_off)` is from
+/// the satisfied side of `target` (`pull` = Near, so violated when too far).
+fn sep_residual(
+    pos: &BTreeMap<EntityId, (f64, f64)>,
+    a: &EntityId,
+    a_off: (f64, f64),
+    b: &EntityId,
+    b_off: (f64, f64),
+    target: f64,
+    pull: bool,
+) -> f64 {
+    let (Some(pa), Some(pb)) = (point_of(pos, a, a_off), point_of(pos, b, b_off)) else {
+        return 0.0;
+    };
+    let d = ((pb.0 - pa.0).powi(2) + (pb.1 - pa.1).powi(2)).sqrt();
+    if pull { (d - target).max(0.0) } else { (target - d).max(0.0) }
+}
+
+/// Residual of an align constraint: the spread (max − min) of the aligned coordinate
+/// over the present nodes. Zero once they share a line; non-zero (and irreducible) if
+/// two *fixed* members disagree — which is how a contradictory align is reported.
+fn align_residual(pos: &BTreeMap<EntityId, (f64, f64)>, nodes: &[EntityId], x_axis: bool) -> f64 {
+    let coord = |p: (f64, f64)| if x_axis { p.0 } else { p.1 };
+    let present: Vec<f64> = nodes.iter().filter_map(|n| pos.get(n)).map(|p| coord(*p)).collect();
+    match (present.iter().cloned().fold(f64::INFINITY, f64::min), present.iter().cloned().fold(f64::NEG_INFINITY, f64::max)) {
+        (lo, hi) if lo.is_finite() && hi.is_finite() => hi - lo,
+        _ => 0.0,
+    }
 }
 
 fn apply_constraint(

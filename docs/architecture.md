@@ -414,17 +414,21 @@ Tested (15 passing tests total) + `cargo run --example m3` (a mini RP2350-Zero-c
 module fixed at a datum, decouplers clustered near it, JST-SH headers in an aligned top-edge row,
 all inside the outline; moving the datum perturbs only the decouplers — locality demonstrated).
 
-**Honest limitation:** the relaxation solver is *approximate* — it satisfies a set of mutually
-constraining relations to within ~0.1–0.2 mm, not exactly, and offers no global-optimum or
-feasibility guarantee. A production tool needs a real geometric constraint solver (DOF analysis /
-decomposition / Newton). This is the deliberate prototype-scope tradeoff, not a design position.
+**Note (M3 → M5):** M3's solver was a *fixed-iteration* relaxation — it satisfied a set of mutually
+constraining relations only to within ~0.1–0.2 mm, with no convergence or feasibility guarantee
+(300 sweeps, then stop and hope). **This has been replaced** by a convergence-based solver — see
+"Prototype status (real solver)" below. The remaining honest limit is that it is still not a
+research-grade general constraint solver (no DOF analysis / decomposition); it converges, satisfies
+feasible sets tightly, and *reports* infeasibility rather than proving global optimality.
 
 **Open limitations / next prototype targets (M4 candidates):**
 - **Resolution UX** for conflicts/orphans now exists (see "Prototype status (resolution UX)"
   below); what remains is presenting it in a GUI and richer multi-issue batching.
-- Solver is approximate relaxation (see above); no keepouts. (`Near`-to-a-*pin* and a settable
-  rotation/orientation attribute now exist — see "Prototype status (physical parts)" below; the
-  solver still does not *optimise* over orientation.)
+- Solver now converges to a tight tolerance and reports infeasibility (see "Prototype status (real
+  solver)" below), but still does no DOF analysis / subsystem decomposition and makes no
+  global-optimum claim; no keepouts. (`Near`-to-a-*pin* and a settable rotation/orientation
+  attribute now exist — see "Prototype status (physical parts)" below; the solver still does not
+  *optimise* over orientation.)
 - Query dependencies are recorded explicitly, not auto-tracked; inputs are coarse
   (`conn_rev`/`geom_rev`).
 - No router.
@@ -551,3 +555,60 @@ pin) constructed, resolved, and asserted gone with the resulting state correct (
 leaves the part `Fixed` at the Fix position, no override, clean report); re-pin shown to be the user's
 call (persists or goes redundant); invalid resolves rejected atomically; and the suggested command
 applied end-to-end to clear the report. Zero new dependencies.
+
+## Prototype status (real solver)
+
+Replaces M3's fixed-iteration relaxation with a **convergence-based** solver that offers explicit
+guarantees instead of "300 sweeps then stop." Still zero-dependency.
+
+**Method — projected Gauss-Seidel with a convergence loop.** Each *sweep* projects the current
+positions onto every constraint's feasible set in turn (Gauss-Seidel: later projections see earlier
+ones' updates within the same sweep), then clamps movable nodes into the board. The inequality
+constraints (`Near`, `MinSep`, `NearPin`) use an implicit **active set** — a projection is a no-op
+while the constraint has slack and fires only when violated, which is exactly active-set handling
+for one-sided distance constraints. Crucially there is **no anchor-spring penalty term** (M3 had
+one): a node is moved only by a constraint that is actually violated, and only by the minimal
+displacement that satisfies it. So feasible sets are satisfied *exactly* (to tolerance) rather than
+approximately, and least-change falls out for free — a part touched by no violated constraint never
+moves.
+
+**Guarantees:**
+- *Iterate to convergence, not a fixed count.* The loop runs until the max constraint residual is
+  below `RES_TOL` (**1 µm** — ~100–200× tighter than M3's ~0.1–0.2 mm), or the max per-sweep node
+  movement falls below `MOVE_TOL` (a geometric stall: projections can no longer make progress), or a
+  `MAX_ITERS` safety cap is hit. The new return type `solve::Solution { positions, converged, iters,
+  unsatisfied }` records *which* happened (`converged` = residual tolerance actually met; `iters` =
+  sweeps taken).
+- *Feasible sets satisfied tightly.* The motivating case M3 got wrong — three decouplers each `Near`
+  a regulator within 6 mm **and** pairwise `MinSep` 3 mm — converges with every relation satisfied
+  to within `RES_TOL` (test asserts ≤ 0.01 mm).
+- *Infeasibility reported, not hidden.* When the residual tolerance is not met (cap hit, or stall on
+  an unsatisfiable set — a `MinSep` larger than the board can fit, contradictory `Fix`es, etc.),
+  `converged` is `false` and `unsatisfied: Vec<Unsatisfied { constraint, residual }>` lists exactly
+  which constraints remain violated and by how much — instead of returning a wrong-but-plausible
+  placement. (Board containment of *movable* nodes is always achievable by clamping, so it is never
+  itself listed; an unsatisfiable board manifests as the relational constraint it defeats.)
+- *Deterministic.* No RNG; stable `BTreeMap`/`Vec` order; coincident points break ties on a fixed
+  axis; f64 working math rounded to integer nm on output. Same `Problem` → identical `Solution`,
+  bit for bit.
+
+**Callers (`elaborate.rs`).** The three solves (full, per-override solve-without effectiveness
+check, final decayed solve) now read `solve(...).positions`; reconciliation/decay semantics are
+unchanged because they are defined purely by *where* nodes are placed. `converged`/`unsatisfied`
+(placement infeasibility) is available for the engine to surface in a future milestone but is not
+yet threaded into `ReconReport`.
+
+**Honest limits.** Not a research-grade general geometric constraint solver: no DOF analysis, no
+graph decomposition into independently-solvable subsystems, no global-optimality claim for the
+least-change objective (projection finds a feasible point via minimal *local* corrections, not the
+global minimum-movement solution). `MinSep` makes the feasible region non-convex, so a pathological
+start could settle into a poor local configuration; for the prototype's well-separated scenes it
+does not bite. Convergence of projected Gauss-Seidel on coupled inequality systems is reliable in
+practice but not formally guaranteed for every input — which is *why* feasibility is checked and
+reported rather than assumed.
+
+**Tested (5 new unit tests, 49 total):** the 3-decoupler `Near`+`MinSep` case satisfied to ≤ 0.01 mm;
+an infeasible set (two `Fix`ed nodes a `Near` cannot reconcile) reported `!converged` with the right
+residual; a `MinSep` larger than the board reported; an unconstrained node staying bit-exactly at its
+anchor; determinism (same `Problem` twice → identical positions/flag/iters). The full M1–M4 suite
+(44 tests) stays green under the tighter solver. Zero new dependencies.

@@ -33,13 +33,14 @@ pub fn boot(source: elaborate::Source, lib: &part::PartLib) -> Result<doc::Doc, 
 #[cfg(test)]
 mod tests {
     use super::command::{suggested_resolutions, Command, Resolution, Transaction};
-    use super::doc::{DecayReason, Doc, Point, Provenance, MM};
+    use super::doc::{DecayReason, Doc, Nm, Point, Provenance, MM};
     use super::elaborate::{psu_module, GenDirective, Source};
     use super::history::History;
     use super::id::EntityId;
     use super::part::part_library;
     use super::query::{Engine, Key};
-    use super::solve::{dist, PLACE_TOL};
+    use super::solve::{dist, solve, Constraint, Problem, Rect, PLACE_TOL};
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn placed(src: Source) -> Doc {
         let lib = part_library();
@@ -557,5 +558,158 @@ mod tests {
         h.commit(Transaction::one(ready[0].clone()), &lib, "apply suggestion").unwrap();
         assert!(h.doc().report.is_clean());
         assert!(suggested_resolutions(&h.doc().report).is_empty());
+    }
+
+    // ---- M5: the convergence-based real solver ----
+
+    /// The motivating case the old fixed-iteration relaxation got wrong: three
+    /// decouplers each `Near` a fixed regulator within 6 mm AND pairwise `MinSep`
+    /// 3 mm apart. The new solver satisfies every relation to a tight tolerance —
+    /// roughly two orders of magnitude tighter than the old ~0.1–0.2 mm.
+    #[test]
+    fn three_decouplers_near_and_minsep_satisfied_tightly() {
+        // 0.01 mm: well inside the solver's 1 µm convergence tolerance (with margin
+        // for nm rounding on output) and ~10–20x tighter than the old relaxation.
+        const TOL: Nm = 10_000;
+        let mut src = vec![
+            GenDirective::Instance { path: "reg".into(), part: "LDO".into() },
+            GenDirective::Fix { path: "reg".into(), pos: Point::mm(30, 30) },
+        ];
+        for i in 0..3 {
+            let d = format!("dec{i}");
+            src.push(GenDirective::Instance { path: d.clone(), part: "Cap".into() });
+            src.push(GenDirective::Near { a: d, b: "reg".into(), within: 6 * MM });
+        }
+        src.push(GenDirective::MinSep { a: "dec0".into(), b: "dec1".into(), gap: 3 * MM });
+        src.push(GenDirective::MinSep { a: "dec1".into(), b: "dec2".into(), gap: 3 * MM });
+        src.push(GenDirective::MinSep { a: "dec0".into(), b: "dec2".into(), gap: 3 * MM });
+        let d = placed(src);
+
+        let reg = pos(&d, "reg");
+        for i in 0..3 {
+            let p = pos(&d, &format!("dec{i}"));
+            assert!(
+                dist(p, reg) <= (6 * MM + TOL) as f64,
+                "dec{i} is {} nm from reg, want <= {}",
+                dist(p, reg),
+                6 * MM + TOL
+            );
+        }
+        for (a, b) in [("dec0", "dec1"), ("dec1", "dec2"), ("dec0", "dec2")] {
+            let sep = dist(pos(&d, a), pos(&d, b));
+            assert!(sep >= (3 * MM - TOL) as f64, "{a}-{b} sep {sep} nm, want >= {}", 3 * MM - TOL);
+        }
+    }
+
+    /// A genuinely infeasible set is *reported*, not silently approximated: two
+    /// immovable (Fixed) nodes 10 mm apart with a `Near 1mm` between them cannot be
+    /// reconciled, so the solver returns `!converged` and names the offending
+    /// constraint with a non-zero residual.
+    #[test]
+    fn infeasible_constraints_are_reported() {
+        let a = EntityId::new("a");
+        let b = EntityId::new("b");
+        let mut anchors = BTreeMap::new();
+        anchors.insert(a.clone(), Point::mm(0, 0));
+        anchors.insert(b.clone(), Point::mm(10, 0));
+        let mut fixed = BTreeSet::new();
+        fixed.insert(a.clone());
+        fixed.insert(b.clone());
+        let prob = Problem {
+            anchors,
+            fixed,
+            board: None,
+            constraints: vec![Constraint::Near { a: a.clone(), b: b.clone(), within: MM }],
+        };
+        let sol = solve(&prob);
+        assert!(!sol.converged, "an infeasible set must not report convergence");
+        assert_eq!(sol.unsatisfied.len(), 1, "the one violated constraint must be listed");
+        // Residual ~= 9 mm (10 mm actual − 1 mm allowed), reported, not hidden.
+        assert!(
+            (sol.unsatisfied[0].residual - 9 * MM).abs() < PLACE_TOL,
+            "residual {} nm, want ~{}",
+            sol.unsatisfied[0].residual,
+            9 * MM
+        );
+        // Fixed nodes never moved.
+        assert_eq!(sol.positions[&a], Point::mm(0, 0));
+        assert_eq!(sol.positions[&b], Point::mm(10, 0));
+    }
+
+    /// A `MinSep` larger than the board can fit is reported (clamping fights the
+    /// separation forever): infeasibility surfaces as the still-violated `MinSep`.
+    #[test]
+    fn minsep_larger_than_board_is_reported() {
+        let a = EntityId::new("a");
+        let b = EntityId::new("b");
+        let mut anchors = BTreeMap::new();
+        anchors.insert(a.clone(), Point::mm(0, 0));
+        anchors.insert(b.clone(), Point::mm(1, 0));
+        let prob = Problem {
+            anchors,
+            fixed: BTreeSet::new(),
+            board: Some(Rect { min: Point::mm(0, 0), max: Point::mm(2, 2) }),
+            // Want 20 mm apart inside a 2 mm board: impossible.
+            constraints: vec![Constraint::MinSep { a, b, gap: 20 * MM }],
+        };
+        let sol = solve(&prob);
+        assert!(!sol.converged);
+        assert_eq!(sol.unsatisfied.len(), 1);
+    }
+
+    /// Least change at the solver boundary: a node touched by no constraint stays
+    /// *exactly* (bit-for-bit) at its anchor.
+    #[test]
+    fn unconstrained_node_stays_exactly_at_anchor() {
+        let n = EntityId::new("n");
+        let mut anchors = BTreeMap::new();
+        anchors.insert(n.clone(), Point { x: 12_345_678, y: -9_876_543 });
+        let prob =
+            Problem { anchors, fixed: BTreeSet::new(), board: None, constraints: Vec::new() };
+        let sol = solve(&prob);
+        assert!(sol.converged);
+        assert!(sol.unsatisfied.is_empty());
+        assert_eq!(sol.positions[&n], Point { x: 12_345_678, y: -9_876_543 });
+    }
+
+    /// Determinism: the same `Problem` solved twice yields identical positions,
+    /// convergence flag, and iteration count — bit for bit.
+    #[test]
+    fn solver_is_deterministic() {
+        let make = || {
+            let reg = EntityId::new("reg");
+            let mut anchors = BTreeMap::new();
+            anchors.insert(reg.clone(), Point::mm(30, 30));
+            let mut fixed = BTreeSet::new();
+            fixed.insert(reg.clone());
+            let mut constraints = Vec::new();
+            for i in 0..3 {
+                let d = EntityId::new(format!("dec{i}"));
+                anchors.insert(d.clone(), Point::mm(10 * (i as i64 + 1), 0));
+                constraints.push(Constraint::Near { a: d, b: reg.clone(), within: 6 * MM });
+            }
+            constraints.push(Constraint::MinSep {
+                a: EntityId::new("dec0"),
+                b: EntityId::new("dec1"),
+                gap: 3 * MM,
+            });
+            constraints.push(Constraint::MinSep {
+                a: EntityId::new("dec1"),
+                b: EntityId::new("dec2"),
+                gap: 3 * MM,
+            });
+            constraints.push(Constraint::MinSep {
+                a: EntityId::new("dec0"),
+                b: EntityId::new("dec2"),
+                gap: 3 * MM,
+            });
+            Problem { anchors, fixed, board: None, constraints }
+        };
+        let s1 = solve(&make());
+        let s2 = solve(&make());
+        assert_eq!(s1.positions, s2.positions);
+        assert_eq!(s1.converged, s2.converged);
+        assert_eq!(s1.iters, s2.iters);
+        assert!(s1.converged, "the feasible 3-decoupler set must converge");
     }
 }

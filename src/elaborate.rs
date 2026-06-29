@@ -222,9 +222,15 @@ pub fn elaborate(
     let base: BTreeMap<EntityId, Point> =
         components.iter().map(|(k, c)| (k.clone(), c.pos.value)).collect();
     let no_suppress = BTreeSet::new();
+    // We use only `.positions` here: reconciliation's least-change/decay logic is
+    // defined purely by where the solver places nodes. The new `Solution` also
+    // carries `converged`/`unsatisfied` (infeasibility), which the engine could
+    // surface in a future milestone; today the placement is what reconciliation
+    // consumes, so the semantics below are unchanged from the relaxation solver.
     let solved_all = solve(&assemble_problem(
         &base, &fixmap, overrides, board, &relational, &no_suppress,
-    ));
+    ))
+    .positions;
 
     let mut report = ReconReport::default();
     let mut decayed: BTreeSet<EntityId> = BTreeSet::new();
@@ -258,7 +264,8 @@ pub fn elaborate(
         let mut suppress = BTreeSet::new();
         suppress.insert(id.clone());
         let solved_wo =
-            solve(&assemble_problem(&base, &fixmap, overrides, board, &relational, &suppress));
+            solve(&assemble_problem(&base, &fixmap, overrides, board, &relational, &suppress))
+                .positions;
         let effective = dist(solved_all[id], solved_wo[id]) > PLACE_TOL as f64;
 
         match ov.strength {
@@ -282,7 +289,8 @@ pub fn elaborate(
     // Final placement with decayed hints freed back to their defaults. This is
     // what a fresh elaboration (after GC) would produce, so the result is stable.
     let solved_final =
-        solve(&assemble_problem(&base, &fixmap, overrides, board, &relational, &decayed));
+        solve(&assemble_problem(&base, &fixmap, overrides, board, &relational, &decayed))
+            .positions;
 
     for (id, c) in components.iter_mut() {
         let prov = if fixmap.contains_key(id) {
