@@ -125,6 +125,10 @@ fn render_directive(d: &GenDirective) -> String {
             }
             s
         }
+        GenDirective::Rotate { path, deg } => format!("rotate {path} {deg}"),
+        GenDirective::NearPin { a, b_comp, b_pin, within } => {
+            format!("nearpin {a} {b_comp}.{b_pin} {}", fmt_len(*within))
+        }
     }
 }
 
@@ -220,6 +224,18 @@ fn parse_line(line: &str) -> Result<Item, String> {
         }
         "alignx" => Item::Directive(GenDirective::AlignX { nodes: node_list(rest, "alignx")? }),
         "aligny" => Item::Directive(GenDirective::AlignY { nodes: node_list(rest, "aligny")? }),
+        "rotate" => {
+            let (path, deg) = two_tokens(rest, "rotate <path> <deg>")?;
+            let deg: i32 = deg
+                .parse()
+                .map_err(|_| format!("`{deg}` is not an integer degree count"))?;
+            Item::Directive(GenDirective::Rotate { path, deg })
+        }
+        "nearpin" => {
+            let (a, bpin, len) = two_tokens_and_len(rest, "nearpin <a> <bComp>.<bPin> <len>")?;
+            let (b_comp, b_pin) = split_last_dot(&bpin, "pin")?;
+            Item::Directive(GenDirective::NearPin { a, b_comp, b_pin, within: len })
+        }
         "connect" => {
             let (a, b) = two_tokens(rest, "connect <compA>.<port> <compB>.<port>")?;
             Item::Directive(GenDirective::ConnectInterface {
@@ -423,6 +439,13 @@ mod tests {
             GenDirective::MinSep { a: "psu.dec[0]".into(), b: "mcu".into(), gap: MM },
             GenDirective::AlignX { nodes: vec!["psu.reg".into(), "psu.dec[0]".into()] },
             GenDirective::AlignY { nodes: vec!["mcu".into(), "sens".into()] },
+            GenDirective::Rotate { path: "psu.reg".into(), deg: 90 },
+            GenDirective::NearPin {
+                a: "psu.dec[0]".into(),
+                b_comp: "psu.reg".into(),
+                b_pin: "VOUT".into(),
+                within: 2 * MM,
+            },
             GenDirective::ConnectInterface {
                 a: ("mcu".into(), "uart".into()),
                 b: ("sens".into(), "uart".into()),
@@ -567,6 +590,45 @@ mod tests {
     #[test]
     fn equiv_placement_scene() {
         assert_elaboration_equiv(&placed(placement_scene()));
+    }
+
+    /// A scene using the physical-parts directives (Rotate + NearPin) round-trips
+    /// through text and re-elaborates identically.
+    #[test]
+    fn equiv_physical_scene() {
+        let scene = vec![
+            GenDirective::Instance { path: "reg".into(), part: "LDO".into() },
+            GenDirective::Instance { path: "dec".into(), part: "Cap".into() },
+            GenDirective::Fix { path: "reg".into(), pos: Point::mm(0, 0) },
+            GenDirective::Rotate { path: "reg".into(), deg: 90 },
+            GenDirective::NearPin {
+                a: "dec".into(),
+                b_comp: "reg".into(),
+                b_pin: "VOUT".into(),
+                within: 0,
+            },
+        ];
+        assert_elaboration_equiv(&placed(scene));
+    }
+
+    /// `rotate` / `nearpin` parse from human-authored text (negative/over-360
+    /// degrees normalise; mm length on the pin proximity).
+    #[test]
+    fn parse_rotate_and_nearpin() {
+        let (src, _ov) = parse("rotate u1 -90\nnearpin c1 u1.VOUT 1.5mm").unwrap();
+        assert_eq!(src[0], GenDirective::Rotate { path: "u1".into(), deg: -90 });
+        assert_eq!(
+            src[1],
+            GenDirective::NearPin {
+                a: "c1".into(),
+                b_comp: "u1".into(),
+                b_pin: "VOUT".into(),
+                within: 1_500_000,
+            }
+        );
+        // Off-axis rotation is rejected at elaboration, not parse.
+        assert!(parse("rotate u1 45").is_ok());
+        assert!(parse("rotate u1 notnum").is_err());
     }
 
     // ---- LoadText command (text -> tier-1 in one atomic transaction) -----

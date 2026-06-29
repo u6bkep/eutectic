@@ -304,6 +304,72 @@ mod tests {
         assert!(pos(&d, "a").x <= 50 * MM + PLACE_TOL);
     }
 
+    // ---- physical parts: orientation + pin geometry ----
+
+    #[test]
+    fn orientation_round_trips_through_elaboration() {
+        // A Rotate directive sets the component's orientation attribute, and it
+        // survives elaboration (and a re-elaboration via the same source).
+        let d = placed(vec![
+            GenDirective::Instance { path: "u1".into(), part: "MCU".into() },
+            GenDirective::Rotate { path: "u1".into(), deg: 90 },
+        ]);
+        use super::doc::Orient;
+        assert_eq!(d.components[&EntityId::new("u1")].orient, Orient::Deg90);
+        // Default orientation when no Rotate is given.
+        let d0 = placed(vec![GenDirective::Instance { path: "u1".into(), part: "MCU".into() }]);
+        assert_eq!(d0.components[&EntityId::new("u1")].orient, Orient::Deg0);
+    }
+
+    #[test]
+    fn rotate_off_axis_is_rejected() {
+        let lib = part_library();
+        let mut h = History::new(Default::default());
+        let r = h.commit(
+            Transaction::one(Command::SetSource(vec![
+                GenDirective::Instance { path: "u1".into(), part: "MCU".into() },
+                GenDirective::Rotate { path: "u1".into(), deg: 45 },
+            ])),
+            &lib,
+            "bad-rot",
+        );
+        assert!(r.is_err(), "off-axis rotation must abort the transaction");
+    }
+
+    /// Near-to-pin pulls a component onto a *pin's* world position, accounting for
+    /// the host component's orientation. reg is fixed at the origin and rotated 90°,
+    /// so its VOUT pin (local (2mm,0)) lands at world (0, 2mm); a cap constrained
+    /// `nearpin reg.VOUT 0` is dragged there.
+    #[test]
+    fn near_to_pin_pulls_component_onto_rotated_pin() {
+        use super::part::pin_world;
+        let d = placed(vec![
+            GenDirective::Instance { path: "reg".into(), part: "LDO".into() },
+            GenDirective::Instance { path: "dec".into(), part: "Cap".into() },
+            GenDirective::Fix { path: "reg".into(), pos: Point::mm(0, 0) },
+            GenDirective::Rotate { path: "reg".into(), deg: 90 },
+            GenDirective::NearPin {
+                a: "dec".into(),
+                b_comp: "reg".into(),
+                b_pin: "VOUT".into(),
+                within: 0,
+            },
+        ]);
+        let lib = part_library();
+        let reg = &d.components[&EntityId::new("reg")];
+        let pin_pos = pin_world(reg, &lib["LDO"], "VOUT").unwrap();
+        assert_eq!(pin_pos, Point::mm(0, 2), "rotated pin world position");
+        // dec's centroid is pulled to the pin world position (within solver tol).
+        assert!(
+            dist(pos(&d, "dec"), pin_pos) <= PLACE_TOL as f64,
+            "dec at {:?}, pin at {:?}",
+            pos(&d, "dec"),
+            pin_pos
+        );
+        // Component-level Near still works alongside (sanity: reg stays fixed).
+        assert_eq!(pos(&d, "reg"), Point::mm(0, 0));
+    }
+
     #[test]
     fn hint_decays_when_solver_would_place_it_there_anyway() {
         // reg is fixed at the origin; dec is constrained to coincide with it.

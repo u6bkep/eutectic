@@ -422,8 +422,9 @@ decomposition / Newton). This is the deliberate prototype-scope tradeoff, not a 
 **Open limitations / next prototype targets (M4 candidates):**
 - **No resolution UX** for conflicts/orphans (accept-constraint, re-pin, delete) — surfacing
   exists, acting on it doesn't.
-- Solver is approximate relaxation (see above); no `Near`-to-a-*pin* (pins have no independent
-  position yet), no rotation/orientation DOF, no keepouts.
+- Solver is approximate relaxation (see above); no keepouts. (`Near`-to-a-*pin* and a settable
+  rotation/orientation attribute now exist — see "Prototype status (physical parts)" below; the
+  solver still does not *optimise* over orientation.)
 - Query dependencies are recorded explicitly, not auto-tracked; inputs are coarse
   (`conn_rev`/`geom_rev`).
 - No router.
@@ -470,3 +471,45 @@ a `<comp>.<pin>` reference splits at the last dot so hierarchical paths (`psu.de
 replaces source+overrides in one atomic transaction (a malformed document aborts the commit, so the
 file is never a back door to an inconsistent state). Zero new dependencies — the parser is
 hand-rolled (line-based).
+
+## Prototype status (physical parts)
+
+Gives parts real planar geometry so proximity constraints can target an actual pin, not just a
+component centroid. Still zero-dependency.
+
+- **Pin offsets.** Every discrete pin (`part::PinDef.offset`) and every interface signal
+  (`part::InterfaceDef.offsets`, keyed by signal name) carries a local 2D offset (`doc::Point`, nm)
+  from the component origin. `PartDef::pin_offset(pin)` resolves a reference (`VOUT`, or
+  `uart.tx` for interface signals, mirroring `pin_role`) to its local offset. `part_library` gives
+  the LDO / Cap / MCU / Sensor plausible pin geometry.
+- **Component orientation.** `doc::Orient` is a cardinal-only rotation enum (`Deg0/90/180/270`,
+  default `Deg0`), kept exact/integer so rotated coordinates compare deterministically — no trig,
+  no float drift. `Component.orient` holds it; `Orient::rotate(Point)` is exact integer rotation;
+  `Orient::from_deg` normalises any multiple of 90 (so `-90 → 270`) and rejects off-axis angles.
+  It is a *settable attribute*, **not** a solver DOF (optimising over rotation is nonlinear; out of
+  scope). Set from the source via `GenDirective::Rotate { path, deg }` (off-axis aborts the
+  transaction).
+- **Pin world positions.** `part::pin_world(comp, def, pin)` returns
+  `comp.pos + rotate(local offset, comp.orient)` — exact for the four cardinal rotations.
+- **Near-to-a-pin.** `GenDirective::NearPin { a, b_comp, b_pin, within }` (and `solve::Constraint::
+  NearPin { a, b, b_off, within }`) pulls component `a` to within `within` of a specific pin on
+  `b`. Elaboration pre-rotates the target pin's local offset by `b`'s orientation into a constant
+  `b_off`; the solver tracks the pin's world position as `pos[b] + b_off` each iteration (moving
+  `b` carries its pin rigidly). Component-level `Near` is unchanged and still works.
+
+**Text front-end:** extended (no breakage). `rotate <path> <deg>` and
+`nearpin <a> <bComp>.<bPin> <len>` serialize/parse and round-trip; the `<bComp>.<bPin>` reference
+splits at the last dot so hierarchical comp paths survive. `project::render` shows ` rot=<deg>` for
+non-default orientations.
+
+**Tested (38 passing total, +9 new):** `pin_offset` for discrete + interface pins; `pin_world`
+exact under each cardinal rotation (plus rotation reversibility and `from_deg` normalisation);
+Near-to-pin drags a component onto a *rotated* pin's world position; orientation round-trips through
+elaboration; off-axis rotation is rejected atomically; `rotate`/`nearpin` parse and round-trip
+through text + re-elaboration.
+
+**Limitations / follow-ups:** orientation is not optimised by the solver (settable only); interface
+signal offsets live on the shared `InterfaceDef`, so the same interface type places its pins at the
+same local spot on every part that uses it (fine for the demo, would be per-instance in production);
+`MinSep`-to-pin is not implemented (only `Near`); a component-orientation *change* does not yet bump
+`geom_rev` (no geometry query consumes it today, so unobservable — left for when one does).

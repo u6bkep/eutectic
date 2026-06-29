@@ -42,6 +42,13 @@ pub enum GenDirective {
     },
     /// Connect discrete pins onto a named net.
     ConnectPins { net: String, pins: Vec<(String, String)> }, // (comp path, pin)
+    /// Set a component's planar orientation (cardinal degrees: 0/90/180/270). A
+    /// settable attribute, not a solver DOF.
+    Rotate { path: String, deg: i32 },
+    /// Like `Near`, but the target is a specific *pin* (`b_comp`.`b_pin`) rather
+    /// than a component centroid. The pin's world position tracks its component's
+    /// position + orientation during solving.
+    NearPin { a: String, b_comp: String, b_pin: String, within: Nm },
 }
 
 /// The generative program (tier 1 authoritative).
@@ -82,7 +89,10 @@ pub fn elaborate(
                 prov: Provenance::Free,
             };
             order += 1;
-            components.insert(id.clone(), Component { id, part: part.clone(), pos });
+            components.insert(
+                id.clone(),
+                Component { id, part: part.clone(), pos, orient: Orient::default() },
+            );
         }
     }
 
@@ -94,6 +104,19 @@ pub fn elaborate(
                 .get_mut(&id)
                 .ok_or_else(|| format!("Place targets unknown instance `{path}`"))?;
             c.pos.value = *pos;
+        }
+    }
+
+    // Pass 2a: orientation (a settable attribute, resolved before constraints so a
+    // NearPin target's pin offset can be rotated correctly).
+    for d in source {
+        if let GenDirective::Rotate { path, deg } = d {
+            let id = EntityId::new(path.clone());
+            let c = components
+                .get_mut(&id)
+                .ok_or_else(|| format!("Rotate targets unknown instance `{path}`"))?;
+            c.orient = Orient::from_deg(*deg)
+                .ok_or_else(|| format!("Rotate `{path}` by {deg}deg: only 0/90/180/270 supported"))?;
         }
     }
 
@@ -122,6 +145,21 @@ pub fn elaborate(
                 check(&a)?;
                 check(&b)?;
                 relational.push(Constraint::Near { a, b, within: *within });
+            }
+            GenDirective::NearPin { a, b_comp, b_pin, within } => {
+                let aid = EntityId::new(a.clone());
+                let bid = EntityId::new(b_comp.clone());
+                check(&aid)?;
+                check(&bid)?;
+                // Pre-rotate the target pin's local offset by b's orientation; the
+                // result is a constant offset the solver adds to b's position.
+                let bc = &components[&bid];
+                let bdef = &lib[&bc.part];
+                let off = bdef.pin_offset(b_pin).ok_or_else(|| {
+                    format!("NearPin: `{b_comp}` ({}) has no pin `{b_pin}`", bc.part)
+                })?;
+                let b_off = bc.orient.rotate(off);
+                relational.push(Constraint::NearPin { a: aid, b: bid, b_off, within: *within });
             }
             GenDirective::MinSep { a, b, gap } => {
                 let (a, b) = (EntityId::new(a.clone()), EntityId::new(b.clone()));

@@ -37,6 +37,11 @@ pub enum Constraint {
     AlignX { nodes: Vec<EntityId> },
     /// Make all nodes share a y coordinate (a horizontal line).
     AlignY { nodes: Vec<EntityId> },
+    /// Keep node `a` no further than `within` from a *pin* on node `b`. The pin's
+    /// world position is `pos[b] + b_off` each iteration, where `b_off` is the
+    /// pin's local offset already rotated by `b`'s (fixed) orientation. Moving `b`
+    /// carries its pin rigidly, so the correction is applied to `b`'s position.
+    NearPin { a: EntityId, b: EntityId, b_off: Point, within: Nm },
 }
 
 pub struct Problem {
@@ -105,29 +110,44 @@ fn apply_constraint(
     pos: &mut BTreeMap<EntityId, (f64, f64)>,
     fixed: &BTreeSet<EntityId>,
 ) {
+    let zero = (0.0, 0.0);
     match c {
-        Constraint::Near { a, b, within } => set_separation(pos, fixed, a, b, *within as f64, true),
-        Constraint::MinSep { a, b, gap } => set_separation(pos, fixed, a, b, *gap as f64, false),
+        Constraint::Near { a, b, within } => {
+            set_separation(pos, fixed, a, b, zero, zero, *within as f64, true)
+        }
+        Constraint::MinSep { a, b, gap } => {
+            set_separation(pos, fixed, a, b, zero, zero, *gap as f64, false)
+        }
         Constraint::AlignX { nodes } => align(pos, fixed, nodes, true),
         Constraint::AlignY { nodes } => align(pos, fixed, nodes, false),
+        Constraint::NearPin { a, b, b_off, within } => {
+            let off = (b_off.x as f64, b_off.y as f64);
+            set_separation(pos, fixed, a, b, zero, off, *within as f64, true)
+        }
     }
 }
 
-/// Drive the distance between `a` and `b` to `target`, but only if violated in the
-/// relevant direction: `pull` (Near) acts when too far; otherwise (MinSep) when
-/// too close. Correction is split between the two, or taken wholly by whichever is
-/// movable.
+/// Drive the distance between the points `a + a_off` and `b + b_off` to `target`,
+/// but only if violated in the relevant direction: `pull` (Near) acts when too
+/// far; otherwise (MinSep) when too close. Offsets let an endpoint be a pin rigidly
+/// attached to its node (a constant local offset); corrections are applied to the
+/// node positions, which carries the offset with them. Correction is split between
+/// the two, or taken wholly by whichever is movable.
+#[allow(clippy::too_many_arguments)]
 fn set_separation(
     pos: &mut BTreeMap<EntityId, (f64, f64)>,
     fixed: &BTreeSet<EntityId>,
     a: &EntityId,
     b: &EntityId,
+    a_off: (f64, f64),
+    b_off: (f64, f64),
     target: f64,
     pull: bool,
 ) {
     let (Some(&pa), Some(&pb)) = (pos.get(a), pos.get(b)) else {
         return;
     };
+    let (pa, pb) = ((pa.0 + a_off.0, pa.1 + a_off.1), (pb.0 + b_off.0, pb.1 + b_off.1));
     let (mut dx, mut dy) = (pb.0 - pa.0, pb.1 - pa.1);
     let mut d = (dx * dx + dy * dy).sqrt();
     if d < 1e-6 {

@@ -35,6 +35,53 @@ impl Point {
     }
 }
 
+/// A component's planar orientation, restricted to the four cardinal rotations so
+/// that rotated pin positions stay exact integers (no float/trig nondeterminism
+/// leaking into stored coordinates or diffs). Orientation is a *settable* DOF for
+/// now — the solver does not optimise over it (that is nonlinear; out of scope).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum Orient {
+    #[default]
+    Deg0,
+    Deg90,
+    Deg180,
+    Deg270,
+}
+
+impl Orient {
+    /// Build from a degree count. Accepts any integer congruent to 0/90/180/270
+    /// mod 360 (so -90 == 270, 450 == 90); returns `None` for off-axis angles.
+    pub fn from_deg(d: i32) -> Option<Orient> {
+        match d.rem_euclid(360) {
+            0 => Some(Orient::Deg0),
+            90 => Some(Orient::Deg90),
+            180 => Some(Orient::Deg180),
+            270 => Some(Orient::Deg270),
+            _ => None,
+        }
+    }
+
+    pub fn to_deg(self) -> i32 {
+        match self {
+            Orient::Deg0 => 0,
+            Orient::Deg90 => 90,
+            Orient::Deg180 => 180,
+            Orient::Deg270 => 270,
+        }
+    }
+
+    /// Rotate a local offset about the origin by this orientation. Exact for all
+    /// four cardinal rotations (integer arithmetic, no trig).
+    pub fn rotate(self, p: Point) -> Point {
+        match self {
+            Orient::Deg0 => p,
+            Orient::Deg90 => Point { x: -p.y, y: p.x },
+            Orient::Deg180 => Point { x: -p.x, y: -p.y },
+            Orient::Deg270 => Point { x: p.y, y: -p.x },
+        }
+    }
+}
+
 /// What is driving a degree of freedom, in order of increasing authority.
 /// `Free` is solver/generator-driven; `Hint`/`Pinned` are user-authored (weak vs
 /// strong); `Fixed` is a hard constraint (e.g. a mechanical datum) that outranks
@@ -72,6 +119,9 @@ pub struct Component {
     pub id: EntityId,
     pub part: String,
     pub pos: Dof<Point>,
+    /// Planar orientation (cardinal only). Default `Deg0`. Set from the generative
+    /// source via `GenDirective::Rotate`; used to place pins in world space.
+    pub orient: Orient,
 }
 
 /// A net is a hyperedge over a set of pins. Membership *is* the connectivity

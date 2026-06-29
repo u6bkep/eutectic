@@ -5,7 +5,7 @@
 //! BTreeMap iteration order makes the output byte-stable, so a one-thing change
 //! produces a one-line diff.
 
-use crate::doc::{DecayReason, Doc, Provenance};
+use crate::doc::{DecayReason, Doc, Orient, Provenance};
 
 pub fn render(doc: &Doc) -> String {
     let mut out = String::new();
@@ -17,8 +17,13 @@ pub fn render(doc: &Doc) -> String {
             Provenance::Pinned => "pinned",
             Provenance::Fixed => "fixed",
         };
+        let rot = if c.orient == Orient::Deg0 {
+            String::new()
+        } else {
+            format!(" rot={}", c.orient.to_deg())
+        };
         out.push_str(&format!(
-            "  {id}: {part} @ ({x},{y}) [{prov}]\n",
+            "  {id}: {part} @ ({x},{y}){rot} [{prov}]\n",
             id = c.id,
             part = c.part,
             x = c.pos.value.x,
