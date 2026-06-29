@@ -436,9 +436,11 @@ feasible sets tightly, and *reports* infeasibility rather than proving global op
   needs: real parts/footprints with pin geometry, a netlist→placement→route flow, and fab output.
   **Footprint *geometry* import now exists** (see "Prototype status (footprint import)" below): real
   KiCad `.kicad_mod` files (incl. the PoC's JST-SH headers and the QFN ICs) parse into `PartDef`s
-  with per-pad pin offsets. What's still missing for the PoC: electrical roles/interfaces (a
-  footprint carries none — they come from the schematic *symbol*), and the netlist→placement→route→fab
-  flow.
+  with per-pad pin offsets. **Electrical roles now exist too** (see "Prototype status (symbol/role
+  layer)" below): a `.kicad_sym` *symbol* supplies the functional pin names + electrical types that a
+  footprint lacks, and the two are joined by pad number into a real `PartDef` with mapped `PinRole`s.
+  What's still missing for the PoC: typed `InterfaceDef`s inferred from symbols (the join produces
+  discrete roled pins, not interfaces yet), and the netlist→placement→route→fab flow.
 
 ## Prototype status (text front-end)
 
@@ -633,10 +635,13 @@ serde/sexp crates) and lift out the bits we model.
   hand into integer nm, half-away-from-zero rounding — no float, preserving the fixed-point
   invariant; the rotation angle is ignored for the offset). Everything else (silkscreen, courtyard,
   fab, 3D models, sizes, layers, zones) is ignored.
-- **Role-less by design (the key limitation).** A footprint carries **no electrical roles** —
+- **Role-less by design (footprint alone).** A footprint carries **no electrical roles** —
   whether a pad is power, input, or passive comes from the *schematic symbol*, not the footprint.
-  So every imported pin is `PinRole::Passive` and `interfaces` is empty. Pairing an imported
-  footprint with role/interface information from a symbol is future work and a PoC prerequisite.
+  So an imported footprint *on its own* gives every pin `PinRole::Passive` and an empty `interfaces`.
+  **This gap is now closed by the symbol/role layer** (see "Prototype status (symbol/role layer)"
+  below): a `.kicad_sym` symbol is parsed for electrical types + functional names and joined to the
+  footprint by pad number, yielding real `PinRole`s. Typed `InterfaceDef` inference from symbols
+  remains future work.
 - **Mapping decisions:** pads that **share a name** (e.g. two `MP` mounting pads, or a split
   thermal pad reusing one number) keep the **first** occurrence — a duplicate pin name would
   silently break `pin_offset`/`pin_role`, which resolve by first match. **Unnamed pads** (`name ==
@@ -654,3 +659,66 @@ offsets in nm, all-`Passive`/no-interface); shared-pad dedup; unnamed-pad skippi
 `(module ...)` + bare pad names + ignored rotation angle; quoted name with spaces/parens; sub-nm
 fractional rounding; a battery of malformed inputs that return `Err` without panicking; and an
 existence-guarded smoke test against a real on-disk footprint. Zero new dependencies.
+
+## Prototype status (symbol/role layer)
+
+Closes the footprint importer's headline gap: a footprint is pure geometry (every pad lands as a
+`Passive` pin), but the *electrical* truth — which pad is power, which is an output, what each pad is
+functionally called — lives in the schematic **symbol** (`.kicad_sym`). This layer parses a symbol
+and **joins it to a footprint by pad number** into a real, roled `PartDef`. Lives in `kicad.rs`
+(it reuses that module's S-expression tokenizer/reader — a `.kicad_sym` is the same S-expr dialect as
+a `.kicad_mod`, so there is exactly one parser). Still zero-dependency.
+
+- **Symbol import.** `import_symbol(text) -> Result<Symbol, String>` (first symbol) and
+  `import_symbol_named(text, name)` (a named symbol out of a multi-symbol library) parse a bare
+  `(symbol ...)` or a `(kicad_symbol_lib ...)`. Pins are gathered by **recursing into nested child
+  unit symbols** (`(symbol "Name_0_1" ...)`, `_1_1`, …) so multi-unit parts yield all their pins;
+  pins are deduped by `number` (first wins). Each `Symbol` pin is `(number, name, ElecType)`; the
+  symbol's `(property "Footprint" "Lib:Name")` is captured (it names the mating footprint).
+- **Electrical type → `PinRole` mapping** (`ElecType::role`). The KiCad pin-type vocabulary is a
+  closed enum (`ElecType`); an unknown token is a parse **error**, never a silent default. Mapping:
+  `power_in → PowerIn`, `power_out → PowerOut`, `output → Output`, `input → Input`,
+  `bidirectional → Bidir`. Everything else — `passive`, `free`, `unspecified`, `no_connect`,
+  `tri_state`, `open_collector`, `open_emitter` — maps to **`Passive`**. This is a *deliberate
+  conservative default*: `free`/`unspecified`/`no_connect` have no driving role, and
+  `tri_state`/`open_collector`/`open_emitter` only drive under bus/wired-OR semantics this
+  prototype's ERC doesn't model yet — calling them `Passive` never invents a spurious
+  driver-vs-driver conflict. This is the one documented place to refine when ERC grows wired-OR rules.
+- **Name vs number on `PinDef`.** `PinDef` gained an additive `number: String` field. The functional
+  `name` (`GPIO0`, `VDD`) is what nets/humans reference and what `pin_role`/`pin_offset` resolve by;
+  `number` (`12`, `MP`) is the geometry/manufacturing key and the symbol↔footprint **join key**. For
+  parts with no distinct numbering (the toy `part_library`, a raw footprint import) `number` defaults
+  to `name`, so all prior callers and the existing footprint/`pin_offset`/`pin_role` behaviour are
+  unchanged.
+- **The join.** `join_symbol_footprint(&Symbol, &PartDef) -> JoinReport` is the tolerant core: the
+  footprint is the geometry source of truth, so the result has **one pin per footprint pad**; where a
+  symbol pin shares the pad's `number`, that pin takes the symbol's functional **name** + mapped
+  **role**, while the **offset** always comes from the footprint pad. Pads with no symbol match stay
+  `Passive` with `name = number`. **Mismatches are reported, never silently dropped:**
+  `JoinReport.symbol_only` lists `(number, name, role)` for symbol pins with no pad (so a dropped
+  *power* pin is visible) and `footprint_only` lists pads with no symbol pin. `import_part(symbol_text,
+  footprint_text) -> Result<PartDef, String>` is the **strict** convenience wrapper: any mismatch is
+  an `Err` naming the offending pads, so a missing power pin can't pass unnoticed; callers wanting to
+  tolerate mismatches use `join_symbol_footprint` and inspect the report.
+
+**Verified on a real symbol+footprint pair.** TI `TPS25981x` eFuse symbol (from
+`Power_Management_TI.kicad_sym`, whose own `Footprint` property names
+`eFuse_TI:Texas_RPW9919A_VQFN-HR-10`) joined to that `.kicad_mod`: a clean **10/10** join, no
+orphans. Sample joined pins (number, name, role, offset nm): `5, IN, PowerIn, (-250000, 0)`;
+`6, OUT, PowerOut, (250000, 0)`; `8, GND, PowerIn, (900000, 225000)`; `3, PG, Passive,
+(-900000, 225000)` (`open_collector → Passive`); `7, DVDT, Output, (725000, 875000)`.
+
+**Tested (5 new unit tests, 62 total):** an embedded multi-unit symbol fixture (pins gathered across
+child units, footprint property captured); the full electrical-type→role table including the
+unknown-type error; a hermetic symbol+footprint join asserting functional names, mapped roles, pad
+numbers, and offsets (nm); the pin-mismatch path (a symbol-only power pin and a footprint-only pad
+both surfaced, nothing dropped, strict `import_part` erroring); and an existence-guarded real-data
+join (the `TPS25981x` ↔ `Texas_RPW9919A_VQFN-HR-10` pair above). The existing 57 tests stay green.
+Zero new dependencies.
+
+**Limitations / follow-ups:** the join produces discrete roled pins only — it does **not** yet infer
+typed `InterfaceDef`s (UART/SWD/…) from symbol pin-name patterns, so the "serial-swap-unrepresentable"
+interface story still relies on the hand-authored library. Pin `number` dedup keeps the first
+definition across units; a symbol that legitimately repeats a number with a different role would lose
+the later one (not seen in practice). Alternate-function pin names (KiCad `(alternate ...)`) are
+ignored — only the primary `(name ...)` is used.

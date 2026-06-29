@@ -271,7 +271,13 @@ pub fn import_footprint(text: &str) -> Result<PartDef, String> {
             .and_then(Sexp::as_atom)
             .ok_or_else(|| format!("pad {pad_name:?} (at ...) missing y"))?;
         let offset = Point { x: mm_to_nm(x)?, y: mm_to_nm(y)? };
-        pins.push(PinDef { name: pad_name.to_string(), role: PinRole::Passive, offset });
+        // A bare footprint has no functional naming: name == number == the pad id.
+        pins.push(PinDef {
+            name: pad_name.to_string(),
+            number: pad_name.to_string(),
+            role: PinRole::Passive,
+            offset,
+        });
     }
 
     Ok(PartDef { name, pins, interfaces: BTreeMap::new() })
@@ -281,6 +287,304 @@ pub fn import_footprint(text: &str) -> Result<PartDef, String> {
 pub fn import_footprint_file(path: &str) -> Result<PartDef, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("reading {path:?}: {e}"))?;
     import_footprint(&text)
+}
+
+// =============================================================================
+// Symbol / role layer
+// =============================================================================
+//
+// A KiCad **symbol** (`.kicad_sym`, also an S-expression — so we reuse the
+// tokenizer/reader above, no second parser) carries exactly the electrical
+// information a footprint lacks: each pin has an *electrical type* (input,
+// power_in, ...), a *functional name* (`GPIO0`, `VDD`, `SWCLK`) and a *pad
+// number* (`12`) that joins it to a footprint pad. This layer:
+//
+//   1. parses a symbol into an intermediate [`Symbol`] (`number`, `name`, type),
+//   2. maps the electrical type to a [`PinRole`] ([`ElecType::role`]),
+//   3. joins a symbol with an imported footprint *by pad number* into a real
+//      [`PartDef`] whose pins carry the functional name + role (from the symbol)
+//      and the offset (from the footprint pad geometry).
+
+/// A pin's electrical type, as spelled in `(pin <type> <style> ...)`.
+///
+/// This is the closed KiCad vocabulary; an unknown token is a parse error rather
+/// than a silent default, so a new KiCad type can't quietly map to `Passive`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ElecType {
+    Input,
+    Output,
+    Bidirectional,
+    TriState,
+    Passive,
+    Free,
+    Unspecified,
+    PowerIn,
+    PowerOut,
+    OpenCollector,
+    OpenEmitter,
+    NoConnect,
+}
+
+impl ElecType {
+    fn parse(s: &str) -> Result<ElecType, String> {
+        Ok(match s {
+            "input" => ElecType::Input,
+            "output" => ElecType::Output,
+            "bidirectional" => ElecType::Bidirectional,
+            "tri_state" => ElecType::TriState,
+            "passive" => ElecType::Passive,
+            "free" => ElecType::Free,
+            "unspecified" => ElecType::Unspecified,
+            "power_in" => ElecType::PowerIn,
+            "power_out" => ElecType::PowerOut,
+            "open_collector" => ElecType::OpenCollector,
+            "open_emitter" => ElecType::OpenEmitter,
+            "no_connect" => ElecType::NoConnect,
+            other => return Err(format!("unknown pin electrical type {other:?}")),
+        })
+    }
+
+    /// Map a KiCad electrical type onto this prototype's [`PinRole`] (the alphabet
+    /// ERC type-checks over).
+    ///
+    /// The four directional/power types map exactly. Everything else collapses to
+    /// [`PinRole::Passive`] — a *deliberate conservative default*:
+    /// - `passive`, `free`, `unspecified`, `no_connect` have no driving role.
+    /// - `tri_state`, `open_collector`, `open_emitter` *can* drive under some
+    ///   conditions, but modelling that needs bus/wired-OR semantics ERC doesn't
+    ///   have yet. Calling them `Passive` is the safe choice: it never invents a
+    ///   spurious driver-vs-driver conflict. This is the documented place to
+    ///   refine once ERC grows wired-OR rules.
+    pub fn role(self) -> PinRole {
+        match self {
+            ElecType::PowerIn => PinRole::PowerIn,
+            ElecType::PowerOut => PinRole::PowerOut,
+            ElecType::Output => PinRole::Output,
+            ElecType::Input => PinRole::Input,
+            ElecType::Bidirectional => PinRole::Bidir,
+            ElecType::TriState
+            | ElecType::Passive
+            | ElecType::Free
+            | ElecType::Unspecified
+            | ElecType::OpenCollector
+            | ElecType::OpenEmitter
+            | ElecType::NoConnect => PinRole::Passive,
+        }
+    }
+}
+
+/// One pin of a schematic symbol: the manufacturing `number` (join key), the
+/// `name` (functional), and its electrical `etype`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SymbolPin {
+    pub number: String,
+    pub name: String,
+    pub etype: ElecType,
+}
+
+/// A parsed schematic symbol: its name plus its pins (flattened across units).
+#[derive(Clone, Debug)]
+pub struct Symbol {
+    pub name: String,
+    pub pins: Vec<SymbolPin>,
+    /// The `(property "Footprint" "Lib:Name")` value, if present — the symbol's
+    /// own declaration of which footprint it mates with. Useful for locating the
+    /// matching `.kicad_mod`.
+    pub footprint: Option<String>,
+}
+
+/// Result of joining a symbol with a footprint. The [`PartDef`] is built from the
+/// footprint's pads (geometry is the manufacturing truth), enriched with symbol
+/// names+roles where numbers match. Mismatches are reported, never silently
+/// dropped — see [`join_symbol_footprint`].
+#[derive(Clone, Debug)]
+pub struct JoinReport {
+    pub part: PartDef,
+    /// Symbol pin numbers with no matching footprint pad (e.g. a power pin the
+    /// footprint doesn't expose). `(number, name, role)` so a dropped power pin is
+    /// visible to the caller.
+    pub symbol_only: Vec<(String, String, PinRole)>,
+    /// Footprint pad numbers with no matching symbol pin: kept in the part as
+    /// `Passive`, name = number (no functional identity available).
+    pub footprint_only: Vec<String>,
+}
+
+/// Extract the pins of one symbol `(symbol ...)` node, descending into nested
+/// child unit symbols (`(symbol "Name_0_1" ...)`). Pins are deduped by `number`,
+/// keeping the first occurrence (multi-unit parts can repeat a number, e.g. a
+/// shared power pin); a later differing definition is ignored.
+fn collect_symbol_pins(node: &[Sexp], out: &mut Vec<SymbolPin>, seen: &mut BTreeMap<String, ()>) {
+    for item in node {
+        if let Some(pin) = item.list_headed("pin") {
+            // (pin <etype> <graphic-style> (at ..) (length ..) (name "..") (number ".."))
+            let etype_tok = pin.get(1).and_then(Sexp::as_atom).unwrap_or("");
+            let etype = match ElecType::parse(etype_tok) {
+                Ok(t) => t,
+                Err(_) => continue, // tolerate odd entries; not all (pin ..) are electrical
+            };
+            let name = pin
+                .iter()
+                .find_map(|s| s.list_headed("name"))
+                .and_then(|l| l.get(1))
+                .and_then(Sexp::as_atom)
+                .unwrap_or("")
+                .to_string();
+            let number = pin
+                .iter()
+                .find_map(|s| s.list_headed("number"))
+                .and_then(|l| l.get(1))
+                .and_then(Sexp::as_atom)
+                .unwrap_or("")
+                .to_string();
+            if number.is_empty() {
+                continue; // a pin with no pad number can't join to a footprint
+            }
+            if seen.insert(number.clone(), ()).is_some() {
+                continue; // first definition of this number wins
+            }
+            out.push(SymbolPin { number, name, etype });
+        } else if let Some(child) = item.list_headed("symbol") {
+            // Nested unit symbol — recurse to gather its pins too.
+            collect_symbol_pins(child, out, seen);
+        }
+    }
+}
+
+/// Build a [`Symbol`] from an already-parsed `(symbol "Name" ...)` node.
+fn symbol_from_node(node: &[Sexp]) -> Result<Symbol, String> {
+    let name = node
+        .get(1)
+        .and_then(Sexp::as_atom)
+        .ok_or("symbol is missing its name")?
+        .to_string();
+    if name.is_empty() {
+        return Err("symbol name is empty".into());
+    }
+    // (property "Footprint" "Lib:Name" ...)
+    let footprint = node.iter().find_map(|s| {
+        let p = s.list_headed("property")?;
+        match p.get(1).and_then(Sexp::as_atom) {
+            Some("Footprint") => p.get(2).and_then(Sexp::as_atom).filter(|v| !v.is_empty()),
+            _ => None,
+        }
+    });
+    let mut pins = Vec::new();
+    let mut seen = BTreeMap::new();
+    collect_symbol_pins(node, &mut pins, &mut seen);
+    Ok(Symbol { name, pins, footprint: footprint.map(str::to_string) })
+}
+
+/// Find every top-level `(symbol "Name" ...)` node in a parsed root, which is
+/// either a `(kicad_symbol_lib ... (symbol ...) ...)` library or a bare
+/// `(symbol ...)`.
+fn top_level_symbols(root: &Sexp) -> Vec<&[Sexp]> {
+    let Some(items) = root.as_list() else { return Vec::new() };
+    match items.first().and_then(Sexp::as_atom) {
+        Some("symbol") => vec![items],
+        Some("kicad_symbol_lib") => {
+            items.iter().filter_map(|s| s.list_headed("symbol")).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Import the **first** symbol from `.kicad_sym` text (a bare `(symbol ...)` or a
+/// `(kicad_symbol_lib ...)` with one or more symbols).
+pub fn import_symbol(text: &str) -> Result<Symbol, String> {
+    let toks = tokenize(text)?;
+    let root = read(&toks)?;
+    let node = *top_level_symbols(&root)
+        .first()
+        .ok_or("no (symbol ...) found in input")?;
+    symbol_from_node(node)
+}
+
+/// Import a specific named symbol from a `.kicad_sym` library — needed because a
+/// real library holds many symbols.
+pub fn import_symbol_named(text: &str, name: &str) -> Result<Symbol, String> {
+    let toks = tokenize(text)?;
+    let root = read(&toks)?;
+    let node = top_level_symbols(&root)
+        .into_iter()
+        .find(|n| n.get(1).and_then(Sexp::as_atom) == Some(name))
+        .ok_or_else(|| format!("symbol {name:?} not found in library"))?;
+    symbol_from_node(node)
+}
+
+/// Join a parsed [`Symbol`] with an imported footprint [`PartDef`] **by pad
+/// number** into a real part. Tolerant: it always produces a part and *reports*
+/// any mismatches (never silently drops a pin) — see [`JoinReport`].
+///
+/// The footprint is the geometry source of truth: the result has one pin per
+/// footprint pad. Where the symbol has a pin with the same `number`, that pin
+/// takes the symbol's functional **name** and mapped **role**; the **offset**
+/// always comes from the footprint pad. Pads with no symbol match stay `Passive`
+/// with name = number.
+pub fn join_symbol_footprint(symbol: &Symbol, footprint: &PartDef) -> JoinReport {
+    let by_number: BTreeMap<&str, &SymbolPin> =
+        symbol.pins.iter().map(|p| (p.number.as_str(), p)).collect();
+    let mut footprint_only = Vec::new();
+    let mut matched: BTreeMap<&str, ()> = BTreeMap::new();
+
+    let mut pins = Vec::with_capacity(footprint.pins.len());
+    for pad in &footprint.pins {
+        // A footprint PinDef has number == name == pad id.
+        match by_number.get(pad.number.as_str()) {
+            Some(sp) => {
+                matched.insert(pad.number.as_str(), ());
+                pins.push(PinDef {
+                    name: sp.name.clone(),
+                    number: pad.number.clone(),
+                    role: sp.etype.role(),
+                    offset: pad.offset,
+                });
+            }
+            None => {
+                footprint_only.push(pad.number.clone());
+                pins.push(PinDef {
+                    name: pad.name.clone(),
+                    number: pad.number.clone(),
+                    role: PinRole::Passive,
+                    offset: pad.offset,
+                });
+            }
+        }
+    }
+
+    let symbol_only: Vec<(String, String, PinRole)> = symbol
+        .pins
+        .iter()
+        .filter(|p| !matched.contains_key(p.number.as_str()))
+        .map(|p| (p.number.clone(), p.name.clone(), p.etype.role()))
+        .collect();
+
+    // Name the part after the footprint (the manufacturable artifact); roles and
+    // interfaces beyond discrete pins are out of scope for this layer.
+    let part = PartDef { name: footprint.name.clone(), pins, interfaces: BTreeMap::new() };
+    JoinReport { part, symbol_only, footprint_only }
+}
+
+/// Convenience: parse the first symbol + the footprint, join them, and return the
+/// part. **Strict** — any pin mismatch (a symbol pin with no pad, or a pad with no
+/// symbol pin) is returned as an `Err` naming the offending numbers, so a missing
+/// power pin can never pass unnoticed. Callers that want to tolerate mismatches
+/// should parse + [`join_symbol_footprint`] and inspect the [`JoinReport`].
+pub fn import_part(symbol_text: &str, footprint_text: &str) -> Result<PartDef, String> {
+    let symbol = import_symbol(symbol_text)?;
+    let footprint = import_footprint(footprint_text)?;
+    let report = join_symbol_footprint(&symbol, &footprint);
+    if !report.symbol_only.is_empty() || !report.footprint_only.is_empty() {
+        let sym: Vec<String> = report
+            .symbol_only
+            .iter()
+            .map(|(n, name, role)| format!("{n}({name},{role:?})"))
+            .collect();
+        return Err(format!(
+            "symbol/footprint pin mismatch joining {:?}: symbol-only pads {:?}, footprint-only pads {:?}",
+            footprint.name, sym, report.footprint_only
+        ));
+    }
+    Ok(report.part)
 }
 
 #[cfg(test)]
@@ -432,5 +736,186 @@ mod tests {
         // 1,2,3 + deduped MP.
         assert_eq!(p.pins.len(), 4);
         assert_eq!(p.pin_offset("1"), Some(Point { x: -1_000_000, y: 1_325_000 }));
+    }
+
+    // --- symbol / role layer ------------------------------------------------
+
+    /// A self-contained symbol modelled on a real `.kicad_sym`: a `kicad_symbol_lib`
+    /// holding one multi-unit `(symbol ...)`. Pins are split across two child unit
+    /// symbols (unit 0 = the power pin, unit 1 = the signal pins), each `(pin ...)`
+    /// carrying an electrical type, a functional `(name ...)` and a pad `(number
+    /// ...)` — and nested `(effects ...)` noise, like the real files.
+    const SYM_LIB: &str = r#"
+(kicad_symbol_lib
+    (version 20241209)
+    (generator "kicad_symbol_editor")
+    (symbol "ACME1234"
+        (pin_names (offset 0.254))
+        (in_bom yes)
+        (property "Reference" "U" (at 0 5 0))
+        (property "Value" "ACME1234" (at 0 -5 0))
+        (property "Footprint" "Acme:ACME-SOT-4" (at 0 -10 0) (effects (hide yes)))
+        (symbol "ACME1234_0_1"
+            (pin power_in line
+                (at -7.62 2.54 0) (length 2.54)
+                (name "VDD" (effects (font (size 1.27 1.27))))
+                (number "1" (effects (font (size 1.27 1.27))))
+            )
+        )
+        (symbol "ACME1234_1_1"
+            (pin output line
+                (at 7.62 2.54 180) (length 2.54)
+                (name "GPIO0" (effects (font (size 1.27 1.27))))
+                (number "2" (effects (font (size 1.27 1.27))))
+            )
+            (pin bidirectional line
+                (at 7.62 0 180) (length 2.54)
+                (name "SWDIO" (effects (font (size 1.27 1.27))))
+                (number "3" (effects (font (size 1.27 1.27))))
+            )
+            (pin passive line
+                (at 7.62 -2.54 180) (length 2.54)
+                (name "GND" (effects (font (size 1.27 1.27))))
+                (number "4" (effects (font (size 1.27 1.27))))
+            )
+        )
+    )
+)
+"#;
+
+    /// Footprint with four pads matching the symbol's numbers 1..4, at distinct
+    /// positions so the join's offsets are checkable.
+    const FP_4: &str = r#"
+(footprint "ACME-SOT-4"
+    (layer "F.Cu")
+    (pad "1" smd rect (at -1 1) (size 0.5 0.5) (layers "F.Cu"))
+    (pad "2" smd rect (at 1 1) (size 0.5 0.5) (layers "F.Cu"))
+    (pad "3" smd rect (at 1 -1) (size 0.5 0.5) (layers "F.Cu"))
+    (pad "4" smd rect (at -1 -1) (size 0.5 0.5) (layers "F.Cu"))
+)
+"#;
+
+    #[test]
+    fn parses_symbol_pins_across_units() {
+        let s = import_symbol(SYM_LIB).unwrap();
+        assert_eq!(s.name, "ACME1234");
+        assert_eq!(s.footprint.as_deref(), Some("Acme:ACME-SOT-4"));
+        // 1 pin in unit 0 + 3 pins in unit 1 = 4, gathered across the nesting.
+        assert_eq!(s.pins.len(), 4);
+        let by_num: std::collections::BTreeMap<&str, &SymbolPin> =
+            s.pins.iter().map(|p| (p.number.as_str(), p)).collect();
+        assert_eq!(by_num["1"].name, "VDD");
+        assert_eq!(by_num["1"].etype, ElecType::PowerIn);
+        assert_eq!(by_num["2"].name, "GPIO0");
+        assert_eq!(by_num["3"].etype, ElecType::Bidirectional);
+    }
+
+    #[test]
+    fn elec_type_to_role_mapping_table() {
+        use PinRole::*;
+        let cases = [
+            ("power_in", PowerIn),
+            ("power_out", PowerOut),
+            ("output", Output),
+            ("input", Input),
+            ("bidirectional", Bidir),
+            // Everything below collapses to Passive (documented conservative default).
+            ("passive", Passive),
+            ("free", Passive),
+            ("unspecified", Passive),
+            ("no_connect", Passive),
+            ("tri_state", Passive),
+            ("open_collector", Passive),
+            ("open_emitter", Passive),
+        ];
+        for (tok, want) in cases {
+            assert_eq!(ElecType::parse(tok).unwrap().role(), want, "type {tok}");
+        }
+        // Unknown type is an error, not a silent Passive.
+        assert!(ElecType::parse("quantum").is_err());
+    }
+
+    #[test]
+    fn join_pairs_names_roles_numbers_and_offsets() {
+        let part = import_part(SYM_LIB, FP_4).unwrap();
+        assert_eq!(part.name, "ACME-SOT-4");
+        assert_eq!(part.pins.len(), 4);
+
+        // Functional name resolves to symbol role; offset comes from the footprint.
+        assert_eq!(part.pin_role("VDD"), Some(PinRole::PowerIn));
+        assert_eq!(part.pin_offset("VDD"), Some(Point { x: -1_000_000, y: 1_000_000 }));
+        assert_eq!(part.pin_role("GPIO0"), Some(PinRole::Output));
+        assert_eq!(part.pin_role("SWDIO"), Some(PinRole::Bidir));
+        assert_eq!(part.pin_role("GND"), Some(PinRole::Passive));
+        assert_eq!(part.pin_offset("GND"), Some(Point { x: -1_000_000, y: -1_000_000 }));
+
+        // Pad numbers preserved as the manufacturing/join key, distinct from names.
+        let vdd = part.pins.iter().find(|p| p.name == "VDD").unwrap();
+        assert_eq!(vdd.number, "1");
+        let gpio = part.pins.iter().find(|p| p.name == "GPIO0").unwrap();
+        assert_eq!(gpio.number, "2");
+    }
+
+    #[test]
+    fn join_reports_mismatches_without_dropping_pins() {
+        // Symbol has a power pin "5" with no pad; footprint has a pad "6" with no
+        // symbol pin. Neither must be silently dropped.
+        let sym = r#"
+(symbol "X"
+    (pin power_in line (at 0 0 0) (length 1) (name "VBUS") (number "5"))
+    (pin input line (at 0 0 0) (length 1) (name "IN") (number "1"))
+)"#;
+        let fp = r#"
+(footprint "X-FP"
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu"))
+    (pad "6" smd rect (at 2 0) (size 1 1) (layers "F.Cu"))
+)"#;
+        let symbol = import_symbol(sym).unwrap();
+        let footprint = import_footprint(fp).unwrap();
+        let report = join_symbol_footprint(&symbol, &footprint);
+
+        // The matched pin carries name + role; the unmatched pad stays Passive.
+        assert_eq!(report.part.pin_role("IN"), Some(PinRole::Input));
+        // The orphan power pin is surfaced (number, name, role), not dropped.
+        assert_eq!(
+            report.symbol_only,
+            vec![("5".to_string(), "VBUS".to_string(), PinRole::PowerIn)]
+        );
+        // The orphan pad is surfaced and kept Passive with name = number.
+        assert_eq!(report.footprint_only, vec!["6".to_string()]);
+        let pad6 = report.part.pins.iter().find(|p| p.number == "6").unwrap();
+        assert_eq!(pad6.role, PinRole::Passive);
+        assert_eq!(pad6.name, "6");
+
+        // The strict convenience wrapper turns any mismatch into an Err.
+        assert!(import_part(sym, fp).is_err());
+    }
+
+    /// Real-data join: pair a real `.kicad_sym` symbol with the `.kicad_mod` its own
+    /// `Footprint` property names. Guarded on existence (no-op without the repo).
+    #[test]
+    fn real_symbol_footprint_join_if_present() {
+        let sym_path =
+            "/home/ben/Documents/kalogon/git/Kalogon-KiCad-Repository/Power_Management_TI.kicad_sym";
+        let fp_path = "/home/ben/Documents/kalogon/git/Kalogon-KiCad-Repository/footprints/eFuse_TI.pretty/Texas_RPW9919A_VQFN-HR-10.kicad_mod";
+        if !std::path::Path::new(sym_path).exists() || !std::path::Path::new(fp_path).exists() {
+            return;
+        }
+        let sym_text = std::fs::read_to_string(sym_path).unwrap();
+        let symbol = import_symbol_named(&sym_text, "TPS25981x").unwrap();
+        assert_eq!(symbol.footprint.as_deref(), Some("eFuse_TI:Texas_RPW9919A_VQFN-HR-10"));
+        let footprint = import_footprint_file(fp_path).unwrap();
+        let report = join_symbol_footprint(&symbol, &footprint);
+
+        // Every footprint pad became a pin; a real power pin carries its role.
+        assert!(!report.part.pins.is_empty());
+        // IN is the eFuse input rail (power_in -> PowerIn).
+        assert_eq!(report.part.pin_role("IN"), Some(PinRole::PowerIn));
+        // OUT is the switched output rail (power_out -> PowerOut).
+        assert_eq!(report.part.pin_role("OUT"), Some(PinRole::PowerOut));
+        // PG is open_collector -> Passive (conservative default).
+        assert_eq!(report.part.pin_role("PG"), Some(PinRole::Passive));
+        // Exact 10/10 join: no orphan pins on either side.
+        assert!(report.symbol_only.is_empty() && report.footprint_only.is_empty());
     }
 }

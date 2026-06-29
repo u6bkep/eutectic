@@ -43,9 +43,19 @@ impl PinRole {
 }
 
 /// A discrete pin on a part.
+///
+/// `name` vs `number`: the **functional name** (`GPIO0`, `VDD`, `SWCLK`) is what
+/// nets and humans reference and what `pin_role`/`pin_offset` resolve by; the pad
+/// **number** (`12`, `MP`) is the geometry/manufacturing key and the join key that
+/// pairs a schematic symbol pin with a footprint pad. For parts that have no
+/// functional naming (a raw footprint import, or the toy `part_library`) the two
+/// coincide — `number` defaults to `name` via the [`pin`] constructor.
 #[derive(Clone, Debug)]
 pub struct PinDef {
     pub name: String,
+    /// Pad/manufacturing number used as the symbol↔footprint join key. Defaults to
+    /// `name` when there is no distinct numbering.
+    pub number: String,
     pub role: PinRole,
     /// Local position of the pin relative to the component origin, in nm. Combined
     /// with the component's position + orientation to get a world position.
@@ -130,7 +140,8 @@ fn uart() -> InterfaceDef {
 }
 
 fn pin(name: &str, role: PinRole, offset: Point) -> PinDef {
-    PinDef { name: name.into(), role, offset }
+    // No distinct pad numbering in the toy library: number defaults to the name.
+    PinDef { name: name.into(), number: name.into(), role, offset }
 }
 
 /// A small built-in library sufficient for the M1 demo.
