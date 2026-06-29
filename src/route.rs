@@ -14,11 +14,12 @@
 //! nanometres; distance comparisons are done in exact `i128` arithmetic against
 //! *squared* thresholds, so no float nondeterminism leaks into a violation set.
 
-use crate::doc::{Doc, Nm, Point, MM};
-use crate::id::{NetId, TraceId, ViaId};
-use crate::part::{pin_world, PartLib, PinRole};
+use crate::doc::{Doc, Nm, Point, PinRef, MM};
+use crate::geom::{clearance_violated, Shape2D};
+use crate::id::{NetId, TraceId};
+use crate::part::{pad_copper_world, pin_world, PadLayers, PartLib, PinRole};
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A copper layer. `Top`/`Bottom` are the outer copper; `Inner(n)` keeps the model
 /// trivially extensible to multilayer boards (n = 0-based inner-layer index). The
@@ -202,77 +203,25 @@ pub fn check_drc(
     }
 
     // --- 2. Clearance: copper of *different* nets must be >= min_clearance. ---
-    let traces: Vec<(&TraceId, &Trace)> = doc.traces.iter().collect();
-    // trace vs trace (same layer, different net): edge-to-edge accounts for widths.
-    for i in 0..traces.len() {
-        for j in (i + 1)..traces.len() {
-            let (a, b) = (traces[i].1, traces[j].1);
-            if a.net == b.net || a.layer != b.layer {
+    // All copper — traces, vias, AND pads — reduces to a world-frame `geom::Shape2D`
+    // tagged with the layer(s) it occupies (the uniform "copper has extent" model;
+    // pads are no longer points). A different-net pair sharing a layer is checked
+    // edge-to-edge by `geom::clearance_violated`.
+    let pieces = net_copper(doc, lib, netlist);
+    let layers = copper_layers_present(doc);
+    for i in 0..pieces.len() {
+        for j in (i + 1)..pieces.len() {
+            let (a, b) = (&pieces[i], &pieces[j]);
+            if a.net == b.net {
                 continue;
             }
-            let thr = rules.min_clearance + a.width / 2 + b.width / 2;
-            if polylines_closer_than(&a.path, &b.path, thr) {
-                out.push(clearance(&a.net, &b.net, a.layer));
-            }
-        }
-    }
-    // trace vs pad of a different net (pad = point, all layers).
-    for t in doc.traces.values() {
-        let thr = rules.min_clearance + t.width / 2;
-        for (nid, pts) in &net_pads {
-            if *nid == t.net {
+            // The first (deterministic) layer both occupy, if any; the 2D shapes are
+            // layer-independent, so one geometric test settles the pair.
+            let Some(&l) = layers.iter().find(|&&l| a.layers.on(l) && b.layers.on(l)) else {
                 continue;
-            }
-            for p in pts {
-                if point_polyline_closer_than(*p, &t.path, thr) {
-                    out.push(clearance(&t.net, nid, t.layer));
-                }
-            }
-        }
-    }
-    // Bonus: via clearance (via pad vs other-net traces, pads, and vias).
-    let vias: Vec<(&ViaId, &Via)> = doc.vias.iter().collect();
-    for (_vid, v) in &vias {
-        let vr = v.pad / 2;
-        // via vs trace
-        for t in doc.traces.values() {
-            if t.net == v.net || !v.spans(t.layer) {
-                continue;
-            }
-            let thr = rules.min_clearance + vr + t.width / 2;
-            if point_polyline_closer_than(v.at, &t.path, thr) {
-                out.push(clearance(&v.net, &t.net, t.layer));
-            }
-        }
-        // via vs pad
-        for (nid, pts) in &net_pads {
-            if *nid == v.net {
-                continue;
-            }
-            let thr = rules.min_clearance + vr;
-            for p in pts {
-                if seg_within(v.at, v.at, *p, *p, thr, true) {
-                    out.push(clearance(&v.net, nid, v.from));
-                }
-            }
-        }
-    }
-    // via vs via (different net, overlapping span).
-    for i in 0..vias.len() {
-        for j in (i + 1)..vias.len() {
-            let (u, w) = (vias[i].1, vias[j].1);
-            if u.net == w.net {
-                continue;
-            }
-            // spans overlap?
-            let overlap = u.from.depth().min(u.to.depth()) <= w.from.depth().max(w.to.depth())
-                && w.from.depth().min(w.to.depth()) <= u.from.depth().max(u.to.depth());
-            if !overlap {
-                continue;
-            }
-            let thr = rules.min_clearance + u.pad / 2 + w.pad / 2;
-            if seg_within(u.at, u.at, w.at, w.at, thr, true) {
-                out.push(clearance(&u.net, &w.net, u.from));
+            };
+            if clearance_violated(&a.shape, &b.shape, rules.min_clearance) {
+                out.push(clearance(&a.net, &b.net, l));
             }
         }
     }
@@ -301,6 +250,101 @@ pub fn check_drc(
 fn clearance(a: &NetId, b: &NetId, layer: Layer) -> Violation {
     let (lo, hi) = if a <= b { (a.clone(), b.clone()) } else { (b.clone(), a.clone()) };
     Violation::Clearance { a: lo, b: hi, layer }
+}
+
+/// A piece of world-frame copper for clearance: its net, 2D shape, and the layer(s)
+/// it occupies. Traces, vias, and pads all reduce to this uniform form.
+struct CopperPiece {
+    net: NetId,
+    shape: Shape2D,
+    layers: PieceLayers,
+}
+
+/// How a copper piece occupies layers (for the same-layer clearance gate).
+enum PieceLayers {
+    Trace(Layer),
+    Via(Layer, Layer),
+    Pad(PadLayers),
+}
+
+impl PieceLayers {
+    fn on(&self, l: Layer) -> bool {
+        match self {
+            PieceLayers::Trace(tl) => *tl == l,
+            PieceLayers::Via(a, b) => {
+                let (lo, hi) = (a.depth().min(b.depth()), a.depth().max(b.depth()));
+                lo <= l.depth() && l.depth() <= hi
+            }
+            PieceLayers::Pad(PadLayers::Top) => l == Layer::Top,
+            PieceLayers::Pad(PadLayers::Bottom) => l == Layer::Bottom,
+            // A through-hole pad's annulus is on every copper layer.
+            PieceLayers::Pad(PadLayers::Through) => true,
+        }
+    }
+}
+
+/// Every world-frame copper piece: each trace (polyline ⊕ width/2), each via (a disc
+/// of its pad), and each netted pad's copper regions (its real `geom` shape, no
+/// longer a point). Pads are attributed to their net via the resolved netlist; a pad
+/// on no net (floating) is omitted here — it is surfaced by the `Floating` query.
+fn net_copper(
+    doc: &Doc,
+    lib: &PartLib,
+    netlist: &BTreeMap<NetId, Vec<(PinRef, PinRole)>>,
+) -> Vec<CopperPiece> {
+    let mut pin_net: BTreeMap<PinRef, NetId> = BTreeMap::new();
+    for (nid, pins) in netlist {
+        for (pr, _) in pins {
+            pin_net.insert(pr.clone(), nid.clone());
+        }
+    }
+    let mut pieces = Vec::new();
+    for t in doc.traces.values() {
+        pieces.push(CopperPiece {
+            net: t.net.clone(),
+            shape: Shape2D::trace(t.path.clone(), t.width),
+            layers: PieceLayers::Trace(t.layer),
+        });
+    }
+    for v in doc.vias.values() {
+        pieces.push(CopperPiece {
+            net: v.net.clone(),
+            shape: Shape2D::disc(v.at, v.pad / 2),
+            layers: PieceLayers::Via(v.from, v.to),
+        });
+    }
+    for c in doc.components.values() {
+        let Some(def) = lib.get(&c.part) else { continue };
+        for pin in &def.pins {
+            let Some(pad) = &pin.pad else { continue };
+            let Some(net) = pin_net.get(&PinRef::new(&c.id, &pin.number)) else { continue };
+            for cu in &pad.copper {
+                pieces.push(CopperPiece {
+                    net: net.clone(),
+                    shape: pad_copper_world(c, cu),
+                    layers: PieceLayers::Pad(cu.layers),
+                });
+            }
+        }
+    }
+    pieces
+}
+
+/// The copper layers present in a design (outer layers always; plus any layer a
+/// trace sits on or a via terminates on), sorted — the candidate set for choosing a
+/// representative layer to report a clearance violation on.
+fn copper_layers_present(doc: &Doc) -> Vec<Layer> {
+    let mut set: BTreeSet<Layer> = BTreeSet::new();
+    set.insert(Layer::Top);
+    set.insert(Layer::Bottom);
+    for t in doc.traces.values() {
+        set.insert(t.layer);
+    }
+    for v in doc.vias.values() {
+        set.insert(v.from);
+        set.insert(v.to);
+    }
+    set.into_iter().collect()
 }
 
 // ----------------------------------------------------------------------------
@@ -489,17 +533,6 @@ fn segments(path: &[Point]) -> Vec<(Point, Point)> {
 /// Is point `p` within `tol` (inclusive) of any segment of `path`?
 fn point_on_polyline(p: Point, path: &[Point], tol: Nm) -> bool {
     segments(path).iter().any(|(a, b)| seg_within(p, p, *a, *b, tol, false))
-}
-
-/// Is point `p` strictly closer than `thr` to any segment of `path`? (clearance)
-fn point_polyline_closer_than(p: Point, path: &[Point], thr: Nm) -> bool {
-    segments(path).iter().any(|(a, b)| seg_within(p, p, *a, *b, thr, true))
-}
-
-/// Are two polylines strictly closer than `thr` anywhere? (clearance)
-fn polylines_closer_than(p: &[Point], q: &[Point], thr: Nm) -> bool {
-    let (sp, sq) = (segments(p), segments(q));
-    sp.iter().any(|(a, b)| sq.iter().any(|(c, d)| seg_within(*a, *b, *c, *d, thr, true)))
 }
 
 /// Are two polylines within `tol` (inclusive) anywhere? (incidence)

@@ -269,6 +269,71 @@ mod tests {
         assert!(text.contains("TYPO1") && text.contains("TYPO2"), "got {text}");
     }
 
+    // A part with one pin carrying a real 0.5 mm square copper pad (top layer) — so
+    // DRC sees copper with extent, not a point.
+    fn pad_lib() -> super::part::PartLib {
+        use super::geom::Shape2D;
+        use super::part::{PadCopper, PadGeo, PadLayers, PartDef, PinDef, PinRole};
+        let pin = PinDef {
+            name: "1".into(),
+            number: "1".into(),
+            role: PinRole::Passive,
+            offset: Point { x: 0, y: 0 },
+            pad: Some(PadGeo {
+                copper: vec![PadCopper {
+                    shape: Shape2D::rect(Point { x: 0, y: 0 }, 500_000, 500_000),
+                    layers: PadLayers::Top,
+                }],
+                drill: None,
+            }),
+        };
+        let mut lib = super::part::PartLib::new();
+        lib.insert(
+            "PAD".into(),
+            PartDef { name: "PAD".into(), pins: vec![pin], interfaces: BTreeMap::new() },
+        );
+        lib
+    }
+
+    fn two_pads_at(x2: Nm) -> Source {
+        vec![
+            GenDirective::Instance { path: "p1".into(), part: "PAD".into() },
+            GenDirective::Instance { path: "p2".into(), part: "PAD".into() },
+            GenDirective::Fix { path: "p1".into(), pos: Point { x: 0, y: 0 } },
+            GenDirective::Fix { path: "p2".into(), pos: Point { x: x2, y: 0 } },
+            GenDirective::ConnectPins { net: "A".into(), pins: vec![("p1".into(), "1".into())] },
+            GenDirective::ConnectPins { net: "B".into(), pins: vec![("p2".into(), "1".into())] },
+        ]
+    }
+
+    /// Stage-3 / issue 0006: DRC clearance is pad-aware — it sees the real copper
+    /// extent of a pad, not its centre point. Two 0.5 mm pads of different nets
+    /// 0.6 mm apart (0.1 mm edge gap) clash a 0.15 mm rule; 1 mm apart they clear.
+    #[test]
+    fn drc_clearance_is_pad_aware() {
+        let lib = pad_lib();
+
+        // Separate engines: each History is its own document lineage (same revision
+        // numbers), so one memoizing engine across both would return a stale result.
+        let mut close = History::new(Default::default());
+        close.commit(Transaction::one(Command::SetSource(two_pads_at(600_000))), &lib, "close").unwrap();
+        let drc = Engine::new().query(close.doc(), &lib, Key::Drc);
+        assert!(
+            drc.as_drc().iter().any(|v| matches!(v, Violation::Clearance { .. })),
+            "fine-pitch different-net pads must clash (pad-aware): {:?}",
+            drc.as_drc()
+        );
+
+        let mut far = History::new(Default::default());
+        far.commit(Transaction::one(Command::SetSource(two_pads_at(1_000_000))), &lib, "far").unwrap();
+        let drc = Engine::new().query(far.doc(), &lib, Key::Drc);
+        assert!(
+            !drc.as_drc().iter().any(|v| matches!(v, Violation::Clearance { .. })),
+            "well-separated pads are clearance-clean: {:?}",
+            drc.as_drc()
+        );
+    }
+
     /// Cascade suppression: a missing instance referenced many times is reported
     /// *once*, so the real fault isn't buried under its downstream noise.
     #[test]
