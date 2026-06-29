@@ -349,6 +349,60 @@ pub(crate) fn copper_layers_present(doc: &Doc) -> Vec<Layer> {
 }
 
 // ----------------------------------------------------------------------------
+// Copper pours (the derived fill — 0004 stage 3).
+// ----------------------------------------------------------------------------
+
+/// A materialized copper pour: the filled copper of one `Conductor` region, after the
+/// clearance knockouts. `fill` is a [`crate::region::Region`] (outer boundary minus a
+/// hole around every foreign-net obstacle), bound to its `net` and `layer`. This is a
+/// **derived** value (re-/computed from the authored region + current copper), never
+/// stored — so it cannot go stale.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PourFill {
+    pub net: NetId,
+    pub layer: Layer,
+    pub fill: crate::region::Region,
+}
+
+/// Compute every copper pour's fill: for each authored `Conductor` region, knock the
+/// clearance-expanded **foreign** copper (different net, same layer) out of the pour
+/// outline. Same-net copper is *not* knocked out — it is what the pour connects to
+/// (connectivity through the fill is checked in a later stage). Pure function of the
+/// authored regions, the current copper, and the design rules.
+///
+/// Foreign copper is the netted copper from [`net_copper`] on the pour's layer; each
+/// obstacle is inflated by `min_clearance` (a [`Shape2D::inflated`] radius bump — the
+/// exact Minkowski offset) and unioned, then subtracted from the outline by the region
+/// kernel. (Floating/unnetted pads are an ERC fault and are not yet knocked out — a
+/// noted limit.)
+pub fn pour_fills(
+    doc: &Doc,
+    lib: &PartLib,
+    netlist: &BTreeMap<NetId, Vec<(PinRef, PinRole)>>,
+    rules: &DesignRules,
+) -> Vec<PourFill> {
+    use crate::region::{difference, shape_to_region, union_all, DEFAULT_CIRCLE_SEGS};
+    let pieces = net_copper(doc, lib, netlist);
+    let mut out = Vec::new();
+    for r in crate::elaborate::regions(&doc.source) {
+        if r.role != crate::geom::Role::Conductor {
+            continue;
+        }
+        let Some(name) = &r.net else { continue };
+        let net = NetId::new(name.clone());
+        let outline = shape_to_region(&r.shape, DEFAULT_CIRCLE_SEGS);
+        let obstacles: Vec<crate::region::Region> = pieces
+            .iter()
+            .filter(|p| p.net != net && p.layers.on(r.layer))
+            .map(|p| shape_to_region(&p.shape.inflated(rules.min_clearance), DEFAULT_CIRCLE_SEGS))
+            .collect();
+        let fill = difference(&outline, &union_all(obstacles));
+        out.push(PourFill { net, layer: r.layer, fill });
+    }
+    out
+}
+
+// ----------------------------------------------------------------------------
 // Connectivity: union-find over a net's pins + traces + vias by geometric
 // incidence. Two pins are electrically joined iff they end up in one component.
 // ----------------------------------------------------------------------------
@@ -540,4 +594,140 @@ fn point_on_polyline(p: Point, path: &[Point], tol: Nm) -> bool {
 fn polylines_closer_than_inc(p: &[Point], q: &[Point], tol: Nm) -> bool {
     let (sp, sq) = (segments(p), segments(q));
     sp.iter().any(|(a, b)| sq.iter().any(|(c, d)| seg_within(*a, *b, *c, *d, tol, false)))
+}
+
+#[cfg(test)]
+mod pour_tests {
+    use super::*;
+    use crate::command::{Command, Transaction};
+    use crate::doc::{Point, MM};
+    use crate::elaborate::{board_rect, GenDirective as G, RegionDecl};
+    use crate::geom::{Role, Shape2D};
+    use crate::history::History;
+    use crate::part::part_library;
+
+    /// Netlist (membership only; roles irrelevant to pours) from a doc's nets.
+    fn netlist_of(doc: &Doc) -> BTreeMap<NetId, Vec<(PinRef, PinRole)>> {
+        doc.nets
+            .iter()
+            .map(|(nid, net)| {
+                (nid.clone(), net.members.iter().map(|pr| (pr.clone(), PinRole::Passive)).collect())
+            })
+            .collect()
+    }
+
+    /// One single-pad footprint on the given copper layer, so a placed instance's pad
+    /// copper sits exactly at the instance origin (1mm square).
+    fn one_pad(layer: &str) -> crate::part::PartDef {
+        crate::kicad::import_footprint(&format!(
+            r#"(footprint "P1" (pad "1" smd rect (at 0 0) (size 1 1) (layers "{layer}")))"#
+        ))
+        .unwrap()
+    }
+
+    fn board_pour_scene(sig_layer: &str) -> (Doc, PartLib) {
+        let mut lib = part_library();
+        lib.insert("PT".into(), one_pad("F.Cu"));
+        lib.insert("PS".into(), one_pad(sig_layer));
+        // A board-covering GND pour on F.Cu; a GND pad at (5,5), a foreign SIG pad at
+        // (15,5).
+        let outline = Shape2D::polygon(vec![
+            Point::mm(0, 0),
+            Point::mm(20, 0),
+            Point::mm(20, 20),
+            Point::mm(0, 20),
+        ]);
+        let src = vec![
+            board_rect(Point::mm(0, 0), Point::mm(20, 20)),
+            G::Instance { path: "g".into(), part: "PT".into() },
+            G::Instance { path: "s".into(), part: "PS".into() },
+            G::Place { path: "g".into(), pos: Point::mm(5, 5) },
+            G::Place { path: "s".into(), pos: Point::mm(15, 5) },
+            G::ConnectPins { net: "GND".into(), pins: vec![("g".into(), "1".into())] },
+            G::ConnectPins { net: "SIG".into(), pins: vec![("s".into(), "1".into())] },
+            G::Region(RegionDecl {
+                shape: outline,
+                role: Role::Conductor,
+                net: Some("GND".into()),
+                layer: Layer::Top,
+            }),
+        ];
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "pour").expect("elaborates");
+        (h.doc().clone(), lib)
+    }
+
+    #[test]
+    fn pour_knocks_out_foreign_keeps_same_net() {
+        let (doc, lib) = board_pour_scene("F.Cu");
+        let nl = netlist_of(&doc);
+        let fills = pour_fills(&doc, &lib, &nl, &DesignRules::default());
+        assert_eq!(fills.len(), 1, "one conductor pour");
+        let f = &fills[0];
+        assert_eq!(f.net, NetId::new("GND"));
+        assert_eq!(f.layer, Layer::Top);
+        // Same-net pad stays inside the pour (it connects to it).
+        assert!(f.fill.contains_point(Point::mm(5, 5)), "GND pad inside the pour");
+        // Foreign pad is knocked out, with clearance: its centre and a point just
+        // inside the clearance ring are not copper; a point beyond the ring is.
+        assert!(!f.fill.contains_point(Point::mm(15, 5)), "SIG pad knocked out");
+        assert!(!f.fill.contains_point(Point { x: 14_400_000, y: 5 * MM }), "inside clearance ring");
+        assert!(f.fill.contains_point(Point::mm(14, 5)), "beyond the clearance ring is copper");
+        // Open board area is copper.
+        assert!(f.fill.contains_point(Point::mm(10, 15)));
+    }
+
+    #[test]
+    fn pour_ignores_foreign_copper_on_other_layers() {
+        // The SIG pad now lives on B.Cu; a Top pour must not knock it out.
+        let (doc, lib) = board_pour_scene("B.Cu");
+        let nl = netlist_of(&doc);
+        let fills = pour_fills(&doc, &lib, &nl, &DesignRules::default());
+        assert!(fills[0].fill.contains_point(Point::mm(15, 5)), "different-layer copper is not knocked out");
+    }
+
+    #[test]
+    fn pour_on_unknown_net_is_rejected() {
+        let mut lib = part_library();
+        lib.insert("PT".into(), one_pad("F.Cu"));
+        let src = vec![
+            board_rect(Point::mm(0, 0), Point::mm(10, 10)),
+            G::Instance { path: "g".into(), part: "PT".into() },
+            G::ConnectPins { net: "GND".into(), pins: vec![("g".into(), "1".into())] },
+            G::Region(RegionDecl {
+                shape: Shape2D::polygon(vec![Point::mm(0, 0), Point::mm(10, 0), Point::mm(10, 10)]),
+                role: Role::Conductor,
+                net: Some("GDN".into()), // typo
+                layer: Layer::Top,
+            }),
+        ];
+        let mut h = History::new(Default::default());
+        let err = h.commit(Transaction::one(Command::SetSource(src)), &lib, "bad").unwrap_err();
+        assert!(err.iter().any(|d| d.code == "E_UNKNOWN_NET"), "typo'd pour net is a hard fault: {err:?}");
+    }
+
+    #[test]
+    fn conductor_pour_without_net_is_rejected() {
+        let lib = part_library();
+        let src = vec![
+            board_rect(Point::mm(0, 0), Point::mm(10, 10)),
+            G::Region(RegionDecl {
+                shape: Shape2D::polygon(vec![Point::mm(0, 0), Point::mm(10, 0), Point::mm(10, 10)]),
+                role: Role::Conductor,
+                net: None,
+                layer: Layer::Top,
+            }),
+        ];
+        let mut h = History::new(Default::default());
+        let err = h.commit(Transaction::one(Command::SetSource(src)), &lib, "nonet").unwrap_err();
+        assert!(err.iter().any(|d| d.code == "E_POUR_NO_NET"), "netless conductor pour rejected: {err:?}");
+    }
+
+    #[test]
+    fn pour_fills_are_deterministic() {
+        let (doc, lib) = board_pour_scene("F.Cu");
+        let nl = netlist_of(&doc);
+        let rules = DesignRules::default();
+        assert_eq!(pour_fills(&doc, &lib, &nl, &rules), pour_fills(&doc, &lib, &nl, &rules));
+    }
 }

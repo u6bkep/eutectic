@@ -389,6 +389,39 @@ pub fn elaborate(
         }
     }
 
+    // Validate region declarations: a copper pour names the net it belongs to, and
+    // that net must exist (be connected by some `net`/ConnectPins directive) — a
+    // pour on a typo'd or never-connected net is a hard fault, never a silent dangle,
+    // the same guarantee `ConnectPins`/`NoConnect` give for pins. Collected, not
+    // aborting early.
+    for d in source {
+        if let GenDirective::Region(r) = d
+            && r.role == Role::Conductor
+        {
+            match &r.net {
+                Some(name) if !nets.contains_key(&NetId::new(name.clone())) => {
+                    errors.push(
+                        Diagnostic::error(
+                            "E_UNKNOWN_NET",
+                            format!("copper pour references net `{name}`, which no directive connects"),
+                            Location::Net(NetId::new(name.clone())),
+                        )
+                        .with_help("connect that net (e.g. `net <name> ...`), or fix the pour's net name"),
+                    );
+                }
+                None => errors.push(
+                    Diagnostic::error(
+                        "E_POUR_NO_NET",
+                        "copper pour has no net; a conductor region must name the net it fills",
+                        Location::None,
+                    )
+                    .with_help("add `net=<name>` to the region, or make it a keep-out/void instead"),
+                ),
+                _ => {}
+            }
+        }
+    }
+
     // Collect-all gate: if the model could not be built cleanly, abort the whole
     // transaction with every fault found. The partial model above is discarded.
     if !errors.is_empty() {

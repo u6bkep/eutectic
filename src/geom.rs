@@ -105,6 +105,21 @@ impl Shape2D {
         }
     }
 
+    /// This shape inflated (Minkowski ⊕ a disc) by `d`: the skeleton is unchanged and
+    /// the inflation radius grows by `d`. Offsetting copper by a clearance is *exactly*
+    /// this — disc Minkowski sums add radii — which is why a pour knockout never needs
+    /// a bespoke polygon-offset. `d` may be negative (deflate); the radius floors at 0.
+    pub fn inflated(&self, d: Nm) -> Shape2D {
+        match self {
+            Shape2D::Stroke { points, radius } => {
+                Shape2D::Stroke { points: points.clone(), radius: (radius + d).max(0) }
+            }
+            Shape2D::Polygon { points, radius } => {
+                Shape2D::Polygon { points: points.clone(), radius: (radius + d).max(0) }
+            }
+        }
+    }
+
     /// Apply a point map (e.g. a placement transform: cardinal rotation + offset) to
     /// every vertex, preserving the inflation radius. Used to lift a footprint-local
     /// pad shape into world coordinates.

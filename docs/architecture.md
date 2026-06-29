@@ -531,12 +531,25 @@ containment edge cases, determinism). **Stage 2 done:** the region *primitive* �
 `elaborate::RegionDecl` (`Shape2D` + `Role` + optional `net` + copper `Layer`), exposed as a
 `GenDirective::Region`, assembled by the shared `elaborate::regions(&Source)` reader (mirroring
 `board_shape`), and round-tripped by the text front-end (`region <role> [net=..] layer=.. <pts>`, with
-keep-out kinds and inner layers). It is tier-1 authoritative; the knockout fill stays derived. Net
-existence is validated at the fill stage (where it is actionable), not here. **Remaining:** the
-derived pour-fill query wired into DRC's copper set, connectivity-through-the-fill in the ratsnest
-(island fragmentation surfaced as honest DRC), Gerber `G36/G37` region-fill + arc export, then solder
-mask as the dual. The kernel pass is `O(N²)` (broadphase spatial index deferred — see performance
-notes); arc-exact boundaries and the 3D-`Solid` boolean are deferred but representable.
+keep-out kinds and inner layers). It is tier-1 authoritative; the knockout fill stays derived.
+**Stage 3 done:** the **derived pour-fill query** — `route::pour_fills(...)` computes, for each
+`Conductor` region, `fill = outline − ⋃(foreign_copper ⊕ clearance)` via the stage-1 kernel
+(`Shape2D::inflated` is the exact Minkowski offset = a radius bump; foreign = different-net copper on
+the pour's layer; same-net copper is *not* knocked out — it is what the pour connects to). The fill is
+a `region::Region` (outer boundary minus a hole per obstacle), bound to its net + layer, recomputed
+not stored. Net-reference validation moved into elaboration: a pour on a typo'd / unconnected net
+(`E_UNKNOWN_NET`) or with no net (`E_POUR_NO_NET`) is a hard fault, same no-silent-dangle guarantee as
+pins. Tests: foreign-pad knocked out *with clearance*, same-net pad kept, other-layer copper ignored,
+determinism, both validation faults. **Scoping note:** the DRC *consumption* of the fill —
+clearance (incl. pour-vs-pour shorts) and connectivity-through-the-fill — is folded into the next
+stage, because both need the same "region-incidence-with-copper" primitive (is a pad inside / within
+clearance of the fill); building it once avoids duplicate machinery, and the knockout's
+clearance-correctness is already proven by the stage-3 tests. Pours have no consumer yet, so nothing
+regresses. **Remaining:** region-vs-copper incidence → wire pour fills into DRC clearance + the
+ratsnest (pads in the fill joined; island fragmentation surfaced as honest DRC); Gerber `G36/G37`
+region-fill + arc export; solder mask as the dual. The kernel pass is `O(N²)` (broadphase spatial
+index deferred — see performance notes); arc-exact boundaries and the 3D-`Solid` boolean are deferred
+but representable. (Floating/unnetted pads are not yet knocked out of a pour — a noted limit.)
 
 ---
 

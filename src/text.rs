@@ -654,6 +654,11 @@ mod tests {
                 net: "VBUS".into(),
                 pins: vec![("psu.reg".into(), "VOUT".into()), ("psu.dec[0]".into(), "p1".into())],
             },
+            // GND is connected so the conductor pour above references a real net.
+            GenDirective::ConnectPins {
+                net: "GND".into(),
+                pins: vec![("psu.dec[0]".into(), "p2".into())],
+            },
             GenDirective::NoConnect {
                 pins: vec![("psu.reg".into(), "GND".into()), ("mcu".into(), "GPIO0".into())],
             },
@@ -739,6 +744,8 @@ region keepout-drill layer=In2.Cu (1mm, 1mm) (2mm, 1mm) (2mm, 2mm)";
         let src = vec![
             board_rect(Point::mm(0, 0), Point::mm(20, 20)),
             GenDirective::Instance { path: "c0".into(), part: "Cap".into() },
+            // GND must be a connected net for the conductor pour to validate.
+            GenDirective::ConnectPins { net: "GND".into(), pins: vec![("c0".into(), "p2".into())] },
             GenDirective::Region(RegionDecl {
                 shape: Shape2D::polygon(vec![Point::mm(0, 0), Point::mm(20, 0), Point::mm(20, 20)]),
                 role: Role::Conductor,
