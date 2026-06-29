@@ -70,8 +70,9 @@
 
 use crate::diagnostic::{Diagnostic, Location};
 use crate::doc::{Doc, Nm, Override, Point, Strength, MM};
-use crate::elaborate::{board_rect, GenDirective, Source};
-use crate::geom::Shape2D;
+use crate::elaborate::{board_rect, GenDirective, RegionDecl, Source};
+use crate::geom::{KeepoutKind, Role, Shape2D};
+use crate::route::Layer;
 use crate::id::EntityId;
 use std::collections::BTreeMap;
 
@@ -123,6 +124,19 @@ fn render_directive(d: &GenDirective) -> String {
         GenDirective::Cutout { shape } => {
             format!("cutout {}", shape.points().iter().map(|p| fmt_point(*p)).collect::<Vec<_>>().join(" "))
         }
+        GenDirective::Region(r) => {
+            // `region <role> [net=<n>] layer=<layer> <p> <p> ...`. Corner radius is
+            // not serialized (same noted follow-up as board/cutout).
+            let mut s = format!("region {}", role_token(&r.role));
+            if let Some(n) = &r.net {
+                s.push_str(&format!(" net={n}"));
+            }
+            s.push_str(&format!(" layer={}", layer_token(r.layer)));
+            for p in r.shape.points() {
+                s.push_str(&format!(" {}", fmt_point(*p)));
+            }
+            s
+        }
         GenDirective::Near { a, b, within } => format!("near {a} {b} {}", fmt_len(*within)),
         GenDirective::MinSep { a, b, gap } => format!("minsep {a} {b} {}", fmt_len(*gap)),
         GenDirective::AlignX { nodes } => format!("alignx {}", nodes.join(" ")),
@@ -169,6 +183,73 @@ fn fmt_len(v: Nm) -> String {
     let frac6 = format!("{frac:06}");
     let trimmed = frac6.trim_end_matches('0');
     format!("{}{whole}.{trimmed}mm", if neg { "-" } else { "" })
+}
+
+/// Canonical text token for a region [`Role`]. Only the roles a `region` directive can
+/// author round-trip here (conductor / void / keep-out by kind); other roles are
+/// composed via footprints, not authored as standalone regions.
+fn role_token(role: &Role) -> String {
+    match role {
+        Role::Conductor => "conductor".into(),
+        Role::Void => "void".into(),
+        Role::Keepout(k) => match k {
+            KeepoutKind::Copper => "keepout".into(),
+            KeepoutKind::Component => "keepout-component".into(),
+            KeepoutKind::Drill => "keepout-drill".into(),
+            KeepoutKind::Route => "keepout-route".into(),
+        },
+        // Not authorable as a region today; emit a stable token so serialization is
+        // never lossy-by-panic (parse rejects these, so they never round-trip in).
+        Role::Substrate => "substrate".into(),
+        Role::Marking => "marking".into(),
+        Role::MaskOpening => "maskopening".into(),
+        Role::Datum => "datum".into(),
+    }
+}
+
+fn parse_role(tok: &str) -> Result<Role, String> {
+    Ok(match tok {
+        "conductor" => Role::Conductor,
+        "void" => Role::Void,
+        "keepout" => Role::Keepout(KeepoutKind::Copper),
+        "keepout-component" => Role::Keepout(KeepoutKind::Component),
+        "keepout-drill" => Role::Keepout(KeepoutKind::Drill),
+        "keepout-route" => Role::Keepout(KeepoutKind::Route),
+        other => {
+            return Err(format!(
+                "region: unknown role `{other}` (conductor | void | keepout[-component|-drill|-route])"
+            ))
+        }
+    })
+}
+
+/// Canonical copper-layer token (KiCad-style): `F.Cu` / `B.Cu` / `In<n>.Cu` (1-based
+/// inner index, matching the fab-file naming).
+fn layer_token(l: Layer) -> String {
+    match l {
+        Layer::Top => "F.Cu".into(),
+        Layer::Bottom => "B.Cu".into(),
+        Layer::Inner(n) => format!("In{}.Cu", n as u16 + 1),
+    }
+}
+
+fn parse_layer(t: &str) -> Result<Layer, String> {
+    match t {
+        "F.Cu" | "top" => Ok(Layer::Top),
+        "B.Cu" | "bottom" => Ok(Layer::Bottom),
+        _ => {
+            // In<n>.Cu, 1-based.
+            let inner = t
+                .strip_prefix("In")
+                .and_then(|s| s.strip_suffix(".Cu"))
+                .and_then(|n| n.parse::<u16>().ok())
+                .filter(|&n| (1..=256).contains(&n));
+            match inner {
+                Some(n) => Ok(Layer::Inner((n - 1) as u8)),
+                None => Err(format!("region: unknown layer `{t}` (F.Cu | B.Cu | In<n>.Cu)")),
+            }
+        }
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -258,6 +339,40 @@ fn parse_line(line: &str) -> Result<Item, String> {
                 return Err("cutout needs ≥3 points: cutout (x,y) (x,y) (x,y) ...".into());
             }
             Item::Directive(GenDirective::Cutout { shape: Shape2D::polygon(pts) })
+        }
+        "region" => {
+            // `region <role> [net=<n>] [layer=<layer>] (x,y) (x,y) (x,y) ...`. Prefix
+            // tokens precede the first point; role is required, net/layer optional
+            // (layer defaults to F.Cu).
+            let open = rest.find('(').ok_or(
+                "region needs ≥3 points: region <role> [net=..] [layer=..] (x,y) (x,y) (x,y) ...",
+            )?;
+            let (prefix, ptspart) = rest.split_at(open);
+            let pts = extract_points(ptspart)?;
+            if pts.len() < 3 {
+                return Err("region needs ≥3 points: region <role> [net=..] [layer=..] (x,y) ...".into());
+            }
+            let mut role: Option<Role> = None;
+            let mut net: Option<String> = None;
+            let mut layer = Layer::Top;
+            for tok in prefix.split_whitespace() {
+                if let Some(n) = tok.strip_prefix("net=") {
+                    net = Some(n.to_string());
+                } else if let Some(l) = tok.strip_prefix("layer=") {
+                    layer = parse_layer(l)?;
+                } else if role.is_none() {
+                    role = Some(parse_role(tok)?);
+                } else {
+                    return Err(format!("region: unexpected token `{tok}`"));
+                }
+            }
+            let role = role.ok_or("region needs a role: conductor | void | keepout[-kind]")?;
+            Item::Directive(GenDirective::Region(RegionDecl {
+                shape: Shape2D::polygon(pts),
+                role,
+                net,
+                layer,
+            }))
         }
         "near" => {
             let (a, b, len) = two_tokens_and_len(rest, "near <a> <b> <len>")?;
@@ -498,6 +613,28 @@ mod tests {
                     Point::mm(25, 30),
                 ]),
             },
+            // A net-bound copper pour on the bottom layer, and a component keep-out.
+            GenDirective::Region(RegionDecl {
+                shape: Shape2D::polygon(vec![
+                    Point::mm(0, 0),
+                    Point::mm(50, 0),
+                    Point::mm(50, 50),
+                    Point::mm(0, 50),
+                ]),
+                role: Role::Conductor,
+                net: Some("GND".into()),
+                layer: Layer::Bottom,
+            }),
+            GenDirective::Region(RegionDecl {
+                shape: Shape2D::polygon(vec![
+                    Point::mm(10, 10),
+                    Point::mm(15, 10),
+                    Point::mm(15, 15),
+                ]),
+                role: Role::Keepout(KeepoutKind::Component),
+                net: None,
+                layer: Layer::Top,
+            }),
             GenDirective::Near { a: "psu.dec[0]".into(), b: "psu.reg".into(), within: 2 * MM },
             GenDirective::MinSep { a: "psu.dec[0]".into(), b: "mcu".into(), gap: MM },
             GenDirective::AlignX { nodes: vec!["psu.reg".into(), "psu.dec[0]".into()] },
@@ -555,6 +692,66 @@ mod tests {
         let (src, ovr) = parse(&text).expect("parse");
         assert_eq!(src, doc.source, "source must round-trip");
         assert_eq!(ovr, doc.overrides, "overrides must round-trip");
+    }
+
+    /// A region directive parses to the expected `RegionDecl` (role, net, layer, and
+    /// points), and the inner-layer / keep-out-kind tokens round-trip.
+    #[test]
+    fn region_directive_parses_and_round_trips() {
+        let text = "\
+region conductor net=GND layer=B.Cu (0mm, 0mm) (10mm, 0mm) (10mm, 10mm) (0mm, 10mm)
+region keepout-drill layer=In2.Cu (1mm, 1mm) (2mm, 1mm) (2mm, 2mm)";
+        let (src, _) = parse(text).expect("parse");
+        assert_eq!(
+            src[0],
+            GenDirective::Region(RegionDecl {
+                shape: Shape2D::polygon(vec![
+                    Point::mm(0, 0),
+                    Point::mm(10, 0),
+                    Point::mm(10, 10),
+                    Point::mm(0, 10),
+                ]),
+                role: Role::Conductor,
+                net: Some("GND".into()),
+                layer: Layer::Bottom,
+            })
+        );
+        assert_eq!(
+            src[1],
+            GenDirective::Region(RegionDecl {
+                shape: Shape2D::polygon(vec![Point::mm(1, 1), Point::mm(2, 1), Point::mm(2, 2)]),
+                role: Role::Keepout(KeepoutKind::Drill),
+                net: None,
+                layer: Layer::Inner(1), // "In2.Cu" is 1-based ⇒ Inner(1).
+            })
+        );
+        // Canonical serialization re-parses to the same source.
+        let doc = doc_of(src.clone(), BTreeMap::new());
+        assert_eq!(parse(&serialize(&doc)).unwrap().0, src);
+    }
+
+    /// Regions are assembled by the shared reader and survive a real commit (they do
+    /// not disturb elaboration — no fill/connectivity yet, just storage).
+    #[test]
+    fn regions_assemble_through_commit() {
+        let lib = part_library();
+        let mut h = History::new(Default::default());
+        let src = vec![
+            board_rect(Point::mm(0, 0), Point::mm(20, 20)),
+            GenDirective::Instance { path: "c0".into(), part: "Cap".into() },
+            GenDirective::Region(RegionDecl {
+                shape: Shape2D::polygon(vec![Point::mm(0, 0), Point::mm(20, 0), Point::mm(20, 20)]),
+                role: Role::Conductor,
+                net: Some("GND".into()),
+                layer: Layer::Bottom,
+            }),
+        ];
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "r").expect("elaborates");
+        let regions = crate::elaborate::regions(&h.doc().source);
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].role, Role::Conductor);
+        assert_eq!(regions[0].net.as_deref(), Some("GND"));
+        assert_eq!(regions[0].layer, Layer::Bottom);
     }
 
     /// `serialize(parse(serialize(doc))) == serialize(doc)` — canonical form is a

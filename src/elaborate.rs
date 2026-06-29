@@ -13,11 +13,29 @@
 
 use crate::diagnostic::{Diagnostic, Location};
 use crate::doc::*;
-use crate::geom::{BoardShape, Shape2D};
+use crate::geom::{BoardShape, Role, Shape2D};
 use crate::id::{EntityId, NetId};
 use crate::part::{courtyard_half_extents, Dir, PartDef, PartLib};
+use crate::route::Layer;
 use crate::solve::{dist, solve, Constraint, Problem, PLACE_TOL};
 use std::collections::{BTreeMap, BTreeSet};
+
+/// An authored **filled region**: a `Shape2D` area carrying a [`Role`] — a copper
+/// pour (`Conductor`, with the `net` it belongs to and the copper `layer` it fills),
+/// a keep-out (`Keepout`), or a filled void (`Void`). This is the *authoritative
+/// declaration* (tier-1, in the generative `Source`); the actual knockout fill
+/// (`region − foreign_copper ⊕ clearance`) is **derived** later (0004 stage 3), so it
+/// is never stored and never goes stale. The shape is in absolute board coordinates
+/// (like the board outline), not a footprint-local transform. `layer` is carried for
+/// every role; for non-`Conductor` roles it is advisory until the fill stage gives it
+/// meaning.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RegionDecl {
+    pub shape: Shape2D,
+    pub role: Role,
+    pub net: Option<String>,
+    pub layer: Layer,
+}
 
 /// A directive in the generative program.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,6 +53,9 @@ pub enum GenDirective {
     Board { outline: Shape2D },
     /// An interior board cutout / void ([`Shape2D`]); components are kept out of it.
     Cutout { shape: Shape2D },
+    /// An authored filled region — a copper pour, keep-out, or filled void. See
+    /// [`RegionDecl`]. Read by [`regions`]; the knockout fill is derived downstream.
+    Region(RegionDecl),
     /// Relational placement constraint solved by the least-change solver.
     Near { a: String, b: String, within: Nm },
     MinSep { a: String, b: String, gap: Nm },
@@ -578,6 +599,20 @@ pub fn board_shape(source: &Source) -> Option<BoardShape> {
         })
         .collect();
     Some(BoardShape { outline, cutouts })
+}
+
+/// Assemble every authored [`RegionDecl`] from the source, in declaration order. The
+/// single shared reader for pours / keep-outs / filled voids — the derived fill query
+/// (0004 stage 3), DRC, and export all call this, exactly as [`board_shape`] is the
+/// shared reader for the outline.
+pub fn regions(source: &Source) -> Vec<RegionDecl> {
+    source
+        .iter()
+        .filter_map(|d| match d {
+            GenDirective::Region(r) => Some(r.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Build a rectangular [`Board`](GenDirective::Board) directive from opposite corners

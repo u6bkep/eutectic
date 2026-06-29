@@ -527,12 +527,16 @@ kernel** once (`src/region.rs`) and let every consumer fall out of it.
 **Stage 1 done:** the `region` kernel — `Region`, `union`/`intersection`/`difference`,
 `shape_to_region` (offset via dilation), and exact-integer predicates — landed standalone with a
 degenerate-case test suite (shared edges, corner-touch, concave dilation, multi-knockout pours,
-containment edge cases, determinism). No consumers yet. **Remaining:** the region *primitive* (an
-authored `Feature` = `Shape2D` + `Role` + optional net), the derived pour-fill query wired into DRC's
-copper set, connectivity-through-the-fill in the ratsnest (island fragmentation surfaced as honest
-DRC), Gerber `G36/G37` region-fill + arc export, then solder mask as the dual. The kernel pass is
-`O(N²)` (broadphase spatial index deferred — see performance notes); arc-exact boundaries and the
-3D-`Solid` boolean are deferred but representable.
+containment edge cases, determinism). **Stage 2 done:** the region *primitive* — an authored
+`elaborate::RegionDecl` (`Shape2D` + `Role` + optional `net` + copper `Layer`), exposed as a
+`GenDirective::Region`, assembled by the shared `elaborate::regions(&Source)` reader (mirroring
+`board_shape`), and round-tripped by the text front-end (`region <role> [net=..] layer=.. <pts>`, with
+keep-out kinds and inner layers). It is tier-1 authoritative; the knockout fill stays derived. Net
+existence is validated at the fill stage (where it is actionable), not here. **Remaining:** the
+derived pour-fill query wired into DRC's copper set, connectivity-through-the-fill in the ratsnest
+(island fragmentation surfaced as honest DRC), Gerber `G36/G37` region-fill + arc export, then solder
+mask as the dual. The kernel pass is `O(N²)` (broadphase spatial index deferred — see performance
+notes); arc-exact boundaries and the 3D-`Solid` boolean are deferred but representable.
 
 ---
 
