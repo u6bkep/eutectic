@@ -266,26 +266,21 @@ pub fn elaborate(
 
     // Pass 2c: overlap-avoidance (issue 0005). No two component courtyards may
     // overlap; generate a NoOverlap constraint for every pair (O(N²), as noted in
-    // the ticket). Courtyards are oriented per component; a part with no geometry
-    // contributes none. comp ids come from a BTreeMap, so pairs are deterministic.
-    let comp_ids: Vec<EntityId> = components.keys().cloned().collect();
-    for i in 0..comp_ids.len() {
-        let ca = &components[&comp_ids[i]];
-        let ah = oriented_courtyard(&lib[&ca.part], ca.orient);
-        if ah == (0, 0) {
-            continue;
-        }
-        for cb_id in comp_ids.iter().skip(i + 1) {
-            let cb = &components[cb_id];
-            let bh = oriented_courtyard(&lib[&cb.part], cb.orient);
-            if bh == (0, 0) {
-                continue;
-            }
+    // the ticket). Courtyards are computed once per component (oriented; a part with
+    // no geometry has none and is dropped here), then paired. `components` is a
+    // BTreeMap, so the order — and thus the constraint set — is deterministic.
+    let courts: Vec<(EntityId, (Nm, Nm))> = components
+        .iter()
+        .map(|(id, c)| (id.clone(), oriented_courtyard(&lib[&c.part], c.orient)))
+        .filter(|(_, h)| *h != (0, 0))
+        .collect();
+    for i in 0..courts.len() {
+        for j in (i + 1)..courts.len() {
             relational.push(Constraint::NoOverlap {
-                a: comp_ids[i].clone(),
-                b: cb_id.clone(),
-                a_half: ah,
-                b_half: bh,
+                a: courts[i].0.clone(),
+                b: courts[j].0.clone(),
+                a_half: courts[i].1,
+                b_half: courts[j].1,
             });
         }
     }
