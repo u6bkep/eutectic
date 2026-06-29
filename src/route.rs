@@ -253,22 +253,23 @@ fn clearance(a: &NetId, b: &NetId, layer: Layer) -> Violation {
 }
 
 /// A piece of world-frame copper for clearance: its net, 2D shape, and the layer(s)
-/// it occupies. Traces, vias, and pads all reduce to this uniform form.
-struct CopperPiece {
-    net: NetId,
-    shape: Shape2D,
-    layers: PieceLayers,
+/// it occupies. Traces, vias, and pads all reduce to this uniform form. Exposed to
+/// the autorouter so it can verify its own proposed copper with the same machinery.
+pub(crate) struct CopperPiece {
+    pub(crate) net: NetId,
+    pub(crate) shape: Shape2D,
+    pub(crate) layers: PieceLayers,
 }
 
 /// How a copper piece occupies layers (for the same-layer clearance gate).
-enum PieceLayers {
+pub(crate) enum PieceLayers {
     Trace(Layer),
     Via(Layer, Layer),
     Pad(PadLayers),
 }
 
 impl PieceLayers {
-    fn on(&self, l: Layer) -> bool {
+    pub(crate) fn on(&self, l: Layer) -> bool {
         match self {
             PieceLayers::Trace(tl) => *tl == l,
             PieceLayers::Via(a, b) => {
@@ -287,7 +288,7 @@ impl PieceLayers {
 /// of its pad), and each netted pad's copper regions (its real `geom` shape, no
 /// longer a point). Pads are attributed to their net via the resolved netlist; a pad
 /// on no net (floating) is omitted here — it is surfaced by the `Floating` query.
-fn net_copper(
+pub(crate) fn net_copper(
     doc: &Doc,
     lib: &PartLib,
     netlist: &BTreeMap<NetId, Vec<(PinRef, PinRole)>>,
@@ -333,7 +334,7 @@ fn net_copper(
 /// The copper layers present in a design (outer layers always; plus any layer a
 /// trace sits on or a via terminates on), sorted — the candidate set for choosing a
 /// representative layer to report a clearance violation on.
-fn copper_layers_present(doc: &Doc) -> Vec<Layer> {
+pub(crate) fn copper_layers_present(doc: &Doc) -> Vec<Layer> {
     let mut set: BTreeSet<Layer> = BTreeSet::new();
     set.insert(Layer::Top);
     set.insert(Layer::Bottom);

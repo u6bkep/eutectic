@@ -459,8 +459,17 @@ rotation/drill/layers) and rendered to Gerber via bounding apertures; (3) **DRC
 clearance is pad-aware** — all copper (traces, vias, pads) reduces to a world-frame
 `geom::Shape2D` and a different-net pair sharing a layer is checked edge-to-edge by
 `geom::clearance_violated` (**resolves 0006**; trace-near-pad-edge and pad-vs-pad
-fine-pitch clearance are now visible, gated by the 2.5D `Layer` model). The router
-obstacle model (stage 4) and router self-honesty (stage 5, **0003**) still pending. Implementation is staged: **(1)** the `geom` core — `Shape2D`,
+fine-pitch clearance are now visible, gated by the 2.5D `Layer` model). **Router
+self-honesty done (resolves 0003):** the autorouter no longer trusts its
+clean-by-construction invariant (which fails at sub-grid pitch / off-grid pad
+stubs) — it verifies its proposed copper against the same pad-aware clearance and
+drops any net that actually clashes, so `routed` means *verified clean*. (On the
+PoC this honestly drops from a lying "19 routed / 5 violations" to "4 routed / 0
+router-introduced violations"; the remaining clearances are all pre-routing
+pad-pad placement issues — 0005.) **Still pending:** board outline / cutouts /
+keep-outs as features + placement overlap avoidance (0005); the router's obstacle
+model still blocks on pad *points* (so it drops more than a pad-extent-aware or
+rip-up router would keep — 0008); full `ZRange`-stackup gating; `Solid`/true-3D. Implementation is staged: **(1)** the `geom` core — `Shape2D`,
 `ZRange`, `Extent::Prism`, `Role`, `Material`, `Feature`, the stackup + defaults, and the 2.5D
 clearance kernel (additive, self-contained); **(2)** pads → `Conductor` features + KiCad pad import
 (smd/thru-hole/custom-primitives/drill/layers) + render; **(3)** unified feature clearance in DRC

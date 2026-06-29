@@ -221,6 +221,16 @@ inner layers, and Gerber export only emits F_Cu/B_Cu — so "4-layer intent" is
 purely documentary. Power integrity (the QFN EP thermal/return path, the VREG_LX
 switching loop) cannot be expressed at all.
 
+> **RESOLVED** (the *silent* part, branch `feat/geometry`, issues 0006 + 0003):
+> DRC is now pad-aware (copper has real extent, stage 3), and the autorouter
+> verifies its own output against that clearance and drops nets it can't route
+> cleanly. The clearance breach is gone — the router now honestly reports far fewer
+> routed nets (4, not a lying 19) and introduces **0** clearance violations; the
+> ~16 that remain are pre-routing pad-pad placement clashes (finding 5 / issue
+> 0005). What's *not* fixed is the routing *capability* at fine pitch (escape
+> routing / finer grid / rip-up — issue 0008): the router still can't fan out a
+> 0.4 mm QFN, it just no longer lies about it.
+
 **4. The grid autorouter cannot fan out a fine-pitch QFN, and its clearance
 guarantee silently breaks there.** Grid pitch = `via_pad + clearance` = 0.45 mm,
 but the QFN-60 pad pitch is 0.40 mm and USB-C/0402 pads are closer still. Different

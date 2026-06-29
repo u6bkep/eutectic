@@ -31,9 +31,13 @@
 //! - track↔via:   `pitch − pad/2 − width/2 ≥ clr`
 //! - via↔via:     `pitch − pad/2 − pad/2   = clr` (exactly — passes, DRC is strict `<`)
 //!
-//! So routed-vs-routed clearance is guaranteed by construction; only *off-grid*
-//! obstacles (pads and pre-existing traces/vias) need radius-based cell blocking,
-//! sized to keep both a node and the half-edges leaving it clear.
+//! So routed-vs-routed clearance is *heuristically* clean on-grid; off-grid obstacles
+//! (pads and pre-existing traces/vias) get radius-based cell blocking. But this
+//! construction invariant is **not trusted**: it fails at sub-grid pitch and never
+//! covered the off-grid pad stubs, so [`autoroute`] runs a final pad-aware clearance
+//! check ([`verify_and_prune`]) and drops any net whose proposed copper actually
+//! clashes. `routed` therefore means *verified clean*, not clean-by-assertion
+//! (issue 0003).
 //!
 //! ## Honest limitations (documented, by design)
 //!
@@ -48,13 +52,16 @@
 //! a net from its pins). All geometry is integer nm; everything is deterministic.
 
 use crate::command::Command;
-use crate::doc::{Doc, Nm, Point, Provenance};
+use crate::doc::{Doc, Nm, PinRef, Point, Provenance};
+use crate::geom::{clearance_violated, Shape2D};
 use crate::id::{NetId, TraceId, ViaId};
-use crate::part::{pin_world, PartLib};
-use crate::route::{DesignRules, Layer, Trace, Via};
+use crate::part::{pin_world, PartLib, PinRole};
+use crate::route::{
+    copper_layers_present, net_copper, CopperPiece, DesignRules, Layer, PieceLayers, Trace, Via,
+};
 use crate::solve::Rect;
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BinaryHeap};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 /// The proposed routing transaction plus a report of what could not be routed.
 ///
@@ -153,7 +160,79 @@ pub fn autoroute(doc: &Doc, lib: &PartLib, rules: &DesignRules) -> AutorouteResu
         }
     }
 
+    // Don't trust the construction invariant — verify the proposed copper against the
+    // same pad-aware clearance DRC uses, and drop any net that actually clashes.
+    verify_and_prune(doc, lib, rules, &mut result);
     result
+}
+
+/// Self-honesty (issue 0003): the grid's "clearance-clean by construction" invariant
+/// fails at sub-grid pitch (and never covered the off-grid pad stubs), so do not
+/// trust it. Check each *proposed* piece of copper against all other-net copper
+/// (existing pads / pre-existing traces+vias + other proposed copper) with the same
+/// `geom` clearance DRC uses; any routed net whose proposed copper clashes is dropped
+/// — its commands removed, the net moved to `unrouted`. So `routed` means *verified
+/// clearance-clean*, not clean-by-assertion. Dropping every clashing net is
+/// conservative (it can drop a net that a smarter order/rip-up would keep — that is
+/// future work, issue 0008); the point here is honesty, not optimality.
+fn verify_and_prune(doc: &Doc, lib: &PartLib, rules: &DesignRules, result: &mut AutorouteResult) {
+    // Existing copper (pads + pre-existing traces/vias) via the shared machinery.
+    // Clearance ignores roles, so a Passive placeholder role is fine.
+    let netlist: BTreeMap<NetId, Vec<(PinRef, PinRole)>> = doc
+        .nets
+        .iter()
+        .map(|(nid, net)| {
+            (nid.clone(), net.members.iter().map(|m| (m.clone(), PinRole::Passive)).collect())
+        })
+        .collect();
+    let existing = net_copper(doc, lib, &netlist);
+
+    // This run's proposed copper.
+    let mut proposed: Vec<CopperPiece> = Vec::new();
+    for cmd in &result.commands {
+        match cmd {
+            Command::AddTrace(_, t) => proposed.push(CopperPiece {
+                net: t.net.clone(),
+                shape: Shape2D::trace(t.path.clone(), t.width),
+                layers: PieceLayers::Trace(t.layer),
+            }),
+            Command::AddVia(_, v) => proposed.push(CopperPiece {
+                net: v.net.clone(),
+                shape: Shape2D::disc(v.at, v.pad / 2),
+                layers: PieceLayers::Via(v.from, v.to),
+            }),
+            _ => {}
+        }
+    }
+
+    let layers = copper_layers_present(doc);
+    let shares = |a: &CopperPiece, b: &CopperPiece| {
+        layers.iter().any(|&l| a.layers.on(l) && b.layers.on(l))
+    };
+    let mut unclean: BTreeSet<NetId> = BTreeSet::new();
+    for p in &proposed {
+        if unclean.contains(&p.net) {
+            continue;
+        }
+        let clashes = existing.iter().chain(proposed.iter()).any(|o| {
+            o.net != p.net && shares(p, o) && clearance_violated(&p.shape, &o.shape, rules.min_clearance)
+        });
+        if clashes {
+            unclean.insert(p.net.clone());
+        }
+    }
+    if unclean.is_empty() {
+        return;
+    }
+    result.commands.retain(|c| match c {
+        Command::AddTrace(_, t) => !unclean.contains(&t.net),
+        Command::AddVia(_, v) => !unclean.contains(&v.net),
+        _ => true,
+    });
+    result.routed.retain(|n| !unclean.contains(n));
+    result.unrouted.extend(unclean);
+    result.unrouted.sort();
+    result.unrouted.dedup();
 }
 
 /// Choose the routing area: the last `Board` directive in tier-1 source, else the
@@ -653,6 +732,62 @@ mod tests {
         let mut h = History::new(Default::default());
         h.commit(Transaction::one(Command::SetSource(src)), &lib, "src").unwrap();
         h
+    }
+
+    /// Issue 0003: a proposed trace that clashes a different-net pad is dropped by the
+    /// self-verify (the construction invariant is not trusted), and the net is moved
+    /// to `unrouted` — `routed` never includes a net whose copper actually violates.
+    #[test]
+    fn verify_prunes_a_net_whose_trace_clashes_a_pad() {
+        use crate::geom::Shape2D;
+        use crate::part::{PadCopper, PadGeo, PadLayers, PartDef, PinDef, PinRole};
+        // A part with one pin carrying a 0.5 mm square copper pad.
+        let pin = PinDef {
+            name: "1".into(),
+            number: "1".into(),
+            role: PinRole::Passive,
+            offset: Point { x: 0, y: 0 },
+            pad: Some(PadGeo {
+                copper: vec![PadCopper {
+                    shape: Shape2D::rect(Point { x: 0, y: 0 }, 500_000, 500_000),
+                    layers: PadLayers::Top,
+                }],
+                drill: None,
+            }),
+        };
+        let mut lib = crate::part::PartLib::new();
+        lib.insert(
+            "PAD".into(),
+            PartDef { name: "PAD".into(), pins: vec![pin], interfaces: BTreeMap::new() },
+        );
+        // Net B's pad sits at the origin; net A is a separate net.
+        let src = vec![
+            G::Instance { path: "b".into(), part: "PAD".into() },
+            G::Fix { path: "b".into(), pos: Point { x: 0, y: 0 } },
+            G::ConnectPins { net: "B".into(), pins: vec![("b".into(), "1".into())] },
+        ];
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "src").unwrap();
+
+        // A net-A trace whose centreline runs straight through net B's pad.
+        let mut result = AutorouteResult {
+            commands: vec![Command::AddTrace(
+                TraceId(1),
+                Trace {
+                    net: NetId::new("A"),
+                    layer: Layer::Top,
+                    path: vec![Point::mm(-2, 0), Point::mm(2, 0)],
+                    width: 200_000,
+                    prov: Provenance::Free,
+                },
+            )],
+            routed: vec![NetId::new("A")],
+            unrouted: vec![],
+        };
+        verify_and_prune(h.doc(), &lib, &DesignRules::default(), &mut result);
+        assert!(result.commands.is_empty(), "trace through a different-net pad must be pruned");
+        assert!(result.routed.is_empty(), "the clashing net must leave `routed`");
+        assert!(result.unrouted.contains(&NetId::new("A")), "and be reported unrouted");
     }
 
     /// Apply a proposed transaction's commands to the history head.
