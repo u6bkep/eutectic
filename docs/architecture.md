@@ -426,6 +426,47 @@ decomposition / Newton). This is the deliberate prototype-scope tradeoff, not a 
   position yet), no rotation/orientation DOF, no keepouts.
 - Query dependencies are recorded explicitly, not auto-tracked; inputs are coarse
   (`conn_rev`/`geom_rev`).
-- No router; no textual *parser* (generative "source" is built via Rust data, not parsed text).
+- No router.
 - The end-to-end PoC target (a single-PCB chip-down rework of the RP2350-Zero SWD-probe carrier)
   needs: real parts/footprints with pin geometry, a netlist→placement→route flow, and fab output.
+
+## Prototype status (text front-end)
+
+The `text` module makes §5's "text as a projection" concrete: a **canonical serializer + parser**
+for the *authoritative* tier-1 state (the generative `source` directives **and** the ID-keyed
+`overrides` map). This is the agent/git-facing authoring surface — *not* a synced second artifact.
+`serialize` and `parse` are the two halves of one projection; materialized positions/nets are
+deliberately **not** serialized (they are derived and re-elaborated on load — `project` renders
+those for viewing).
+
+**Grammar** — one directive per line, `#` line comments, whitespace-tokenized, coordinates `(x, y)`:
+
+```text
+inst    <path> <part>                 place  <path> (<x>, <y>)
+fix     <path> (<x>, <y>)             board  (<x>, <y>) (<x>, <y>)
+near    <a> <b> <len>                 minsep <a> <b> <len>
+alignx  <node> ...                    aligny <node> ...
+connect <compA>.<port> <compB>.<port> net    <name> <comp>.<pin> ...
+hint    <path> (<x>, <y>)             pin    <path> (<x>, <y>)   # ID-keyed overrides
+```
+
+It covers every `GenDirective` variant and both override strengths (`hint` = weak/`Hint`,
+`pin` = strong/`Pin`). Lengths accept `30mm` (decimal ok), `30000000nm`, or a bare integer (nm);
+a `<comp>.<pin>` reference splits at the last dot so hierarchical paths (`psu.dec[0].p1`) survive.
+
+**Guarantees (tested — 14 new unit tests, 29 total):**
+- *Deterministic / canonical:* `serialize` is a pure function with stable output — source
+  directives in source order (instance order is itself tier-1 truth, driving default placement),
+  overrides in `BTreeMap` id order, every coordinate in one canonical mm form.
+- *Idempotent:* `serialize(parse(serialize(doc)))` byte-equals `serialize(doc)`.
+- *Round-trips:* `parse(serialize(doc))` reproduces `(source, overrides)` exactly; re-elaborating
+  it reproduces the same `components`/`nets`/`report` (verified on `psu_module`, the UART-link
+  design, and a Board/Near/MinSep/AlignY/Fix scene).
+- *Tolerant in, canonical out:* mm/nm/bare units, comments, and extra whitespace all parse; output
+  is always the one canonical form. Parse errors return `Err(String)` naming the offending line —
+  never a panic.
+
+`Command::LoadText(String)` lowers the text front-end onto the sole mutation surface: it parses and
+replaces source+overrides in one atomic transaction (a malformed document aborts the commit, so the
+file is never a back door to an inconsistent state). Zero new dependencies — the parser is
+hand-rolled (line-based).

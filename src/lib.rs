@@ -10,6 +10,7 @@
 //! - `elaborate` — generative source -> instances + ID-keyed override reconcile.
 //! - `part` — typed pins & interfaces (makes the serial swap unrepresentable).
 //! - `project` — deterministic text projection (agent/git view).
+//! - `text` — canonical serializer + parser for tier-1 truth (the text front-end).
 
 pub mod command;
 pub mod doc;
@@ -20,6 +21,7 @@ pub mod part;
 pub mod project;
 pub mod query;
 pub mod solve;
+pub mod text;
 
 /// Build a root document from a generative source by elaborating it once.
 pub fn boot(source: elaborate::Source, lib: &part::PartLib) -> Result<doc::Doc, String> {

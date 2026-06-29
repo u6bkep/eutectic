@@ -29,6 +29,11 @@ pub enum Command {
     Pin(EntityId, Point),
     /// Drop an override.
     ClearOverride(EntityId),
+    /// Replace the *entire* tier-1 state (source + overrides) from canonical text,
+    /// parsed by [`crate::text::parse`]. This is the text front-end lowering to the
+    /// one mutation surface: a malformed document aborts the transaction (atomic),
+    /// so the file is never a back door to an inconsistent state.
+    LoadText(String),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -60,6 +65,11 @@ pub fn apply(doc: &Doc, txn: &Transaction, lib: &PartLib, tick: u64) -> Result<D
             }
             Command::ClearOverride(id) => {
                 next.overrides.remove(id);
+            }
+            Command::LoadText(text) => {
+                let (source, overrides) = crate::text::parse(text)?;
+                next.source = source;
+                next.overrides = overrides;
             }
         }
     }
