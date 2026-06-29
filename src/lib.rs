@@ -306,6 +306,31 @@ mod tests {
         ]
     }
 
+    /// Issue 0005: the placement solver keeps component courtyards from overlapping.
+    /// Two pad-bearing parts placed coincident are pushed apart until their
+    /// courtyards (pad bbox + margin) clear. A footprint-less toy part has no
+    /// courtyard, so this only governs real (pad-bearing) parts.
+    #[test]
+    fn placement_avoids_courtyard_overlap() {
+        let lib = pad_lib(); // PAD: a 0.5 mm pad → courtyard half-extent 0.25 mm + margin.
+        let src = vec![
+            GenDirective::Instance { path: "p1".into(), part: "PAD".into() },
+            GenDirective::Instance { path: "p2".into(), part: "PAD".into() },
+            GenDirective::Place { path: "p1".into(), pos: Point { x: 0, y: 0 } },
+            GenDirective::Place { path: "p2".into(), pos: Point { x: 0, y: 0 } }, // coincident
+        ];
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "s").unwrap();
+        let (a, b) = (pos(h.doc(), "p1"), pos(h.doc(), "p2"));
+        // Courtyards must not overlap: separated by ≥ (sum of half-extents) on an axis.
+        let sep = 2 * (250_000 + super::part::COURTYARD_MARGIN);
+        let (dx, dy) = ((a.x - b.x).abs(), (a.y - b.y).abs());
+        assert!(
+            dx >= sep - PLACE_TOL || dy >= sep - PLACE_TOL,
+            "courtyards still overlap: p1={a:?} p2={b:?} (need ≥{sep} on an axis)"
+        );
+    }
+
     /// Stage-3 / issue 0006: DRC clearance is pad-aware — it sees the real copper
     /// extent of a pad, not its centre point. Two 0.5 mm pads of different nets
     /// 0.6 mm apart (0.1 mm edge gap) clash a 0.15 mm rule; 1 mm apart they clear.

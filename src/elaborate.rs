@@ -14,7 +14,7 @@
 use crate::diagnostic::{Diagnostic, Location};
 use crate::doc::*;
 use crate::id::{EntityId, NetId};
-use crate::part::{Dir, PartDef, PartLib};
+use crate::part::{courtyard_half_extents, Dir, PartDef, PartLib};
 use crate::solve::{dist, solve, Constraint, Problem, Rect, PLACE_TOL};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -264,6 +264,32 @@ pub fn elaborate(
         }
     }
 
+    // Pass 2c: overlap-avoidance (issue 0005). No two component courtyards may
+    // overlap; generate a NoOverlap constraint for every pair (O(N²), as noted in
+    // the ticket). Courtyards are oriented per component; a part with no geometry
+    // contributes none. comp ids come from a BTreeMap, so pairs are deterministic.
+    let comp_ids: Vec<EntityId> = components.keys().cloned().collect();
+    for i in 0..comp_ids.len() {
+        let ca = &components[&comp_ids[i]];
+        let ah = oriented_courtyard(&lib[&ca.part], ca.orient);
+        if ah == (0, 0) {
+            continue;
+        }
+        for cb_id in comp_ids.iter().skip(i + 1) {
+            let cb = &components[cb_id];
+            let bh = oriented_courtyard(&lib[&cb.part], cb.orient);
+            if bh == (0, 0) {
+                continue;
+            }
+            relational.push(Constraint::NoOverlap {
+                a: comp_ids[i].clone(),
+                b: cb_id.clone(),
+                a_half: ah,
+                b_half: bh,
+            });
+        }
+    }
+
     // Pass 3: connections. A selector resolves against the part: a functional name
     // fans out to every pad with that name (so a six-pad power rail gets six
     // members), a pad number picks one pad. An unresolvable selector — a typo or a
@@ -471,6 +497,16 @@ fn note_missing(
         ));
     }
     true
+}
+
+/// A part's courtyard half-extents oriented for a placed component: a cardinal
+/// 90°/270° turn swaps width and height.
+fn oriented_courtyard(def: &PartDef, orient: Orient) -> (Nm, Nm) {
+    let (hw, hh) = courtyard_half_extents(def);
+    match orient {
+        Orient::Deg90 | Orient::Deg270 => (hh, hw),
+        Orient::Deg0 | Orient::Deg180 => (hw, hh),
+    }
 }
 
 /// A `help:` line listing a part's distinct functional pin names — the candidates

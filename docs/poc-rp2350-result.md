@@ -242,6 +242,13 @@ believed were safe. A fine-pitch fanout needs escape-routing / non-grid pad acce
 which this router doesn't have. (Honest and expected per the brief — but the
 silent clearance breach, vs. an honest "can't route", is the surprising part.)
 
+> **RESOLVED** (branch `feat/keepout`, issue 0005): parts now have a courtyard
+> (origin-centred bbox of their pad copper + margin) and elaboration emits a
+> `NoOverlap` solver constraint for every component pair, so overlapping courtyards
+> are pushed apart (AABB min-translation; fixed-fixed overlaps reported). On this PoC
+> it cuts the now-visible pad-pad clashes from 16 → 1 (the residual +3V3/GND pair is
+> the *approximate* solver, 0007). Orientation is still not optimised by the solver.
+
 **5. Placement has no courtyard / overlap-avoidance primitive.** `NearPin` pulls a
 decoupler onto its pad, but nothing stops 14 caps stacking on top of each other (or
 on the QFN) — `MinSep` is pairwise and component-centroid only, so spreading N caps

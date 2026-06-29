@@ -229,6 +229,41 @@ pub fn pad_copper_world(comp: &Component, c: &PadCopper) -> Shape2D {
     c.shape.map_points(|p| to_world(comp, p))
 }
 
+/// Default extra clearance added around a part's copper extent to form its
+/// courtyard keep-out, in nm (~0.25 mm, the KiCad-ish default).
+pub const COURTYARD_MARGIN: Nm = 250_000;
+
+/// A part's **courtyard** as origin-centred axis-aligned half-extents `(hw, hh)` in
+/// component-local nm: the bounding box of its **pad copper**, made symmetric about
+/// the origin and grown by [`COURTYARD_MARGIN`]. This is the keep-out the placement
+/// solver uses for overlap-avoidance (issue 0005).
+///
+/// Derived from real copper extent only, so a footprint-less part (the toy
+/// `part_library`, `pad: None`) returns `(0, 0)` — it has no defined physical
+/// courtyard, so it is exempt from overlap-avoidance (it is an abstract fixture, not
+/// a placeable body). Origin-centred (rather than a true offset bbox) keeps it a
+/// single half-extent pair that rotates by swapping `hw`/`hh` on a cardinal turn;
+/// real footprints are centred on their origin, so this is tight in practice and
+/// conservative otherwise.
+pub fn courtyard_half_extents(def: &PartDef) -> (Nm, Nm) {
+    let (mut mx, mut my) = (0, 0); // max |coordinate| on each axis
+    let mut any = false;
+    for pin in &def.pins {
+        let Some(pad) = &pin.pad else { continue };
+        for cu in &pad.copper {
+            if let Some((lo, hi)) = cu.shape.bbox() {
+                mx = mx.max(lo.x.abs()).max(hi.x.abs());
+                my = my.max(lo.y.abs()).max(hi.y.abs());
+                any = true;
+            }
+        }
+    }
+    if !any {
+        return (0, 0);
+    }
+    (mx + COURTYARD_MARGIN, my + COURTYARD_MARGIN)
+}
+
 pub type PartLib = BTreeMap<String, PartDef>;
 
 fn uart() -> InterfaceDef {

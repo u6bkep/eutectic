@@ -466,8 +466,18 @@ stubs) — it verifies its proposed copper against the same pad-aware clearance 
 drops any net that actually clashes, so `routed` means *verified clean*. (On the
 PoC this honestly drops from a lying "19 routed / 5 violations" to "4 routed / 0
 router-introduced violations"; the remaining clearances are all pre-routing
-pad-pad placement issues — 0005.) **Still pending:** board outline / cutouts /
-keep-outs as features + placement overlap avoidance (0005); the router's obstacle
+pad-pad placement issues — 0005.) **Placement overlap-avoidance done (resolves 0005):** each part has a **courtyard**
+(`part::courtyard_half_extents` — the origin-centred bbox of its pad copper + a
+margin; footprint-less parts have none and are exempt), and elaboration emits a
+`solve::Constraint::NoOverlap` for every component pair so the solver pushes
+overlapping courtyards apart (AABB min-translation, fixed parts immovable →
+unresolvable overlaps reported). On the PoC this cuts the pre-routing pad-pad
+clashes the honest DRC surfaced from **16 → 1** (the residual is a +3V3/GND pair the
+*approximate* solver (0007) can't fully separate on a dense board, not an
+overlap-avoidance gap). Courtyards are origin-centred symmetric boxes (tight for
+origin-centred footprints, conservative otherwise) and the pass is O(N²) — noted
+limits. **Still pending:** board outline / cutouts / keep-outs *as features* (Stage
+B2 — arbitrary `Substrate` polygon + `Void`, the MCAD-fit angle); the router's obstacle
 model still blocks on pad *points* (so it drops more than a pad-extent-aware or
 rip-up router would keep — 0008); full `ZRange`-stackup gating; `Solid`/true-3D. Implementation is staged: **(1)** the `geom` core — `Shape2D`,
 `ZRange`, `Extent::Prism`, `Role`, `Material`, `Feature`, the stackup + defaults, and the 2.5D

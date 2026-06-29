@@ -79,6 +79,11 @@ pub enum Constraint {
     /// pin's local offset already rotated by `b`'s (fixed) orientation. Moving `b`
     /// carries its pin rigidly, so the correction is applied to `b`'s position.
     NearPin { a: EntityId, b: EntityId, b_off: Point, within: Nm },
+    /// Two component courtyards (axis-aligned boxes, centred on each node, with the
+    /// given half-extents already oriented) must not overlap (issue 0005). When they
+    /// do, the nodes are pushed apart along the axis of least penetration. Two
+    /// overlapping *fixed* parts cannot be separated and are reported as unsatisfied.
+    NoOverlap { a: EntityId, b: EntityId, a_half: (Nm, Nm), b_half: (Nm, Nm) },
 }
 
 pub struct Problem {
@@ -225,6 +230,33 @@ fn constraint_residual(c: &Constraint, pos: &BTreeMap<EntityId, (f64, f64)>) -> 
         }
         Constraint::AlignX { nodes } => align_residual(pos, nodes, true),
         Constraint::AlignY { nodes } => align_residual(pos, nodes, false),
+        Constraint::NoOverlap { a, b, a_half, b_half } => {
+            let (Some(&pa), Some(&pb)) = (pos.get(a), pos.get(b)) else { return 0.0 };
+            aabb_push(pa, half_f64(*a_half), pb, half_f64(*b_half)).map_or(0.0, |(d, _, _)| d)
+        }
+    }
+}
+
+fn half_f64(h: (Nm, Nm)) -> (f64, f64) {
+    (h.0 as f64, h.1 as f64)
+}
+
+/// Penetration of two axis-aligned courtyards (centres `pa`/`pb`, half-extents
+/// `ah`/`bh`). Returns `(depth, ux, uy)` — the minimum-translation separation: push
+/// `b` by `+depth·(ux,uy)` and `a` by `−depth·(ux,uy)` to just clear. `None` if the
+/// boxes are disjoint (touching counts as disjoint). Axis of least penetration; the
+/// push sign carries `b` to the far side, deterministic when centres coincide.
+fn aabb_push(pa: (f64, f64), ah: (f64, f64), pb: (f64, f64), bh: (f64, f64)) -> Option<(f64, f64, f64)> {
+    let (dx, dy) = (pb.0 - pa.0, pb.1 - pa.1);
+    let ox = (ah.0 + bh.0) - dx.abs();
+    let oy = (ah.1 + bh.1) - dy.abs();
+    if ox <= 0.0 || oy <= 0.0 {
+        return None;
+    }
+    if ox <= oy {
+        Some((ox, if dx >= 0.0 { 1.0 } else { -1.0 }, 0.0))
+    } else {
+        Some((oy, 0.0, if dy >= 0.0 { 1.0 } else { -1.0 }))
     }
 }
 
@@ -276,6 +308,29 @@ fn apply_constraint(
         Constraint::NearPin { a, b, b_off, within } => {
             let off = (b_off.x as f64, b_off.y as f64);
             set_separation(pos, fixed, a, b, zero, off, *within as f64, true)
+        }
+        Constraint::NoOverlap { a, b, a_half, b_half } => {
+            let (Some(&pa), Some(&pb)) = (pos.get(a), pos.get(b)) else { return };
+            let Some((depth, ux, uy)) = aabb_push(pa, half_f64(*a_half), pb, half_f64(*b_half)) else {
+                return;
+            };
+            let (a_fixed, b_fixed) = (fixed.contains(a), fixed.contains(b));
+            let (sa, sb) = match (a_fixed, b_fixed) {
+                (true, true) => (0.0, 0.0),
+                (true, false) => (0.0, 1.0),
+                (false, true) => (1.0, 0.0),
+                (false, false) => (0.5, 0.5),
+            };
+            if !a_fixed {
+                let pa = pos.get_mut(a).unwrap();
+                pa.0 -= depth * ux * sa;
+                pa.1 -= depth * uy * sa;
+            }
+            if !b_fixed {
+                let pb = pos.get_mut(b).unwrap();
+                pb.0 += depth * ux * sb;
+                pb.1 += depth * uy * sb;
+            }
         }
     }
 }
