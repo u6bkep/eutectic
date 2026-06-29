@@ -978,4 +978,33 @@ mod tests {
         // Exact 10/10 join: no orphan pins on either side.
         assert!(report.symbol_only.is_empty() && report.footprint_only.is_empty());
     }
+
+    /// PoC Stage-1 gate: the authoritative RP2350A QFN-60 symbol + footprint
+    /// (KiCad official library, vendored under poc/parts/) join cleanly into a
+    /// 61-pin part with real RP2350 functions and roles. Guarded on the vendored
+    /// files existing, so it is a no-op in a checkout without them.
+    #[test]
+    fn rp2350a_qfn60_join_if_present() {
+        let sym_path = "poc/parts/MCU_RaspberryPi.kicad_sym";
+        let fp_path = "poc/parts/RP2350A_QFN-60.kicad_mod";
+        if !std::path::Path::new(sym_path).exists() || !std::path::Path::new(fp_path).exists() {
+            return;
+        }
+        let sym = import_symbol_named(&std::fs::read_to_string(sym_path).unwrap(), "RP2350A").unwrap();
+        let footprint = import_footprint_file(fp_path).unwrap();
+        let report = join_symbol_footprint(&sym, &footprint);
+        // 60 signal/power pads + the exposed pad = 61 pins, clean both ways.
+        assert_eq!(report.part.pins.len(), 61);
+        assert!(report.symbol_only.is_empty() && report.footprint_only.is_empty());
+        // Real RP2350 functional names + roles survive the join.
+        assert_eq!(report.part.pin_role("GPIO0"), Some(PinRole::Bidir));
+        assert_eq!(report.part.pin_role("IOVDD"), Some(PinRole::PowerIn));
+        assert_eq!(report.part.pin_role("VREG_LX"), Some(PinRole::PowerOut));
+        assert!(report.part.pins.iter().any(|p| p.name == "USB_DP"));
+        assert!(report.part.pins.iter().any(|p| p.name == "QSPI_SCLK"));
+        // 6 IOVDD + 3 DVDD pads share a functional name (the duplicate-name case
+        // the PoC must uniquify before it can net every power pad).
+        assert_eq!(report.part.pins.iter().filter(|p| p.name == "IOVDD").count(), 6);
+        assert_eq!(report.part.pins.iter().filter(|p| p.name == "DVDD").count(), 3);
+    }
 }

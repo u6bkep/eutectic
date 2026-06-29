@@ -1,0 +1,502 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-2.000000 -3.045000 60.000000 49.045000">
+  <rect class="outline-board" x="0.000000" y="-1.045000" width="56.000000" height="44.000000" fill="none" stroke="black" stroke-width="0.1"/>
+  <g class="component" data-id="C0">
+    <circle class="pad" cx="27.059722" cy="22.003119" r="0.3"/>
+    <circle class="pad" cx="28.019722" cy="22.003119" r="0.3"/>
+    <circle class="origin" cx="27.539722" cy="22.003119" r="0.5" fill="red"/>
+    <text x="27.539722" y="22.003119" font-size="1.5">C0</text>
+  </g>
+  <g class="component" data-id="C1">
+    <circle class="pad" cx="27.056572" cy="18.038525" r="0.3"/>
+    <circle class="pad" cx="28.016572" cy="18.038525" r="0.3"/>
+    <circle class="origin" cx="27.536572" cy="18.038525" r="0.5" fill="red"/>
+    <text x="27.536572" y="18.038525" font-size="1.5">C1</text>
+  </g>
+  <g class="component" data-id="C10">
+    <circle class="pad" cx="27.063630" cy="19.950392" r="0.3"/>
+    <circle class="pad" cx="28.023630" cy="19.950392" r="0.3"/>
+    <circle class="origin" cx="27.543630" cy="19.950392" r="0.5" fill="red"/>
+    <text x="27.543630" y="19.950392" font-size="1.5">C10</text>
+  </g>
+  <g class="component" data-id="C11">
+    <circle class="pad" cx="30.511412" cy="15.731835" r="0.3"/>
+    <circle class="pad" cx="31.471412" cy="15.731835" r="0.3"/>
+    <circle class="origin" cx="30.991412" cy="15.731835" r="0.5" fill="red"/>
+    <text x="30.991412" y="15.731835" font-size="1.5">C11</text>
+  </g>
+  <g class="component" data-id="C12">
+    <circle class="pad" cx="33.963868" cy="19.546712" r="0.3"/>
+    <circle class="pad" cx="34.923868" cy="19.546712" r="0.3"/>
+    <circle class="origin" cx="34.443868" cy="19.546712" r="0.5" fill="red"/>
+    <text x="34.443868" y="19.546712" font-size="1.5">C12</text>
+  </g>
+  <g class="component" data-id="C13">
+    <circle class="pad" cx="33.315604" cy="22.567341" r="0.3"/>
+    <circle class="pad" cx="34.275604" cy="22.567341" r="0.3"/>
+    <circle class="origin" cx="33.795604" cy="22.567341" r="0.5" fill="red"/>
+    <text x="33.795604" y="22.567341" font-size="1.5">C13</text>
+  </g>
+  <g class="component" data-id="C2">
+    <circle class="pad" cx="29.304971" cy="15.804917" r="0.3"/>
+    <circle class="pad" cx="30.264971" cy="15.804917" r="0.3"/>
+    <circle class="origin" cx="29.784971" cy="15.804917" r="0.5" fill="red"/>
+    <text x="29.784971" y="15.804917" font-size="1.5">C2</text>
+  </g>
+  <g class="component" data-id="C3">
+    <circle class="pad" cx="33.305605" cy="15.798535" r="0.3"/>
+    <circle class="pad" cx="34.265605" cy="15.798535" r="0.3"/>
+    <circle class="origin" cx="33.785605" cy="15.798535" r="0.5" fill="red"/>
+    <text x="33.785605" y="15.798535" font-size="1.5">C3</text>
+  </g>
+  <g class="component" data-id="C4">
+    <circle class="pad" cx="33.959677" cy="19.203665" r="0.3"/>
+    <circle class="pad" cx="34.919677" cy="19.203665" r="0.3"/>
+    <circle class="origin" cx="34.439677" cy="19.203665" r="0.5" fill="red"/>
+    <text x="34.439677" y="19.203665" font-size="1.5">C4</text>
+  </g>
+  <g class="component" data-id="C5">
+    <circle class="pad" cx="33.962465" cy="21.967495" r="0.3"/>
+    <circle class="pad" cx="34.922465" cy="21.967495" r="0.3"/>
+    <circle class="origin" cx="34.442465" cy="21.967495" r="0.5" fill="red"/>
+    <text x="34.442465" y="21.967495" font-size="1.5">C5</text>
+  </g>
+  <g class="component" data-id="C6">
+    <circle class="pad" cx="30.113530" cy="22.601918" r="0.3"/>
+    <circle class="pad" cx="31.073530" cy="22.601918" r="0.3"/>
+    <circle class="origin" cx="30.593530" cy="22.601918" r="0.5" fill="red"/>
+    <text x="30.593530" y="22.601918" font-size="1.5">C6</text>
+  </g>
+  <g class="component" data-id="C7">
+    <circle class="pad" cx="30.513909" cy="22.596071" r="0.3"/>
+    <circle class="pad" cx="31.473909" cy="22.596071" r="0.3"/>
+    <circle class="origin" cx="30.993909" cy="22.596071" r="0.5" fill="red"/>
+    <text x="30.993909" y="22.596071" font-size="1.5">C7</text>
+  </g>
+  <g class="component" data-id="C8">
+    <circle class="pad" cx="33.963538" cy="21.551805" r="0.3"/>
+    <circle class="pad" cx="34.923538" cy="21.551805" r="0.3"/>
+    <circle class="origin" cx="34.443538" cy="21.551805" r="0.5" fill="red"/>
+    <text x="34.443538" y="21.551805" font-size="1.5">C8</text>
+  </g>
+  <g class="component" data-id="C9">
+    <circle class="pad" cx="32.114548" cy="22.585781" r="0.3"/>
+    <circle class="pad" cx="33.074548" cy="22.585781" r="0.3"/>
+    <circle class="origin" cx="32.594548" cy="22.585781" r="0.5" fill="red"/>
+    <text x="32.594548" y="22.585781" font-size="1.5">C9</text>
+  </g>
+  <g class="component" data-id="C_IN">
+    <circle class="pad" cx="9.520000" cy="24.955000" r="0.3"/>
+    <circle class="pad" cx="10.480000" cy="24.955000" r="0.3"/>
+    <circle class="origin" cx="10.000000" cy="24.955000" r="0.5" fill="red"/>
+    <text x="10.000000" y="24.955000" font-size="1.5">C_IN</text>
+  </g>
+  <g class="component" data-id="C_OUT">
+    <circle class="pad" cx="17.520000" cy="24.955000" r="0.3"/>
+    <circle class="pad" cx="18.480000" cy="24.955000" r="0.3"/>
+    <circle class="origin" cx="18.000000" cy="24.955000" r="0.5" fill="red"/>
+    <text x="18.000000" y="24.955000" font-size="1.5">C_OUT</text>
+  </g>
+  <g class="component" data-id="C_X1">
+    <circle class="pad" cx="14.520000" cy="9.955000" r="0.3"/>
+    <circle class="pad" cx="15.480000" cy="9.955000" r="0.3"/>
+    <circle class="origin" cx="15.000000" cy="9.955000" r="0.5" fill="red"/>
+    <text x="15.000000" y="9.955000" font-size="1.5">C_X1</text>
+  </g>
+  <g class="component" data-id="C_X2">
+    <circle class="pad" cx="20.520000" cy="9.955000" r="0.3"/>
+    <circle class="pad" cx="21.480000" cy="9.955000" r="0.3"/>
+    <circle class="origin" cx="21.000000" cy="9.955000" r="0.5" fill="red"/>
+    <text x="21.000000" y="9.955000" font-size="1.5">C_X2</text>
+  </g>
+  <g class="component" data-id="D1">
+    <circle class="pad" cx="39.085000" cy="29.505000" r="0.3"/>
+    <circle class="pad" cx="39.085000" cy="28.405000" r="0.3"/>
+    <circle class="pad" cx="40.915000" cy="28.405000" r="0.3"/>
+    <circle class="pad" cx="40.915000" cy="29.505000" r="0.3"/>
+    <circle class="origin" cx="40.000000" cy="28.955000" r="0.5" fill="red"/>
+    <text x="40.000000" y="28.955000" font-size="1.5">D1</text>
+  </g>
+  <g class="component" data-id="J1">
+    <circle class="pad" cx="2.000000" cy="37.955000" r="0.3"/>
+    <circle class="pad" cx="3.000000" cy="37.955000" r="0.3"/>
+    <circle class="pad" cx="4.000000" cy="37.955000" r="0.3"/>
+    <circle class="pad" cx="0.700000" cy="34.080000" r="0.3"/>
+    <circle class="origin" cx="3.000000" cy="35.955000" r="0.5" fill="red"/>
+    <text x="3.000000" y="35.955000" font-size="1.5">J1</text>
+  </g>
+  <g class="component" data-id="J10">
+    <circle class="pad" cx="52.000000" cy="9.955000" r="0.3"/>
+    <circle class="pad" cx="53.000000" cy="9.955000" r="0.3"/>
+    <circle class="pad" cx="54.000000" cy="9.955000" r="0.3"/>
+    <circle class="pad" cx="50.700000" cy="6.080000" r="0.3"/>
+    <circle class="origin" cx="53.000000" cy="7.955000" r="0.5" fill="red"/>
+    <text x="53.000000" y="7.955000" font-size="1.5">J10</text>
+  </g>
+  <g class="component" data-id="J11">
+    <circle class="pad" cx="24.750000" cy="44.000000" r="0.3"/>
+    <circle class="pad" cx="25.550000" cy="44.000000" r="0.3"/>
+    <circle class="pad" cx="26.750000" cy="44.000000" r="0.3"/>
+    <circle class="pad" cx="27.750000" cy="44.000000" r="0.3"/>
+    <circle class="pad" cx="28.250000" cy="44.000000" r="0.3"/>
+    <circle class="pad" cx="29.250000" cy="44.000000" r="0.3"/>
+    <circle class="pad" cx="30.450000" cy="44.000000" r="0.3"/>
+    <circle class="pad" cx="31.250000" cy="44.000000" r="0.3"/>
+    <circle class="pad" cx="31.250000" cy="44.000000" r="0.3"/>
+    <circle class="pad" cx="30.450000" cy="44.000000" r="0.3"/>
+    <circle class="pad" cx="29.750000" cy="44.000000" r="0.3"/>
+    <circle class="pad" cx="28.750000" cy="44.000000" r="0.3"/>
+    <circle class="pad" cx="27.250000" cy="44.000000" r="0.3"/>
+    <circle class="pad" cx="26.250000" cy="44.000000" r="0.3"/>
+    <circle class="pad" cx="25.550000" cy="44.000000" r="0.3"/>
+    <circle class="pad" cx="24.750000" cy="44.000000" r="0.3"/>
+    <circle class="pad" cx="23.680000" cy="43.085000" r="0.3"/>
+    <circle class="origin" cx="28.000000" cy="39.955000" r="0.5" fill="red"/>
+    <text x="28.000000" y="39.955000" font-size="1.5">J11</text>
+  </g>
+  <g class="component" data-id="J2">
+    <circle class="pad" cx="2.000000" cy="30.955000" r="0.3"/>
+    <circle class="pad" cx="3.000000" cy="30.955000" r="0.3"/>
+    <circle class="pad" cx="4.000000" cy="30.955000" r="0.3"/>
+    <circle class="pad" cx="0.700000" cy="27.080000" r="0.3"/>
+    <circle class="origin" cx="3.000000" cy="28.955000" r="0.5" fill="red"/>
+    <text x="3.000000" y="28.955000" font-size="1.5">J2</text>
+  </g>
+  <g class="component" data-id="J3">
+    <circle class="pad" cx="2.000000" cy="23.955000" r="0.3"/>
+    <circle class="pad" cx="3.000000" cy="23.955000" r="0.3"/>
+    <circle class="pad" cx="4.000000" cy="23.955000" r="0.3"/>
+    <circle class="pad" cx="0.700000" cy="20.080000" r="0.3"/>
+    <circle class="origin" cx="3.000000" cy="21.955000" r="0.5" fill="red"/>
+    <text x="3.000000" y="21.955000" font-size="1.5">J3</text>
+  </g>
+  <g class="component" data-id="J4">
+    <circle class="pad" cx="2.000000" cy="16.955000" r="0.3"/>
+    <circle class="pad" cx="3.000000" cy="16.955000" r="0.3"/>
+    <circle class="pad" cx="4.000000" cy="16.955000" r="0.3"/>
+    <circle class="pad" cx="0.700000" cy="13.080000" r="0.3"/>
+    <circle class="origin" cx="3.000000" cy="14.955000" r="0.5" fill="red"/>
+    <text x="3.000000" y="14.955000" font-size="1.5">J4</text>
+  </g>
+  <g class="component" data-id="J5">
+    <circle class="pad" cx="2.000000" cy="9.955000" r="0.3"/>
+    <circle class="pad" cx="3.000000" cy="9.955000" r="0.3"/>
+    <circle class="pad" cx="4.000000" cy="9.955000" r="0.3"/>
+    <circle class="pad" cx="0.700000" cy="6.080000" r="0.3"/>
+    <circle class="origin" cx="3.000000" cy="7.955000" r="0.5" fill="red"/>
+    <text x="3.000000" y="7.955000" font-size="1.5">J5</text>
+  </g>
+  <g class="component" data-id="J6">
+    <circle class="pad" cx="52.000000" cy="37.955000" r="0.3"/>
+    <circle class="pad" cx="53.000000" cy="37.955000" r="0.3"/>
+    <circle class="pad" cx="54.000000" cy="37.955000" r="0.3"/>
+    <circle class="pad" cx="50.700000" cy="34.080000" r="0.3"/>
+    <circle class="origin" cx="53.000000" cy="35.955000" r="0.5" fill="red"/>
+    <text x="53.000000" y="35.955000" font-size="1.5">J6</text>
+  </g>
+  <g class="component" data-id="J7">
+    <circle class="pad" cx="52.000000" cy="30.955000" r="0.3"/>
+    <circle class="pad" cx="53.000000" cy="30.955000" r="0.3"/>
+    <circle class="pad" cx="54.000000" cy="30.955000" r="0.3"/>
+    <circle class="pad" cx="50.700000" cy="27.080000" r="0.3"/>
+    <circle class="origin" cx="53.000000" cy="28.955000" r="0.5" fill="red"/>
+    <text x="53.000000" y="28.955000" font-size="1.5">J7</text>
+  </g>
+  <g class="component" data-id="J8">
+    <circle class="pad" cx="52.000000" cy="23.955000" r="0.3"/>
+    <circle class="pad" cx="53.000000" cy="23.955000" r="0.3"/>
+    <circle class="pad" cx="54.000000" cy="23.955000" r="0.3"/>
+    <circle class="pad" cx="50.700000" cy="20.080000" r="0.3"/>
+    <circle class="origin" cx="53.000000" cy="21.955000" r="0.5" fill="red"/>
+    <text x="53.000000" y="21.955000" font-size="1.5">J8</text>
+  </g>
+  <g class="component" data-id="J9">
+    <circle class="pad" cx="52.000000" cy="16.955000" r="0.3"/>
+    <circle class="pad" cx="53.000000" cy="16.955000" r="0.3"/>
+    <circle class="pad" cx="54.000000" cy="16.955000" r="0.3"/>
+    <circle class="pad" cx="50.700000" cy="13.080000" r="0.3"/>
+    <circle class="origin" cx="53.000000" cy="14.955000" r="0.5" fill="red"/>
+    <text x="53.000000" y="14.955000" font-size="1.5">J9</text>
+  </g>
+  <g class="component" data-id="L1">
+    <circle class="pad" cx="21.325000" cy="28.955000" r="0.3"/>
+    <circle class="pad" cx="22.675000" cy="28.955000" r="0.3"/>
+    <circle class="origin" cx="22.000000" cy="28.955000" r="0.5" fill="red"/>
+    <text x="22.000000" y="28.955000" font-size="1.5">L1</text>
+  </g>
+  <g class="component" data-id="R_AVDD">
+    <circle class="pad" cx="23.490000" cy="24.955000" r="0.3"/>
+    <circle class="pad" cx="24.510000" cy="24.955000" r="0.3"/>
+    <circle class="origin" cx="24.000000" cy="24.955000" r="0.5" fill="red"/>
+    <text x="24.000000" y="24.955000" font-size="1.5">R_AVDD</text>
+  </g>
+  <g class="component" data-id="R_BOOT">
+    <circle class="pad" cx="43.490000" cy="8.955000" r="0.3"/>
+    <circle class="pad" cx="44.510000" cy="8.955000" r="0.3"/>
+    <circle class="origin" cx="44.000000" cy="8.955000" r="0.5" fill="red"/>
+    <text x="44.000000" y="8.955000" font-size="1.5">R_BOOT</text>
+  </g>
+  <g class="component" data-id="R_CC1">
+    <circle class="pad" cx="21.490000" cy="37.955000" r="0.3"/>
+    <circle class="pad" cx="22.510000" cy="37.955000" r="0.3"/>
+    <circle class="origin" cx="22.000000" cy="37.955000" r="0.5" fill="red"/>
+    <text x="22.000000" y="37.955000" font-size="1.5">R_CC1</text>
+  </g>
+  <g class="component" data-id="R_CC2">
+    <circle class="pad" cx="33.490000" cy="37.955000" r="0.3"/>
+    <circle class="pad" cx="34.510000" cy="37.955000" r="0.3"/>
+    <circle class="origin" cx="34.000000" cy="37.955000" r="0.5" fill="red"/>
+    <text x="34.000000" y="37.955000" font-size="1.5">R_CC2</text>
+  </g>
+  <g class="component" data-id="R_DM">
+    <circle class="pad" cx="30.490000" cy="34.955000" r="0.3"/>
+    <circle class="pad" cx="31.510000" cy="34.955000" r="0.3"/>
+    <circle class="origin" cx="31.000000" cy="34.955000" r="0.5" fill="red"/>
+    <text x="31.000000" y="34.955000" font-size="1.5">R_DM</text>
+  </g>
+  <g class="component" data-id="R_DP">
+    <circle class="pad" cx="24.490000" cy="34.955000" r="0.3"/>
+    <circle class="pad" cx="25.510000" cy="34.955000" r="0.3"/>
+    <circle class="origin" cx="25.000000" cy="34.955000" r="0.5" fill="red"/>
+    <text x="25.000000" y="34.955000" font-size="1.5">R_DP</text>
+  </g>
+  <g class="component" data-id="R_X">
+    <circle class="pad" cx="15.490000" cy="15.955000" r="0.3"/>
+    <circle class="pad" cx="16.510000" cy="15.955000" r="0.3"/>
+    <circle class="origin" cx="16.000000" cy="15.955000" r="0.5" fill="red"/>
+    <text x="16.000000" y="15.955000" font-size="1.5">R_X</text>
+  </g>
+  <g class="component" data-id="SW1">
+    <circle class="pad" cx="41.800000" cy="5.680000" r="0.3"/>
+    <circle class="pad" cx="38.200000" cy="4.230000" r="0.3"/>
+    <circle class="origin" cx="40.000000" cy="4.955000" r="0.5" fill="red"/>
+    <text x="40.000000" y="4.955000" font-size="1.5">SW1</text>
+  </g>
+  <g class="component" data-id="SW2">
+    <circle class="pad" cx="17.800000" cy="5.680000" r="0.3"/>
+    <circle class="pad" cx="14.200000" cy="4.230000" r="0.3"/>
+    <circle class="origin" cx="16.000000" cy="4.955000" r="0.5" fill="red"/>
+    <text x="16.000000" y="4.955000" font-size="1.5">SW2</text>
+  </g>
+  <g class="component" data-id="U1">
+    <circle class="pad" cx="24.550000" cy="21.755000" r="0.3"/>
+    <circle class="pad" cx="24.550000" cy="21.355000" r="0.3"/>
+    <circle class="pad" cx="24.550000" cy="20.955000" r="0.3"/>
+    <circle class="pad" cx="24.550000" cy="20.555000" r="0.3"/>
+    <circle class="pad" cx="24.550000" cy="20.155000" r="0.3"/>
+    <circle class="pad" cx="24.550000" cy="19.755000" r="0.3"/>
+    <circle class="pad" cx="24.550000" cy="19.355000" r="0.3"/>
+    <circle class="pad" cx="24.550000" cy="18.955000" r="0.3"/>
+    <circle class="pad" cx="24.550000" cy="18.555000" r="0.3"/>
+    <circle class="pad" cx="24.550000" cy="18.155000" r="0.3"/>
+    <circle class="pad" cx="24.550000" cy="17.755000" r="0.3"/>
+    <circle class="pad" cx="24.550000" cy="17.355000" r="0.3"/>
+    <circle class="pad" cx="24.550000" cy="16.955000" r="0.3"/>
+    <circle class="pad" cx="24.550000" cy="16.555000" r="0.3"/>
+    <circle class="pad" cx="24.550000" cy="16.155000" r="0.3"/>
+    <circle class="pad" cx="25.200000" cy="15.505000" r="0.3"/>
+    <circle class="pad" cx="25.600000" cy="15.505000" r="0.3"/>
+    <circle class="pad" cx="26.000000" cy="15.505000" r="0.3"/>
+    <circle class="pad" cx="26.400000" cy="15.505000" r="0.3"/>
+    <circle class="pad" cx="26.800000" cy="15.505000" r="0.3"/>
+    <circle class="pad" cx="27.200000" cy="15.505000" r="0.3"/>
+    <circle class="pad" cx="27.600000" cy="15.505000" r="0.3"/>
+    <circle class="pad" cx="28.000000" cy="15.505000" r="0.3"/>
+    <circle class="pad" cx="28.400000" cy="15.505000" r="0.3"/>
+    <circle class="pad" cx="28.800000" cy="15.505000" r="0.3"/>
+    <circle class="pad" cx="29.200000" cy="15.505000" r="0.3"/>
+    <circle class="pad" cx="29.600000" cy="15.505000" r="0.3"/>
+    <circle class="pad" cx="30.000000" cy="15.505000" r="0.3"/>
+    <circle class="pad" cx="30.400000" cy="15.505000" r="0.3"/>
+    <circle class="pad" cx="30.800000" cy="15.505000" r="0.3"/>
+    <circle class="pad" cx="31.450000" cy="16.155000" r="0.3"/>
+    <circle class="pad" cx="31.450000" cy="16.555000" r="0.3"/>
+    <circle class="pad" cx="31.450000" cy="16.955000" r="0.3"/>
+    <circle class="pad" cx="31.450000" cy="17.355000" r="0.3"/>
+    <circle class="pad" cx="31.450000" cy="17.755000" r="0.3"/>
+    <circle class="pad" cx="31.450000" cy="18.155000" r="0.3"/>
+    <circle class="pad" cx="31.450000" cy="18.555000" r="0.3"/>
+    <circle class="pad" cx="31.450000" cy="18.955000" r="0.3"/>
+    <circle class="pad" cx="31.450000" cy="19.355000" r="0.3"/>
+    <circle class="pad" cx="31.450000" cy="19.755000" r="0.3"/>
+    <circle class="pad" cx="31.450000" cy="20.155000" r="0.3"/>
+    <circle class="pad" cx="31.450000" cy="20.555000" r="0.3"/>
+    <circle class="pad" cx="31.450000" cy="20.955000" r="0.3"/>
+    <circle class="pad" cx="31.450000" cy="21.355000" r="0.3"/>
+    <circle class="pad" cx="31.450000" cy="21.755000" r="0.3"/>
+    <circle class="pad" cx="30.800000" cy="22.405000" r="0.3"/>
+    <circle class="pad" cx="30.400000" cy="22.405000" r="0.3"/>
+    <circle class="pad" cx="30.000000" cy="22.405000" r="0.3"/>
+    <circle class="pad" cx="29.600000" cy="22.405000" r="0.3"/>
+    <circle class="pad" cx="29.200000" cy="22.405000" r="0.3"/>
+    <circle class="pad" cx="28.800000" cy="22.405000" r="0.3"/>
+    <circle class="pad" cx="28.400000" cy="22.405000" r="0.3"/>
+    <circle class="pad" cx="28.000000" cy="22.405000" r="0.3"/>
+    <circle class="pad" cx="27.600000" cy="22.405000" r="0.3"/>
+    <circle class="pad" cx="27.200000" cy="22.405000" r="0.3"/>
+    <circle class="pad" cx="26.800000" cy="22.405000" r="0.3"/>
+    <circle class="pad" cx="26.400000" cy="22.405000" r="0.3"/>
+    <circle class="pad" cx="26.000000" cy="22.405000" r="0.3"/>
+    <circle class="pad" cx="25.600000" cy="22.405000" r="0.3"/>
+    <circle class="pad" cx="25.200000" cy="22.405000" r="0.3"/>
+    <circle class="pad" cx="26.550000" cy="20.405000" r="0.3"/>
+    <circle class="origin" cx="28.000000" cy="18.955000" r="0.5" fill="red"/>
+    <text x="28.000000" y="18.955000" font-size="1.5">U1</text>
+  </g>
+  <g class="component" data-id="U2">
+    <circle class="pad" cx="35.525000" cy="14.860000" r="0.3"/>
+    <circle class="pad" cx="35.525000" cy="13.590000" r="0.3"/>
+    <circle class="pad" cx="35.525000" cy="12.320000" r="0.3"/>
+    <circle class="pad" cx="35.525000" cy="11.050000" r="0.3"/>
+    <circle class="pad" cx="40.475000" cy="11.050000" r="0.3"/>
+    <circle class="pad" cx="40.475000" cy="12.320000" r="0.3"/>
+    <circle class="pad" cx="40.475000" cy="13.590000" r="0.3"/>
+    <circle class="pad" cx="40.475000" cy="14.860000" r="0.3"/>
+    <circle class="origin" cx="38.000000" cy="12.955000" r="0.5" fill="red"/>
+    <text x="38.000000" y="12.955000" font-size="1.5">U2</text>
+  </g>
+  <g class="component" data-id="U3">
+    <circle class="pad" cx="12.862500" cy="29.905000" r="0.3"/>
+    <circle class="pad" cx="12.862500" cy="28.955000" r="0.3"/>
+    <circle class="pad" cx="12.862500" cy="28.005000" r="0.3"/>
+    <circle class="pad" cx="15.137500" cy="28.005000" r="0.3"/>
+    <circle class="pad" cx="15.137500" cy="29.905000" r="0.3"/>
+    <circle class="origin" cx="14.000000" cy="28.955000" r="0.5" fill="red"/>
+    <text x="14.000000" y="28.955000" font-size="1.5">U3</text>
+  </g>
+  <g class="component" data-id="Y1">
+    <circle class="pad" cx="16.900000" cy="12.105000" r="0.3"/>
+    <circle class="pad" cx="19.100000" cy="12.105000" r="0.3"/>
+    <circle class="pad" cx="19.100000" cy="13.805000" r="0.3"/>
+    <circle class="pad" cx="16.900000" cy="13.805000" r="0.3"/>
+    <circle class="origin" cx="18.000000" cy="12.955000" r="0.5" fill="red"/>
+    <text x="18.000000" y="12.955000" font-size="1.5">Y1</text>
+  </g>
+  <polyline class="trace trace-top" data-id="t1" points="27.059722,22.003119 27.000000,21.805000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t2" points="27.000000,21.805000 27.000000,20.905000 26.100000,20.905000 26.100000,18.205000 27.000000,18.205000 27.056572,18.038525" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t3" points="27.000000,18.205000 27.000000,15.955000 29.250000,15.955000 29.304971,15.804917" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t4" points="29.250000,15.955000 29.700000,15.955000 29.700000,16.405000 30.600000,16.405000 30.600000,16.855000 31.050000,16.855000 31.050000,17.305000 31.950000,17.305000 31.950000,15.955000 33.300000,15.955000 33.305605,15.798535" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t5" points="31.950000,17.305000 31.950000,19.105000 33.750000,19.105000 33.959677,19.203665" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t6" points="33.300000,19.105000 33.300000,21.805000 33.750000,21.805000 33.962465,21.967495" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t7" points="33.300000,21.805000 31.950000,21.805000 31.950000,23.155000 30.150000,23.155000 30.113530,22.601918" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t8" points="30.600000,23.155000 30.513909,22.596071" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t9" points="33.300000,21.355000 33.750000,21.355000 33.963538,21.551805" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t10" points="31.950000,22.705000 32.114548,22.585781" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t11" points="26.100000,20.905000 25.200000,20.905000 25.200000,21.805000 17.550000,21.805000 17.550000,24.955000 17.520000,24.955000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t12" points="33.750000,21.805000 33.750000,29.455000 39.150000,29.455000 39.085000,29.505000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t13" points="23.400000,21.805000 23.400000,24.955000 23.490000,24.955000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t14" points="31.950000,21.805000 31.500000,21.805000 31.500000,21.355000 31.450000,21.355000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t15" points="24.750000,21.805000 24.550000,21.755000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t16" points="23.850000,21.805000 23.850000,17.755000 24.550000,17.755000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t17" points="27.000000,15.955000 26.800000,15.505000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t18" points="31.950000,15.955000 31.950000,15.055000 31.050000,15.055000 31.050000,15.505000 30.800000,15.505000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t19" points="31.950000,18.655000 31.500000,18.655000 31.450000,18.955000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t20" points="31.500000,21.805000 31.450000,21.755000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t21" points="30.150000,23.155000 27.900000,23.155000 27.900000,22.705000 27.600000,22.405000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t22" points="27.900000,22.705000 28.000000,22.405000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t23" points="31.500000,21.805000 29.700000,21.805000 29.600000,22.405000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t24" points="33.300000,15.955000 33.300000,15.055000 35.100000,15.055000 35.100000,15.505000 36.000000,15.505000 36.000000,15.055000 40.500000,15.055000 40.475000,14.860000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t25" points="17.550000,24.955000 15.300000,24.955000 15.300000,29.905000 15.137500,29.905000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t26" points="27.063630,19.950392 27.000000,20.005000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t27" points="27.000000,20.005000 27.000000,18.655000 28.800000,18.655000 28.800000,16.405000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t28" points="28.800000,16.405000 28.800000,15.955000 28.350000,15.955000 28.350000,15.055000 30.600000,15.055000 30.511412,15.731835" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t29" points="30.600000,15.055000 31.950000,15.055000 31.950000,20.005000 33.750000,20.005000 33.963868,19.546712" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t30" points="28.350000,15.055000 25.650000,15.055000 25.650000,14.605000 22.500000,14.605000 22.500000,29.005000 22.675000,28.955000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t31" points="28.350000,15.505000 28.000000,15.505000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t32" points="31.950000,19.555000 31.500000,19.555000 31.450000,19.355000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t33" points="27.000000,19.555000 26.550000,19.555000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t34" points="26.550000,19.555000 25.200000,19.555000 24.550000,19.755000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t35" points="22.500000,23.155000 29.250000,23.155000 29.250000,22.705000 29.200000,22.405000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t36" points="2.000000,37.955000 1.800000,38.005000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t37" points="1.800000,38.005000 1.800000,31.705000 4.500000,31.705000 4.500000,21.355000 23.400000,21.355000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t38" points="23.400000,21.355000 24.550000,21.355000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t39" points="4.000000,37.955000 4.050000,38.005000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t40" points="4.050000,38.005000 4.050000,32.155000 4.950000,32.155000 4.950000,30.355000 15.750000,30.355000 15.750000,25.405000 25.200000,25.405000 25.200000,23.605000 32.400000,23.605000 32.400000,23.155000 33.300000,23.155000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t41" points="33.300000,23.155000 35.100000,23.155000 35.100000,22.705000 35.550000,22.705000 35.550000,20.905000 25.200000,20.905000 25.200000,20.455000 24.550000,20.955000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t42" points="44.510000,8.955000 44.550000,8.755000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t43" points="44.550000,8.755000 44.100000,8.755000 44.100000,8.305000 41.850000,8.305000 41.850000,5.605000 41.800000,5.680000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t44" points="2.000000,30.955000 1.800000,30.805000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t45" points="1.800000,30.805000 1.800000,29.455000 4.050000,29.455000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t46" points="4.050000,29.455000 23.400000,29.455000 23.400000,25.405000 25.200000,25.405000 25.200000,23.605000 35.550000,23.605000 35.550000,23.155000 36.000000,23.155000 36.000000,20.455000 28.800000,20.455000 28.800000,19.555000 28.350000,19.555000 28.350000,19.105000 25.200000,19.105000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t47" points="25.200000,19.105000 25.200000,20.455000 24.550000,20.555000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t48" points="4.000000,30.955000 4.050000,30.805000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t49" points="4.050000,30.805000 4.050000,30.355000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t50" points="4.050000,30.355000 15.750000,30.355000 15.750000,29.905000 23.850000,29.905000 23.850000,25.855000 25.650000,25.855000 25.650000,24.055000 36.000000,24.055000 36.000000,23.605000 36.450000,23.605000 36.450000,20.005000 35.550000,20.005000 35.550000,18.655000 32.400000,18.655000 32.400000,19.555000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t51" points="32.400000,19.555000 31.950000,19.555000 31.950000,20.005000 28.800000,20.005000 28.800000,19.105000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t52" points="28.800000,19.105000 28.800000,18.655000 25.650000,18.655000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t53" points="25.650000,18.655000 25.650000,20.005000 24.550000,20.155000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t54" points="26.750000,44.000000 26.550000,42.955000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t55" points="26.550000,42.955000 24.300000,42.955000 24.300000,42.505000 21.600000,42.505000 21.600000,38.005000 21.490000,37.955000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t56" points="29.750000,44.000000 29.700000,42.955000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t57" points="29.700000,42.955000 29.700000,38.005000 33.300000,38.005000 33.490000,37.955000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t60" points="28.250000,44.000000 28.350000,42.955000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t61" points="28.350000,42.955000 27.450000,42.955000 27.250000,44.000000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t62" points="28.350000,42.955000 28.350000,35.755000 31.050000,35.755000 31.050000,34.855000 31.500000,34.855000 31.510000,34.955000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t63" points="27.750000,44.000000 27.000000,42.955000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t64" points="27.000000,42.955000 28.800000,42.955000 28.750000,44.000000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t65" points="27.000000,42.955000 25.650000,42.955000 25.650000,34.855000 25.510000,34.955000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t71" points="54.000000,37.955000 54.000000,38.005000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t72" points="54.000000,38.005000 53.550000,38.005000 53.550000,37.105000 41.400000,37.105000 41.400000,27.655000 40.950000,27.655000 40.950000,14.155000 24.750000,14.155000 24.750000,15.055000 24.300000,15.055000 24.300000,15.955000 24.750000,15.955000 24.550000,16.155000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t78" points="52.000000,16.955000 52.200000,16.855000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t79" points="52.200000,16.855000 41.400000,16.855000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t80" points="41.400000,16.855000 32.400000,16.855000 32.400000,14.605000 29.700000,14.605000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t81" points="29.700000,14.605000 29.700000,15.055000 29.600000,15.505000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t82" points="54.000000,16.955000 54.000000,16.855000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t83" points="54.000000,16.855000 53.550000,16.855000 53.550000,16.405000 41.400000,16.405000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t84" points="41.400000,16.405000 32.850000,16.405000 32.850000,15.505000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t85" points="32.850000,15.505000 32.400000,15.505000 32.400000,14.605000 30.150000,14.605000 30.150000,15.055000 30.000000,15.505000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t89" points="43.490000,8.955000 43.650000,8.755000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t90" points="43.650000,8.755000 25.200000,8.755000 25.200000,13.705000 24.300000,13.705000 24.300000,14.605000 23.850000,14.605000 23.850000,17.305000 23.400000,17.305000 23.400000,20.905000 22.950000,20.905000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t91" points="22.950000,20.905000 22.950000,22.705000 25.200000,22.705000 25.200000,22.405000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t92" points="36.000000,8.755000 36.000000,13.255000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t93" points="36.000000,13.255000 36.000000,14.155000 35.550000,14.155000 35.550000,15.055000 35.525000,14.860000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t96" points="25.600000,22.405000 25.650000,22.705000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t97" points="25.650000,22.705000 25.650000,23.155000 23.850000,23.155000 23.850000,23.605000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t98" points="23.850000,23.605000 22.950000,23.605000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t99" points="22.950000,23.605000 22.950000,22.255000 22.050000,22.255000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t100" points="22.050000,22.255000 22.050000,13.705000 35.550000,13.705000 35.525000,13.590000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t103" points="17.800000,5.680000 18.000000,5.605000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t104" points="18.000000,5.605000 18.000000,13.255000 19.800000,13.255000 19.800000,14.155000 23.850000,14.155000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t105" points="23.850000,14.155000 26.100000,14.155000 26.100000,14.605000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t106" points="26.100000,14.605000 26.100000,15.055000 28.800000,15.055000 28.800000,15.505000 29.200000,15.505000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t109" points="9.520000,24.955000 9.450000,24.955000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t110" points="9.450000,24.955000 9.450000,28.105000 13.500000,28.105000 13.500000,29.005000 14.850000,29.005000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t111" points="14.850000,29.005000 16.200000,29.005000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t112" points="16.200000,29.005000 16.200000,37.105000 22.050000,37.105000 22.050000,42.055000 24.750000,42.055000 24.750000,42.505000 25.650000,42.505000 25.550000,44.000000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t113" points="25.650000,42.505000 27.900000,42.505000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t114" points="27.900000,42.505000 29.250000,42.505000 29.250000,42.955000 30.600000,42.955000 30.450000,44.000000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t115" points="30.600000,42.955000 30.450000,44.000000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t116" points="25.650000,42.505000 25.550000,44.000000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t117" points="13.050000,28.105000 12.862500,28.005000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t118" points="13.500000,29.005000 13.500000,29.455000 13.050000,29.455000 13.050000,29.905000 12.862500,29.905000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t125" points="20.520000,9.955000 20.700000,10.105000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t126" points="20.700000,10.105000 18.450000,10.105000 18.450000,12.805000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t127" points="18.450000,12.805000 17.550000,12.805000 17.550000,14.605000 16.650000,14.605000 16.650000,15.955000 16.510000,15.955000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t128" points="17.550000,13.705000 18.900000,13.705000 19.100000,13.805000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle class="via" data-id="v1" cx="28.800000" cy="16.405000" r="0.150000" fill="#333"/>
+  <circle class="via" data-id="v2" cx="26.550000" cy="19.555000" r="0.150000" fill="#333"/>
+  <circle class="via" data-id="v3" cx="23.400000" cy="21.355000" r="0.150000" fill="#333"/>
+  <circle class="via" data-id="v4" cx="33.300000" cy="23.155000" r="0.150000" fill="#333"/>
+  <circle class="via" data-id="v5" cx="4.050000" cy="29.455000" r="0.150000" fill="#333"/>
+  <circle class="via" data-id="v6" cx="25.200000" cy="19.105000" r="0.150000" fill="#333"/>
+  <circle class="via" data-id="v7" cx="4.050000" cy="30.355000" r="0.150000" fill="#333"/>
+  <circle class="via" data-id="v8" cx="32.400000" cy="19.555000" r="0.150000" fill="#333"/>
+  <circle class="via" data-id="v9" cx="28.800000" cy="19.105000" r="0.150000" fill="#333"/>
+  <circle class="via" data-id="v10" cx="25.650000" cy="18.655000" r="0.150000" fill="#333"/>
+  <circle class="via" data-id="v11" cx="27.000000" cy="42.955000" r="0.150000" fill="#333"/>
+  <circle class="via" data-id="v12" cx="41.400000" cy="16.855000" r="0.150000" fill="#333"/>
+  <circle class="via" data-id="v13" cx="29.700000" cy="14.605000" r="0.150000" fill="#333"/>
+  <circle class="via" data-id="v14" cx="41.400000" cy="16.405000" r="0.150000" fill="#333"/>
+  <circle class="via" data-id="v15" cx="32.850000" cy="15.505000" r="0.150000" fill="#333"/>
+  <circle class="via" data-id="v16" cx="22.950000" cy="20.905000" r="0.150000" fill="#333"/>
+  <circle class="via" data-id="v17" cx="36.000000" cy="13.255000" r="0.150000" fill="#333"/>
+  <circle class="via" data-id="v18" cx="23.850000" cy="23.605000" r="0.150000" fill="#333"/>
+  <circle class="via" data-id="v19" cx="22.950000" cy="23.605000" r="0.150000" fill="#333"/>
+  <circle class="via" data-id="v20" cx="22.050000" cy="22.255000" r="0.150000" fill="#333"/>
+  <circle class="via" data-id="v21" cx="23.850000" cy="14.155000" r="0.150000" fill="#333"/>
+  <circle class="via" data-id="v22" cx="26.100000" cy="14.605000" r="0.150000" fill="#333"/>
+  <circle class="via" data-id="v23" cx="14.850000" cy="29.005000" r="0.150000" fill="#333"/>
+  <circle class="via" data-id="v24" cx="16.200000" cy="29.005000" r="0.150000" fill="#333"/>
+  <circle class="via" data-id="v25" cx="27.900000" cy="42.505000" r="0.150000" fill="#333"/>
+  <circle class="via" data-id="v27" cx="18.450000" cy="12.805000" r="0.150000" fill="#333"/>
+</svg>
