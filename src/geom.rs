@@ -78,8 +78,11 @@ impl Shape2D {
             radius: 0,
         }
     }
-    /// An axis-aligned rounded rectangle: the core rect inset by `r`, ⊕ `r`.
+    /// An axis-aligned rounded rectangle: the core rect inset by `r`, ⊕ `r`. The
+    /// radius is clamped to `[0, min(w, h)/2]` (as KiCad does), so an over-large `r`
+    /// degenerates to a capsule/disc rather than ballooning the shape.
     pub fn round_rect(c: Point, w: Nm, h: Nm, r: Nm) -> Shape2D {
+        let r = r.clamp(0, w.min(h) / 2);
         let (hw, hh) = (w / 2 - r, h / 2 - r);
         Shape2D::Polygon {
             points: vec![
@@ -140,13 +143,19 @@ impl Shape2D {
 // Exact clearance kernel.
 // ----------------------------------------------------------------------------
 
-/// Is the edge-to-edge gap between two shapes **less than** `min_clr` (a DRC
-/// clearance violation; strict `<`, matching the rest of the engine)? `min_clr` is
-/// assumed `≥ 0`. Overlapping regions (gap `< 0`) always violate. For disjoint
-/// regions the gap is `skeleton_distance(a, b) − radius(a) − radius(b)`, so a
-/// violation is `skeleton_distance < min_clr + radius(a) + radius(b)`. All exact i128.
+/// Is the edge-to-edge gap between two shapes a clearance violation, for `min_clr ≥
+/// 0`? Two cases:
+///   - **Overlapping or exactly touching** regions (gap `≤ 0`) always violate. For
+///     DRC this is the right call: copper of two different nets that touches is a
+///     short, regardless of the rule value (so an exact zero-gap touch under a
+///     `min_clr == 0` rule is reported, even though `0 < 0` is false).
+///   - **Strictly disjoint** regions violate iff the gap `< min_clr`, where gap =
+///     `skeleton_distance(a, b) − radius(a) − radius(b)` — i.e. `skeleton_distance <
+///     min_clr + radius(a) + radius(b)`.
+///
+/// All exact i128, deterministic.
 pub fn clearance_violated(a: &Shape2D, b: &Shape2D, min_clr: Nm) -> bool {
-    // Overlapping skeletons ⇒ the inflated regions overlap ⇒ gap < 0 ≤ min_clr.
+    // Overlapping/touching skeletons ⇒ the inflated regions overlap or touch (gap ≤ 0).
     if skeletons_overlap(a, b) {
         return true;
     }
@@ -255,7 +264,10 @@ fn point_in_polygon(p: Point, poly: &[Point]) -> bool {
     if n < 3 {
         return false;
     }
-    // On-boundary ⇒ inside.
+    // On-boundary ⇒ inside. This pre-check must run BEFORE the crossing loop: the
+    // crossing test below uses `(lhs < rhs) == (dy > 0)`, whose `>=`-vs-`>` edge only
+    // arises for a point exactly on a downward edge — already handled here, so the
+    // crossing loop never sees it. Do not reorder.
     for i in 0..n {
         let (a, b) = (poly[i], poly[(i + 1) % n]);
         if orient(a, b, p) == 0 && on_seg(a, b, p) {
@@ -492,6 +504,19 @@ mod tests {
         let probe = Shape2D::disc(pt(11 * MM / 10, 11 * MM / 10), 1);
         assert!(clearance_violated(&sharp, &probe, MM / 5), "sharp corner within 0.2mm");
         assert!(!clearance_violated(&round, &probe, MM / 5), "rounded corner beyond 0.2mm");
+    }
+
+    #[test]
+    fn round_rect_radius_is_clamped_not_ballooned() {
+        // r far larger than the box: clamps to min(w,h)/2 instead of growing. A
+        // square 2mm box with r=10mm clamps to r=1mm → a disc of radius 1mm, so a
+        // probe 1.5mm from center clears it (a ballooned shape would not).
+        let rr = Shape2D::round_rect(pt(0, 0), 2 * MM, 2 * MM, 10 * MM);
+        let near = Shape2D::disc(pt(15 * MM / 10, 0), 1); // 1.5mm from center
+        assert!(!clearance_violated(&rr, &near, MM / 10), "clamped shape stays ~1mm radius");
+        // A probe 0.9mm from center is inside the ~1mm clamped radius.
+        let inside = Shape2D::disc(pt(9 * MM / 10, 0), 1);
+        assert!(clearance_violated(&rr, &inside, 1));
     }
 
     #[test]
