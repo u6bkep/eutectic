@@ -18,8 +18,7 @@
 //! status (Gerber/fab output)".
 
 use crate::doc::{Doc, Nm, Point, MM};
-use crate::elaborate::GenDirective;
-use crate::geom::Shape2D;
+use crate::geom::{BoardShape, Shape2D};
 use crate::part::{pad_copper_world, pin_world, PadLayers, PartDef, PartLib};
 use crate::route::{Layer, Trace, Via};
 use std::collections::{BTreeMap, BTreeSet};
@@ -134,7 +133,7 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> String {
             }
         }
     }
-    if let Some((min, max)) = board {
+    if let Some((min, max)) = board.as_ref().and_then(BoardShape::bbox) {
         pts.push(min);
         pts.push(max);
     }
@@ -177,21 +176,34 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> String {
         fmt_mm(y1 - y0),
     ));
 
-    // Board outline (or the implicit bounding box when the source carries none).
-    let (bx0, by0, bx1, by1) = match board {
-        Some((min, max)) => (min.x, min.y, max.x, max.y),
-        None => (x0 + MARGIN, y0 + MARGIN, x1 - MARGIN, y1 - MARGIN),
+    // Board outline + cutouts (the real shape), or the implicit bounding box when
+    // the source carries no board. A polygon renders rect / rounded / concave alike.
+    let svg_poly = |class: &str, points: &[Point]| -> String {
+        let pts: Vec<String> =
+            points.iter().map(|p| format!("{},{}", fmt_mm(p.x), fmt_mm(flip(p.y)))).collect();
+        format!(
+            "  <polygon class=\"{class}\" points=\"{}\" fill=\"none\" stroke=\"black\" stroke-width=\"0.1\"/>\n",
+            pts.join(" ")
+        )
     };
-    let outline_kind = if board.is_some() { "board" } else { "bbox" };
-    // Rect origin is the top-left in SVG space: min x, flipped max y.
-    out.push_str(&format!(
-        "  <rect class=\"outline-{}\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"none\" stroke=\"black\" stroke-width=\"0.1\"/>\n",
-        outline_kind,
-        fmt_mm(bx0),
-        fmt_mm(flip(by1)),
-        fmt_mm(bx1 - bx0),
-        fmt_mm(by1 - by0),
-    ));
+    match &board {
+        Some(b) => {
+            out.push_str(&svg_poly("outline-board", b.outline.points()));
+            for c in &b.cutouts {
+                out.push_str(&svg_poly("outline-cutout", c.points()));
+            }
+        }
+        None => {
+            let (bx0, by0, bx1, by1) = (x0 + MARGIN, y0 + MARGIN, x1 - MARGIN, y1 - MARGIN);
+            out.push_str(&format!(
+                "  <rect class=\"outline-bbox\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"none\" stroke=\"black\" stroke-width=\"0.1\"/>\n",
+                fmt_mm(bx0),
+                fmt_mm(flip(by1)),
+                fmt_mm(bx1 - bx0),
+                fmt_mm(by1 - by0),
+            ));
+        }
+    }
 
     // One group per component: pads, an origin marker, and an id label.
     for c in doc.components.values() {
@@ -273,13 +285,10 @@ fn layer_color(l: Layer) -> &'static str {
 
 // ---- 4. Gerber (RS-274X) + Excellon drill (fab output) ----
 
-/// The board outline rectangle carried by tier-1 source (last `Board` wins, as in
-/// elaboration), if any.
-fn source_board(doc: &Doc) -> Option<(Point, Point)> {
-    doc.source.iter().rev().find_map(|d| match d {
-        GenDirective::Board { min, max } => Some((*min, *max)),
-        _ => None,
-    })
+/// The board outline + cutouts carried by tier-1 source (the shared assembler), if
+/// any. A real [`BoardShape`] now — rounded/concave outlines and cutouts, not a rect.
+fn source_board(doc: &Doc) -> Option<BoardShape> {
+    crate::elaborate::board_shape(&doc.source)
 }
 
 /// Bounding box of all placed/routed geometry (pad world points, trace vertices,
@@ -488,7 +497,11 @@ pub fn gerber_layer(doc: &Doc, lib: &PartLib, layer: Layer) -> String {
 /// The `Edge.Cuts` Gerber: the board outline as a closed rectangle drawn with a thin
 /// (0.1 mm) round pen. Uses the source `Board` rect, else the placement bounding box.
 pub fn gerber_edge_cuts(doc: &Doc, lib: &PartLib) -> String {
-    let (min, max) = source_board(doc).unwrap_or_else(|| placement_bbox(doc, lib));
+    // The real board outline + cutouts; fall back to a rectangle around all geometry.
+    let board = source_board(doc).unwrap_or_else(|| {
+        let (min, max) = placement_bbox(doc, lib);
+        BoardShape::rect(min, max)
+    });
     let mut out = String::new();
     out.push_str("G04 Edge.Cuts *\n");
     out.push_str("%FSLAX46Y46*%\n");
@@ -496,16 +509,18 @@ pub fn gerber_edge_cuts(doc: &Doc, lib: &PartLib) -> String {
     out.push_str("%ADD10C,0.100000*%\n");
     out.push_str("D10*\n");
     out.push_str("G01*\n");
-    let corners = [
-        (min.x, min.y),
-        (max.x, min.y),
-        (max.x, max.y),
-        (min.x, max.y),
-        (min.x, min.y),
-    ];
-    for (i, (x, y)) in corners.iter().enumerate() {
-        let op = if i == 0 { "D02" } else { "D01" };
-        out.push_str(&format!("X{}Y{}{}*\n", gbr_coord(*x), gbr_coord(*y), op));
+    // Each contour (outline, then every cutout) as a closed D02-move + D01-draws
+    // loop. Rounded corners (a Shape2D radius) are drawn as the polygon at this
+    // fidelity — a documented approximation, like the pad flashes.
+    let contour = |points: &[Point], out: &mut String| {
+        for (i, p) in points.iter().chain(points.first()).enumerate() {
+            let op = if i == 0 { "D02" } else { "D01" };
+            out.push_str(&format!("X{}Y{}{}*\n", gbr_coord(p.x), gbr_coord(p.y), op));
+        }
+    };
+    contour(board.outline.points(), &mut out);
+    for c in &board.cutouts {
+        contour(c.points(), &mut out);
     }
     out.push_str("M02*\n");
     out
@@ -564,7 +579,7 @@ mod tests {
     use super::*;
     use crate::command::{Command, Transaction};
     use crate::doc::Doc;
-    use crate::elaborate::psu_module;
+    use crate::elaborate::{board_rect, psu_module};
     use crate::history::History;
     use crate::part::part_library;
 
@@ -634,11 +649,10 @@ psu.reg,LDO,0.000000,0.000000,0
     #[test]
     fn svg_contains_outline_and_component_ids() {
         // A scene with an explicit board outline.
-        use crate::elaborate::GenDirective as G;
         let lib = part_library();
         let mut h = History::new(Default::default());
         let mut src = psu_module(2);
-        src.insert(0, G::Board { min: Point::mm(0, 0), max: Point::mm(60, 40) });
+        src.insert(0, board_rect(Point::mm(0, 0), Point::mm(60, 40)));
         h.commit(Transaction::one(Command::SetSource(src)), &lib, "board").unwrap();
         let s = svg(h.doc(), &lib);
 
@@ -681,7 +695,7 @@ psu.reg,LDO,0.000000,0.000000,0
         let lib = part_library();
         let mut h = History::new(Default::default());
         let src = vec![
-            G::Board { min: Point::mm(0, 0), max: Point::mm(20, 10) },
+            board_rect(Point::mm(0, 0), Point::mm(20, 10)),
             G::Instance { path: "c0".into(), part: "Cap".into() },
             G::Instance { path: "c1".into(), part: "Cap".into() },
             G::Place { path: "c0".into(), pos: Point::mm(5, 5) },
@@ -848,7 +862,7 @@ psu.reg,LDO,0.000000,0.000000,0
         use crate::route::DesignRules;
         let lib = part_library();
         let src = vec![
-            G::Board { min: Point::mm(-6, -10), max: Point::mm(18, 10) },
+            board_rect(Point::mm(-6, -10), Point::mm(18, 10)),
             G::Instance { path: "reg".into(), part: "LDO".into() },
             G::Instance { path: "c0".into(), part: "Cap".into() },
             G::Instance { path: "c1".into(), part: "Cap".into() },

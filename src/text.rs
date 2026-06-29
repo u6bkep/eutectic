@@ -70,7 +70,8 @@
 
 use crate::diagnostic::{Diagnostic, Location};
 use crate::doc::{Doc, Nm, Override, Point, Strength, MM};
-use crate::elaborate::{GenDirective, Source};
+use crate::elaborate::{board_rect, GenDirective, Source};
+use crate::geom::Shape2D;
 use crate::id::EntityId;
 use std::collections::BTreeMap;
 
@@ -113,8 +114,14 @@ fn render_directive(d: &GenDirective) -> String {
         GenDirective::Instance { path, part } => format!("inst {path} {part}"),
         GenDirective::Place { path, pos } => format!("place {path} {}", fmt_point(*pos)),
         GenDirective::Fix { path, pos } => format!("fix {path} {}", fmt_point(*pos)),
-        GenDirective::Board { min, max } => {
-            format!("board {} {}", fmt_point(*min), fmt_point(*max))
+        GenDirective::Board { outline } => {
+            // Serialized as an explicit polygon (`board <p> <p> ...`); the rect
+            // shorthand `boardrect <min> <max>` is parse-only sugar. Corner radius
+            // (rounded outlines) is not yet serialized — a noted follow-up.
+            format!("board {}", outline.points().iter().map(|p| fmt_point(*p)).collect::<Vec<_>>().join(" "))
+        }
+        GenDirective::Cutout { shape } => {
+            format!("cutout {}", shape.points().iter().map(|p| fmt_point(*p)).collect::<Vec<_>>().join(" "))
         }
         GenDirective::Near { a, b, within } => format!("near {a} {b} {}", fmt_len(*within)),
         GenDirective::MinSep { a, b, gap } => format!("minsep {a} {b} {}", fmt_len(*gap)),
@@ -233,10 +240,24 @@ fn parse_line(line: &str) -> Result<Item, String> {
         }
         "board" => {
             let pts = extract_points(rest)?;
-            if pts.len() != 2 {
-                return Err("board needs two coordinates: board (minx, miny) (maxx, maxy)".into());
+            if pts.len() < 3 {
+                return Err("board needs ≥3 outline points: board (x,y) (x,y) (x,y) ...".into());
             }
-            Item::Directive(GenDirective::Board { min: pts[0], max: pts[1] })
+            Item::Directive(GenDirective::Board { outline: Shape2D::polygon(pts) })
+        }
+        "boardrect" => {
+            let pts = extract_points(rest)?;
+            if pts.len() != 2 {
+                return Err("boardrect needs two corners: boardrect (minx,miny) (maxx,maxy)".into());
+            }
+            Item::Directive(board_rect(pts[0], pts[1]))
+        }
+        "cutout" => {
+            let pts = extract_points(rest)?;
+            if pts.len() < 3 {
+                return Err("cutout needs ≥3 points: cutout (x,y) (x,y) (x,y) ...".into());
+            }
+            Item::Directive(GenDirective::Cutout { shape: Shape2D::polygon(pts) })
         }
         "near" => {
             let (a, b, len) = two_tokens_and_len(rest, "near <a> <b> <len>")?;
@@ -452,7 +473,7 @@ mod tests {
             GenDirective::Instance { path: "c1".into(), part: "Cap".into() },
             GenDirective::Instance { path: "c2".into(), part: "Cap".into() },
             GenDirective::Fix { path: "reg".into(), pos: Point::mm(0, 0) },
-            GenDirective::Board { min: Point::mm(0, 0), max: Point::mm(50, 50) },
+            board_rect(Point::mm(0, 0), Point::mm(50, 50)),
             GenDirective::Near { a: "c1".into(), b: "reg".into(), within: 3 * MM },
             GenDirective::Near { a: "c2".into(), b: "reg".into(), within: 3 * MM },
             GenDirective::MinSep { a: "c1".into(), b: "c2".into(), gap: 4 * MM },
@@ -469,7 +490,14 @@ mod tests {
             GenDirective::Instance { path: "sens".into(), part: "Sensor".into() },
             GenDirective::Place { path: "psu.dec[0]".into(), pos: Point::mm(5, 5) },
             GenDirective::Fix { path: "psu.reg".into(), pos: Point { x: 1, y: -2_500_000 } },
-            GenDirective::Board { min: Point::mm(0, 0), max: Point::mm(50, 50) },
+            board_rect(Point::mm(0, 0), Point::mm(50, 50)),
+            GenDirective::Cutout {
+                shape: Shape2D::polygon(vec![
+                    Point::mm(20, 20),
+                    Point::mm(30, 20),
+                    Point::mm(25, 30),
+                ]),
+            },
             GenDirective::Near { a: "psu.dec[0]".into(), b: "psu.reg".into(), within: 2 * MM },
             GenDirective::MinSep { a: "psu.dec[0]".into(), b: "mcu".into(), gap: MM },
             GenDirective::AlignX { nodes: vec!["psu.reg".into(), "psu.dec[0]".into()] },

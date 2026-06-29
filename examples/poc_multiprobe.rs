@@ -19,7 +19,7 @@ use ecad_core::autoroute::autoroute;
 use ecad_core::command::{Command, Transaction};
 use ecad_core::diagnostic::render;
 use ecad_core::doc::{Point, MM};
-use ecad_core::elaborate::{GenDirective as G, Source};
+use ecad_core::elaborate::{board_rect, GenDirective as G, Source};
 use ecad_core::export::{excellon_drill, gerber_set, netlist, placement_csv, svg};
 use ecad_core::history::History;
 use ecad_core::kicad::{
@@ -223,7 +223,7 @@ fn build_source() -> Source {
     let mut b = Builder::new();
 
     // 4-layer-intent board outline (signal / GND / PWR / signal). 56 x 44 mm.
-    b.s.push(G::Board { min: Point::mm(0, 0), max: Point::mm(56, 44) });
+    b.s.push(board_rect(Point::mm(0, 0), Point::mm(56, 44)));
 
     // --- core instances + coarse placement ---------------------------------
     b.inst("U1", "RP2350A");

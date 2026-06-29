@@ -9,7 +9,7 @@
 
 use ecad_core::command::{Command, Transaction};
 use ecad_core::doc::{Point, MM};
-use ecad_core::elaborate::{psu_module, GenDirective as G};
+use ecad_core::elaborate::{board_rect, psu_module, GenDirective as G};
 use ecad_core::export::{netlist, placement_csv, svg};
 use ecad_core::history::History;
 use ecad_core::part::part_library;
@@ -20,7 +20,7 @@ fn main() {
 
     // psu_module(2) on a 60x40 mm board outline; cluster the decouplers near the
     // regulator so the placement is not just a default row.
-    let mut src = vec![G::Board { min: Point::mm(0, 0), max: Point::mm(60, 40) }];
+    let mut src = vec![board_rect(Point::mm(0, 0), Point::mm(60, 40))];
     src.extend(psu_module(2));
     src.push(G::Fix { path: "psu.reg".into(), pos: Point::mm(30, 20) });
     src.push(G::Near { a: "psu.dec[0]".into(), b: "psu.reg".into(), within: 6 * MM });

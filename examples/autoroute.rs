@@ -6,7 +6,7 @@
 use ecad_core::autoroute::autoroute;
 use ecad_core::command::{Command, Transaction};
 use ecad_core::doc::Point;
-use ecad_core::elaborate::GenDirective as G;
+use ecad_core::elaborate::{board_rect, GenDirective as G};
 use ecad_core::history::History;
 use ecad_core::part::part_library;
 use ecad_core::query::{Engine, Key};
@@ -20,7 +20,7 @@ fn main() {
     // caps' p1) and GND (reg.GND + both caps' p2). A Pinned hand route walls the
     // direct VBUS path on Top, so the autorouter must detour (and use a via).
     let src = vec![
-        G::Board { min: Point::mm(-6, -10), max: Point::mm(18, 10) },
+        board_rect(Point::mm(-6, -10), Point::mm(18, 10)),
         G::Instance { path: "reg".into(), part: "LDO".into() },
         G::Instance { path: "c0".into(), part: "Cap".into() },
         G::Instance { path: "c1".into(), part: "Cap".into() },

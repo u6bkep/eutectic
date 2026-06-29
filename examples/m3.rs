@@ -10,13 +10,13 @@
 
 use ecad_core::command::{Command, Transaction};
 use ecad_core::doc::{Doc, Point, Provenance, MM};
-use ecad_core::elaborate::{GenDirective as G, Source};
+use ecad_core::elaborate::{board_rect, GenDirective as G, Source};
 use ecad_core::history::History;
 use ecad_core::part::part_library;
 
 fn scene(mcu_datum: Point) -> Source {
     let mut s = vec![
-        G::Board { min: Point::mm(0, 0), max: Point::mm(60, 40) },
+        board_rect(Point::mm(0, 0), Point::mm(60, 40)),
         // The module, fixed at a mechanical datum.
         G::Instance { path: "mcu".into(), part: "MCU".into() },
         G::Fix { path: "mcu".into(), pos: mcu_datum },

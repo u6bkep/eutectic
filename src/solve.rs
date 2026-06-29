@@ -55,6 +55,7 @@
 //! *checked and reported* rather than assumed.
 
 use crate::doc::{Nm, Point};
+use crate::geom::BoardShape;
 use crate::id::EntityId;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -91,7 +92,8 @@ pub struct Problem {
     pub anchors: BTreeMap<EntityId, Point>,
     /// Nodes that cannot move (Fixed / Pinned provenance).
     pub fixed: BTreeSet<EntityId>,
-    pub board: Option<Rect>,
+    /// Board boundary; movable nodes are kept inside the outline and out of cutouts.
+    pub board: Option<BoardShape>,
     pub constraints: Vec<Constraint>,
 }
 
@@ -155,14 +157,20 @@ pub fn solve(p: &Problem) -> Solution {
             apply_constraint(c, &mut pos, &p.fixed);
         }
         // Containment has the last word (movable nodes only; a fixed datum may sit
-        // outside the outline).
-        if let Some(r) = &p.board {
+        // outside the outline). Only out-of-bounds nodes are moved — an in-bounds
+        // node keeps its exact position (no per-sweep rounding that would stall
+        // convergence). For a rectangular board this reproduces the old clamp.
+        if let Some(board) = &p.board {
             for (id, pp) in pos.iter_mut() {
                 if p.fixed.contains(id) {
                     continue;
                 }
-                pp.0 = pp.0.clamp(r.min.x as f64, r.max.x as f64);
-                pp.1 = pp.1.clamp(r.min.y as f64, r.max.y as f64);
+                let pt = Point { x: pp.0.round() as Nm, y: pp.1.round() as Nm };
+                if !board.contains(pt) {
+                    let q = board.contain(pt);
+                    pp.0 = q.x as f64;
+                    pp.1 = q.y as f64;
+                }
             }
         }
 

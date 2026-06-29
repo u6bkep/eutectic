@@ -46,13 +46,14 @@ pub fn boot(
 mod tests {
     use super::command::{suggested_resolutions, Command, Resolution, Transaction};
     use super::doc::{DecayReason, Doc, Nm, Point, Provenance, MM};
-    use super::elaborate::{psu_module, GenDirective, Source};
+    use super::elaborate::{board_rect, psu_module, GenDirective, Source};
+    use super::geom::{BoardShape, Shape2D};
     use super::history::History;
     use super::id::{EntityId, NetId, TraceId, ViaId};
     use super::part::part_library;
     use super::query::{Engine, Key};
     use super::route::{Layer, Trace, Via, Violation};
-    use super::solve::{dist, solve, Constraint, Problem, Rect, PLACE_TOL};
+    use super::solve::{dist, solve, Constraint, Problem, PLACE_TOL};
     use std::collections::{BTreeMap, BTreeSet};
 
     fn placed(src: Source) -> Doc {
@@ -306,6 +307,33 @@ mod tests {
         ]
     }
 
+    /// Stage B2: the solver keeps movable parts inside an arbitrary board outline and
+    /// out of cutouts (not just a rect). A part placed far outside is pulled in; one
+    /// placed in a cutout is pushed to the cutout boundary.
+    #[test]
+    fn solver_respects_outline_and_cutouts() {
+        // 20×20 mm board centred at (10,10) → [0,20]²; a 4 mm cutout at the centre.
+        let outline = Shape2D::rect(Point::mm(10, 10), 20 * MM, 20 * MM);
+        let cutout = Shape2D::rect(Point::mm(10, 10), 4 * MM, 4 * MM); // [8,12]²
+        let src = vec![
+            GenDirective::Board { outline: outline.clone() },
+            GenDirective::Cutout { shape: cutout.clone() },
+            GenDirective::Instance { path: "a".into(), part: "Cap".into() },
+            GenDirective::Place { path: "a".into(), pos: Point::mm(50, 50) }, // far outside
+            GenDirective::Instance { path: "b".into(), part: "Cap".into() },
+            GenDirective::Place { path: "b".into(), pos: Point::mm(10, 10) }, // in the cutout
+        ];
+        let d = placed(src);
+        let board = BoardShape { outline, cutouts: vec![cutout] };
+        let (pa, pb) = (pos(&d, "a"), pos(&d, "b"));
+        assert!(board.contains(pa), "part placed outside is pulled onto the board: {pa:?}");
+        // Pushed from the cutout centre to its boundary (~2 mm away).
+        assert!(
+            dist(pb, Point::mm(10, 10)) >= (2 * MM - PLACE_TOL) as f64,
+            "part in the cutout is pushed to its boundary: {pb:?}"
+        );
+    }
+
     /// Issue 0005: the placement solver keeps component courtyards from overlapping.
     /// Two pad-bearing parts placed coincident are pushed apart until their
     /// courtyards (pad bbox + margin) clear. A footprint-less toy part has no
@@ -542,7 +570,7 @@ mod tests {
         let d = placed(vec![
             GenDirective::Instance { path: "a".into(), part: "LDO".into() },
             GenDirective::Place { path: "a".into(), pos: Point::mm(100, 0) },
-            GenDirective::Board { min: Point::mm(0, 0), max: Point::mm(50, 50) },
+            board_rect(Point::mm(0, 0), Point::mm(50, 50)),
         ]);
         assert!(pos(&d, "a").x <= 50 * MM + PLACE_TOL);
     }
@@ -890,7 +918,7 @@ mod tests {
         let prob = Problem {
             anchors,
             fixed: BTreeSet::new(),
-            board: Some(Rect { min: Point::mm(0, 0), max: Point::mm(2, 2) }),
+            board: Some(BoardShape::rect(Point::mm(0, 0), Point::mm(2, 2))),
             // Want 20 mm apart inside a 2 mm board: impossible.
             constraints: vec![Constraint::MinSep { a, b, gap: 20 * MM }],
         };

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="-2.000000 -3.045000 60.000000 49.045000">
-  <rect class="outline-board" x="0.000000" y="-1.045000" width="56.000000" height="44.000000" fill="none" stroke="black" stroke-width="0.1"/>
+  <polygon class="outline-board" points="0.000000,42.955000 56.000000,42.955000 56.000000,-1.045000 0.000000,-1.045000" fill="none" stroke="black" stroke-width="0.1"/>
   <g class="component" data-id="C0">
     <circle class="pad" cx="26.295791" cy="23.766431" r="0.3"/>
     <circle class="pad" cx="27.255791" cy="23.766431" r="0.3"/>

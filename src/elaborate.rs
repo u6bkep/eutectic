@@ -13,9 +13,10 @@
 
 use crate::diagnostic::{Diagnostic, Location};
 use crate::doc::*;
+use crate::geom::{BoardShape, Shape2D};
 use crate::id::{EntityId, NetId};
 use crate::part::{courtyard_half_extents, Dir, PartDef, PartLib};
-use crate::solve::{dist, solve, Constraint, Problem, Rect, PLACE_TOL};
+use crate::solve::{dist, solve, Constraint, Problem, PLACE_TOL};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A directive in the generative program.
@@ -28,8 +29,12 @@ pub enum GenDirective {
     /// A hard placement constraint (e.g. a connector mated to a mechanical
     /// datum). Outranks user overrides; surfaces conflicts rather than yielding.
     Fix { path: String, pos: Point },
-    /// Board outline; all components are kept within it.
-    Board { min: Point, max: Point },
+    /// Board outline (a [`Shape2D`] — rounded/concave/CAD-imported all expressible);
+    /// movable components are kept inside it. Use [`board_rect`] for the common
+    /// rectangle. The last `Board` in the source wins.
+    Board { outline: Shape2D },
+    /// An interior board cutout / void ([`Shape2D`]); components are kept out of it.
+    Cutout { shape: Shape2D },
     /// Relational placement constraint solved by the least-change solver.
     Near { a: String, b: String, within: Nm },
     MinSep { a: String, b: String, gap: Nm },
@@ -165,7 +170,9 @@ pub fn elaborate(
     // Pass 2b: collect hard placement constraints (Fix), the board outline, and
     // relational constraints for the solver.
     let mut fixmap: BTreeMap<EntityId, Point> = BTreeMap::new();
-    let mut board: Option<Rect> = None;
+    // The board outline + cutouts (assembled from Board/Cutout directives); movable
+    // components are kept inside it by the solver.
+    let board = board_shape(source);
     let mut relational: Vec<Constraint> = Vec::new();
     for d in source {
         match d {
@@ -176,7 +183,6 @@ pub fn elaborate(
                 }
                 fixmap.insert(id, *pos);
             }
-            GenDirective::Board { min, max } => board = Some(Rect { min: *min, max: *max }),
             GenDirective::Near { a, b, within } => {
                 let (a, b) = (EntityId::new(a.clone()), EntityId::new(b.clone()));
                 // Evaluate both so both are reported if both are missing.
@@ -386,7 +392,7 @@ pub fn elaborate(
     // surface in a future milestone; today the placement is what reconciliation
     // consumes, so the semantics below are unchanged from the relaxation solver.
     let solved_all = solve(&assemble_problem(
-        &base, &fixmap, overrides, board, &relational, &no_suppress,
+        &base, &fixmap, overrides, board.as_ref(), &relational, &no_suppress,
     ))
     .positions;
 
@@ -422,7 +428,7 @@ pub fn elaborate(
         let mut suppress = BTreeSet::new();
         suppress.insert(id.clone());
         let solved_wo =
-            solve(&assemble_problem(&base, &fixmap, overrides, board, &relational, &suppress))
+            solve(&assemble_problem(&base, &fixmap, overrides, board.as_ref(), &relational, &suppress))
                 .positions;
         let effective = dist(solved_all[id], solved_wo[id]) > PLACE_TOL as f64;
 
@@ -447,7 +453,7 @@ pub fn elaborate(
     // Final placement with decayed hints freed back to their defaults. This is
     // what a fresh elaboration (after GC) would produce, so the result is stable.
     let solved_final =
-        solve(&assemble_problem(&base, &fixmap, overrides, board, &relational, &decayed))
+        solve(&assemble_problem(&base, &fixmap, overrides, board.as_ref(), &relational, &decayed))
             .positions;
 
     for (id, c) in components.iter_mut() {
@@ -526,7 +532,7 @@ fn assemble_problem(
     base: &BTreeMap<EntityId, Point>,
     fixmap: &BTreeMap<EntityId, Point>,
     overrides: &BTreeMap<EntityId, Override>,
-    board: Option<Rect>,
+    board: Option<&BoardShape>,
     relational: &[Constraint],
     suppress: &BTreeSet<EntityId>,
 ) -> Problem {
@@ -552,7 +558,33 @@ fn assemble_problem(
             }
         }
     }
-    Problem { anchors, fixed, board, constraints: relational.to_vec() }
+    Problem { anchors, fixed, board: board.cloned(), constraints: relational.to_vec() }
+}
+
+/// Assemble the board outline + cutouts from the source. The outline is the last
+/// `Board` directive's [`Shape2D`] (`None` if there is none — the solver then leaves
+/// placement unbounded); cutouts are every `Cutout` directive's shape. This is the
+/// single shared reader (elaboration, autorouter, export all call it).
+pub fn board_shape(source: &Source) -> Option<BoardShape> {
+    let outline = source.iter().rev().find_map(|d| match d {
+        GenDirective::Board { outline } => Some(outline.clone()),
+        _ => None,
+    })?;
+    let cutouts = source
+        .iter()
+        .filter_map(|d| match d {
+            GenDirective::Cutout { shape } => Some(shape.clone()),
+            _ => None,
+        })
+        .collect();
+    Some(BoardShape { outline, cutouts })
+}
+
+/// Build a rectangular [`Board`](GenDirective::Board) directive from opposite corners
+/// — sugar over the polygon outline form for the common case.
+pub fn board_rect(min: Point, max: Point) -> GenDirective {
+    let c = Point { x: (min.x + max.x) / 2, y: (min.y + max.y) / 2 };
+    GenDirective::Board { outline: Shape2D::rect(c, max.x - min.x, max.y - min.y) }
 }
 
 /// Connect two interface ports using the interface type's mate map. The mate map

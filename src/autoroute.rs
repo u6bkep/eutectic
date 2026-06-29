@@ -235,14 +235,15 @@ fn verify_and_prune(doc: &Doc, lib: &PartLib, rules: &DesignRules, result: &mut 
     result.unrouted.dedup();
 }
 
-/// Choose the routing area: the last `Board` directive in tier-1 source, else the
-/// bounding box of every pad, padded by two grid pitches so edge pins have room.
+/// Choose the routing area: the board outline's bounding box if a `Board` is
+/// declared, else the bounding box of every pad, padded by two grid pitches so edge
+/// pins have room. (The grid spans the bbox; masking cells to a non-rectangular
+/// outline / out of cutouts is a follow-up — see architecture.md §8.)
 fn routing_area(doc: &Doc, net_pads: &BTreeMap<NetId, Vec<Point>>, pitch: Nm) -> Option<Rect> {
-    if let Some(b) = doc.source.iter().rev().find_map(|d| match d {
-        crate::elaborate::GenDirective::Board { min, max } => Some(Rect { min: *min, max: *max }),
-        _ => None,
-    }) {
-        return Some(b);
+    if let Some(board) = crate::elaborate::board_shape(&doc.source)
+        && let Some((min, max)) = board.bbox()
+    {
+        return Some(Rect { min, max });
     }
     let mut it = net_pads.values().flatten().copied();
     let first = it.next()?;
@@ -719,7 +720,7 @@ mod tests {
     use super::*;
     use crate::command::{Command, Transaction};
     use crate::doc::Point;
-    use crate::elaborate::{GenDirective as G, Source};
+    use crate::elaborate::{board_rect, GenDirective as G, Source};
     use crate::history::History;
     use crate::id::TraceId;
     use crate::part::part_library;
@@ -811,7 +812,7 @@ mod tests {
     /// (reg.GND↔dec.p2). reg(LDO)@(0,0), dec(Cap)@(12,0).
     fn two_net_board() -> Source {
         vec![
-            G::Board { min: Point::mm(-6, -10), max: Point::mm(18, 10) },
+            board_rect(Point::mm(-6, -10), Point::mm(18, 10)),
             G::Instance { path: "reg".into(), part: "LDO".into() },
             G::Instance { path: "dec".into(), part: "Cap".into() },
             G::Place { path: "reg".into(), pos: Point::mm(0, 0) },
@@ -870,7 +871,7 @@ mod tests {
     fn pinned_obstacle_is_avoided() {
         let lib = part_library();
         let src = vec![
-            G::Board { min: Point::mm(-6, -10), max: Point::mm(18, 10) },
+            board_rect(Point::mm(-6, -10), Point::mm(18, 10)),
             G::Instance { path: "reg".into(), part: "LDO".into() },
             G::Instance { path: "dec".into(), part: "Cap".into() },
             G::Place { path: "reg".into(), pos: Point::mm(0, 0) },
@@ -920,7 +921,7 @@ mod tests {
     fn impossible_net_is_reported_not_botched() {
         let lib = part_library();
         let src = vec![
-            G::Board { min: Point::mm(-6, -10), max: Point::mm(18, 10) },
+            board_rect(Point::mm(-6, -10), Point::mm(18, 10)),
             G::Instance { path: "reg".into(), part: "LDO".into() },
             G::Instance { path: "dec".into(), part: "Cap".into() },
             G::Place { path: "reg".into(), pos: Point::mm(0, 0) },
@@ -963,7 +964,7 @@ mod tests {
         let lib = part_library();
         // Three caps' p1 pads + reg.VOUT all on one net.
         let src = vec![
-            G::Board { min: Point::mm(-6, -12), max: Point::mm(30, 12) },
+            board_rect(Point::mm(-6, -12), Point::mm(30, 12)),
             G::Instance { path: "reg".into(), part: "LDO".into() },
             G::Instance { path: "c0".into(), part: "Cap".into() },
             G::Instance { path: "c1".into(), part: "Cap".into() },

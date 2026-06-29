@@ -476,8 +476,18 @@ clashes the honest DRC surfaced from **16 → 1** (the residual is a +3V3/GND pa
 *approximate* solver (0007) can't fully separate on a dense board, not an
 overlap-avoidance gap). Courtyards are origin-centred symmetric boxes (tight for
 origin-centred footprints, conservative otherwise) and the pass is O(N²) — noted
-limits. **Still pending:** board outline / cutouts / keep-outs *as features* (Stage
-B2 — arbitrary `Substrate` polygon + `Void`, the MCAD-fit angle); the router's obstacle
+limits. **Board outline + cutouts done (Stage B2 — the MCAD-fit representation):** the board
+is one `geom::BoardShape { outline: Shape2D, cutouts: Vec<Shape2D> }` — a `Substrate`
+outline (rounded/concave/CAD-imported all expressible) with `Void` cutouts;
+`board_rect(min,max)` is a constructor over it, not a parallel rectangle. Authored via
+`GenDirective::Board { outline }` + `Cutout { shape }`, assembled by the shared
+`elaborate::board_shape(&Source)` that the solver, autorouter, and export all read.
+The solver containment is now polygon-aware (movable parts pulled inside the outline,
+pushed out of cutouts — `BoardShape::contain`, approximate boundary projection); fab
+export draws the real outline + cutout contours (Gerber `Edge.Cuts` + SVG); text
+round-trips `board`/`cutout` (corner-radius serialization is a noted follow-up).
+**Still pending:** the routing grid still spans the outline *bbox* (cells outside the
+outline / inside cutouts are not yet masked — a small follow-up); the router's obstacle
 model still blocks on pad *points* (so it drops more than a pad-extent-aware or
 rip-up router would keep — 0008); full `ZRange`-stackup gating; `Solid`/true-3D. Implementation is staged: **(1)** the `geom` core — `Shape2D`,
 `ZRange`, `Extent::Prism`, `Role`, `Material`, `Feature`, the stackup + defaults, and the 2.5D

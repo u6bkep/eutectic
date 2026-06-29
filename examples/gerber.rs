@@ -9,7 +9,7 @@
 use ecad_core::autoroute::autoroute;
 use ecad_core::command::{Command, Transaction};
 use ecad_core::doc::Point;
-use ecad_core::elaborate::GenDirective as G;
+use ecad_core::elaborate::{board_rect, GenDirective as G};
 use ecad_core::export::{gerber_set, svg};
 use ecad_core::history::History;
 use ecad_core::part::part_library;
@@ -21,7 +21,7 @@ fn main() {
 
     // A regulator + two decouplers on a 24x20 mm board (the autoroute demo board).
     let src = vec![
-        G::Board { min: Point::mm(-6, -10), max: Point::mm(18, 10) },
+        board_rect(Point::mm(-6, -10), Point::mm(18, 10)),
         G::Instance { path: "reg".into(), part: "LDO".into() },
         G::Instance { path: "c0".into(), part: "Cap".into() },
         G::Instance { path: "c1".into(), part: "Cap".into() },

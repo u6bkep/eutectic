@@ -135,6 +135,37 @@ impl Shape2D {
         Some((Point { x: min.x - r, y: min.y - r }, Point { x: max.x + r, y: max.y + r }))
     }
 
+    /// This shape's vertices in order (a polygon's boundary, a stroke's polyline).
+    /// For drawing a board outline / cutout boundary.
+    pub fn points(&self) -> &[Point] {
+        self.vertices()
+    }
+
+    /// Is `p` inside this shape's filled area? `Polygon` uses point-in-polygon
+    /// (boundary counts as inside); a `Stroke` has no area, so `false`. Used for
+    /// board containment (the outline is a polygon).
+    pub fn contains_point(&self, p: Point) -> bool {
+        self.area_contains(p)
+    }
+
+    /// The point on this shape's boundary closest to `p` (exact-ish: the projection
+    /// parameter is computed in f64 and rounded to nm). Used to pull an out-of-bounds
+    /// component back to the board edge. Empty shapes return `p` unchanged.
+    pub fn closest_boundary_point(&self, p: Point) -> Point {
+        let mut best = p;
+        let mut best_d2 = i128::MAX;
+        for (a, b) in self.segments() {
+            let q = closest_on_segment(p, a, b);
+            let d2 = (q.x - p.x) as i128 * (q.x - p.x) as i128
+                + (q.y - p.y) as i128 * (q.y - p.y) as i128;
+            if d2 < best_d2 {
+                best_d2 = d2;
+                best = q;
+            }
+        }
+        best
+    }
+
     /// The skeleton's segments (consecutive vertices; a polygon's boundary closes).
     /// A lone point yields one degenerate segment `(p, p)`.
     fn segments(&self) -> Vec<(Point, Point)> {
@@ -247,6 +278,19 @@ fn pt_seg_d2(p: Point, a: Point, b: Point) -> (i128, i128) {
 /// Is the squared distance from point `p` to segment `a`–`b` strictly `< thr2`?
 /// Tested as `num < thr2·den` (no fraction min, so no cross-multiplying two large
 /// numerators — that would overflow i128 at board scale).
+/// The point on segment `a`–`b` closest to `p`: project, clamp the parameter to
+/// `[0, 1]`, round to nm. f64 intermediate (the parameter is rational) — fine for the
+/// approximate board-containment pull-back; integer endpoints stay exact at t∈{0,1}.
+fn closest_on_segment(p: Point, a: Point, b: Point) -> Point {
+    let (vx, vy) = ((b.x - a.x) as f64, (b.y - a.y) as f64);
+    let len2 = vx * vx + vy * vy;
+    if len2 == 0.0 {
+        return a;
+    }
+    let t = (((p.x - a.x) as f64 * vx + (p.y - a.y) as f64 * vy) / len2).clamp(0.0, 1.0);
+    Point { x: (a.x as f64 + t * vx).round() as Nm, y: (a.y as f64 + t * vy).round() as Nm }
+}
+
 fn pt_seg_within2(p: Point, a: Point, b: Point, thr2: i128) -> bool {
     let (num, den) = pt_seg_d2(p, a, b);
     num < thr2 * den
@@ -477,6 +521,53 @@ impl Stackup {
     /// The z-range of a named slab (the bridge a 2.5D "place this on F.Cu" uses).
     pub fn slab_z(&self, name: &str) -> Option<ZRange> {
         self.slabs.iter().find(|s| s.name == name).map(|s| s.z)
+    }
+}
+
+/// The board boundary: an `outline` ([`Role::Substrate`]) with interior `cutouts`
+/// ([`Role::Void`]). The **one** board representation — `outline`/`cutouts` are
+/// [`Shape2D`]s, so rounded corners (a `Polygon` radius) and concave / arbitrary
+/// (CAD-imported) outlines are expressible; `BoardShape::rect` is just a constructor
+/// for the common case. The interior of the board is "inside the outline and outside
+/// every cutout".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoardShape {
+    pub outline: Shape2D,
+    pub cutouts: Vec<Shape2D>,
+}
+
+impl BoardShape {
+    /// A rectangular board from opposite corners — sugar over the polygon form.
+    pub fn rect(min: Point, max: Point) -> BoardShape {
+        let c = Point { x: (min.x + max.x) / 2, y: (min.y + max.y) / 2 };
+        BoardShape { outline: Shape2D::rect(c, max.x - min.x, max.y - min.y), cutouts: vec![] }
+    }
+
+    /// Is `p` on the board: inside the outline and outside every cutout?
+    pub fn contains(&self, p: Point) -> bool {
+        self.outline.contains_point(p) && !self.cutouts.iter().any(|c| c.contains_point(p))
+    }
+
+    /// The nearest on-board point to `p`: if `p` is outside the outline, pull it to
+    /// the outline boundary; if it then sits inside a cutout, push it to that
+    /// cutout's boundary. Approximate (snaps to a boundary), enough to keep a placed
+    /// component on the board.
+    pub fn contain(&self, p: Point) -> Point {
+        let mut q = p;
+        if !self.outline.contains_point(q) {
+            q = self.outline.closest_boundary_point(q);
+        }
+        for c in &self.cutouts {
+            if c.contains_point(q) {
+                q = c.closest_boundary_point(q);
+            }
+        }
+        q
+    }
+
+    /// The outline's bounding box `(min, max)` — the area a routing grid spans.
+    pub fn bbox(&self) -> Option<(Point, Point)> {
+        self.outline.bbox()
     }
 }
 
