@@ -8,12 +8,14 @@
 //! - `history` — the version DAG (undo / branch / replay).
 //! - `query` — hand-rolled incremental query engine (Netlist, ERC, DRC).
 //! - `route` — routed copper representation (trace/via/layer) + the DRC kernel.
+//! - `autoroute` — basic deterministic grid/maze autorouter (transaction-proposer).
 //! - `elaborate` — generative source -> instances + ID-keyed override reconcile.
 //! - `part` — typed pins & interfaces (makes the serial swap unrepresentable).
 //! - `project` — deterministic text projection (agent/git view).
 //! - `text` — canonical serializer + parser for tier-1 truth (the text front-end).
 //! - `export` — deterministic output artifacts (netlist / pick-and-place / SVG).
 
+pub mod autoroute;
 pub mod command;
 pub mod doc;
 pub mod elaborate;

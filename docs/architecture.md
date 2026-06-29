@@ -433,9 +433,11 @@ feasible sets tightly, and *reports* infeasibility rather than proving global op
   (`conn_rev`/`geom_rev`/`route_rev`).
 - **Routing representation + DRC now exist** (see "Prototype status (routing core)" below):
   provenance-tagged trace/via/layer facts live in the `Doc` (tier 2), routing commands
-  mutate them atomically, and DRC is a tier-3 query (clearance, min-width, ratsnest). The
-  **autorouter itself is the next step** — it will write `Free` trace DOFs on top of this
-  representation, treating `Pinned` traces as fixed obstacles.
+  mutate them atomically, and DRC is a tier-3 query (clearance, min-width, ratsnest). A
+  **basic deterministic grid/maze autorouter now exists** (see "Prototype status (autorouter)"
+  below): it writes `Free` trace DOFs as a *proposed transaction* on top of this representation,
+  treats `Pinned` traces as fixed obstacles, and verifies clean against the DRC query. Still
+  missing: rip-up/retry, topological/push-and-shove, and length/impedance matching.
 - The end-to-end PoC target (a single-PCB chip-down rework of the RP2350-Zero SWD-probe carrier)
   needs: real parts/footprints with pin geometry, a netlist→placement→route flow, and fab output.
   **Footprint *geometry* import now exists** (see "Prototype status (footprint import)" below): real
@@ -839,8 +841,61 @@ edit does **not** re-run ERC/Netlist (input isolation); a non-routing edit whose
 unchanged does **not** recompute DRC (early-cutoff firewall, like the ERC test); and routing commands
 validate atomically. The existing 69 tests stay green. Zero new dependencies.
 
-**Explicitly deferred (next agent / later work):** the **autorouter** (writes `Free` trace DOFs onto
-this representation, treats `Pinned` traces as obstacles); **serializing routes** in the text
+**Explicitly deferred (next agent / later work):** ~~the **autorouter**~~ — now built, see
+"Prototype status (autorouter)" below; **serializing routes** in the text
 front-end (`text` module — routes are not yet part of the canonical tier-1/tier-2 text projection);
 and **rendering traces** in the export SVG / Gerber (`export` module — copper geometry now exists in
 the model, but emitting it is out of scope here).
+
+## Prototype status (autorouter)
+
+A **basic deterministic grid/maze autorouter** (`autoroute` module), built as the
+transaction-proposer §1 prescribes: `autoroute(doc, lib, rules) -> AutorouteResult` is a pure
+function that **reads** facts (netlist, placement, pinned routes) and **returns** a proposed
+`Vec<Command>` (`AddTrace` + `AddVia`, all `Provenance::Free`) plus `routed`/`unrouted` net lists.
+It never mutates the `Doc`; applying the commands goes through the ordinary atomic
+`command::apply` path, so the GUI cannot tell an autoroute trace from a hand route except by the
+provenance bit. Zero new dependencies; all geometry is integer nm; same `Doc` → byte-identical
+commands.
+
+**Grid + A\*.** The routing area (the source `Board` outline, else the pad bounding box + margin)
+is discretised into a square grid; A\* searches over `(x, y, layer)` with `Top`/`Bottom` copper,
+orthogonal steps costing one pitch and a layer change costing a via penalty (10 pitches, so
+single-layer routes are strongly preferred and vias appear only when needed). Net order is `NetId`
+order; pins within a net are connected MST-style (each remaining pin routed to the net's existing
+connected copper). A grid path is coalesced into collinear segments, with `AddVia` emitted at each
+layer change and a short stub onto the *exact* pad world point at each pin end (so the trace
+literally touches the pad — the ratsnest unions it).
+
+**Grid pitch (clearance falls out).** `pitch = via_pad + min_clearance` with
+`via_pad = 2·min_trace_width`, `via_drill = min_trace_width`. Because all routed copper lies on grid
+nodes / axis-aligned edges and **distinct nets never share a node** (node ownership), the minimum
+distance between different-net copper is exactly `pitch` — chosen so *every* adjacent-node pairing
+(track↔track, track↔via, via↔via) meets the edge-to-edge clearance rule. So routed-vs-routed
+clearance is guaranteed by construction; only **off-grid** obstacles need radius-based cell
+blocking. Obstacles → blocked cells: the board exterior (off-grid), other-net **pads**
+(`pin_world`, points, all layers), other-net **pre-existing traces/vias** (`Pinned` hand routes are
+fixed obstacles, blocked on their layer/span), and copper **already routed this run** for other nets
+(node ownership). Same-net copper is never blocked. Block radii are sized to keep both a node and
+the half-edges leaving it clear; correctness is **verified against the real DRC query**, not assumed.
+
+**Failure is reported, not fatal.** A net whose pins cannot all be connected (e.g. walled off on
+both layers) is added to `unrouted` and contributes **no** commands — its partial claims are rolled
+back, so it never emits dangling/overlapping copper and never blocks later nets with phantom
+ownership. Routing then continues with the remaining nets.
+
+**Honest limits (by design).** Greedy net-by-net maze routing only: **no rip-up-and-retry, no
+topological/push-and-shove, no length/impedance matching.** Consequently **net ordering matters** —
+a net that fails may be routable in a different order (an earlier net can wall off a later one).
+Pads are points (the model carries no pad size). Existing *same-net* copper is treated as a
+non-obstacle but is not used as a routing seed (a net is re-routed from its pins). Only `Top`/`Bottom`
+are routed (the grid is 2-layer); inner layers in the representation are ignored by the router.
+
+**Tested (5 new unit tests, 83 total) — all verified through `Key::Drc`:** a two-net board routes
+from all-`Unrouted` to fully DRC-clean (no clearance/width violations introduced); a 3-pin net
+connects MST-style and passes the ratsnest; a `Pinned` other-net wall on `Top` is avoided (the route
+drops to `Bottom` via a via and stays clearance-clean); an impossible net (walled on both layers) is
+reported `unrouted` with **no** commands emitted, leaving DRC flagging it unrouted but introducing no
+spurious violations; and determinism (autoroute twice → identical commands). The existing 78 tests
+stay green. `cargo run --example autoroute` shows the end-to-end pass: DRC violations (unrouted)
+before, autoroute + apply, DRC clean after.
