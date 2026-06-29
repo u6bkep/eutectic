@@ -113,12 +113,20 @@ implementation was built this way by focused sub-agents, each verified before me
 - [`docs/poc-rp2350-spec.md`](docs/poc-rp2350-spec.md) — design spec for the capstone proof of
   concept: a chip-down rework of a multi-SWD debug probe (bare RP2350 + JST-SH headers), used to
   drive the whole flow end-to-end on a real board.
+- [`docs/poc-rp2350-result.md`](docs/poc-rp2350-result.md) — the PoC build result and, more
+  valuably, the **framework-friction findings** it surfaced. See also `examples/poc_multiprobe.rs`
+  and the vendored parts/outputs under `poc/`.
+
+The capstone PoC built a real 44-component / 44-net RP2350A board (ERC-clean, authoritative pinout
+verified through the importer) and was reported **honestly**: the basic autorouter completed 19/44
+nets and left the rest, which is what exposed the gaps now tracked as issues (below).
 
 ## Honest limitations
 
-It is a prototype. Among the known gaps (see `docs/architecture.md` for the full, current list): the
-autorouter is a basic greedy grid router (no rip-up/retry, topological, or length/impedance
-matching); DRC treats pads as points; Gerber output is not viewer-validated; the placement solver is
-an approximate relaxation, not a DOF-decomposing geometric solver; query dependencies are recorded
-explicitly rather than auto-tracked; and persistent structural-sharing maps (`im`) are a noted
-production swap for the current `BTreeMap`s.
+It is a prototype. The known gaps — several of them silent-correctness issues the PoC surfaced (net
+pins keyed by name so duplicate power pins can float; the router's clearance guarantee breaking at
+fine pitch) alongside missing features (no copper planes/multilayer; greedy autorouter; pads-as-
+points DRC; approximate placement solver) — are filed as a standing backlog. That backlog lives in a
+file-based `issues/` tracker kept beside the repo (to migrate to GitHub Issues on upload); each
+subsystem's honest limits are also recorded in its "Prototype status" section in
+`docs/architecture.md`.
