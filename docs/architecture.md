@@ -438,7 +438,10 @@ feasible sets tightly, and *reports* infeasibility rather than proving global op
   KiCad `.kicad_mod` files (incl. the PoC's JST-SH headers and the QFN ICs) parse into `PartDef`s
   with per-pad pin offsets. What's still missing for the PoC: electrical roles/interfaces (a
   footprint carries none — they come from the schematic *symbol*), and the netlist→placement→route→fab
-  flow.
+  flow. **Netlist and placement export now exist** (see "Prototype status (export)" below): the
+  connectivity and pick-and-place artifacts a board is checked/assembled against are emitted
+  deterministically from a `Doc`. **Gerber/drill output remains deferred** until routing exists —
+  those describe copper geometry the model does not yet carry.
 
 ## Prototype status (text front-end)
 
@@ -654,3 +657,36 @@ offsets in nm, all-`Passive`/no-interface); shared-pad dedup; unnamed-pad skippi
 `(module ...)` + bare pad names + ignored rotation angle; quoted name with spaces/parens; sub-nm
 fractional rounding; a battery of malformed inputs that return `Err` without panicking; and an
 existence-guarded smoke test against a real on-disk footprint. Zero new dependencies.
+
+## Prototype status (export)
+
+The `export` module turns a `Doc` (+ the `PartLib` for geometry) into deterministic, diffable
+output artifacts. Each exporter is a **pure function** of its inputs — no wall-clock, no
+randomness, all iteration over `BTreeMap`/`BTreeSet` — so output is byte-stable run to run, and a
+one-thing change yields a one-line diff. This is the same "render is a pure function of the model"
+discipline as the text projection, applied to fab/check artifacts.
+
+- **`netlist(doc) -> String`** — the connectivity artifact. One net per line,
+  `name: comp.pin comp.pin ...`, nets in `NetId` order and pins in `PinRef` order. This is what a
+  fabricated/assembled board is checked against.
+- **`placement_csv(doc) -> String`** — a pick-and-place CSV, `ref,part,x_mm,y_mm,rotation_deg`, one
+  row per component in `EntityId` order. Coordinates are six-decimal millimetres formatted by pure
+  integer arithmetic (no float — the fixed-point determinism invariant holds end to end); rotation
+  is the component's cardinal orientation.
+- **`svg(doc, lib) -> String`** — a board sketch for visual sanity-checking: the board outline (the
+  source `Board` directive if present, else the bounding box of placed geometry), each component
+  drawn at its position with its pin pads (via `pin_world`) and an id label. The model's y axis
+  points up (ECAD convention) and SVG's points down, so y is flipped within the content bounds to
+  keep the sketch upright. Element order follows `EntityId` order; no timestamps.
+
+**Gerber/drill is deliberately deferred.** Those formats describe *copper geometry* — trace
+polygons, pad stacks, drill hits — and there is **no router yet**, so the model carries no copper
+traces to emit. The artifacts above cover exactly what the model has today: placement (positions +
+cardinal orientation) and connectivity (the net hypergraph). Gerber becomes meaningful once a
+routing layer writes trace geometry into the document.
+
+`cargo run --example export` elaborates a small power-supply board on a 60×40 mm outline and prints
+all three artifacts. Tested (7 new unit tests, 64 total): netlist nets/pins for `psu_module(2)`;
+P&P header + exact rows + row count + a rotated component's rotation column; SVG outline (explicit
+board *and* bbox fallback), component ids, labels, and pads; `fmt_mm` sign/fraction handling; and
+determinism (each exporter called twice yields identical strings). Zero new dependencies.
