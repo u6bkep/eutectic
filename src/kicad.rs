@@ -311,7 +311,7 @@ fn parse_pad_geometry(pad: &[Sexp], center: Point) -> Result<Option<PadGeo>, Str
         .and_then(|a| a.parse::<f64>().ok())
         .unwrap_or(0.0);
 
-    let drill = parse_drill(pad, center)?;
+    let drill = parse_drill(pad, center, angle)?;
     let layers = pad_layers(pad, pad_type);
 
     let copper = if let Some(size) = pad.iter().find_map(|s| s.list_headed("size")) {
@@ -359,36 +359,41 @@ fn oval_shape(c: Point, w: Nm, h: Nm) -> Shape2D {
     }
 }
 
-/// Rotate a shape about `center` by `deg` (KiCad CCW degrees). Exact for the four
+/// Rotate a point about `center` by `deg` (KiCad CCW degrees). Exact for the four
 /// cardinal angles; off-axis angles use float trig rounded to nm (import-time only).
-fn rotate_shape(s: Shape2D, center: Point, deg: f64) -> Shape2D {
+fn rotate_point(p: Point, center: Point, deg: f64) -> Point {
     let d = ((deg % 360.0) + 360.0) % 360.0;
     if d == 0.0 {
-        return s;
+        return p;
     }
-    s.map_points(|p| {
-        let (dx, dy) = (p.x - center.x, p.y - center.y);
-        let (rx, ry) = if d == 90.0 {
-            (-dy, dx)
-        } else if d == 180.0 {
-            (-dx, -dy)
-        } else if d == 270.0 {
-            (dy, -dx)
-        } else {
-            let r = d.to_radians();
-            let (sin, cos) = (r.sin(), r.cos());
-            (
-                ((dx as f64) * cos - (dy as f64) * sin).round() as Nm,
-                ((dx as f64) * sin + (dy as f64) * cos).round() as Nm,
-            )
-        };
-        Point { x: center.x + rx, y: center.y + ry }
-    })
+    let (dx, dy) = (p.x - center.x, p.y - center.y);
+    let (rx, ry) = if d == 90.0 {
+        (-dy, dx)
+    } else if d == 180.0 {
+        (-dx, -dy)
+    } else if d == 270.0 {
+        (dy, -dx)
+    } else {
+        let r = d.to_radians();
+        let (sin, cos) = (r.sin(), r.cos());
+        (
+            ((dx as f64) * cos - (dy as f64) * sin).round() as Nm,
+            ((dx as f64) * sin + (dy as f64) * cos).round() as Nm,
+        )
+    };
+    Point { x: center.x + rx, y: center.y + ry }
+}
+
+/// Rotate a shape's vertices about `center` by `deg` (see [`rotate_point`]).
+fn rotate_shape(s: Shape2D, center: Point, deg: f64) -> Shape2D {
+    s.map_points(|p| rotate_point(p, center, deg))
 }
 
 /// Parse a pad's `(drill <d>)` (round) or `(drill oval <w> <h>)` (slot, along the
-/// longer axis), centred at `center`. `None` if the pad has no drill.
-fn parse_drill(pad: &[Sexp], center: Point) -> Result<Option<Drill>, String> {
+/// longer axis), centred at `center` and rotated by the pad `(at)` angle so the
+/// drill agrees with the copper. `None` if the pad has no drill. (A drill `(offset
+/// …)` is not yet applied — the hole sits at the pad centre; rare, noted.)
+fn parse_drill(pad: &[Sexp], center: Point, angle: f64) -> Result<Option<Drill>, String> {
     let Some(d) = pad.iter().find_map(|s| s.list_headed("drill")) else {
         return Ok(None);
     };
@@ -396,22 +401,18 @@ fn parse_drill(pad: &[Sexp], center: Point) -> Result<Option<Drill>, String> {
         Some("oval") => {
             let w = mm_to_nm(d.get(2).and_then(Sexp::as_atom).ok_or("drill oval missing w")?)?;
             let h = mm_to_nm(d.get(3).and_then(Sexp::as_atom).ok_or("drill oval missing h")?)?;
-            let drill = if w >= h {
+            let (a, b, dia) = if w >= h {
                 let dx = (w - h) / 2;
-                Drill::Slot {
-                    a: Point { x: center.x - dx, y: center.y },
-                    b: Point { x: center.x + dx, y: center.y },
-                    d: h,
-                }
+                (Point { x: center.x - dx, y: center.y }, Point { x: center.x + dx, y: center.y }, h)
             } else {
                 let dy = (h - w) / 2;
-                Drill::Slot {
-                    a: Point { x: center.x, y: center.y - dy },
-                    b: Point { x: center.x, y: center.y + dy },
-                    d: w,
-                }
+                (Point { x: center.x, y: center.y - dy }, Point { x: center.x, y: center.y + dy }, w)
             };
-            Ok(Some(drill))
+            Ok(Some(Drill::Slot {
+                a: rotate_point(a, center, angle),
+                b: rotate_point(b, center, angle),
+                d: dia,
+            }))
         }
         Some(tok) => Ok(Some(Drill::Round { d: mm_to_nm(tok)? })),
         None => Ok(None),
@@ -419,17 +420,19 @@ fn parse_drill(pad: &[Sexp], center: Point) -> Result<Option<Drill>, String> {
 }
 
 /// Which copper layer(s) a pad occupies: through-hole types span the board; otherwise
-/// read `(layers …)` (`*.Cu` ⇒ through, a lone `B.Cu` ⇒ bottom, else top).
+/// read `(layers …)` — `*.` or both outer layers ⇒ through, a lone `B.Cu` ⇒ bottom,
+/// else top.
 fn pad_layers(pad: &[Sexp], pad_type: &str) -> PadLayers {
     if pad_type == "thru_hole" || pad_type == "np_thru_hole" {
         return PadLayers::Through;
     }
     if let Some(l) = pad.iter().find_map(|s| s.list_headed("layers")) {
         let toks: Vec<&str> = l.iter().skip(1).filter_map(Sexp::as_atom).collect();
-        if toks.iter().any(|t| t.starts_with("*.")) {
+        let (has_f, has_b) = (toks.contains(&"F.Cu"), toks.contains(&"B.Cu"));
+        if toks.iter().any(|t| t.starts_with("*.")) || (has_f && has_b) {
             return PadLayers::Through;
         }
-        if toks.contains(&"B.Cu") && !toks.contains(&"F.Cu") {
+        if has_b {
             return PadLayers::Bottom;
         }
     }
