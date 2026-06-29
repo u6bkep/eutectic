@@ -120,6 +120,65 @@ fn round_div(num: i128, den: i128) -> i128 {
     if num >= 0 { (num + den / 2) / den } else { -((-num + den / 2) / den) }
 }
 
+/// Squared distance from point `p` to segment `a`–`b`, as `(num, den)` with
+/// `dist² = num/den`, `den > 0` (exact i128). Mirrors the geom kernel; kept local so
+/// `region` stays self-contained.
+fn pt_seg_d2(p: Point, a: Point, b: Point) -> (i128, i128) {
+    let (vx, vy) = ((b.x - a.x) as i128, (b.y - a.y) as i128);
+    let (wx, wy) = ((p.x - a.x) as i128, (p.y - a.y) as i128);
+    let den = vx * vx + vy * vy;
+    if den == 0 {
+        return (wx * wx + wy * wy, 1);
+    }
+    let t = wx * vx + wy * vy;
+    if t <= 0 {
+        (wx * wx + wy * wy, 1)
+    } else if t >= den {
+        let (ux, uy) = ((p.x - b.x) as i128, (p.y - b.y) as i128);
+        (ux * ux + uy * uy, 1)
+    } else {
+        // |w|² − t²/den = (|w|²·den − t²)/den. Exact in i128 at board scale (±1e9 nm:
+        // |w|²·den ≲ 4e36 ≪ i128::MAX).
+        let ww = wx * wx + wy * wy;
+        (ww * den - t * t, den)
+    }
+}
+
+/// Is `dist²(p, seg a–b) < thr2`? Compared as `num < thr2·den` (no cross-multiplying
+/// two large numerators — that would overflow i128 at board scale).
+fn pt_seg_lt(p: Point, a: Point, b: Point, thr2: i128) -> bool {
+    let (num, den) = pt_seg_d2(p, a, b);
+    num < thr2 * den
+}
+
+/// Do segments `a1a2` and `b1b2` intersect (touch / collinear-overlap counts)?
+fn segs_intersect(a1: Point, a2: Point, b1: Point, b2: Point) -> bool {
+    let d1 = cross(b1, b2, a1).signum();
+    let d2 = cross(b1, b2, a2).signum();
+    let d3 = cross(a1, a2, b1).signum();
+    let d4 = cross(a1, a2, b2).signum();
+    if d1 != d2 && d3 != d4 {
+        return true;
+    }
+    (d1 == 0 && on_seg_bbox(b1, b2, a1))
+        || (d2 == 0 && on_seg_bbox(b1, b2, a2))
+        || (d3 == 0 && on_seg_bbox(a1, a2, b1))
+        || (d4 == 0 && on_seg_bbox(a1, a2, b2))
+}
+
+/// Is the minimum distance between segments `a1a2` and `b1b2` `< thr` (thr² = `thr2`)?
+/// Intersection ⇒ distance 0. Else the min is at one of the four endpoint-to-opposite
+/// distances.
+fn seg_seg_within2(a1: Point, a2: Point, b1: Point, b2: Point, thr2: i128) -> bool {
+    if segs_intersect(a1, a2, b1, b2) {
+        return true;
+    }
+    pt_seg_lt(a1, b1, b2, thr2)
+        || pt_seg_lt(a2, b1, b2, thr2)
+        || pt_seg_lt(b1, a1, a2, thr2)
+        || pt_seg_lt(b2, a1, a2, thr2)
+}
+
 // ----------------------------------------------------------------------------
 // Region queries.
 // ----------------------------------------------------------------------------
@@ -228,6 +287,36 @@ impl Region {
         }
         let _ = it;
         Some((min, max))
+    }
+
+    /// Decompose into connected filled components. After a clean boolean each
+    /// positive-area (CCW) ring is one disjoint island; each hole (CW ring) is
+    /// attached to the island whose outer ring contains it. A pour split into pieces
+    /// by its knockouts yields several islands here — the basis for honest "this pad
+    /// reaches a copper island that doesn't connect to the rest" reporting.
+    pub fn islands(&self) -> Vec<Region> {
+        let mut islands: Vec<Region> = Vec::new();
+        let mut holes: Vec<Ring> = Vec::new();
+        for r in &self.rings {
+            match signed_area2(r).cmp(&0) {
+                std::cmp::Ordering::Greater => islands.push(Region { rings: vec![r.clone()] }),
+                std::cmp::Ordering::Less => holes.push(r.clone()),
+                std::cmp::Ordering::Equal => {} // degenerate (collinear / <3 verts): drop.
+            }
+        }
+        for h in holes {
+            // Attach to the island whose outer ring contains the hole. Test *every*
+            // hole vertex (not just the first): a hole vertex can land exactly on the
+            // outer boundary — where `winding` is 0 — so a first-vertex-only test could
+            // miss the containing island and silently fill the knockout solid.
+            if let Some(isl) = islands
+                .iter_mut()
+                .find(|isl| h.iter().any(|&v| winding(v, &isl.rings[0..1]) != 0))
+            {
+                isl.rings.push(h);
+            }
+        }
+        islands
     }
 }
 
@@ -453,6 +542,29 @@ pub fn intersection(a: &Region, b: &Region) -> Region {
 }
 pub fn difference(a: &Region, b: &Region) -> Region {
     boolean(a, b, BoolOp::Difference)
+}
+
+/// Do regions `a` and `b` come within `thr` of each other edge-to-edge, or overlap?
+/// `thr ≥ 0`; overlap (one's filled area containing a vertex of the other, or their
+/// boundaries crossing) always returns true. This is the copper-incidence test:
+/// clearance uses `thr = min_clearance` (a pour-vs-pour short), connectivity uses a
+/// small touch tolerance.
+pub fn regions_within(a: &Region, b: &Region, thr: Nm) -> bool {
+    // Filled-area overlap: a vertex of one lies inside the other.
+    if a.rings.iter().flatten().any(|&p| b.contains_point(p))
+        || b.rings.iter().flatten().any(|&p| a.contains_point(p))
+    {
+        return true;
+    }
+    let thr2 = (thr as i128) * (thr as i128);
+    for ea in a.rings.iter().flat_map(|r| ring_edges(r)) {
+        for eb in b.rings.iter().flat_map(|r| ring_edges(r)) {
+            if seg_seg_within2(ea.0, ea.1, eb.0, eb.1, thr2) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Union a list of regions (left fold). Empty ⇒ empty region.

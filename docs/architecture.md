@@ -545,11 +545,24 @@ clearance (incl. pour-vs-pour shorts) and connectivity-through-the-fill — is f
 stage, because both need the same "region-incidence-with-copper" primitive (is a pad inside / within
 clearance of the fill); building it once avoids duplicate machinery, and the knockout's
 clearance-correctness is already proven by the stage-3 tests. Pours have no consumer yet, so nothing
-regresses. **Remaining:** region-vs-copper incidence → wire pour fills into DRC clearance + the
-ratsnest (pads in the fill joined; island fragmentation surfaced as honest DRC); Gerber `G36/G37`
-region-fill + arc export; solder mask as the dual. The kernel pass is `O(N²)` (broadphase spatial
-index deferred — see performance notes); arc-exact boundaries and the 3D-`Solid` boolean are deferred
-but representable. (Floating/unnetted pads are not yet knocked out of a pour — a noted limit.)
+regresses. **Stage 4 done:** pours are now real copper in DRC. Two new region primitives:
+`region::regions_within(a, b, thr)` (do two regions overlap or come within `thr` edge-to-edge — exact
+i128 segment distance) and `Region::islands()` (split a fill into connected filled components — each
+CCW ring an island, holes attached by containment). DRC wiring: (1) **clearance** — pour-vs-pour: two
+different-net pours overlapping/within clearance on a layer is a short (foreign-copper-vs-pour is clean
+by construction, so only pour-vs-pour is new); (2) **connectivity** — `pin_islands` gains a node per
+pour island, and a pad/trace/via landing on an island joins it, so a pour **collapses the ratsnest**
+(the PoC's 54-pin GND problem); a pour *fragmented* by its knockouts leaves pads on different islands
+disconnected — surfaced honestly as remaining `Unrouted` islands. A region-only edit now bumps
+`geom_rev` (regions diffed in `command.rs`) so the incremental `Drc` query recomputes — no latent
+staleness. Tests: pour connects two GND pads (vs unrouted without it), a full-width foreign trace
+splits the pour into two islands (pads stay unrouted), overlapping GND/PWR pours short. **0004's
+copper-pour half is now functional end-to-end for DRC** (planes for GND/power on 2 layers); the
+multilayer-routing half stays in 0008's orbit. **Remaining:** Gerber `G36/G37` region-fill + arc
+export (stage 5); solder mask as the dual (stage 6). The DRC pass is `O(N²)` (broadphase spatial index
+deferred — see performance notes); arc-exact boundaries and the 3D-`Solid` boolean are deferred but
+representable. (Floating/unnetted pads are not yet knocked out of a pour; SMD-pad-to-pour is all-layer
+like the rest of the pin model — noted limits.)
 
 ---
 

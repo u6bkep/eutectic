@@ -214,7 +214,10 @@ pub fn apply(doc: &Doc, txn: &Transaction, lib: &PartLib, tick: u64) -> Result<D
     let connectivity_changed = next.nets != doc.nets
         || next.no_connects != doc.no_connects
         || part_shape_changed(doc, &next);
-    let geometry_changed = positions_changed(doc, &next);
+    // Pours are derived geometry; a region-only edit changes the DRC pour fills, so it
+    // must bump geom_rev (which `Drc` depends on) or the fill would go stale.
+    let geometry_changed = positions_changed(doc, &next)
+        || crate::elaborate::regions(&next.source) != crate::elaborate::regions(&doc.source);
     let routing_changed = next.traces != doc.traces || next.vias != doc.vias;
     next.conn_rev = if connectivity_changed { tick } else { doc.conn_rev };
     next.geom_rev = if geometry_changed { tick } else { doc.geom_rev };

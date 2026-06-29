@@ -226,6 +226,23 @@ pub fn check_drc(
         }
     }
 
+    // Copper pours are real copper too. They are clearance-clean against the foreign
+    // copper they were built from (knocked out by construction), so the only new
+    // clearance class is **pour-vs-pour**: two different-net pours overlapping (or
+    // within clearance) on the same layer is a short.
+    let pours = pour_fills(doc, lib, netlist, rules);
+    for i in 0..pours.len() {
+        for j in (i + 1)..pours.len() {
+            let (a, b) = (&pours[i], &pours[j]);
+            if a.net != b.net
+                && a.layer == b.layer
+                && crate::region::regions_within(&a.fill, &b.fill, rules.min_clearance)
+            {
+                out.push(clearance(&a.net, &b.net, a.layer));
+            }
+        }
+    }
+
     // --- 3. Connectivity completeness (ratsnest) via union-find. ---
     for (nid, pins) in netlist {
         let pts = &net_pads[nid];
@@ -235,7 +252,24 @@ pub fn check_drc(
         }
         let net_traces: Vec<&Trace> = doc.traces.values().filter(|t| t.net == *nid).collect();
         let net_vias: Vec<&Via> = doc.vias.values().filter(|v| v.net == *nid).collect();
-        let islands = pin_islands(pts, &net_traces, &net_vias, rules.touch_tol);
+        // This net's pour copper as `(layer, island)` pairs. Same-net fills on a layer
+        // are unioned *before* islanding, so overlapping same-net pours merge into one
+        // island (no spurious split); the layer is kept so trace/via incidence can be
+        // gated by it (copper on a different layer reaches the pour only through a via).
+        // A pad/trace/via on an island joins everything else on it, so a pour collapses
+        // the ratsnest; a pour fragmented by its knockouts leaves pads on different
+        // islands disconnected (surfaced as remaining `Unrouted` islands — honest DRC).
+        let mut by_layer: BTreeMap<Layer, Vec<crate::region::Region>> = BTreeMap::new();
+        for p in pours.iter().filter(|p| p.net == *nid) {
+            by_layer.entry(p.layer).or_default().push(p.fill.clone());
+        }
+        let net_islands: Vec<(Layer, crate::region::Region)> = by_layer
+            .into_iter()
+            .flat_map(|(layer, fills)| {
+                crate::region::union_all(fills).islands().into_iter().map(move |i| (layer, i))
+            })
+            .collect();
+        let islands = pin_islands(pts, &net_traces, &net_vias, &net_islands, rules.touch_tol);
         if islands > 1 {
             out.push(Violation::Unrouted { net: nid.clone(), islands });
         }
@@ -430,14 +464,25 @@ impl UnionFind {
 }
 
 /// Number of connected components among a net's *pins*, joining them through the
-/// net's copper. Nodes: pins, then traces, then vias. Incidence (within `tol`):
-/// pin↔pin (coincident pads), pin↔trace and pin↔via (pads are all-layer points),
-/// trace↔trace (same layer), trace↔via and via↔via (via must span the layer).
-fn pin_islands(pins: &[Point], traces: &[&Trace], vias: &[&Via], tol: Nm) -> usize {
+/// net's copper. Nodes: pins, then traces, then vias, then **pour islands**. Incidence
+/// (within `tol`): pin↔pin (coincident pads), pin↔trace and pin↔via (pads are
+/// all-layer points), trace↔trace (same layer), trace↔via and via↔via (via must span
+/// the layer), and copper↔island (a pin/trace/via landing on a filled pour island
+/// joins everything else on that island). Distinct islands are *not* joined to each
+/// other, so a pour fragmented by its knockouts leaves pads on different islands in
+/// separate components — reported honestly as remaining ratsnest islands.
+fn pin_islands(
+    pins: &[Point],
+    traces: &[&Trace],
+    vias: &[&Via],
+    pour_islands: &[(Layer, crate::region::Region)],
+    tol: Nm,
+) -> usize {
     let (np, nt, nv) = (pins.len(), traces.len(), vias.len());
-    let mut uf = UnionFind::new(np + nt + nv);
+    let mut uf = UnionFind::new(np + nt + nv + pour_islands.len());
     let trace_node = |i: usize| np + i;
     let via_node = |i: usize| np + nt + i;
+    let island_node = |i: usize| np + nt + nv + i;
 
     // pin ↔ pin
     for i in 0..np {
@@ -486,6 +531,29 @@ fn pin_islands(pins: &[Point], traces: &[&Trace], vias: &[&Via], tol: Nm) -> usi
                 && w.from.depth().min(w.to.depth()) <= u.from.depth().max(u.to.depth());
             if overlap && seg_within(u.at, u.at, w.at, w.at, tol, false) {
                 uf.union(via_node(i), via_node(j));
+            }
+        }
+    }
+    // copper ↔ pour island: a pad/trace/via whose copper lands on a filled island is
+    // electrically that island. Pins are all-layer points (matching the pad model, as
+    // pin↔trace incidence already is), so a same-net pad under its pour connects
+    // regardless of layer. Traces and vias ARE layer-specific, so they join an island
+    // only on the pour's own layer (a trace/via overlapping the pour in XY but on
+    // another layer reaches it only through a via — never implicitly).
+    for (ii, (layer, isl)) in pour_islands.iter().enumerate() {
+        for (pi, p) in pins.iter().enumerate() {
+            if isl.contains_point(*p) {
+                uf.union(pi, island_node(ii));
+            }
+        }
+        for (ti, t) in traces.iter().enumerate() {
+            if t.layer == *layer && t.path.iter().any(|p| isl.contains_point(*p)) {
+                uf.union(trace_node(ti), island_node(ii));
+            }
+        }
+        for (vi, v) in vias.iter().enumerate() {
+            if v.spans(*layer) && isl.contains_point(v.at) {
+                uf.union(via_node(vi), island_node(ii));
             }
         }
     }
@@ -729,5 +797,251 @@ mod pour_tests {
         let nl = netlist_of(&doc);
         let rules = DesignRules::default();
         assert_eq!(pour_fills(&doc, &lib, &nl, &rules), pour_fills(&doc, &lib, &nl, &rules));
+    }
+
+    fn drc(doc: &Doc, lib: &PartLib) -> Vec<Violation> {
+        check_drc(doc, lib, &netlist_of(doc), &DesignRules::default())
+    }
+
+    /// Two GND pads with no traces are unrouted — until a GND pour covers them, which
+    /// collapses the ratsnest (the headline pour win).
+    #[test]
+    fn pour_connects_same_net_pads() {
+        let mut lib = part_library();
+        lib.insert("PT".into(), one_pad("F.Cu"));
+        let outline = Shape2D::polygon(vec![
+            Point::mm(0, 0),
+            Point::mm(20, 0),
+            Point::mm(20, 20),
+            Point::mm(0, 20),
+        ]);
+        let base = vec![
+            board_rect(Point::mm(0, 0), Point::mm(20, 20)),
+            G::Instance { path: "g1".into(), part: "PT".into() },
+            G::Instance { path: "g2".into(), part: "PT".into() },
+            G::Place { path: "g1".into(), pos: Point::mm(5, 5) },
+            G::Place { path: "g2".into(), pos: Point::mm(15, 15) },
+            G::ConnectPins {
+                net: "GND".into(),
+                pins: vec![("g1".into(), "1".into()), ("g2".into(), "1".into())],
+            },
+        ];
+        // Without a pour and without traces: GND's two pads are disconnected.
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(base.clone())), &lib, "no-pour").unwrap();
+        assert!(
+            drc(h.doc(), &lib)
+                .iter()
+                .any(|v| matches!(v, Violation::Unrouted { net, .. } if *net == NetId::new("GND"))),
+            "GND is unrouted without a pour"
+        );
+        // Add the GND pour: the two pads now share its island ⇒ no longer unrouted.
+        let mut with_pour = base;
+        with_pour.push(G::Region(RegionDecl {
+            shape: outline,
+            role: Role::Conductor,
+            net: Some("GND".into()),
+            layer: Layer::Top,
+        }));
+        let mut h2 = History::new(Default::default());
+        h2.commit(Transaction::one(Command::SetSource(with_pour)), &lib, "pour").unwrap();
+        assert!(
+            !drc(h2.doc(), &lib)
+                .iter()
+                .any(|v| matches!(v, Violation::Unrouted { net, .. } if *net == NetId::new("GND"))),
+            "the pour connects both GND pads: {:?}",
+            drc(h2.doc(), &lib)
+        );
+    }
+
+    /// A foreign trace cutting fully across the pour splits it into two islands; GND
+    /// pads on opposite sides stay disconnected — honest fragmentation reporting.
+    #[test]
+    fn fragmented_pour_leaves_pads_unrouted() {
+        let mut lib = part_library();
+        lib.insert("PT".into(), one_pad("F.Cu"));
+        let outline = Shape2D::polygon(vec![
+            Point::mm(0, 0),
+            Point::mm(20, 0),
+            Point::mm(20, 20),
+            Point::mm(0, 20),
+        ]);
+        let src = vec![
+            board_rect(Point::mm(0, 0), Point::mm(20, 20)),
+            G::Instance { path: "g1".into(), part: "PT".into() },
+            G::Instance { path: "g2".into(), part: "PT".into() },
+            G::Instance { path: "s".into(), part: "PT".into() },
+            G::Place { path: "g1".into(), pos: Point::mm(5, 5) },   // below the cut
+            G::Place { path: "g2".into(), pos: Point::mm(5, 15) },  // above the cut
+            G::Place { path: "s".into(), pos: Point::mm(10, 10) },
+            G::ConnectPins {
+                net: "GND".into(),
+                pins: vec![("g1".into(), "1".into()), ("g2".into(), "1".into())],
+            },
+            G::ConnectPins { net: "SIG".into(), pins: vec![("s".into(), "1".into())] },
+            G::Region(RegionDecl {
+                shape: outline,
+                role: Role::Conductor,
+                net: Some("GND".into()),
+                layer: Layer::Top,
+            }),
+        ];
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "frag").unwrap();
+        // A full-width SIG trace at y=10 cuts the GND pour into top/bottom islands.
+        let cut = Trace {
+            net: NetId::new("SIG"),
+            layer: Layer::Top,
+            path: vec![Point::mm(0, 10), Point::mm(20, 10)],
+            width: 150_000,
+            prov: crate::doc::Provenance::Pinned,
+        };
+        h.commit(Transaction::one(Command::AddTrace(TraceId(1), cut)), &lib, "cut").unwrap();
+        assert!(
+            drc(h.doc(), &lib).iter().any(|v| matches!(
+                v,
+                Violation::Unrouted { net, islands } if *net == NetId::new("GND") && *islands == 2
+            )),
+            "the split pour leaves GND in two islands: {:?}",
+            drc(h.doc(), &lib)
+        );
+    }
+
+    /// Review regression (BUG 1): a same-net trace on a *different* layer that passes
+    /// under a pour must NOT be joined through it — cross-layer copper connects only
+    /// via a via. Here a B.Cu GND trace runs under an F.Cu GND pour with no via, so
+    /// the two GND pads stay disconnected.
+    #[test]
+    fn cross_layer_trace_not_joined_through_pour() {
+        let mut lib = part_library();
+        lib.insert("PT".into(), one_pad("F.Cu"));
+        let left_pour = Shape2D::polygon(vec![
+            Point::mm(0, 0),
+            Point::mm(15, 0),
+            Point::mm(15, 10),
+            Point::mm(0, 10),
+        ]);
+        let src = vec![
+            board_rect(Point::mm(0, 0), Point::mm(30, 10)),
+            G::Instance { path: "g1".into(), part: "PT".into() },
+            G::Instance { path: "g2".into(), part: "PT".into() },
+            G::Place { path: "g1".into(), pos: Point::mm(5, 5) },  // under the F.Cu pour
+            G::Place { path: "g2".into(), pos: Point::mm(25, 5) }, // outside the pour
+            G::ConnectPins {
+                net: "GND".into(),
+                pins: vec![("g1".into(), "1".into()), ("g2".into(), "1".into())],
+            },
+            G::Region(RegionDecl {
+                shape: left_pour,
+                role: Role::Conductor,
+                net: Some("GND".into()),
+                layer: Layer::Top,
+            }),
+        ];
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "xlayer").unwrap();
+        // A B.Cu GND trace from g2 running left *under* the F.Cu pour (x=10 is inside
+        // the pour), but on the bottom layer with no via.
+        let t = Trace {
+            net: NetId::new("GND"),
+            layer: Layer::Bottom,
+            path: vec![Point::mm(25, 5), Point::mm(10, 5)],
+            width: 150_000,
+            prov: crate::doc::Provenance::Pinned,
+        };
+        h.commit(Transaction::one(Command::AddTrace(TraceId(1), t)), &lib, "btrace").unwrap();
+        assert!(
+            drc(h.doc(), &lib).iter().any(|v| matches!(
+                v,
+                Violation::Unrouted { net, .. } if *net == NetId::new("GND")
+            )),
+            "B.Cu trace must not connect through the F.Cu pour without a via: {:?}",
+            drc(h.doc(), &lib)
+        );
+    }
+
+    /// Review regression (BUG 2): two overlapping same-net pours on one layer are one
+    /// blob of copper — they must be unioned before islanding, so pads split between
+    /// them are connected (not falsely reported as two islands).
+    #[test]
+    fn overlapping_same_net_pours_merge() {
+        let mut lib = part_library();
+        lib.insert("PT".into(), one_pad("F.Cu"));
+        let a = Shape2D::polygon(vec![
+            Point::mm(0, 0),
+            Point::mm(18, 0),
+            Point::mm(18, 10),
+            Point::mm(0, 10),
+        ]);
+        let b = Shape2D::polygon(vec![
+            Point::mm(12, 0),
+            Point::mm(30, 0),
+            Point::mm(30, 10),
+            Point::mm(12, 10),
+        ]);
+        let src = vec![
+            board_rect(Point::mm(0, 0), Point::mm(30, 10)),
+            G::Instance { path: "g1".into(), part: "PT".into() },
+            G::Instance { path: "g2".into(), part: "PT".into() },
+            G::Place { path: "g1".into(), pos: Point::mm(5, 5) },  // pour A only
+            G::Place { path: "g2".into(), pos: Point::mm(25, 5) }, // pour B only
+            G::ConnectPins {
+                net: "GND".into(),
+                pins: vec![("g1".into(), "1".into()), ("g2".into(), "1".into())],
+            },
+            G::Region(RegionDecl { shape: a, role: Role::Conductor, net: Some("GND".into()), layer: Layer::Top }),
+            G::Region(RegionDecl { shape: b, role: Role::Conductor, net: Some("GND".into()), layer: Layer::Top }),
+        ];
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "twopours").unwrap();
+        assert!(
+            !drc(h.doc(), &lib).iter().any(|v| matches!(
+                v,
+                Violation::Unrouted { net, .. } if *net == NetId::new("GND")
+            )),
+            "overlapping same-net pours are one island connecting both pads: {:?}",
+            drc(h.doc(), &lib)
+        );
+    }
+
+    /// Two different-net pours overlapping on the same layer is a short.
+    #[test]
+    fn overlapping_pours_short() {
+        let mut lib = part_library();
+        lib.insert("PT".into(), one_pad("F.Cu"));
+        let left = Shape2D::polygon(vec![
+            Point::mm(0, 0),
+            Point::mm(12, 0),
+            Point::mm(12, 12),
+            Point::mm(0, 12),
+        ]);
+        let right = Shape2D::polygon(vec![
+            Point::mm(8, 8),
+            Point::mm(20, 8),
+            Point::mm(20, 20),
+            Point::mm(8, 20),
+        ]);
+        let src = vec![
+            board_rect(Point::mm(0, 0), Point::mm(20, 20)),
+            G::Instance { path: "a".into(), part: "PT".into() },
+            G::Instance { path: "b".into(), part: "PT".into() },
+            G::Place { path: "a".into(), pos: Point::mm(2, 2) },
+            G::Place { path: "b".into(), pos: Point::mm(18, 18) },
+            G::ConnectPins { net: "GND".into(), pins: vec![("a".into(), "1".into())] },
+            G::ConnectPins { net: "PWR".into(), pins: vec![("b".into(), "1".into())] },
+            G::Region(RegionDecl { shape: left, role: Role::Conductor, net: Some("GND".into()), layer: Layer::Top }),
+            G::Region(RegionDecl { shape: right, role: Role::Conductor, net: Some("PWR".into()), layer: Layer::Top }),
+        ];
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "shorts").unwrap();
+        assert!(
+            drc(h.doc(), &lib).iter().any(|v| matches!(
+                v,
+                Violation::Clearance { a, b, .. }
+                    if *a == NetId::new("GND") && *b == NetId::new("PWR")
+            )),
+            "overlapping GND/PWR pours short: {:?}",
+            drc(h.doc(), &lib)
+        );
     }
 }
