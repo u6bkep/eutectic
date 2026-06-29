@@ -31,7 +31,7 @@
 //! headers are accepted; pad names may be quoted or bare.
 
 use crate::doc::{Nm, Point};
-use crate::part::{PartDef, PinDef, PinRole};
+use crate::part::{Pad, PadShape, PartDef, PinDef, PinRole};
 use std::collections::BTreeMap;
 
 /// A parsed S-expression node: either a leaf atom or a parenthesised list.
@@ -271,16 +271,47 @@ pub fn import_footprint(text: &str) -> Result<PartDef, String> {
             .and_then(Sexp::as_atom)
             .ok_or_else(|| format!("pad {pad_name:?} (at ...) missing y"))?;
         let offset = Point { x: mm_to_nm(x)?, y: mm_to_nm(y)? };
+        // Pad copper geometry for fab output: the shape token (the 4th element of
+        // `(pad <name> <type> <shape> ...)`) and `(size w h)`. Render-only — it does
+        // not affect roles/offsets. A pad missing its size carries no geometry.
+        let pad = parse_pad_geometry(pad)?;
         // A bare footprint has no functional naming: name == number == the pad id.
         pins.push(PinDef {
             name: pad_name.to_string(),
             number: pad_name.to_string(),
             role: PinRole::Passive,
             offset,
+            pad,
         });
     }
 
     Ok(PartDef { name, pins, interfaces: BTreeMap::new() })
+}
+
+/// Lift a pad's copper geometry — its [`PadShape`] and `(size w h)` — out of a
+/// `(pad <name> <type> <shape> … (size w h) …)` node, for fab output only.
+///
+/// The shape is the 4th list element. The four shapes KiCad uses for copper pads
+/// map directly to [`PadShape`]; `custom`/`trapezoid`/`chamfered_rect` and any
+/// other token fall back to [`PadShape::Rect`] (the conservative bounding-box
+/// approximation — sufficient for flashing copper). A pad with **no** `(size …)`
+/// yields `None` (no geometry to flash), which is not an error.
+fn parse_pad_geometry(pad: &[Sexp]) -> Result<Option<Pad>, String> {
+    let Some(size) = pad.iter().find_map(|s| s.list_headed("size")) else {
+        return Ok(None);
+    };
+    let w = size.get(1).and_then(Sexp::as_atom).ok_or("pad (size …) missing width")?;
+    let h = size.get(2).and_then(Sexp::as_atom).ok_or("pad (size …) missing height")?;
+    let shape = match pad.get(3).and_then(Sexp::as_atom) {
+        Some("circle") => PadShape::Circle,
+        Some("rect") => PadShape::Rect,
+        Some("roundrect") => PadShape::RoundRect,
+        Some("oval") => PadShape::Oval,
+        // Unknown/complex shapes (custom, trapezoid, chamfered_rect, …): treat the
+        // pad as its bounding rectangle for flashing purposes.
+        _ => PadShape::Rect,
+    };
+    Ok(Some(Pad { size: (mm_to_nm(w)?, mm_to_nm(h)?), shape }))
 }
 
 /// Convenience wrapper: read a `.kicad_mod` file from disk and import it.
@@ -537,6 +568,7 @@ pub fn join_symbol_footprint(symbol: &Symbol, footprint: &PartDef) -> JoinReport
                     number: pad.number.clone(),
                     role: sp.etype.role(),
                     offset: pad.offset,
+                    pad: pad.pad, // copper geometry always comes from the footprint
                 });
             }
             None => {
@@ -546,6 +578,7 @@ pub fn join_symbol_footprint(symbol: &Symbol, footprint: &PartDef) -> JoinReport
                     number: pad.number.clone(),
                     role: PinRole::Passive,
                     offset: pad.offset,
+                    pad: pad.pad,
                 });
             }
         }
@@ -669,6 +702,33 @@ mod tests {
         assert_eq!(p.pin_offset("3"), Some(Point { x: 1_000_000, y: 1_325_000 }));
         // first MP wins: (-2.3, -1.2) mm
         assert_eq!(p.pin_offset("MP"), Some(Point { x: -2_300_000, y: -1_200_000 }));
+    }
+
+    #[test]
+    fn captures_pad_shape_and_size() {
+        use crate::part::PadShape;
+        let p = import_footprint(JST_SH_1X03).unwrap();
+        // pad "1": roundrect, size 0.6 x 1.55 mm.
+        let pad1 = p.pins.iter().find(|pin| pin.name == "1").unwrap().pad.unwrap();
+        assert_eq!(pad1.shape, PadShape::RoundRect);
+        assert_eq!(pad1.size, (600_000, 1_550_000));
+        // A rect pad (FP_4) captures shape Rect and its size.
+        let r = import_footprint(FP_4).unwrap();
+        let a1 = r.pins.iter().find(|pin| pin.name == "1").unwrap().pad.unwrap();
+        assert_eq!(a1.shape, PadShape::Rect);
+        assert_eq!(a1.size, (500_000, 500_000));
+        // Geometry rides through the symbol/footprint join (footprint is the source).
+        let joined = import_part(SYM_LIB, FP_4).unwrap();
+        let vdd = joined.pins.iter().find(|pin| pin.name == "VDD").unwrap();
+        assert_eq!(vdd.pad.unwrap().shape, PadShape::Rect);
+        assert_eq!(vdd.pad.unwrap().size, (500_000, 500_000));
+    }
+
+    #[test]
+    fn pad_without_size_yields_no_geometry() {
+        let src = r#"(footprint "X" (pad "1" smd circle (at 0 0) (layers "F.Cu")))"#;
+        let p = import_footprint(src).unwrap();
+        assert_eq!(p.pins[0].pad, None);
     }
 
     #[test]

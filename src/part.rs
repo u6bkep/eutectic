@@ -5,9 +5,31 @@
 //! itself encodes how two instances mate (UART crosses tx<->rx). A designer never
 //! wires individual signals, so connecting tx-to-tx is not expressible.
 
-use crate::doc::{Component, Point, MM};
+use crate::doc::{Component, Nm, Point, MM};
 use crate::part::Dir::*;
 use std::collections::BTreeMap;
+
+/// A pad's copper geometry, as spelled in a footprint's `(pad … <shape> (size w h))`.
+/// The four shapes the prototype recognises; an unrecognised footprint shape token
+/// is mapped to the nearest of these by the importer (documented there).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PadShape {
+    Circle,
+    Rect,
+    RoundRect,
+    Oval,
+}
+
+/// Render-only pad copper geometry attached to a [`PinDef`]: the pad's `size`
+/// (width, height in nm) and its [`PadShape`]. This is **fab-output metadata
+/// only** — it exists so a footprint pad can *flash as copper* in Gerber. DRC and
+/// the autorouter deliberately keep treating a pad as its `pin_world` *point*
+/// (radius 0), so this field never changes connectivity or clearance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pad {
+    pub size: (Nm, Nm),
+    pub shape: PadShape,
+}
 
 /// Signal/pin electrical direction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +82,11 @@ pub struct PinDef {
     /// Local position of the pin relative to the component origin, in nm. Combined
     /// with the component's position + orientation to get a world position.
     pub offset: Point,
+    /// Optional copper geometry for fab output ([`Pad`]). `Some` for an imported
+    /// footprint pad (shape + size); `None` for the toy `part_library` pins, which
+    /// carry no footprint. **Render-only** — DRC/the solver treat pads as points and
+    /// never read this (see [`Pad`]).
+    pub pad: Option<Pad>,
 }
 
 /// A typed interface (e.g. UART). Defined once; encodes the correct mating so
@@ -141,7 +168,8 @@ fn uart() -> InterfaceDef {
 
 fn pin(name: &str, role: PinRole, offset: Point) -> PinDef {
     // No distinct pad numbering in the toy library: number defaults to the name.
-    PinDef { name: name.into(), number: name.into(), role, offset }
+    // The toy parts carry no footprint, so they have no pad copper geometry.
+    PinDef { name: name.into(), number: name.into(), role, offset, pad: None }
 }
 
 /// A small built-in library sufficient for the M1 demo.

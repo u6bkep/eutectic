@@ -447,10 +447,13 @@ feasible sets tightly, and *reports* infeasibility rather than proving global op
   footprint lacks, and the two are joined by pad number into a real `PartDef` with mapped `PinRole`s.
   **Netlist and placement export now exist too** (see "Prototype status (export)" below): the
   connectivity and pick-and-place artifacts a board is checked/assembled against are emitted
-  deterministically from a `Doc`. What's still missing for the PoC: typed `InterfaceDef`s inferred
-  from symbols (the join produces discrete roled pins, not interfaces yet), the **router**, and
-  **Gerber/drill output** (deferred until routing — it describes copper geometry the model does not
-  yet carry).
+  deterministically from a `Doc`. The **router** now exists (see "Prototype status (autorouter)"),
+  and **Gerber/drill output now exists too** (see "Prototype status (Gerber/fab output)"): RS-274X
+  per copper layer + `Edge.Cuts` + an Excellon drill program, emitted deterministically from routed
+  copper, with footprint pads flashing as copper (render-only pad geometry — DRC still treats pads as
+  points). It is **not yet validated against a real Gerber viewer**. What's still missing for the PoC:
+  typed `InterfaceDef`s inferred from symbols (the join produces discrete roled pins, not interfaces
+  yet), and serializing routes in the canonical text projection.
 
 ## Prototype status (text front-end)
 
@@ -643,8 +646,10 @@ serde/sexp crates) and lift out the bits we model.
 - **What is imported is geometry, not electrics.** One `PinDef` per `pad`, named by the pad's
   number/name, positioned at the pad's `(at x y [angle])` converted mm→nm (decimal mm parsed by
   hand into integer nm, half-away-from-zero rounding — no float, preserving the fixed-point
-  invariant; the rotation angle is ignored for the offset). Everything else (silkscreen, courtyard,
-  fab, 3D models, sizes, layers, zones) is ignored.
+  invariant; the rotation angle is ignored for the offset). The pad's **shape + `(size w h)`** are
+  also captured into `PinDef.pad: Option<Pad>` — **render-only** copper geometry for fab output (see
+  "Prototype status (Gerber/fab output)"); DRC/the solver ignore it and keep treating pads as points.
+  Everything else (silkscreen, courtyard, fab, 3D models, layers, zones) is ignored.
 - **Role-less by design (footprint alone).** A footprint carries **no electrical roles** —
   whether a pad is power, input, or passive comes from the *schematic symbol*, not the footprint.
   So an imported footprint *on its own* gives every pin `PinRole::Passive` and an empty `interfaces`.
@@ -750,21 +755,22 @@ discipline as the text projection, applied to fab/check artifacts.
   is the component's cardinal orientation.
 - **`svg(doc, lib) -> String`** — a board sketch for visual sanity-checking: the board outline (the
   source `Board` directive if present, else the bounding box of placed geometry), each component
-  drawn at its position with its pin pads (via `pin_world`) and an id label. The model's y axis
-  points up (ECAD convention) and SVG's points down, so y is flipped within the content bounds to
-  keep the sketch upright. Element order follows `EntityId` order; no timestamps.
+  drawn at its position with its pin pads (via `pin_world`) and an id label, **and the routed copper**
+  (trace polylines coloured/classed per layer, vias as circles). The model's y axis points up (ECAD
+  convention) and SVG's points down, so y is flipped within the content bounds to keep the sketch
+  upright. Element order follows `EntityId`/`TraceId`/`ViaId` order; no timestamps.
 
-**Gerber/drill is deliberately deferred.** Those formats describe *copper geometry* — trace
-polygons, pad stacks, drill hits — and there is **no router yet**, so the model carries no copper
-traces to emit. The artifacts above cover exactly what the model has today: placement (positions +
-cardinal orientation) and connectivity (the net hypergraph). Gerber becomes meaningful once a
-routing layer writes trace geometry into the document.
+**Gerber/drill output now exists** (see "Prototype status (Gerber/fab output)" below): now that
+routing writes real copper into the `Doc` and footprint pads carry render geometry, the fab
+artifacts describe genuine copper. `gerber_set` emits an RS-274X Gerber per copper layer + an
+`Edge.Cuts` outline and an Excellon drill program.
 
 `cargo run --example export` elaborates a small power-supply board on a 60×40 mm outline and prints
-all three artifacts. Tested (7 new unit tests, 64 total): netlist nets/pins for `psu_module(2)`;
-P&P header + exact rows + row count + a rotated component's rotation column; SVG outline (explicit
-board *and* bbox fallback), component ids, labels, and pads; `fmt_mm` sign/fraction handling; and
-determinism (each exporter called twice yields identical strings). Zero new dependencies.
+the netlist / P&P / SVG; `cargo run --example gerber` autoroutes a board and dumps the full fab
+fileset + SVG. Tested (netlist nets/pins for `psu_module(2)`; P&P header + exact rows + row count +
+a rotated component's rotation column; SVG outline (explicit board *and* bbox fallback), component
+ids, labels, pads, and now trace/via elements; `fmt_mm` sign/fraction handling; determinism — each
+exporter called twice yields identical strings). Zero new dependencies.
 
 ## Prototype status (routing core)
 
@@ -822,9 +828,10 @@ connectivity edit whose resolved netlist is unchanged is cut off and does **not*
 `Engine::query` now folds `route_rev` into the current revision.
 
 **Modelling decisions / simplifications (documented honestly):**
-- **Pads are points.** A footprint import carries no pad *size*, so a pad is its `pin_world` centre
-  (radius 0) for both clearance and incidence; pads are treated as present on **all layers**
-  (through-hole assumption). Trace/via copper *does* carry width/pad size in the clearance threshold.
+- **Pads are points.** A pad is its `pin_world` centre (radius 0) for both clearance and incidence;
+  pads are treated as present on **all layers** (through-hole assumption). (Footprint pads now carry
+  size/shape — `PinDef.pad` — but that is **render-only** for Gerber; DRC deliberately still ignores
+  it.) Trace/via copper *does* carry width/pad size in the clearance threshold.
 - **A "touch" is incidence within `touch_tol`**, not an overlap area; hand-placed integer coordinates
   make exact-coincident endpoints distance 0, and the tolerance absorbs deliberate near-misses.
 - **Clearance violations are keyed by `(net, net, layer)`** (de-duped), not by location — multiple
@@ -844,8 +851,8 @@ validate atomically. The existing 69 tests stay green. Zero new dependencies.
 **Explicitly deferred (next agent / later work):** ~~the **autorouter**~~ — now built, see
 "Prototype status (autorouter)" below; **serializing routes** in the text
 front-end (`text` module — routes are not yet part of the canonical tier-1/tier-2 text projection);
-and **rendering traces** in the export SVG / Gerber (`export` module — copper geometry now exists in
-the model, but emitting it is out of scope here).
+and ~~**rendering traces** in the export SVG / Gerber~~ — now done, see "Prototype status
+(Gerber/fab output)" below (the SVG draws traces/vias and a Gerber/Excellon fab fileset is emitted).
 
 ## Prototype status (autorouter)
 
@@ -899,3 +906,60 @@ reported `unrouted` with **no** commands emitted, leaving DRC flagging it unrout
 spurious violations; and determinism (autoroute twice → identical commands). The existing 78 tests
 stay green. `cargo run --example autoroute` shows the end-to-end pass: DRC violations (unrouted)
 before, autoroute + apply, DRC clean after.
+
+## Prototype status (Gerber/fab output)
+
+The last missing PoC piece: **fab output**. Now that routing writes real copper into the `Doc`
+(traces with width, vias with pad + drill) and footprint pads carry render geometry, the `export`
+module emits the manufacturing fileset — **RS-274X Gerber** per copper layer + an `Edge.Cuts`
+outline, and an **Excellon drill** program. Same discipline as the other exporters: each is a pure
+function of the `Doc` (+ `PartLib`), all coordinates flow from integer nanometres into each format
+by **integer arithmetic** (no float, no timestamps, stable ordering) → byte-stable, diffable output.
+
+**Pad geometry capture (render-only, additive).** A footprint pad has a position but the model
+carried no pad *size/shape*, so a pad could not flash as copper. `import_footprint` now also reads
+each pad's **shape** token (`circle`/`rect`/`roundrect`/`oval`; unknown/complex shapes fall back to
+their bounding `rect`) and `(size w h)`, stored as `PinDef.pad: Option<part::Pad { size: (Nm, Nm),
+shape: PadShape }>`. It rides through the symbol↔footprint join (the footprint is the geometry
+source). This is **fab-render metadata only**: DRC and the autorouter still treat a pad as its
+`pin_world` *point* (radius 0) and never read it. Toy `part_library` pins carry no footprint, so
+`pad` is `None` and they contribute no copper flashes.
+
+**Coordinate format.** Gerber uses `%FSLAX46Y46*%` (absolute, leading-zeros-omitted, 4 integer + 6
+fractional digits of mm) with `%MOMM*%`. Because 1 mm = 1_000_000 nm, the integer the file carries
+**is exactly the nanometre value** — so a coordinate is just `nm.to_string()`, no float. Aperture
+definitions and Excellon coordinates/tool sizes use the same six-decimal-mm `fmt_mm` formatter.
+
+**API (`export` module).**
+- **`gerber_layer(doc, lib, layer) -> String`** — one copper layer as RS-274X: format spec, mm
+  units, the layer's **aperture table** (distinct apertures, codes 10.. in a canonical `Ord`), then
+  objects. **Traces → draws:** each trace's centreline is a `D02` move + `D01` draws with a round
+  aperture sized to its `width`. **Vias/pads → flashes:** a via pad (`D03`) on each layer it
+  `spans`, with a round aperture sized to its `pad`; a component pad (`D03`) by **shape** —
+  `circle→C`, `rect`/`roundrect→R` (bounding box; basic Gerber has no rounded-rect), `oval→O`.
+  Component pads flash on **every** copper layer (the all-layer point model). Object order is
+  `TraceId`, then `ViaId`, then `(EntityId, pin)` — deterministic. Ends `M02*`.
+- **`gerber_edge_cuts(doc, lib) -> String`** — the board outline as a closed rectangle drawn with a
+  thin 0.1 mm pen, from the source `Board` rect, else the placement/route bounding box.
+- **`excellon_drill(doc) -> String`** — `M48` header, `METRIC`, one **tool** per distinct via drill
+  diameter (`T1..`, sorted), then each tool's hole coordinates (`ViaId` order), `M30`. Decimal-point
+  coordinates so zero-suppression mode is moot.
+- **`gerber_set(doc, lib) -> Vec<(String, String)>`** — the convenient fileset: `board-F_Cu.gbr` /
+  `board-B_Cu.gbr` / `board-In<n>_Cu.gbr` (stack-up order) + `board-Edge_Cuts.gbr` + `board.drl`.
+
+**Honest limits.** **Not validated against a real Gerber viewer** — assertions here are
+syntactic/structural (format directives, aperture defs, draw/flash counts, exact coordinates). **DRC
+still treats pads as points** (radius 0, all layers); the pad size/shape captured here feeds *only*
+the copper flash, not clearance/connectivity. Component pads flash on all copper layers (the model
+has no per-pad layer), `roundrect`/`custom` pads flash as their bounding rectangle, and the board
+base filename is the fixed `board` (the `Doc` carries no board name). Through-holes are vias only.
+
+**Tested (10 new unit tests, 93 total):** footprint import captures pad shape + size (fixture, and a
+size-less pad → `None`) and it survives the symbol/footprint join; a hand-routed two-layer fixture
+produces the F_Cu/B_Cu Gerbers with the expected format spec, aperture defs, exact trace draws
+(`D01` counts + coordinates) and via/pad flashes (`D03`); the Excellon lists the via drill + its
+coordinate; `Edge.Cuts` traces the outline rectangle; a part with real pad geometry flashes `R`/`C`
+apertures at the right world positions; the SVG now contains `trace`/`via` elements; `gerber_set`
+filenames + layer order; and determinism (every fab exporter twice → byte-identical, incl. on an
+autorouted board). The existing 83 tests stay green. `cargo run --example gerber` autoroutes a board
+and dumps the whole fileset + SVG. Zero new dependencies.

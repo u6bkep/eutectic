@@ -84,7 +84,7 @@ pub struct Via {
 
 impl Via {
     /// Does this via connect copper on `layer`? (Is `layer` within its span?)
-    fn spans(&self, layer: Layer) -> bool {
+    pub fn spans(&self, layer: Layer) -> bool {
         let (lo, hi) = (self.from.depth().min(self.to.depth()), self.from.depth().max(self.to.depth()));
         let d = layer.depth();
         lo <= d && d <= hi
