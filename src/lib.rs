@@ -11,10 +11,12 @@
 //! - `part` — typed pins & interfaces (makes the serial swap unrepresentable).
 //! - `project` — deterministic text projection (agent/git view).
 //! - `text` — canonical serializer + parser for tier-1 truth (the text front-end).
+//! - `export` — deterministic output artifacts (netlist / pick-and-place / SVG).
 
 pub mod command;
 pub mod doc;
 pub mod elaborate;
+pub mod export;
 pub mod history;
 pub mod id;
 pub mod kicad;
