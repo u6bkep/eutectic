@@ -1,8 +1,11 @@
 # ECAD-from-scratch: Architecture & Representation
 
-**Status:** theoretical design. No code yet. This document captures the architecture
-converged on in design discussion, *including the open questions and hard parts* — it is
-meant to be argued with, not treated as settled.
+**Status:** design of record, now substantially **implemented** as the `ecad-core` Rust prototype
+(see [`../README.md`](../README.md) and the "Prototype status (...)" sections throughout this
+document). This file captures the architecture converged on in design discussion *including the
+open questions and hard parts* — the prose sections (§1–§6) are the reasoning; each "Prototype
+status" section records what the corresponding code actually does and its honest limits. Treat it
+as a living document, not settled dogma.
 
 ## Motivation
 
@@ -338,7 +341,12 @@ region conflict *spatially*; no text merge can reason about it. Mitigations enab
 - **TopoR / FreeRouting** — topological routing.
 - **Onshape/Fusion sketch solvers** — geometric constraint solving, DOF analysis, least-change.
 
-## Recommended next steps
+## Roadmap (historical)
+
+> This was the original build order. It has since been overtaken by events: the engine core, the
+> placement solver, KiCad import, routing + DRC + a basic autorouter, and fab export are all built.
+> See the "Prototype status (...)" sections below and [`../README.md`](../README.md) for the current
+> state; the items here are kept to show the sequence the work actually followed.
 
 1. **This document** — the synced design of record. ✅ done
 2. **Prototype the engine core only** — fact store + command algebra + Salsa-style query layer +
