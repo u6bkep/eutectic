@@ -497,6 +497,43 @@ clearance kernel (additive, self-contained); **(2)** pads → `Conductor` featur
 **(5)** router honesty as the downstream consequence (0003). `Solid` and true-3D solving are out of
 scope; the representation merely keeps the door open.
 
+### Copper pours / solder mask: the region kernel (0004)
+
+A copper pour, a solder-mask layer, a paste stencil, and a keep-out-aware fill are **one operation**:
+*offset some shapes, then boolean-combine regions*. A pour is `zone − ⋃(foreign_copper ⊕ clearance)`
+(with same-net thermal spokes); a mask is `⋃(pad ⊕ mask_expansion)`; paste is the same with a
+reduction. So instead of a one-off "pour" feature we build the shared **offset + polygon-boolean
+kernel** once (`src/region.rs`) and let every consumer fall out of it.
+
+- **`Region` = a set of oriented rings** (CCW outer, CW holes) under the non-zero winding rule — so a
+  pour with knockouts (area + holes), disjoint copper islands, and nested cut-outs are one type. It is
+  the result of every boolean.
+- **Boolean** (`union`/`intersection`/`difference`) subdivides the two inputs' edges at their shared
+  crossings (each crossing rounded to nm **once** and used to split *both* edges, so no cracks open),
+  classifies each fragment by a midpoint inside/on-boundary/outside test, selects per the operation
+  (with explicit coincident-edge rules), and stitches survivors back into rings. Predicates
+  (orientation, winding, on-segment) are exact `i128`; only the shared rounding is approximate, and it
+  is deterministic.
+- **Offset is a radius bump, not a new algorithm.** A `Shape2D` is already a skeleton ⊕ a disc of
+  `radius`; inflating by clearance `c` is `radius += c` (disc Minkowski sums add radii — exact).
+  `region::shape_to_region` then realises any inflated shape as a filled `Region` by the **dilation
+  decomposition** (core area ∪ one rect per skeleton edge ∪ one disc per vertex) — which reuses
+  `union`, so there is exactly one boolean engine. Arcs are tessellated at a fixed fine resolution
+  (integer direction table; the only float is the correctly-rounded IEEE `sqrt` for an edge normal,
+  matching the `closest_on_segment` precedent). The fill is a **derived (tier-3)** result, so this
+  tessellation is never baked into stored state — keeping the door open to arc-exact boundaries later
+  without a data migration.
+
+**Stage 1 done:** the `region` kernel — `Region`, `union`/`intersection`/`difference`,
+`shape_to_region` (offset via dilation), and exact-integer predicates — landed standalone with a
+degenerate-case test suite (shared edges, corner-touch, concave dilation, multi-knockout pours,
+containment edge cases, determinism). No consumers yet. **Remaining:** the region *primitive* (an
+authored `Feature` = `Shape2D` + `Role` + optional net), the derived pour-fill query wired into DRC's
+copper set, connectivity-through-the-fill in the ratsnest (island fragmentation surfaced as honest
+DRC), Gerber `G36/G37` region-fill + arc export, then solder mask as the dual. The kernel pass is
+`O(N²)` (broadphase spatial index deferred — see performance notes); arc-exact boundaries and the
+3D-`Solid` boolean are deferred but representable.
+
 ---
 
 ## Open questions / hard parts (carry these forward)

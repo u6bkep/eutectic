@@ -28,6 +28,7 @@ pub mod kicad;
 pub mod part;
 pub mod project;
 pub mod query;
+pub mod region;
 pub mod route;
 pub mod solve;
 pub mod text;
