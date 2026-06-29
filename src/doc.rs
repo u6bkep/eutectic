@@ -101,7 +101,18 @@ pub struct Dof<T> {
     pub prov: Provenance,
 }
 
-/// A reference to a specific pin on a specific component instance.
+/// A reference to a specific *physical pad* on a specific component instance.
+///
+/// `pin` is the **stable pad identity**, not the functional name: a pad **number**
+/// for a discrete pin (`"30"`, `"MP"`), or `"port.signal"` for an interface signal.
+/// This is what lets a part with six pads named `IOVDD` carry six distinct members
+/// on a net — identity is `(comp, number)`, and the six numbers differ even though
+/// the names collide. The two axes of identity are orthogonal: `comp` (the
+/// `EntityId` / instance path) separates *instances* (three chained `D1`/`D2`/`D3`,
+/// two MCUs); `pin` (the pad number) separates *pads within one instance*. A
+/// functional name is only ever a per-component selector
+/// ([`PartDef::resolve_selector`](crate::part::PartDef::resolve_selector)) that
+/// fans out to these identities at connection time — it never crosses instances.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PinRef {
     pub comp: EntityId,
@@ -109,6 +120,10 @@ pub struct PinRef {
 }
 
 impl PinRef {
+    /// Construct a reference from a component id and a stable pad identity (a pad
+    /// number, or `port.signal`). Callers turning a user-facing *name* into refs
+    /// must fan out through [`PartDef::resolve_selector`](crate::part::PartDef::resolve_selector)
+    /// first — this constructor does no name resolution.
     pub fn new(comp: &EntityId, pin: &str) -> PinRef {
         PinRef { comp: comp.clone(), pin: pin.into() }
     }
@@ -195,6 +210,11 @@ pub struct Doc {
     pub components: BTreeMap<EntityId, Component>,
     /// tier 2: materialized connectivity.
     pub nets: BTreeMap<NetId, Net>,
+    /// tier 2: pads deliberately left unconnected. A pad that is neither a net
+    /// member nor in this set is a *floating pad* — surfaced by ERC, never silent
+    /// (issue 0001's completeness guarantee). Members are pad identities, same as
+    /// [`PinRef`] (a pad number, or `port.signal`).
+    pub no_connects: BTreeSet<PinRef>,
     /// tier 2: materialized routed copper. Like placement, this is solver/hand
     /// state (not a derived query): a `Pinned` trace is hand/agent-authored, a
     /// `Free` one is a future autorouter's regen-able output. Mutated only through

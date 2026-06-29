@@ -40,8 +40,14 @@ pub enum GenDirective {
         a: (String, String), // (component path, port name)
         b: (String, String),
     },
-    /// Connect discrete pins onto a named net.
-    ConnectPins { net: String, pins: Vec<(String, String)> }, // (comp path, pin)
+    /// Connect discrete pins onto a named net. Each `(comp path, selector)` is
+    /// resolved against the component's part: a functional name fans out to *every*
+    /// pad with that name (so `IOVDD` connects all six pads), a pad number selects
+    /// that one pad. An unresolvable selector aborts elaboration (no silent dangle).
+    ConnectPins { net: String, pins: Vec<(String, String)> }, // (comp path, selector)
+    /// Mark pads as deliberately unconnected. Same `(comp path, selector)` shape as
+    /// `ConnectPins`; the resolved pads are exempt from the floating-pad check.
+    NoConnect { pins: Vec<(String, String)> },
     /// Set a component's planar orientation (cardinal degrees: 0/90/180/270). A
     /// settable attribute, not a solver DOF.
     Rotate { path: String, deg: i32 },
@@ -58,6 +64,7 @@ pub type Source = Vec<GenDirective>;
 pub struct Elaborated {
     pub components: BTreeMap<EntityId, Component>,
     pub nets: BTreeMap<NetId, Net>,
+    pub no_connects: BTreeSet<PinRef>,
     pub report: ReconReport,
 }
 
@@ -155,8 +162,17 @@ pub fn elaborate(
                 // result is a constant offset the solver adds to b's position.
                 let bc = &components[&bid];
                 let bdef = &lib[&bc.part];
-                let off = bdef.pin_offset(b_pin).ok_or_else(|| {
+                // A selector may name several pads (a power rail); for a geometric
+                // anchor we target the first by pad order — deterministic and enough
+                // for a placement hint.
+                let num = bdef.resolve_selector(b_pin).into_iter().next().ok_or_else(|| {
                     format!("NearPin: `{b_comp}` ({}) has no pin `{b_pin}`", bc.part)
+                })?;
+                // A discrete pad always has an offset; an interface signal could be
+                // present in `signals` but absent from `offsets` (a malformed
+                // InterfaceDef) — surface that as an elaboration error, not a panic.
+                let off = bdef.pin_offset(&num).ok_or_else(|| {
+                    format!("NearPin: `{b_comp}` ({}) pin `{b_pin}` has no offset", bc.part)
                 })?;
                 let b_off = bc.orient.rotate(off);
                 relational.push(Constraint::NearPin { a: aid, b: bid, b_off, within: *within });
@@ -185,7 +201,11 @@ pub fn elaborate(
         }
     }
 
-    // Pass 3: connections.
+    // Pass 3: connections. A selector resolves against the part: a functional name
+    // fans out to every pad with that name (so a six-pad power rail gets six
+    // members), a pad number picks one pad. An unresolvable selector — a typo or a
+    // pin the part doesn't have — aborts elaboration rather than dangling silently.
+    let mut no_connects: BTreeSet<PinRef> = BTreeSet::new();
     for d in source {
         match d {
             GenDirective::ConnectInterface { a, b } => {
@@ -193,17 +213,22 @@ pub fn elaborate(
             }
             GenDirective::ConnectPins { net, pins } => {
                 let id = NetId::new(net.clone());
+                let mut members = Vec::new();
+                for (comp, sel) in pins {
+                    members.extend(resolve_member(
+                        &components, lib, comp, sel, &format!("net `{net}`"),
+                    )?);
+                }
                 let entry = nets.entry(id.clone()).or_insert_with(|| Net {
                     id,
                     name: net.clone(),
                     members: BTreeSet::new(),
                 });
-                for (comp, pin) in pins {
-                    let cid = EntityId::new(comp.clone());
-                    if !components.contains_key(&cid) {
-                        return Err(format!("net `{net}` references unknown `{comp}`"));
-                    }
-                    entry.members.insert(PinRef::new(&cid, pin));
+                entry.members.extend(members);
+            }
+            GenDirective::NoConnect { pins } => {
+                for (comp, sel) in pins {
+                    no_connects.extend(resolve_member(&components, lib, comp, sel, "no-connect")?);
                 }
             }
             _ => {}
@@ -308,7 +333,34 @@ pub fn elaborate(
         }
     }
 
-    Ok(Elaborated { components, nets, report })
+    Ok(Elaborated { components, nets, no_connects, report })
+}
+
+/// Resolve a `(comp path, selector)` connection reference into concrete
+/// [`PinRef`]s. Validates that the instance exists, its part is known, and the
+/// selector names at least one pad — fanning a functional name out to every
+/// matching pad. An empty resolution is an error (`ctx` names the offending site),
+/// which is what makes a typo'd or missing pin a hard fault instead of a silent
+/// dangling member.
+fn resolve_member(
+    components: &BTreeMap<EntityId, Component>,
+    lib: &PartLib,
+    comp: &str,
+    sel: &str,
+    ctx: &str,
+) -> Result<Vec<PinRef>, String> {
+    let cid = EntityId::new(comp.to_string());
+    let c = components
+        .get(&cid)
+        .ok_or_else(|| format!("{ctx} references unknown instance `{comp}`"))?;
+    let def = lib
+        .get(&c.part)
+        .ok_or_else(|| format!("{ctx}: instance `{comp}` has unknown part `{}`", c.part))?;
+    let nums = def.resolve_selector(sel);
+    if nums.is_empty() {
+        return Err(format!("{ctx}: `{comp}` (part `{}`) has no pin `{sel}`", c.part));
+    }
+    Ok(nums.iter().map(|n| PinRef::new(&cid, n)).collect())
 }
 
 /// Build a solver problem from base placements + overrides + constraints.

@@ -23,7 +23,7 @@ use crate::doc::{Doc, InputId, PinRef};
 use crate::id::NetId;
 use crate::part::{PartLib, PinRole};
 use crate::route::{check_drc, DesignRules, Violation};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Key {
@@ -31,6 +31,11 @@ pub enum Key {
     Netlist,
     /// Electrical-rules check, computed *from* the resolved netlist.
     Erc,
+    /// Connectivity completeness: pads that are neither netted nor no-connect.
+    /// Separate from [`Erc`](Key::Erc) because its dependency footprint differs — it
+    /// reads the component/pad universe and no-connect set (raw Connectivity), not
+    /// just the resolved netlist, so it cannot share ERC's netlist-only firewall.
+    Floating,
     /// Design-rules check over the routed copper: clearance, min width, ratsnest.
     Drc,
 }
@@ -39,6 +44,7 @@ pub enum Key {
 pub enum QueryValue {
     Netlist(BTreeMap<NetId, Vec<(PinRef, PinRole)>>),
     Erc(Vec<String>),
+    Floating(Vec<String>),
     Drc(Vec<Violation>),
 }
 
@@ -47,6 +53,12 @@ impl QueryValue {
         match self {
             QueryValue::Erc(v) => v,
             _ => panic!("not an Erc value"),
+        }
+    }
+    pub fn as_floating(&self) -> &[String] {
+        match self {
+            QueryValue::Floating(v) => v,
+            _ => panic!("not a Floating value"),
         }
     }
     pub fn as_netlist(&self) -> &BTreeMap<NetId, Vec<(PinRef, PinRole)>> {
@@ -203,6 +215,37 @@ impl Engine {
                     }
                 }
                 QueryValue::Erc(errs)
+            }
+            Key::Floating => {
+                // Connectivity completeness: every physical pad of every instance
+                // must be a net member or explicitly no-connect. This is what makes
+                // a silently-dropped pad (the duplicate-power-pin class) impossible —
+                // even one forgotten pad is reported, not just collapsed names.
+                //
+                // Depends on raw Connectivity (the component/pad universe, net
+                // membership, and the no-connect set) — NOT firewalled behind the
+                // Netlist value, because adding an unconnected component changes this
+                // result without changing the resolved netlist.
+                deps.push(Dep::Input {
+                    which: InputId::Connectivity,
+                    rev: doc.input_rev(InputId::Connectivity),
+                });
+                let connected: BTreeSet<&PinRef> =
+                    doc.nets.values().flat_map(|n| n.members.iter()).collect();
+                let mut floats = Vec::new();
+                for c in doc.components.values() {
+                    let Some(def) = lib.get(&c.part) else { continue };
+                    for pad in &def.pins {
+                        let pr = PinRef::new(&c.id, &pad.number);
+                        if !connected.contains(&pr) && !doc.no_connects.contains(&pr) {
+                            floats.push(format!(
+                                "floating pad: `{}` pad `{}` ({}) is on no net and not marked no-connect",
+                                c.id, pad.number, pad.name
+                            ));
+                        }
+                    }
+                }
+                QueryValue::Floating(floats)
             }
             Key::Drc => {
                 // DRC reads three things, recorded as dependencies:

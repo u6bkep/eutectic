@@ -16,11 +16,12 @@
 //! by the pad's number/name, positioned at the pad's `(at x y)` converted mm→nm.
 //!
 //! ## Mapping decisions (documented contract)
-//! - **Shared pad names** (e.g. two `MP` mounting pads, or a split thermal pad
-//!   that reuses one number): we keep the **first** occurrence and drop later pads
-//!   with an already-seen name. They are the same electrical pin, and a duplicate
-//!   pin name would silently break `PartDef::pin_offset`/`pin_role`, which resolve
-//!   by first match.
+//! - **Shared pad ids** (e.g. two `MP` mounting pads, or a split thermal pad that
+//!   reuses one number): we keep the **first** occurrence and drop later pads with
+//!   an already-seen id. They are the same electrical pad — pad id (the pad number)
+//!   is the stable identity a `PinRef` keys on, so it must stay unique within a
+//!   part. (Distinct pads that share a *functional name* after a symbol join — six
+//!   `IOVDD` — are all kept; names may collide, ids may not.)
 //! - **Unnamed pads** (`name == ""`, used for thermal/exposed pads and mechanical
 //!   features): **skipped**. An empty name carries no electrical identity, and a
 //!   footprint's roles come from the symbol anyway.
@@ -620,9 +621,49 @@ pub fn import_part(symbol_text: &str, footprint_text: &str) -> Result<PartDef, S
     Ok(report.part)
 }
 
+/// Overlay functional names + electrical roles onto an imported (role-less)
+/// footprint, keyed by pad **number** — a lightweight stand-in for a full symbol
+/// when none exists (the common case for jellybean parts: regulators, crystals,
+/// flash). Each `(number, name, role)` entry renames and roles the pad with that
+/// number; pads not in the map keep their imported `(numeric name, Passive)`
+/// identity. Returns an error naming any entry whose pad number is absent, so a
+/// typo in the role map is a hard fault, not a silent no-op.
+///
+/// This is the first-class form of the per-pad role assignment that issue 0002
+/// called for — the alternative to authoring a whole `.kicad_sym`. It composes with
+/// [`resolve_selector`](crate::part::PartDef::resolve_selector): assign a shared
+/// name to several pads here and connecting that name nets all of them.
+pub fn apply_role_map(mut part: PartDef, map: &[(&str, &str, PinRole)]) -> Result<PartDef, String> {
+    for (num, name, role) in map {
+        let mut hit = false;
+        for p in part.pins.iter_mut() {
+            if p.number == *num {
+                p.name = (*name).to_string();
+                p.role = *role;
+                hit = true;
+            }
+        }
+        if !hit {
+            return Err(format!("apply_role_map: part `{}` has no pad `{num}`", part.name));
+        }
+    }
+    Ok(part)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // `pin_role`/`pin_offset` now resolve a *stored identity* (pad number). These
+    // helpers verify the join by functional **name** — finding the PinDef directly —
+    // which is what these tests mean to check (the symbol's role landed on the named
+    // pin). User-facing name→pad resolution is exercised via `resolve_selector`.
+    fn role_of(part: &PartDef, name: &str) -> Option<PinRole> {
+        part.pins.iter().find(|p| p.name == name).map(|p| p.role)
+    }
+    fn offset_of(part: &PartDef, name: &str) -> Option<Point> {
+        part.pins.iter().find(|p| p.name == name).map(|p| p.offset)
+    }
 
     /// A self-contained footprint modelled on a real JST-SH 1x03 vertical header
     /// (`JST_SH_BM03B-SRSS-TB_1x03-1MP_P1.00mm_Vertical`): three signal pads, two
@@ -896,18 +937,40 @@ mod tests {
     }
 
     #[test]
+    fn apply_role_map_overlays_names_and_roles_by_pad_number() {
+        // A bare footprint imports role-less (name == number, Passive).
+        let bare = import_footprint(FP_4).unwrap();
+        assert_eq!(role_of(&bare, "VIN"), None);
+        let roled =
+            apply_role_map(bare, &[("1", "VIN", PinRole::PowerIn), ("4", "VOUT", PinRole::PowerOut)])
+                .unwrap();
+        assert_eq!(role_of(&roled, "VIN"), Some(PinRole::PowerIn));
+        assert_eq!(role_of(&roled, "VOUT"), Some(PinRole::PowerOut));
+        // The overlaid name now resolves to its pad as a connection selector.
+        assert_eq!(roled.resolve_selector("VIN"), vec!["1".to_string()]);
+        // A map entry for a pad the footprint lacks is a hard error, not a no-op.
+        let err = apply_role_map(import_footprint(FP_4).unwrap(), &[("99", "X", PinRole::PowerIn)])
+            .unwrap_err();
+        assert!(err.contains("99"), "got {err}");
+    }
+
+    #[test]
     fn join_pairs_names_roles_numbers_and_offsets() {
         let part = import_part(SYM_LIB, FP_4).unwrap();
         assert_eq!(part.name, "ACME-SOT-4");
         assert_eq!(part.pins.len(), 4);
 
         // Functional name resolves to symbol role; offset comes from the footprint.
-        assert_eq!(part.pin_role("VDD"), Some(PinRole::PowerIn));
-        assert_eq!(part.pin_offset("VDD"), Some(Point { x: -1_000_000, y: 1_000_000 }));
-        assert_eq!(part.pin_role("GPIO0"), Some(PinRole::Output));
-        assert_eq!(part.pin_role("SWDIO"), Some(PinRole::Bidir));
-        assert_eq!(part.pin_role("GND"), Some(PinRole::Passive));
-        assert_eq!(part.pin_offset("GND"), Some(Point { x: -1_000_000, y: -1_000_000 }));
+        assert_eq!(role_of(&part, "VDD"), Some(PinRole::PowerIn));
+        assert_eq!(offset_of(&part, "VDD"), Some(Point { x: -1_000_000, y: 1_000_000 }));
+        assert_eq!(role_of(&part, "GPIO0"), Some(PinRole::Output));
+        assert_eq!(role_of(&part, "SWDIO"), Some(PinRole::Bidir));
+        assert_eq!(role_of(&part, "GND"), Some(PinRole::Passive));
+        assert_eq!(offset_of(&part, "GND"), Some(Point { x: -1_000_000, y: -1_000_000 }));
+
+        // Stored identity is the pad number, and the name selector resolves to it.
+        assert_eq!(part.resolve_selector("VDD"), vec!["1".to_string()]);
+        assert_eq!(part.pin_role("1"), Some(PinRole::PowerIn));
 
         // Pad numbers preserved as the manufacturing/join key, distinct from names.
         let vdd = part.pins.iter().find(|p| p.name == "VDD").unwrap();
@@ -935,7 +998,7 @@ mod tests {
         let report = join_symbol_footprint(&symbol, &footprint);
 
         // The matched pin carries name + role; the unmatched pad stays Passive.
-        assert_eq!(report.part.pin_role("IN"), Some(PinRole::Input));
+        assert_eq!(role_of(&report.part, "IN"), Some(PinRole::Input));
         // The orphan power pin is surfaced (number, name, role), not dropped.
         assert_eq!(
             report.symbol_only,
@@ -970,11 +1033,11 @@ mod tests {
         // Every footprint pad became a pin; a real power pin carries its role.
         assert!(!report.part.pins.is_empty());
         // IN is the eFuse input rail (power_in -> PowerIn).
-        assert_eq!(report.part.pin_role("IN"), Some(PinRole::PowerIn));
+        assert_eq!(role_of(&report.part, "IN"), Some(PinRole::PowerIn));
         // OUT is the switched output rail (power_out -> PowerOut).
-        assert_eq!(report.part.pin_role("OUT"), Some(PinRole::PowerOut));
+        assert_eq!(role_of(&report.part, "OUT"), Some(PinRole::PowerOut));
         // PG is open_collector -> Passive (conservative default).
-        assert_eq!(report.part.pin_role("PG"), Some(PinRole::Passive));
+        assert_eq!(role_of(&report.part, "PG"), Some(PinRole::Passive));
         // Exact 10/10 join: no orphan pins on either side.
         assert!(report.symbol_only.is_empty() && report.footprint_only.is_empty());
     }
@@ -997,14 +1060,24 @@ mod tests {
         assert_eq!(report.part.pins.len(), 61);
         assert!(report.symbol_only.is_empty() && report.footprint_only.is_empty());
         // Real RP2350 functional names + roles survive the join.
-        assert_eq!(report.part.pin_role("GPIO0"), Some(PinRole::Bidir));
-        assert_eq!(report.part.pin_role("IOVDD"), Some(PinRole::PowerIn));
-        assert_eq!(report.part.pin_role("VREG_LX"), Some(PinRole::PowerOut));
+        assert_eq!(role_of(&report.part, "GPIO0"), Some(PinRole::Bidir));
+        assert_eq!(role_of(&report.part, "IOVDD"), Some(PinRole::PowerIn));
+        assert_eq!(role_of(&report.part, "VREG_LX"), Some(PinRole::PowerOut));
         assert!(report.part.pins.iter().any(|p| p.name == "USB_DP"));
         assert!(report.part.pins.iter().any(|p| p.name == "QSPI_SCLK"));
-        // 6 IOVDD + 3 DVDD pads share a functional name (the duplicate-name case
-        // the PoC must uniquify before it can net every power pad).
+        // 6 IOVDD + 3 DVDD pads share a functional name. The fix: a name selector
+        // fans out to ALL of them (distinct pad numbers), so connecting "IOVDD"
+        // nets every pad — no uniquify workaround, no silently-floating power pads.
         assert_eq!(report.part.pins.iter().filter(|p| p.name == "IOVDD").count(), 6);
         assert_eq!(report.part.pins.iter().filter(|p| p.name == "DVDD").count(), 3);
+        let iovdd_pads = report.part.resolve_selector("IOVDD");
+        assert_eq!(iovdd_pads.len(), 6);
+        assert_eq!(report.part.resolve_selector("DVDD").len(), 3);
+        // Each resolved identity is a real, distinct pad that resolves to a role.
+        // (KiCad marks only one pin of a stacked power rail `power_in` and the rest
+        // `passive`, so the roles legitimately vary — what matters is all 6 are
+        // present and connectable, which is the floating-power-pad fix.)
+        assert!(iovdd_pads.iter().all(|n| report.part.pin_role(n).is_some()));
+        assert!(iovdd_pads.iter().any(|n| report.part.pin_role(n) == Some(PinRole::PowerIn)));
     }
 }

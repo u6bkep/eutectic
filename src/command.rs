@@ -160,6 +160,7 @@ pub fn apply(doc: &Doc, txn: &Transaction, lib: &PartLib, tick: u64) -> Result<D
     let elab = elaborate(&next.source, &next.overrides, lib)?;
     next.components = elab.components;
     next.nets = elab.nets;
+    next.no_connects = elab.no_connects;
     next.report = elab.report;
 
     // Decay: garbage-collect hints that the reconciliation found ineffective.
@@ -173,7 +174,9 @@ pub fn apply(doc: &Doc, txn: &Transaction, lib: &PartLib, tick: u64) -> Result<D
     // Bump coarse input revisions by diffing materialized state against the prior
     // doc. Connectivity and geometry move independently so the query engine can
     // skip work precisely.
-    let connectivity_changed = next.nets != doc.nets || part_shape_changed(doc, &next);
+    let connectivity_changed = next.nets != doc.nets
+        || next.no_connects != doc.no_connects
+        || part_shape_changed(doc, &next);
     let geometry_changed = positions_changed(doc, &next);
     let routing_changed = next.traces != doc.traces || next.vias != doc.vias;
     next.conn_rev = if connectivity_changed { tick } else { doc.conn_rev };

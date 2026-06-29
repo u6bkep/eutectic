@@ -52,12 +52,17 @@ A full, if prototype-grade, flow:
 - A deterministic least-change constraint solver (`Near` / `MinSep` / `AlignX/Y` / `Board`
   containment) that satisfies feasible sets tightly and *reports* infeasibility.
 - Import of real **KiCad footprints** (`.kicad_mod`) and **symbols** (`.kicad_sym`), joined by pad
-  number into parts with real names, electrical roles, and pad geometry.
+  number into parts with real names, electrical roles, and pad geometry; a lightweight
+  `apply_role_map` overlays roles onto a bare footprint without a full symbol.
+- **Pad-identity net membership**: a net references pads by stable identity (pad number), and a
+  functional name is a *selector* that fans out to every matching pad — so an MCU's six `IOVDD` pads
+  all connect, none silently float. A `Floating` query reports any pad that is on no net and not
+  explicitly no-connect; an unknown pin in a connection is a hard error.
 - A trace/via/layer routing representation, a DRC query (clearance / min-width / ratsnest), and a
   basic deterministic grid autorouter.
 - Export: netlist, pick-and-place CSV, SVG, **Gerber (RS-274X)** and **Excellon** drill.
 
-**93 tests, zero dependencies, `cargo clippy --all-targets` clean.**
+**99 tests, zero dependencies, `cargo clippy --all-targets` clean.**
 
 ## Modules (`src/`)
 
@@ -123,10 +128,11 @@ nets and left the rest, which is what exposed the gaps now tracked as issues (be
 
 ## Honest limitations
 
-It is a prototype. The known gaps — several of them silent-correctness issues the PoC surfaced (net
-pins keyed by name so duplicate power pins can float; the router's clearance guarantee breaking at
-fine pitch) alongside missing features (no copper planes/multilayer; greedy autorouter; pads-as-
-points DRC; approximate placement solver) — are filed as a standing backlog. That backlog lives in a
-file-based `issues/` tracker kept beside the repo (to migrate to GitHub Issues on upload); each
-subsystem's honest limits are also recorded in its "Prototype status" section in
+It is a prototype. The known gaps — the remaining silent-correctness issue the PoC surfaced (the
+router's clearance guarantee breaking at fine pitch) alongside missing features (no copper
+planes/multilayer; greedy autorouter; pads-as-points DRC; approximate placement solver) — are filed
+as a standing backlog. (The duplicate-power-pin float and connect-time validation, the two scariest
+findings, are now fixed — see "Prototype status (pin identity)" in `docs/architecture.md`.) That
+backlog lives in a file-based `issues/` tracker kept beside the repo (to migrate to GitHub Issues on
+upload); each subsystem's honest limits are also recorded in its "Prototype status" section in
 `docs/architecture.md`.

@@ -85,17 +85,18 @@ pub fn placement_csv(doc: &Doc) -> String {
 
 // ---- 3. SVG sketch (visual sanity-check artifact) ----
 
-/// Enumerate the pin reference names of a part, deterministically: discrete pins
-/// in declaration order, then `port.signal` for each interface signal (both
-/// `BTreeMap`-ordered). These are exactly the names [`pin_world`] resolves.
-fn part_pin_names(def: &PartDef) -> Vec<String> {
-    let mut names: Vec<String> = def.pins.iter().map(|p| p.name.clone()).collect();
+/// Enumerate the stable pin identities of a part, deterministically: discrete pins
+/// by pad **number** in declaration order, then `port.signal` for each interface
+/// signal (both `BTreeMap`-ordered). These are exactly the identities [`pin_world`]
+/// resolves — numbers, not names, since functional names can repeat across pads.
+fn part_pin_ids(def: &PartDef) -> Vec<String> {
+    let mut ids: Vec<String> = def.pins.iter().map(|p| p.number.clone()).collect();
     for (port, iface) in &def.interfaces {
         for sig in iface.signals.keys() {
-            names.push(format!("{port}.{sig}"));
+            ids.push(format!("{port}.{sig}"));
         }
     }
-    names
+    ids
 }
 
 /// Minimal XML text escaping for labels.
@@ -125,8 +126,8 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> String {
     for c in doc.components.values() {
         pts.push(c.pos.value);
         if let Some(def) = lib.get(&c.part) {
-            for name in part_pin_names(def) {
-                if let Some(w) = pin_world(c, def, &name) {
+            for id in part_pin_ids(def) {
+                if let Some(w) = pin_world(c, def, &id) {
                     pts.push(w);
                 }
             }
@@ -195,8 +196,8 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> String {
     for c in doc.components.values() {
         out.push_str(&format!("  <g class=\"component\" data-id=\"{}\">\n", xml_escape(c.id.as_str())));
         if let Some(def) = lib.get(&c.part) {
-            for name in part_pin_names(def) {
-                if let Some(w) = pin_world(c, def, &name) {
+            for id in part_pin_ids(def) {
+                if let Some(w) = pin_world(c, def, &id) {
                     out.push_str(&format!(
                         "    <circle class=\"pad\" cx=\"{}\" cy=\"{}\" r=\"0.3\"/>\n",
                         fmt_mm(w.x),
@@ -288,8 +289,8 @@ fn placement_bbox(doc: &Doc, lib: &PartLib) -> (Point, Point) {
     let mut pts: Vec<Point> = Vec::new();
     for c in doc.components.values() {
         if let Some(def) = lib.get(&c.part) {
-            for name in part_pin_names(def) {
-                if let Some(w) = pin_world(c, def, &name) {
+            for id in part_pin_ids(def) {
+                if let Some(w) = pin_world(c, def, &id) {
                     pts.push(w);
                 }
             }
@@ -394,7 +395,7 @@ fn component_pad_flashes(doc: &Doc, lib: &PartLib) -> Vec<(Point, Aperture)> {
         if let Some(def) = lib.get(&c.part) {
             for pin in &def.pins {
                 if let Some(pad) = pin.pad
-                    && let Some(w) = pin_world(c, def, &pin.name)
+                    && let Some(w) = pin_world(c, def, &pin.number)
                 {
                     out.push((w, pad_aperture(&pad)));
                 }

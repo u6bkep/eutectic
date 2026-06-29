@@ -66,12 +66,18 @@ impl PinRole {
 
 /// A discrete pin on a part.
 ///
-/// `name` vs `number`: the **functional name** (`GPIO0`, `VDD`, `SWCLK`) is what
-/// nets and humans reference and what `pin_role`/`pin_offset` resolve by; the pad
-/// **number** (`12`, `MP`) is the geometry/manufacturing key and the join key that
-/// pairs a schematic symbol pin with a footprint pad. For parts that have no
-/// functional naming (a raw footprint import, or the toy `part_library`) the two
-/// coincide — `number` defaults to `name` via the [`pin`] constructor.
+/// `name` vs `number`: the **functional name** (`GPIO0`, `VDD`, `SWCLK`) is the
+/// human/agent-facing *selector* humans reference; the pad **number** (`12`, `MP`)
+/// is the geometry/manufacturing key, the join key pairing a symbol pin with a
+/// footprint pad, **and the stable identity stored in a [`PinRef`]**. Names repeat
+/// (six pads named `IOVDD`); numbers are unique within a part, so identity keys on
+/// the number. A name fans out to its pads via
+/// [`resolve_selector`](PartDef::resolve_selector); `pin_role`/`pin_offset` resolve
+/// the resulting *number*. For parts with no functional naming (a raw footprint
+/// import, or the toy `part_library`) the two coincide — `number` defaults to
+/// `name` via the [`pin`] constructor.
+///
+/// [`PinRef`]: crate::doc::PinRef
 #[derive(Clone, Debug)]
 pub struct PinDef {
     pub name: String,
@@ -114,30 +120,70 @@ pub struct PartDef {
 }
 
 impl PartDef {
-    /// Resolve the electrical role of a pin reference name.
-    /// Interface signals are addressed as `port.signal` (e.g. `uart.tx`).
-    pub fn pin_role(&self, pin: &str) -> Option<PinRole> {
-        if let Some((port, sig)) = pin.split_once('.') {
+    /// Resolve the electrical role of a *stored pin identity* (see [`PinRef`]):
+    /// a pad **number** for a discrete pin, or `port.signal` for an interface
+    /// signal. Pad numbers are unique within a part, so this is unambiguous —
+    /// unlike functional names, which repeat (six `IOVDD` pads share a name but
+    /// have distinct numbers). Use [`resolve_selector`](Self::resolve_selector) to
+    /// turn a user-facing name into the identities this resolves.
+    ///
+    /// [`PinRef`]: crate::doc::PinRef
+    pub fn pin_role(&self, id: &str) -> Option<PinRole> {
+        if let Some((port, sig)) = id.split_once('.') {
             let iface = self.interfaces.get(port)?;
             iface.signals.get(sig).copied().map(PinRole::from_dir)
         } else {
             self.pins
                 .iter()
-                .find(|p| p.name == pin)
+                .find(|p| p.number == id)
                 .map(|p| p.role)
         }
     }
 
-    /// Resolve a pin reference to its local offset from the component origin.
-    /// Interface signals are addressed as `port.signal` (e.g. `uart.tx`), mirroring
-    /// [`pin_role`](Self::pin_role).
-    pub fn pin_offset(&self, pin: &str) -> Option<Point> {
-        if let Some((port, sig)) = pin.split_once('.') {
+    /// Resolve a *stored pin identity* to its local offset from the component
+    /// origin. Identity semantics match [`pin_role`](Self::pin_role): a pad number
+    /// for a discrete pin, or `port.signal` for an interface signal.
+    pub fn pin_offset(&self, id: &str) -> Option<Point> {
+        if let Some((port, sig)) = id.split_once('.') {
             let iface = self.interfaces.get(port)?;
             iface.offsets.get(sig).copied()
         } else {
-            self.pins.iter().find(|p| p.name == pin).map(|p| p.offset)
+            self.pins.iter().find(|p| p.number == id).map(|p| p.offset)
         }
+    }
+
+    /// Resolve a *connection selector* (a user/agent-facing pin reference) to the
+    /// set of stable pin identities it names — the pad **numbers** to store as
+    /// [`PinRef`]s. This is the one place a functional name fans out to physical
+    /// pads, which is what keeps a multi-pad power rail (six `IOVDD`) from
+    /// collapsing to a single member.
+    ///
+    /// Resolution order:
+    /// - `port.signal` (contains `.`) → an interface signal: returns that single
+    ///   identity if the port and signal exist, else empty.
+    /// - otherwise match by functional **name** first (so `IOVDD` → every IOVDD
+    ///   pad's number); if no name matches, fall back to matching a pad **number**
+    ///   directly (so `30` / `MP` selects that one pad).
+    ///
+    /// An **empty** result means the selector names nothing on this part — a typo
+    /// or a role gap. Callers must treat that as an error, never a silent no-op.
+    /// The fanout is scoped to this one part: a name never reaches across instances.
+    ///
+    /// [`PinRef`]: crate::doc::PinRef
+    pub fn resolve_selector(&self, sel: &str) -> Vec<String> {
+        if let Some((port, sig)) = sel.split_once('.') {
+            return match self.interfaces.get(port) {
+                Some(iface) if iface.signals.contains_key(sig) => vec![sel.to_string()],
+                _ => Vec::new(),
+            };
+        }
+        let by_name: Vec<String> =
+            self.pins.iter().filter(|p| p.name == sel).map(|p| p.number.clone()).collect();
+        if !by_name.is_empty() {
+            return by_name;
+        }
+        // Fall back to a direct pad-number reference.
+        self.pins.iter().filter(|p| p.number == sel).map(|p| p.number.clone()).collect()
     }
 }
 
@@ -252,6 +298,35 @@ mod tests {
         // Interface signals addressed as `port.signal`.
         assert_eq!(mcu.pin_offset("uart.tx"), Some(Point { x: 3 * MM, y: MM }));
         assert_eq!(mcu.pin_offset("uart.bogus"), None);
+    }
+
+    #[test]
+    fn resolve_selector_fans_out_by_name_and_falls_back_to_number() {
+        use PinRole::*;
+        let mk = |name: &str, number: &str, role| PinDef {
+            name: name.into(),
+            number: number.into(),
+            role,
+            offset: Point { x: 0, y: 0 },
+            pad: None,
+        };
+        let part = PartDef {
+            name: "P".into(),
+            // Two pads share the name VDD (distinct numbers) — the duplicate-power
+            // case; numbers are out of order to prove order follows declaration.
+            pins: vec![mk("VDD", "1", PowerIn), mk("VDD", "8", PowerIn), mk("GND", "4", Passive)],
+            interfaces: BTreeMap::new(),
+        };
+        // A functional name fans out to *every* matching pad number.
+        assert_eq!(part.resolve_selector("VDD"), vec!["1".to_string(), "8".to_string()]);
+        assert_eq!(part.resolve_selector("GND"), vec!["4".to_string()]);
+        // No name matches -> fall back to a direct pad-number reference.
+        assert_eq!(part.resolve_selector("8"), vec!["8".to_string()]);
+        // Names nothing -> empty, so the caller raises a hard error (no silent dangle).
+        assert!(part.resolve_selector("NOPE").is_empty());
+        // Stored identity resolves by number, never by the colliding name.
+        assert_eq!(part.pin_role("8"), Some(PowerIn));
+        assert_eq!(part.pin_role("VDD"), None);
     }
 
     /// A pin's world position is exact under each of the four cardinal rotations.

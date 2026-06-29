@@ -21,7 +21,9 @@ use ecad_core::doc::{Point, MM};
 use ecad_core::elaborate::{GenDirective as G, Source};
 use ecad_core::export::{excellon_drill, gerber_set, netlist, placement_csv, svg};
 use ecad_core::history::History;
-use ecad_core::kicad::{import_footprint_file, import_symbol_named, join_symbol_footprint};
+use ecad_core::kicad::{
+    apply_role_map, import_footprint_file, import_symbol_named, join_symbol_footprint,
+};
 use ecad_core::part::{PartDef, PartLib, PinRole};
 use ecad_core::query::{Engine, Key};
 use ecad_core::route::DesignRules;
@@ -40,46 +42,21 @@ fn fp(file: &str) -> PartDef {
 }
 
 /// Re-label imported footprint pads with functional names + electrical roles,
-/// keyed by pad *number*. Pads not listed keep their numeric name as Passive.
-/// (Friction: a bare footprint carries no roles/names, and the codebase has no
-/// symbol for these jellybean parts, so we hand-map by pad number here.)
-fn relabel(mut part: PartDef, map: &[(&str, &str, PinRole)]) -> PartDef {
-    for (num, name, role) in map {
-        let mut hit = false;
-        for p in part.pins.iter_mut() {
-            if p.number == *num {
-                p.name = (*name).to_string();
-                p.role = *role;
-                hit = true;
-            }
-        }
-        assert!(hit, "relabel: part {} has no pad #{num}", part.name);
-    }
-    part
-}
-
-/// Make duplicate functional pin names unique by appending `_<number>`.
-/// REQUIRED for the RP2350A: it has 6 pads named IOVDD and 3 named DVDD, and the
-/// framework resolves a net's pin reference by *name* (first match wins), so
-/// without this only one pad of each power rail could ever be connected.
-fn uniquify(mut part: PartDef) -> PartDef {
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    for p in &part.pins {
-        *counts.entry(p.name.clone()).or_default() += 1;
-    }
-    for p in part.pins.iter_mut() {
-        if counts[&p.name] > 1 {
-            p.name = format!("{}_{}", p.name, p.number);
-        }
-    }
-    part
+/// keyed by pad *number* — a jellybean part with no symbol gets its roles from a
+/// hand-map. This is just the library's [`apply_role_map`] (issue 0002's
+/// lightweight role overlay); the example wraps it to panic on a typo'd map.
+/// Assigning the *same* name to several pads is fine and intended — connecting that
+/// name fans out to all of them (see the duplicate power pads on the RP2350 below).
+fn relabel(part: PartDef, map: &[(&str, &str, PinRole)]) -> PartDef {
+    apply_role_map(part, map).expect("role map references a missing pad")
 }
 
 fn build_lib() -> (PartLib, PartDef) {
     let mut lib = PartLib::new();
 
     // U1: RP2350A QFN-60 — authoritative symbol + footprint, joined through the
-    // framework, then power-pin names made unique.
+    // framework. The six IOVDD and three DVDD pads keep their shared functional
+    // names: connecting "IOVDD" now fans out to all six pads (no uniquify hack).
     let sym = import_symbol_named(
         &std::fs::read_to_string(format!("{PARTS}/MCU_RaspberryPi.kicad_sym")).unwrap(),
         "RP2350A",
@@ -93,7 +70,7 @@ fn build_lib() -> (PartLib, PartDef) {
         jr.symbol_only,
         jr.footprint_only
     );
-    let rp2350 = uniquify(jr.part);
+    let rp2350 = jr.part;
     lib.insert("RP2350A".into(), rp2350.clone());
 
     // J1..J10: JST-SH 3-pin (pads 1,2,3,MP) — passive connector, no relabel.
@@ -143,29 +120,30 @@ fn build_lib() -> (PartLib, PartDef) {
         ),
     );
 
-    // J11: USB-C receptacle (USB 2.0). Dual data/power pads given DISTINCT names so
-    // each physical pad can be netted (the framework keys pins by name).
+    // J11: USB-C receptacle (USB 2.0). The four VBUS pads, four GND pads, and the
+    // two DP / two DM pads share a name each: connecting "VBUS"/"GND"/"DP"/"DM" fans
+    // out to every physical pad (no per-pad distinct-name workaround needed).
     lib.insert(
         "USBC".into(),
         relabel(
             fp("USB_C_Receptacle.kicad_mod"),
             &[
-                ("A1", "GND1", Passive),
-                ("A4", "VBUS1", PowerIn),
+                ("A1", "GND", Passive),
+                ("A4", "VBUS", PowerIn),
                 ("A5", "CC1", Passive),
-                ("A6", "DP1", Bidir),
-                ("A7", "DM1", Bidir),
+                ("A6", "DP", Bidir),
+                ("A7", "DM", Bidir),
                 ("A8", "SBU1", Passive),
-                ("A9", "VBUS2", PowerIn),
-                ("A12", "GND2", Passive),
-                ("B1", "GND3", Passive),
-                ("B4", "VBUS3", PowerIn),
+                ("A9", "VBUS", PowerIn),
+                ("A12", "GND", Passive),
+                ("B1", "GND", Passive),
+                ("B4", "VBUS", PowerIn),
                 ("B5", "CC2", Passive),
-                ("B6", "DP2", Bidir),
-                ("B7", "DM2", Bidir),
+                ("B6", "DP", Bidir),
+                ("B7", "DM", Bidir),
                 ("B8", "SBU2", Passive),
-                ("B9", "VBUS4", PowerIn),
-                ("B12", "GND4", Passive),
+                ("B9", "VBUS", PowerIn),
+                ("B12", "GND", Passive),
                 ("SH", "SHIELD", Passive),
             ],
         ),
@@ -292,36 +270,34 @@ fn build_source() -> Source {
     }
 
     // --- power rails --------------------------------------------------------
-    // VBUS (5V) from USB-C -> regulator input.
+    // VBUS (5V) from USB-C -> regulator input. "VBUS" fans out to all four pads.
     b.net(
         "VBUS",
         &[
-            p("J11", "VBUS1"), p("J11", "VBUS2"), p("J11", "VBUS3"), p("J11", "VBUS4"),
+            p("J11", "VBUS"),
             p("U3", "VIN"), p("U3", "EN"), // EN tied high to VIN -> always on
         ],
     );
-    // +3V3 rail from regulator output to every 3.3 V consumer.
-    let iovdd = ["IOVDD_1", "IOVDD_11", "IOVDD_20", "IOVDD_30", "IOVDD_38", "IOVDD_45"];
-    let mut v3: Vec<Pin> = vec![
-        p("U3", "VOUT"),
-        p("U1", "QSPI_IOVDD"),
-        p("U1", "USB_OTP_VDD"),
-        p("U1", "ADC_AVDD"),
-        p("U1", "VREG_VIN"),
-        p("U2", "VCC"),
-        p("D1", "VDD"),
-    ];
-    for n in iovdd {
-        v3.push(p("U1", n));
-    }
-    b.net("+3V3", &v3);
+    // +3V3 rail from regulator output to every 3.3 V consumer. "IOVDD" fans out to
+    // all six IOVDD pads — the duplicate-power-pin case that used to silently float.
+    b.net(
+        "+3V3",
+        &[
+            p("U3", "VOUT"),
+            p("U1", "IOVDD"),
+            p("U1", "QSPI_IOVDD"),
+            p("U1", "USB_OTP_VDD"),
+            p("U1", "ADC_AVDD"),
+            p("U1", "VREG_VIN"),
+            p("U2", "VCC"),
+            p("D1", "VDD"),
+        ],
+    );
 
     // Core buck: VREG_LX -> L1 -> +DVDD (1.1V); VREG_FB senses +DVDD; PGND->GND.
     b.net("VREG_LX", &[p("U1", "VREG_LX"), p("L1", "1")]);
-    b.net(
-        "+DVDD",
-        &[p("L1", "2"), p("U1", "VREG_FB"), p("U1", "DVDD_6"), p("U1", "DVDD_23"), p("U1", "DVDD_39")],
-    );
+    // "DVDD" fans out to all three DVDD pads.
+    b.net("+DVDD", &[p("L1", "2"), p("U1", "VREG_FB"), p("U1", "DVDD")]);
     b.net("GND", &[p("U1", "GND"), p("U1", "VREG_PGND")]);
 
     // VREG_AVDD: 33R from +3V3 + 4.7uF to GND (RC filter).
@@ -362,15 +338,15 @@ fn build_source() -> Source {
     b.place("R_CC2", 34, 5);
     b.net("USB_DP", &[p("U1", "USB_DP"), p("R_DP", "1")]);
     b.net("USB_DM", &[p("U1", "USB_DM"), p("R_DM", "1")]);
-    b.net("DP_CONN", &[p("R_DP", "2"), p("J11", "DP1"), p("J11", "DP2")]);
-    b.net("DM_CONN", &[p("R_DM", "2"), p("J11", "DM1"), p("J11", "DM2")]);
+    b.net("DP_CONN", &[p("R_DP", "2"), p("J11", "DP")]);
+    b.net("DM_CONN", &[p("R_DM", "2"), p("J11", "DM")]);
     b.net("CC1", &[p("J11", "CC1"), p("R_CC1", "1")]);
     b.net("CC2", &[p("J11", "CC2"), p("R_CC2", "1")]);
     b.net(
         "GND",
         &[
             p("R_CC1", "2"), p("R_CC2", "2"),
-            p("J11", "GND1"), p("J11", "GND2"), p("J11", "GND3"), p("J11", "GND4"),
+            p("J11", "GND"), // fans out to all four GND pads
             p("J11", "SHIELD"),
             p("U3", "GND"), p("D1", "GND"),
         ],
@@ -389,28 +365,31 @@ fn build_source() -> Source {
     //     map now uses GP0-19 for the 10 channels, so the LED moves to GP20). ---
     b.net("LED_DIN", &[p("U1", "GPIO20"), p("D1", "DIN")]);
 
-    // --- decoupling: one cap per power pin, placed near that pin ------------
-    // (rail net, mcu pin, value-label-only). Each cap p1->rail, p2->GND.
+    // --- decoupling: one cap per power pin, placed near *that* pad ----------
+    // (rail net, mcu pad, value-label-only). Each cap p1->rail, p2->GND. The cap
+    // joins the rail by name; placement targets a *specific* pad, so the six IOVDD /
+    // three DVDD pads are referenced by pad NUMBER (a name there would fan out — the
+    // name selects the rail, the number selects the individual pad to sit beside).
     let decaps: &[(&str, &str)] = &[
-        ("+3V3", "IOVDD_1"),
-        ("+3V3", "IOVDD_11"),
-        ("+3V3", "IOVDD_20"),
-        ("+3V3", "IOVDD_30"),
-        ("+3V3", "IOVDD_38"),
-        ("+3V3", "IOVDD_45"),
+        ("+3V3", "1"), // IOVDD pads, by pad number
+        ("+3V3", "11"),
+        ("+3V3", "20"),
+        ("+3V3", "30"),
+        ("+3V3", "38"),
+        ("+3V3", "45"),
         ("+3V3", "QSPI_IOVDD"),
         ("+3V3", "USB_OTP_VDD"),
         ("+3V3", "ADC_AVDD"),
         ("+3V3", "VREG_VIN"),
-        ("+DVDD", "DVDD_6"),
-        ("+DVDD", "DVDD_23"),
-        ("+DVDD", "DVDD_39"),
+        ("+DVDD", "6"), // DVDD pads, by pad number
+        ("+DVDD", "23"),
+        ("+DVDD", "39"),
         ("VREG_AVDD", "VREG_AVDD"),
     ];
-    for (i, (rail, pin)) in decaps.iter().enumerate() {
+    for (i, (rail, pad)) in decaps.iter().enumerate() {
         let c = format!("C{i}");
         b.inst(&c, "C");
-        b.near_pin(&c, "U1", pin, 3); // pull each decoupler within 3 mm of its pin
+        b.near_pin(&c, "U1", pad, 3); // pull each decoupler within 3 mm of its pad
         b.net(rail, &[p(&c, "1")]);
         b.net("GND", &[p(&c, "2")]);
     }
@@ -423,6 +402,22 @@ fn build_source() -> Source {
     b.net("GND", &[p("C_IN", "2")]);
     b.net("+3V3", &[p("C_OUT", "1")]);
     b.net("GND", &[p("C_OUT", "2")]);
+
+    // --- intentional no-connects --------------------------------------------
+    // Pads deliberately left open, declared so the completeness check (issue 0001)
+    // stays clean rather than just quiet: this probe does not self-debug (user
+    // decision #4), so the RP2350's own SWD pins are open; GP21-29 are unused on the
+    // sequential map; USB sideband, the LED-chain output, and the regulator NC pin
+    // are unused by design.
+    b.s.push(G::NoConnect {
+        pins: vec![
+            p("U1", "SWCLK"), p("U1", "SWDIO"),
+            p("U1", "GPIO21"), p("U1", "GPIO22"), p("U1", "GPIO23"), p("U1", "GPIO24"),
+            p("U1", "GPIO25"), p("U1", "GPIO26/ADC0"), p("U1", "GPIO27/ADC1"),
+            p("U1", "GPIO28/ADC2"), p("U1", "GPIO29/ADC3"),
+            p("D1", "DOUT"), p("J11", "SBU1"), p("J11", "SBU2"), p("U3", "NC"),
+        ],
+    });
 
     b.finish()
 }
@@ -456,6 +451,15 @@ fn main() {
     println!("  ERC violations: {}", erc.as_erc().len());
     for v in erc.as_erc() {
         println!("    {v:?}");
+    }
+    // Connectivity completeness (issue 0001): every pad that is on no net and not
+    // marked no-connect. With pad-identity keying, ALL six IOVDD / three DVDD pads
+    // are accounted for; what remains here is genuinely unconnected pads (unused
+    // GPIOs etc.) that a finished design would route or NC — surfaced, not silent.
+    let floats = eng.query(doc, &lib, Key::Floating);
+    println!("  floating pads: {}", floats.as_floating().len());
+    for v in floats.as_floating().iter() {
+        println!("    {v}");
     }
 
     // Stage 4: route + DRC

@@ -665,11 +665,13 @@ serde/sexp crates) and lift out the bits we model.
   below): a `.kicad_sym` symbol is parsed for electrical types + functional names and joined to the
   footprint by pad number, yielding real `PinRole`s. Typed `InterfaceDef` inference from symbols
   remains future work.
-- **Mapping decisions:** pads that **share a name** (e.g. two `MP` mounting pads, or a split
-  thermal pad reusing one number) keep the **first** occurrence — a duplicate pin name would
-  silently break `pin_offset`/`pin_role`, which resolve by first match. **Unnamed pads** (`name ==
-  ""`, used for thermal/exposed pads and mechanical features) are **skipped** (no electrical
-  identity).
+- **Mapping decisions:** pads that **share a pad id** (e.g. two `MP` mounting pads, or a split
+  thermal pad reusing one number) keep the **first** occurrence — they are the *same electrical
+  pad*, and pad id is the stable identity (see "Prototype status (pin identity)"). **Unnamed pads**
+  (`name == ""`, used for thermal/exposed pads and mechanical features) are **skipped** (no
+  electrical identity). Note this dedup is by pad *id*; distinct pads that later share a *functional
+  name* via a symbol join (six `IOVDD` pads, numbers `1/11/…`) are all kept — names may collide,
+  ids may not.
 
 **Verified on real PoC footprints** (from the Orbiter_Ultra.pretty library): the JST-SH headers and
 the QFN ICs parse correctly — e.g. `JST_SH_BM03B-SRSS-TB_1x03-1MP_P1.00mm_Vertical` → 4 pins
@@ -745,6 +747,46 @@ interface story still relies on the hand-authored library. Pin `number` dedup ke
 definition across units; a symbol that legitimately repeats a number with a different role would lose
 the later one (not seen in practice). Alternate-function pin names (KiCad `(alternate ...)`) are
 ignored — only the primary `(name ...)` is used.
+
+## Prototype status (pin identity)
+
+Closes issues 0001 + 0002 (the PoC's scariest finding: a real MCU reuses power-pin
+*names* — the RP2350A has six pads named `IOVDD`, three `DVDD` — and the original
+name-keyed model collapsed them, silently floating 5 of 6 pads with DRC none the
+wiser). Two orthogonal axes of identity, deliberately separated:
+
+- **`comp` (the `EntityId` / instance path)** separates *instances*: three chained
+  WS2812s, two MCUs.
+- **`pin` (the pad number)** separates *pads within one instance*. `PinRef.pin` now
+  holds the **stable pad identity** — a pad number for a discrete pin, or
+  `port.signal` for an interface signal — never the functional name. `pin_role` /
+  `pin_offset` resolve that identity; numbers are unique per part, names are not.
+
+A functional **name is only a selector**, scoped to one part:
+`PartDef::resolve_selector("IOVDD")` fans out to every IOVDD pad's number (falling
+back to a direct pad-number reference, e.g. `"30"`/`"MP"`). The fan-out happens once,
+at connection time in elaboration (`ConnectPins`/`NoConnect`), so a name never
+reaches across instances. An unresolvable selector — a typo, or a pin the part lacks
+— **aborts the (atomic) elaboration** rather than creating a silently dangling
+member: that is issue 0002's connect-time validation. Issue 0002's other half is
+`kicad::apply_role_map`, a `(pad_number, name, role)` overlay that roles a bare
+footprint without authoring a full `.kicad_sym`.
+
+**Completeness, not just non-collapse.** `Doc.no_connects` (from
+`GenDirective::NoConnect`) records intentional opens, and a dedicated `Key::Floating`
+query reports every pad that is on no net and not no-connect. It is a *separate*
+query from `Key::Erc` on purpose: its dependency footprint is the raw component/pad
+universe + no-connect set (not the resolved netlist), so it cannot share — and would
+weaken — ERC's netlist-only early-cutoff firewall. Together `Erc` + `Floating` are
+the full electrical check. Result: a dropped pad is now *reported*, not merely
+un-collapsed — even a single forgotten pad, not just duplicated power names.
+
+The capstone PoC validates this end to end: it nets all six IOVDD / three DVDD pads
+(and the EP→GND) with single name connects, declares its intentional opens, and runs
+**0 floating pads / ERC 0** — the old `uniquify`/distinct-name workarounds are
+deleted. **Limit:** placement that must target one *specific* pad of a duplicated
+name (a per-pad decoupler) references it by pad number, since a name there would fan
+out (`NearPin` takes the first match).
 
 ## Prototype status (export)
 

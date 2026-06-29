@@ -179,6 +179,15 @@ validated against a real Gerber viewer**, and 4-layer intent is not represented
 Concrete things that were awkward, missing, or error-prone driving the agent-first
 API to build a real board. Ordered by how much they bit.
 
+> **RESOLVED** (findings 1 & 2, branch `feat/pin-identity`, issues 0001/0002): net
+> membership now keys on **pad identity** (pad number); a functional name is a
+> *selector* that fans out to every matching pad at connection time. A
+> `Key::Floating` query reports any pad on no net and not no-connect; an unknown pin
+> in a connection is a hard elaboration error; `kicad::apply_role_map` overlays
+> roles onto a bare footprint. The PoC below now nets all 6 IOVDD / 3 DVDD pads with
+> single name connects and runs 0 floating pads — `uniquify()` is gone. The findings
+> are preserved here as the record of what the build surfaced.
+
 **1. Pins are keyed by name, and real MCUs have duplicate power-pin names.**
 The RP2350A has 6 pads named `IOVDD` and 3 named `DVDD`. A net references a pin by
 `(component, name)`, and `pin_offset`/`pin_world` resolve **by name, first match

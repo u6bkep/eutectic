@@ -39,6 +39,10 @@
 //! aligny  <node> <node> ...        # share a y coordinate (horizontal line)
 //! connect <compA>.<port> <compB>.<port>   # typed-interface connection (auto-crossed)
 //! net     <name> <comp>.<pin> <comp>.<pin> ...   # join discrete pins onto a net
+//! nc      <comp>.<pin> <comp>.<pin> ...          # mark pads deliberately unconnected
+//!
+//! A `<pin>` in `net`/`nc` is a *selector*: a functional name fans out to every pad
+//! with that name (a multi-pad power rail), or a pad number selects one pad.
 //!
 //! # ---- ID-keyed overrides (tier-1) ----
 //! hint    <path> (<x>, <y>)        # weak override (a nudge; decays if ineffective)
@@ -120,6 +124,13 @@ fn render_directive(d: &GenDirective) -> String {
         }
         GenDirective::ConnectPins { net, pins } => {
             let mut s = format!("net {net}");
+            for (comp, pin) in pins {
+                s.push_str(&format!(" {comp}.{pin}"));
+            }
+            s
+        }
+        GenDirective::NoConnect { pins } => {
+            let mut s = String::from("nc");
             for (comp, pin) in pins {
                 s.push_str(&format!(" {comp}.{pin}"));
             }
@@ -254,6 +265,17 @@ fn parse_line(line: &str) -> Result<Item, String> {
                 pins.push(split_last_dot(t, "pin")?);
             }
             Item::Directive(GenDirective::ConnectPins { net, pins })
+        }
+        "nc" => {
+            let toks: Vec<&str> = rest.split_whitespace().collect();
+            if toks.is_empty() {
+                return Err("nc needs at least one pin: nc <comp>.<pin> ...".into());
+            }
+            let mut pins = Vec::new();
+            for t in &toks {
+                pins.push(split_last_dot(t, "pin")?);
+            }
+            Item::Directive(GenDirective::NoConnect { pins })
         }
         "hint" | "pin" => {
             let (path, pos) = path_and_point(rest)?;
@@ -453,6 +475,9 @@ mod tests {
             GenDirective::ConnectPins {
                 net: "VBUS".into(),
                 pins: vec![("psu.reg".into(), "VOUT".into()), ("psu.dec[0]".into(), "p1".into())],
+            },
+            GenDirective::NoConnect {
+                pins: vec![("psu.reg".into(), "GND".into()), ("mcu".into(), "GPIO0".into())],
             },
         ]
     }

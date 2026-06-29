@@ -148,6 +148,101 @@ mod tests {
         assert_eq!(eng.count(Key::Erc), e0, "erc should be cut off");
     }
 
+    // A part with several pads sharing one functional name (the real
+    // duplicate-power-pin shape: an MCU's six IOVDD pads). Numbers are unique.
+    fn dup_power_lib() -> super::part::PartLib {
+        use super::part::{PartDef, PinDef, PinRole};
+        let mk = |name: &str, number: &str, role| PinDef {
+            name: name.into(),
+            number: number.into(),
+            role,
+            offset: Point { x: 0, y: 0 },
+            pad: None,
+        };
+        let mut lib = super::part::PartLib::new();
+        lib.insert(
+            "PWRCHIP".into(),
+            PartDef {
+                name: "PWRCHIP".into(),
+                pins: vec![
+                    mk("VDD", "1", PinRole::PowerIn),
+                    mk("VDD", "11", PinRole::PowerIn),
+                    mk("VDD", "20", PinRole::PowerIn),
+                    mk("GND", "2", PinRole::Passive),
+                ],
+                interfaces: BTreeMap::new(),
+            },
+        );
+        lib
+    }
+
+    fn dup_power_source() -> Source {
+        vec![
+            GenDirective::Instance { path: "u1".into(), part: "PWRCHIP".into() },
+            GenDirective::ConnectPins {
+                net: "+3V3".into(),
+                pins: vec![("u1".into(), "VDD".into())],
+            },
+        ]
+    }
+
+    /// Issue 0001 regression: connecting a net to a duplicated power-pin *name*
+    /// must net every physical pad, not collapse to one. Three VDD pads → three
+    /// members keyed by distinct pad numbers.
+    #[test]
+    fn duplicate_power_name_fans_out_to_every_pad() {
+        let lib = dup_power_lib();
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(dup_power_source())), &lib, "s").unwrap();
+        let net = &h.doc().nets[&NetId::new("+3V3")];
+        let pads: BTreeSet<String> = net.members.iter().map(|p| p.pin.clone()).collect();
+        assert_eq!(
+            pads,
+            BTreeSet::from(["1".to_string(), "11".to_string(), "20".to_string()]),
+            "all three VDD pads must be on the net"
+        );
+    }
+
+    /// Issue 0001 completeness half: a pad on no net is reported by the Floating
+    /// query until it is netted or explicitly no-connect — never silent.
+    #[test]
+    fn floating_pad_reported_until_netted_or_no_connect() {
+        let lib = dup_power_lib();
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(dup_power_source())), &lib, "s").unwrap();
+        let mut eng = Engine::new();
+        // VDD pads are netted; GND is not → exactly one floating pad.
+        let floats = eng.query(h.doc(), &lib, Key::Floating);
+        let floats = floats.as_floating();
+        assert_eq!(floats.len(), 1, "only GND floats: {floats:?}");
+        assert!(floats[0].contains("GND"), "got {:?}", floats[0]);
+
+        // Marking GND no-connect clears it.
+        let mut src = dup_power_source();
+        src.push(GenDirective::NoConnect { pins: vec![("u1".into(), "GND".into())] });
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "nc").unwrap();
+        let floats = eng.query(h.doc(), &lib, Key::Floating);
+        assert!(floats.as_floating().is_empty(), "no floats after NC: {:?}", floats.as_floating());
+    }
+
+    /// Issue 0002: a connection to a pin the part doesn't have is a hard
+    /// elaboration error (atomic — the transaction never commits), not a silent
+    /// dangling member.
+    #[test]
+    fn connect_to_unknown_pin_is_a_hard_error() {
+        let lib = dup_power_lib();
+        let mut h = History::new(Default::default());
+        let src = vec![
+            GenDirective::Instance { path: "u1".into(), part: "PWRCHIP".into() },
+            GenDirective::ConnectPins {
+                net: "x".into(),
+                pins: vec![("u1".into(), "TYPO".into())],
+            },
+        ];
+        let err = h.commit(Transaction::one(Command::SetSource(src)), &lib, "s").unwrap_err();
+        assert!(err.contains("TYPO") && err.contains("u1"), "got {err}");
+    }
+
     #[test]
     fn override_survives_reelaboration_and_orphans_surface() {
         let lib = part_library();
