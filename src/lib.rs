@@ -17,6 +17,7 @@ pub mod doc;
 pub mod elaborate;
 pub mod history;
 pub mod id;
+pub mod kicad;
 pub mod part;
 pub mod project;
 pub mod query;
