@@ -13,7 +13,7 @@
 
 use crate::diagnostic::{Diagnostic, Location};
 use crate::doc::*;
-use crate::geom::{BoardShape, Role, Shape2D, Stackup};
+use crate::geom::{BoardShape, Feature, NetFeature, Role, Shape2D, Stackup, ZRange};
 use crate::id::{EntityId, NetId};
 use crate::part::{Dir, PartDef, PartLib, courtyard_half_extents};
 use crate::route::Layer;
@@ -832,6 +832,90 @@ pub fn stackup(_source: &Source) -> Stackup {
     Stackup::default_2layer()
 }
 
+/// Lower an abstract copper [`Layer`] to its absolute [`ZRange`] via the stackup:
+/// `Top`→top outer copper, `Bottom`→bottom outer copper, `Inner(n)`→the `(1 + n)`-th
+/// copper layer counting from the top (matching [`Layer::depth`](crate::route::Layer)).
+///
+/// If the chosen copper layer is absent (e.g. `Inner` on the default 2-layer stackup,
+/// or any copper layer missing) we fall back to the full board extent (`board_z`), and
+/// if even that is `None` (an empty stackup) to `ZRange::new(0, 0)` — so a region
+/// always lowers to *some* prism rather than being silently dropped.
+fn layer_z(su: &Stackup, l: Layer) -> ZRange {
+    let chosen = match l {
+        Layer::Top => su.top_copper(),
+        Layer::Bottom => su.bottom_copper(),
+        Layer::Inner(n) => su.nth_copper_from_top(1 + n as usize),
+    };
+    chosen.or_else(|| su.board_z()).unwrap_or(ZRange::new(0, 0))
+}
+
+/// Lower the authored board/region geometry of a `Source` into the converged
+/// [`NetFeature`] model — a [`Feature`] (pure physical geometry) paired with the
+/// optional net it carries. This is the additive producer the convergence's Phase 2
+/// will wire DRC/export onto; for now it has no callers besides tests. It is the
+/// role-filtered union of what [`board_shape`] and [`regions`] read today
+/// (Decision 12.4), kept as one derived view, threading z through [`stackup`].
+///
+/// Emitted per directive (net stays an *annotation* alongside the feature, never a
+/// field on `Feature` — connectivity is authoritative, Decision 12.1):
+///   - the **last** `Board` directive → one [`Role::Substrate`] netless feature,
+///     preserving [`board_shape`]'s "last `Board` wins" single-outline semantics.
+///     (Unioning several `Board` directives into one multi-substrate body is deferred.)
+///   - every `Cutout` → a [`Role::Void`] netless feature (mirrors [`board_shape`]).
+///   - every `Region` → a feature carrying the authored role + net, on the region's
+///     copper layer z (mirrors [`regions`]).
+pub fn features(source: &Source) -> Vec<crate::geom::NetFeature> {
+    let su = stackup(source);
+    // The full board vertical extent (Substrate and Void span it). An empty stackup
+    // has no extent — fall back to a zero range so the feature is still emitted.
+    let board_z = su.board_z().unwrap_or(ZRange::new(0, 0));
+
+    let mut out: Vec<NetFeature> = Vec::new();
+
+    // Board: only the LAST `Board` becomes the substrate (reverse-find mirrors
+    // `board_shape`'s "last `Board` wins").
+    if let Some(outline) = source.iter().rev().find_map(|d| match d {
+        GenDirective::Board { outline } => Some(outline),
+        _ => None,
+    }) {
+        out.push(NetFeature::netless(Feature::prism(
+            Role::Substrate,
+            outline.clone(),
+            board_z,
+        )));
+    }
+
+    // Cutouts: every one (mirrors `board_shape`).
+    for d in source {
+        if let GenDirective::Cutout { shape } = d {
+            out.push(NetFeature::netless(Feature::prism(
+                Role::Void,
+                shape.clone(),
+                board_z,
+            )));
+        }
+    }
+
+    // Regions: every one, carrying the authored role + net (mirrors `regions`).
+    for d in source {
+        if let GenDirective::Region(RegionDecl {
+            shape,
+            role,
+            net,
+            layer,
+        }) = d
+        {
+            let net_opt = net.as_ref().map(|n| NetId::new(n.clone()));
+            out.push(NetFeature::new(
+                net_opt,
+                Feature::prism(role.clone(), shape.clone(), layer_z(&su, *layer)),
+            ));
+        }
+    }
+
+    out
+}
+
 /// Build a rectangular [`Board`](GenDirective::Board) directive from opposite corners
 /// — sugar over the polygon outline form for the common case.
 pub fn board_rect(min: Point, max: Point) -> GenDirective {
@@ -969,4 +1053,92 @@ pub fn psu_module(n: usize) -> Source {
         });
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geom::Extent;
+
+    fn pt(x: Nm, y: Nm) -> Point {
+        Point { x, y }
+    }
+
+    /// Board + cutout + a Top conductor region lower to exactly one Substrate, one
+    /// Void, and one Conductor feature; net rides as an annotation and the conductor
+    /// sits on the top-copper z.
+    #[test]
+    fn features_lowers_board_cutout_and_region() {
+        let su = Stackup::default_2layer();
+        let src = vec![
+            board_rect(pt(0, 0), pt(10 * MM, 10 * MM)),
+            GenDirective::Cutout {
+                shape: Shape2D::rect(pt(5 * MM, 5 * MM), MM, MM),
+            },
+            GenDirective::Region(RegionDecl {
+                shape: Shape2D::rect(pt(2 * MM, 2 * MM), MM, MM),
+                role: Role::Conductor,
+                net: Some("GND".into()),
+                layer: Layer::Top,
+            }),
+        ];
+
+        let feats = features(&src);
+        assert_eq!(feats.len(), 3, "one substrate, one void, one conductor");
+
+        let subs: Vec<&NetFeature> = feats
+            .iter()
+            .filter(|f| f.feature.role == Role::Substrate)
+            .collect();
+        assert_eq!(subs.len(), 1, "exactly one substrate feature");
+        assert!(subs[0].net.is_none(), "substrate is netless");
+        let Extent::Prism { z, .. } = subs[0].feature.extent;
+        assert_eq!(z, su.board_z().unwrap(), "substrate spans the whole board");
+
+        let voids: Vec<&NetFeature> = feats
+            .iter()
+            .filter(|f| f.feature.role == Role::Void)
+            .collect();
+        assert_eq!(voids.len(), 1, "exactly one void feature");
+        assert!(voids[0].net.is_none(), "void is netless");
+
+        let conds: Vec<&NetFeature> = feats
+            .iter()
+            .filter(|f| f.feature.role == Role::Conductor)
+            .collect();
+        assert_eq!(conds.len(), 1, "exactly one conductor feature");
+        assert_eq!(
+            conds[0].net,
+            Some(NetId::new("GND")),
+            "conductor carries its net annotation"
+        );
+        let Extent::Prism { z, .. } = conds[0].feature.extent;
+        assert_eq!(z, su.top_copper().unwrap(), "Top region sits on top copper");
+    }
+
+    /// Two `Board` directives: only the last outline becomes the substrate feature
+    /// (mirrors `board_shape`'s "last `Board` wins").
+    #[test]
+    fn features_last_board_wins() {
+        let first = Shape2D::rect(pt(0, 0), 4 * MM, 4 * MM);
+        let last = Shape2D::rect(pt(0, 0), 8 * MM, 8 * MM);
+        let src = vec![
+            GenDirective::Board {
+                outline: first.clone(),
+            },
+            GenDirective::Board {
+                outline: last.clone(),
+            },
+        ];
+
+        let feats = features(&src);
+        let subs: Vec<&NetFeature> = feats
+            .iter()
+            .filter(|f| f.feature.role == Role::Substrate)
+            .collect();
+        assert_eq!(subs.len(), 1, "only one substrate emitted");
+        let Extent::Prism { shape, .. } = &subs[0].feature.extent;
+        assert_eq!(*shape, last, "the LAST board outline becomes the substrate");
+        assert_ne!(*shape, first, "the earlier board is dropped");
+    }
 }
