@@ -631,8 +631,12 @@ fn subdivide_arc(
 /// per subdivision, so even a board-spanning curve reaches µm flatness well within it.
 const MAX_BEZIER_DEPTH: u32 = 24;
 
-/// Integer midpoint of two lattice points — de Casteljau's only operation. At board
-/// scale (`|coord| ≤ ~1e9`) the coordinate sum stays well within `i64`.
+/// Integer midpoint of two lattice points — de Casteljau's only operation. By the
+/// convex-hull property every generated point stays within the input control hull, so
+/// the i64 sum `a.x + b.x` is never the binding limit. The real ceiling for the whole
+/// flatten is the flatness test's i128 product in [`pt_seg_d2`] (≈`64·C⁴`), which is
+/// safe at board scale (`|coord| ≤ ~1e9` nm, ~2.7× margin) — the crate-wide
+/// coordinate-range assumption, not specific to Béziers (see issue 0018).
 fn midpoint(a: Point, b: Point) -> Point {
     Point {
         x: (a.x + b.x) / 2,
