@@ -57,10 +57,11 @@ pub const DEFAULT_CHORD_TOL: Nm = 1_000;
 
 /// One edge of a skeleton [`Path`], implicitly starting at the previous point.
 ///
-/// The enum is **deliberately open**: a `Cubic { c1, c2, end }` Bézier slots in later
-/// as purely (a) one [`Path::flatten`] arm and (b) export arms — with *no* change to
-/// the clearance/boolean kernel (which only ever sees the tessellated polyline this
-/// flattens to — "strategy A") or to any path-walking consumer.
+/// Curved edges (`Arc`, `Quadratic`, `Cubic`) follow "strategy A": they are
+/// authoritative, and the only places they are special are (a) one [`Path::flatten`]
+/// arm each and (b) export arms. The clearance/boolean kernel and every other
+/// path-walking consumer see *only* the tessellated polyline `flatten` produces, so
+/// adding a curve kind never touches them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Seg {
     /// A straight edge to `end`.
@@ -71,13 +72,24 @@ pub enum Seg {
     /// rationals ([`circumcenter`]) only when export needs `G02`/`G03` I/J or an SVG
     /// `A` arc. A collinear triple degenerates to a straight chord.
     Arc { mid: Point, end: Point },
+    /// A quadratic Bézier from the current point, control point `ctrl`, to `end` —
+    /// the form TrueType `glyf` outlines use. Control points are lattice points;
+    /// flattens by pure-integer de Casteljau (no float, no `sqrt`). Stored natively
+    /// rather than elevated to a cubic so `glyf` round-trips without off-lattice loss.
+    Quadratic { ctrl: Point, end: Point },
+    /// A cubic Bézier from the current point, controls `c1`,`c2`, to `end` — the form
+    /// OpenType CFF charstrings and SVG paths use. Same integer de Casteljau flatten.
+    Cubic { c1: Point, c2: Point, end: Point },
 }
 
 impl Seg {
     /// Where this edge ends (the next path point).
     pub fn end(&self) -> Point {
         match self {
-            Seg::Line { end } | Seg::Arc { end, .. } => *end,
+            Seg::Line { end }
+            | Seg::Arc { end, .. }
+            | Seg::Quadratic { end, .. }
+            | Seg::Cubic { end, .. } => *end,
         }
     }
     fn map(&self, f: &impl Fn(Point) -> Point) -> Seg {
@@ -85,6 +97,15 @@ impl Seg {
             Seg::Line { end } => Seg::Line { end: f(*end) },
             Seg::Arc { mid, end } => Seg::Arc {
                 mid: f(*mid),
+                end: f(*end),
+            },
+            Seg::Quadratic { ctrl, end } => Seg::Quadratic {
+                ctrl: f(*ctrl),
+                end: f(*end),
+            },
+            Seg::Cubic { c1, c2, end } => Seg::Cubic {
+                c1: f(*c1),
+                c2: f(*c2),
                 end: f(*end),
             },
         }
@@ -134,6 +155,8 @@ impl Path {
             match s {
                 Seg::Line { end } => out.push(*end),
                 Seg::Arc { mid, end } => flatten_arc(cur, *mid, *end, tol, &mut out),
+                Seg::Quadratic { ctrl, end } => flatten_quad(cur, *ctrl, *end, tol, &mut out),
+                Seg::Cubic { c1, c2, end } => flatten_cubic(cur, *c1, *c2, *end, tol, &mut out),
             }
             cur = s.end();
         }
@@ -192,6 +215,17 @@ impl Shape2D {
             path: Path {
                 start,
                 segs: vec![Seg::Arc { mid, end }],
+            },
+            radius: width / 2,
+        }
+    }
+    /// An open cubic-Bézier stroke: `width`-wide copper following the cubic
+    /// `start`→(`c1`,`c2`)→`end`. Sugar over the [`Path`]/[`Seg::Cubic`] form.
+    pub fn cubic(start: Point, c1: Point, c2: Point, end: Point, width: Nm) -> Shape2D {
+        Shape2D::Stroke {
+            path: Path {
+                start,
+                segs: vec![Seg::Cubic { c1, c2, end }],
             },
             radius: width / 2,
         }
@@ -590,6 +624,76 @@ fn subdivide_arc(
     }
     subdivide_arc(p, m, cx, cy, r, tol, turn, out);
     subdivide_arc(m, q, cx, cy, r, tol, turn, out);
+}
+
+/// Max recursion depth for Bézier flattening — a backstop against pathological
+/// non-convergence at integer resolution. Cubic control-point deviation shrinks ~4×
+/// per subdivision, so even a board-spanning curve reaches µm flatness well within it.
+const MAX_BEZIER_DEPTH: u32 = 24;
+
+/// Integer midpoint of two lattice points — de Casteljau's only operation. At board
+/// scale (`|coord| ≤ ~1e9`) the coordinate sum stays well within `i64`.
+fn midpoint(a: Point, b: Point) -> Point {
+    Point {
+        x: (a.x + b.x) / 2,
+        y: (a.y + b.y) / 2,
+    }
+}
+
+/// Append the flattening of the quadratic Bézier `p0`→(`ctrl`)→`p2` to `out`
+/// (excluding `p0`, including `p2`). Pure-integer de Casteljau: subdivide at the
+/// midpoint until the control point is within `tol` of the chord. No float, no `sqrt`.
+/// Uses *segment* distance (not line distance) so a collinear control point that
+/// overshoots an endpoint still forces subdivision — the curve's overshoot is kept.
+fn flatten_quad(p0: Point, ctrl: Point, p2: Point, tol: Nm, out: &mut Vec<Point>) {
+    let t = tol.max(1) as i128;
+    subdivide_quad(p0, ctrl, p2, t * t, 0, out);
+}
+
+fn subdivide_quad(p0: Point, c: Point, p2: Point, tol2: i128, depth: u32, out: &mut Vec<Point>) {
+    if depth >= MAX_BEZIER_DEPTH || pt_seg_within2(c, p0, p2, tol2) {
+        out.push(p2);
+        return;
+    }
+    let p01 = midpoint(p0, c);
+    let p12 = midpoint(c, p2);
+    let m = midpoint(p01, p12);
+    subdivide_quad(p0, p01, m, tol2, depth + 1, out);
+    subdivide_quad(m, p12, p2, tol2, depth + 1, out);
+}
+
+/// Append the flattening of the cubic Bézier `p0`→(`c1`,`c2`)→`p3` to `out` (excluding
+/// `p0`, including `p3`). Pure-integer de Casteljau: subdivide at the midpoint until
+/// **both** control points are within `tol` of the chord. No float, no `sqrt`.
+fn flatten_cubic(p0: Point, c1: Point, c2: Point, p3: Point, tol: Nm, out: &mut Vec<Point>) {
+    let t = tol.max(1) as i128;
+    subdivide_cubic(p0, c1, c2, p3, t * t, 0, out);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn subdivide_cubic(
+    p0: Point,
+    c1: Point,
+    c2: Point,
+    p3: Point,
+    tol2: i128,
+    depth: u32,
+    out: &mut Vec<Point>,
+) {
+    if depth >= MAX_BEZIER_DEPTH
+        || (pt_seg_within2(c1, p0, p3, tol2) && pt_seg_within2(c2, p0, p3, tol2))
+    {
+        out.push(p3);
+        return;
+    }
+    let p01 = midpoint(p0, c1);
+    let p12 = midpoint(c1, c2);
+    let p23 = midpoint(c2, p3);
+    let p012 = midpoint(p01, p12);
+    let p123 = midpoint(p12, p23);
+    let m = midpoint(p012, p123);
+    subdivide_cubic(p0, p01, p012, m, tol2, depth + 1, out);
+    subdivide_cubic(m, p123, p23, p3, tol2, depth + 1, out);
 }
 
 /// Is the squared distance from point `p` to segment `a`–`b` strictly `< thr2`?
@@ -1173,6 +1277,109 @@ mod tests {
             vec![pt(0, 0), pt(2 * MM, 0)],
             "collinear ⇒ a single chord"
         );
+    }
+
+    // Perpendicular distance from `(px,py)` to segment `a`–`b`, in f64 nm (test only).
+    fn pt_seg_dist_f64(px: f64, py: f64, a: Point, b: Point) -> f64 {
+        let (ax, ay) = (a.x as f64, a.y as f64);
+        let (bx, by) = (b.x as f64, b.y as f64);
+        let (ex, ey) = (bx - ax, by - ay);
+        let len2 = ex * ex + ey * ey;
+        let t = if len2 == 0.0 {
+            0.0
+        } else {
+            (((px - ax) * ex + (py - ay) * ey) / len2).clamp(0.0, 1.0)
+        };
+        let (cx, cy) = (ax + t * ex, ay + t * ey);
+        ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()
+    }
+
+    #[test]
+    fn straight_cubic_flattens_to_a_chord() {
+        // Controls lying on the segment ⇒ the curve is the chord ⇒ no subdivision.
+        let poly = Path {
+            start: pt(0, 0),
+            segs: vec![Seg::Cubic {
+                c1: pt(3 * MM, 0),
+                c2: pt(6 * MM, 0),
+                end: pt(9 * MM, 0),
+            }],
+        }
+        .flatten(DEFAULT_CHORD_TOL);
+        assert_eq!(poly, vec![pt(0, 0), pt(9 * MM, 0)]);
+    }
+
+    #[test]
+    fn cubic_flatten_approximates_the_curve_within_tolerance() {
+        let (p0, c1, c2, p3) = (
+            pt(0, 0),
+            pt(0, 4 * MM),
+            pt(10 * MM, -4 * MM),
+            pt(10 * MM, 0),
+        );
+        let poly = Path {
+            start: p0,
+            segs: vec![Seg::Cubic { c1, c2, end: p3 }],
+        }
+        .flatten(DEFAULT_CHORD_TOL);
+        assert_eq!(poly.first().copied(), Some(p0));
+        assert_eq!(poly.last().copied(), Some(p3));
+        assert!(poly.len() > 2, "a curved cubic must subdivide");
+        // Every analytic curve sample lies within tol (+ rounding slack) of the polyline.
+        let eval = |t: f64| {
+            let u = 1.0 - t;
+            let bx = u * u * u * p0.x as f64
+                + 3.0 * u * u * t * c1.x as f64
+                + 3.0 * u * t * t * c2.x as f64
+                + t * t * t * p3.x as f64;
+            let by = u * u * u * p0.y as f64
+                + 3.0 * u * u * t * c1.y as f64
+                + 3.0 * u * t * t * c2.y as f64
+                + t * t * t * p3.y as f64;
+            (bx, by)
+        };
+        for i in 0..=200 {
+            let (x, y) = eval(i as f64 / 200.0);
+            let best = poly
+                .windows(2)
+                .map(|w| pt_seg_dist_f64(x, y, w[0], w[1]))
+                .fold(f64::MAX, f64::min);
+            assert!(
+                best <= DEFAULT_CHORD_TOL as f64 + 50.0,
+                "curve sample {i} is {best} nm off the flattened polyline"
+            );
+        }
+    }
+
+    #[test]
+    fn quadratic_flatten_captures_the_apex() {
+        // Apex at t=½ is (p0 + 2c + p2)/4 = (5mm, 3mm).
+        let (p0, c, p2) = (pt(0, 0), pt(5 * MM, 6 * MM), pt(10 * MM, 0));
+        let poly = Path {
+            start: p0,
+            segs: vec![Seg::Quadratic { ctrl: c, end: p2 }],
+        }
+        .flatten(DEFAULT_CHORD_TOL);
+        assert_eq!(poly.first().copied(), Some(p0));
+        assert_eq!(poly.last().copied(), Some(p2));
+        assert!(
+            poly.iter().any(|p| (p.y - 3 * MM).abs() < 200_000),
+            "a flattened vertex tracks the apex bulge near y=3mm"
+        );
+    }
+
+    #[test]
+    fn cubic_bbox_covers_the_bulge() {
+        // A cubic bowing up to ~3.75mm; the bbox (via flatten) must reach the bulge.
+        let s = Shape2D::cubic(
+            pt(0, 0),
+            pt(0, 5 * MM),
+            pt(10 * MM, 5 * MM),
+            pt(10 * MM, 0),
+            MM / 10,
+        );
+        let (_min, max) = s.bbox().unwrap();
+        assert!(max.y > 2 * MM, "bbox reaches the upward bulge: {max:?}");
     }
 
     #[test]

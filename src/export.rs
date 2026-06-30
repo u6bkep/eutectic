@@ -18,7 +18,7 @@
 //! status (Gerber/fab output)".
 
 use crate::doc::{Doc, MM, Nm, Point};
-use crate::geom::{BoardShape, Extent, Role, Seg, Shape2D, circumcenter};
+use crate::geom::{BoardShape, DEFAULT_CHORD_TOL, Extent, Path, Role, Seg, Shape2D, circumcenter};
 use crate::part::{PartDef, PartLib, pin_world};
 use crate::route::{DesignRules, Layer, Trace, Via};
 use std::collections::{BTreeMap, BTreeSet};
@@ -196,7 +196,7 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> String {
     // An arc-bearing outline/cutout emits a `<path>` (true `A` arcs); a straight one
     // keeps the byte-identical `<polygon>`.
     let svg_outline = |class: &str, shape: &Shape2D| -> String {
-        if has_arc(shape) {
+        if has_curve(shape) {
             format!(
                 "  <path class=\"{class}\" d=\"{}\" fill=\"none\" stroke=\"black\" stroke-width=\"0.1\"/>\n",
                 svg_path_d(shape, &flip)
@@ -467,13 +467,16 @@ fn rdiv(num: i128, den: i128) -> i128 {
     }
 }
 
-/// Does this shape's skeleton contain any arc edge? Straight shapes keep their exact
-/// legacy export (polygon / G01 lines); only arc-bearing shapes take the arc path.
-fn has_arc(s: &Shape2D) -> bool {
-    s.path()
-        .segs
-        .iter()
-        .any(|seg| matches!(seg, Seg::Arc { .. }))
+/// Does this shape's skeleton contain any curved edge (arc or Bézier)? Straight shapes
+/// keep their exact legacy export (polygon / G01 lines); only curve-bearing shapes take
+/// the curve-aware `<path>` / contour route.
+fn has_curve(s: &Shape2D) -> bool {
+    s.path().segs.iter().any(|seg| {
+        matches!(
+            seg,
+            Seg::Arc { .. } | Seg::Quadratic { .. } | Seg::Cubic { .. }
+        )
+    })
 }
 
 /// `mid` and `end` re-expressed relative to `start` (so `start` becomes the origin).
@@ -568,6 +571,24 @@ fn svg_path_d(shape: &Shape2D, flip: &impl Fn(Nm) -> Nm) -> String {
                 )),
                 None => d.push_str(&format!(" L {},{}", fmt_mm(end.x), fmt_mm(flip(end.y)))),
             },
+            // Béziers export directly — SVG carries them losslessly. Control points are
+            // y-flipped alongside the endpoints.
+            Seg::Quadratic { ctrl, end } => d.push_str(&format!(
+                " Q {},{} {},{}",
+                fmt_mm(ctrl.x),
+                fmt_mm(flip(ctrl.y)),
+                fmt_mm(end.x),
+                fmt_mm(flip(end.y)),
+            )),
+            Seg::Cubic { c1, c2, end } => d.push_str(&format!(
+                " C {},{} {},{} {},{}",
+                fmt_mm(c1.x),
+                fmt_mm(flip(c1.y)),
+                fmt_mm(c2.x),
+                fmt_mm(flip(c2.y)),
+                fmt_mm(end.x),
+                fmt_mm(flip(end.y)),
+            )),
         }
         cur = seg.end();
     }
@@ -622,6 +643,18 @@ fn gerber_contour<'a>(shape: &Shape2D, out: &mut String, mode: &mut &'a str, g75
                 }
                 None => line_to(*end, out, mode),
             },
+            // Gerber has no Béziers — flatten this edge to chord-tolerance G01 segments
+            // (the start is the current point, already emitted; skip it).
+            Seg::Quadratic { .. } | Seg::Cubic { .. } => {
+                let flat = Path {
+                    start: cur,
+                    segs: vec![seg.clone()],
+                }
+                .flatten(DEFAULT_CHORD_TOL);
+                for p in flat.into_iter().skip(1) {
+                    line_to(p, out, mode);
+                }
+            }
         }
         cur = seg.end();
     }
@@ -1285,6 +1318,51 @@ psu.reg,LDO,0.000000,0.000000,0
         assert!(
             out.contains("G01*\nX-10000000Y0D01*"),
             "straight closing edge:\n{out}"
+        );
+    }
+
+    /// A filled blob whose top edge is a cubic Bézier, closed by the flat diameter.
+    fn cubic_blob(r: Nm) -> Shape2D {
+        Shape2D::polygon_path(
+            crate::geom::Path {
+                start: tp(-r, 0),
+                segs: vec![Seg::Cubic {
+                    c1: tp(-r, 2 * r),
+                    c2: tp(r, 2 * r),
+                    end: tp(r, 0),
+                }],
+            },
+            0,
+        )
+    }
+
+    #[test]
+    fn svg_path_d_emits_a_cubic_command() {
+        let d = svg_path_d(&cubic_blob(10 * TMM), &(|y: Nm| -y));
+        assert!(d.starts_with("M "), "{d}");
+        assert!(d.contains(" C "), "carries an SVG cubic command: {d}");
+        assert!(d.ends_with(" Z"), "closed: {d}");
+    }
+
+    #[test]
+    fn gerber_contour_flattens_a_bezier_to_g01_lines() {
+        // Gerber has no Béziers: the curve must come out as a run of G01 draws, with
+        // no arc codes and no SVG-isms.
+        let mut out = String::new();
+        let (mut mode, mut g75) = ("G01", false);
+        gerber_contour(&cubic_blob(10 * TMM), &mut out, &mut mode, &mut g75);
+        assert!(
+            !out.contains("G02*") && !out.contains("G03*"),
+            "a Bézier emits no arc codes:\n{out}"
+        );
+        let draws = out.matches("D01*").count();
+        assert!(
+            draws > 2,
+            "the Bézier flattens to several G01 draws ({draws}):\n{out}"
+        );
+        assert!(
+            out.contains("X10000000Y0"),
+            "reaches the curve endpoint:\n{out}"
         );
     }
 

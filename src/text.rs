@@ -187,6 +187,17 @@ fn fmt_path(path: &Path) -> String {
                 toks.push(fmt_point(*mid));
                 toks.push(fmt_point(*end));
             }
+            Seg::Quadratic { ctrl, end } => {
+                toks.push("quad".into());
+                toks.push(fmt_point(*ctrl));
+                toks.push(fmt_point(*end));
+            }
+            Seg::Cubic { c1, c2, end } => {
+                toks.push("cubic".into());
+                toks.push(fmt_point(*c1));
+                toks.push(fmt_point(*c2));
+                toks.push(fmt_point(*end));
+            }
         }
     }
     toks.join(" ")
@@ -559,6 +570,8 @@ fn extract_path(s: &str) -> Result<Path, String> {
     enum PTok {
         Coord(Point),
         Arc,
+        Quad,
+        Cubic,
     }
     let mut toks = Vec::new();
     let mut rest = s.trim_start();
@@ -579,9 +592,11 @@ fn extract_path(s: &str) -> Result<Path, String> {
                 .unwrap_or(rest.len());
             match &rest[..end] {
                 "arc" => toks.push(PTok::Arc),
+                "quad" => toks.push(PTok::Quad),
+                "cubic" => toks.push(PTok::Cubic),
                 other => {
                     return Err(format!(
-                        "unexpected token `{other}` in path (expected a coordinate or `arc`)"
+                        "unexpected token `{other}` in path (expected a coordinate, `arc`, `quad`, or `cubic`)"
                     ));
                 }
             }
@@ -591,7 +606,9 @@ fn extract_path(s: &str) -> Result<Path, String> {
     let mut it = toks.into_iter();
     let start = match it.next() {
         Some(PTok::Coord(p)) => p,
-        Some(PTok::Arc) => return Err("a path must begin with a coordinate, not `arc`".into()),
+        Some(_) => {
+            return Err("a path must begin with a coordinate, not `arc`/`quad`/`cubic`".into());
+        }
         None => return Err("expected a coordinate `(x, y)`".into()),
     };
     let mut segs = Vec::new();
@@ -611,17 +628,61 @@ fn extract_path(s: &str) -> Result<Path, String> {
                 };
                 segs.push(Seg::Arc { mid, end });
             }
+            PTok::Quad => {
+                let ctrl = match it.next() {
+                    Some(PTok::Coord(p)) => p,
+                    _ => {
+                        return Err(
+                            "`quad` needs a control coordinate: quad (cx,cy) (ex,ey)".into()
+                        );
+                    }
+                };
+                let end = match it.next() {
+                    Some(PTok::Coord(p)) => p,
+                    _ => return Err("`quad` needs an endpoint coordinate after the control".into()),
+                };
+                segs.push(Seg::Quadratic { ctrl, end });
+            }
+            PTok::Cubic => {
+                let c1 = match it.next() {
+                    Some(PTok::Coord(p)) => p,
+                    _ => {
+                        return Err(
+                            "`cubic` needs two controls + an endpoint: cubic (c1) (c2) (end)"
+                                .into(),
+                        );
+                    }
+                };
+                let c2 = match it.next() {
+                    Some(PTok::Coord(p)) => p,
+                    _ => return Err("`cubic` needs a second control coordinate".into()),
+                };
+                let end = match it.next() {
+                    Some(PTok::Coord(p)) => p,
+                    _ => {
+                        return Err(
+                            "`cubic` needs an endpoint coordinate after the controls".into()
+                        );
+                    }
+                };
+                segs.push(Seg::Cubic { c1, c2, end });
+            }
         }
     }
     Ok(Path { start, segs })
 }
 
-/// Does the path enclose area as a polygon — ≥ 3 corners, or ≥ 1 corner closed by an
-/// arc edge (a half-disc is a valid 2-corner arc polygon)?
+/// Does the path enclose area as a polygon — ≥ 3 corners, or ≥ 1 corner closed by a
+/// curved edge (a half-disc is a valid 2-corner arc polygon; a Bézier blob likewise)?
 fn path_is_polygon(path: &Path) -> bool {
-    let has_arc = path.segs.iter().any(|s| matches!(s, Seg::Arc { .. }));
+    let has_curve = path.segs.iter().any(|s| {
+        matches!(
+            s,
+            Seg::Arc { .. } | Seg::Quadratic { .. } | Seg::Cubic { .. }
+        )
+    });
     let corners = 1 + path.segs.len();
-    corners >= 3 || (has_arc && corners >= 2)
+    corners >= 3 || (has_curve && corners >= 2)
 }
 
 fn extract_points(s: &str) -> Result<Vec<Point>, String> {
@@ -1023,6 +1084,54 @@ region conductor layer=F.Cu (0mm, 0mm) (4mm, 0mm) arc (5mm, 2mm) (4mm, 4mm) (0mm
             "serialized form carries `arc` markers:\n{canon}"
         );
         assert_eq!(parse(&canon).unwrap().0, src);
+    }
+
+    #[test]
+    fn bezier_edges_parse_and_round_trip() {
+        // A region with one quadratic and one cubic edge, mixed with straight edges.
+        let text = "\
+region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2mm) (7mm, 2mm) (8mm, 0mm) (0mm, 4mm)";
+        let (src, _) = parse(text).expect("parse");
+        match &src[0] {
+            GenDirective::Region(r) => assert_eq!(
+                r.shape.path().segs,
+                vec![
+                    Seg::Quadratic {
+                        ctrl: Point::mm(2, 3),
+                        end: Point::mm(4, 0),
+                    },
+                    Seg::Cubic {
+                        c1: Point::mm(5, 2),
+                        c2: Point::mm(7, 2),
+                        end: Point::mm(8, 0),
+                    },
+                    Seg::Line {
+                        end: Point::mm(0, 4),
+                    },
+                ],
+            ),
+            other => panic!("expected a region, got {other:?}"),
+        }
+        // Canonical serialization re-parses identically (quad/cubic markers survive).
+        let doc = doc_of(src.clone(), BTreeMap::new());
+        let canon = serialize(&doc);
+        assert!(
+            canon.contains("quad (") && canon.contains("cubic ("),
+            "markers:\n{canon}"
+        );
+        assert_eq!(parse(&canon).unwrap().0, src);
+    }
+
+    #[test]
+    fn bezier_path_parse_errors_are_reported() {
+        assert!(
+            parse("board (0mm,0mm) cubic (1mm,1mm) (2mm,2mm)").is_err(),
+            "cubic needs two controls AND an endpoint"
+        );
+        assert!(
+            parse("board (0mm,0mm) quad (1mm,1mm)").is_err(),
+            "quad needs a control AND an endpoint"
+        );
     }
 
     #[test]
