@@ -6,6 +6,7 @@
 //! wires individual signals, so connecting tx-to-tx is not expressible.
 
 use crate::doc::{Component, MM, Nm, Point};
+use crate::geom;
 use crate::geom::Shape2D;
 use crate::part::Dir::*;
 use std::collections::BTreeMap;
@@ -238,6 +239,74 @@ pub fn to_world(comp: &Component, p: Point) -> Point {
 /// World-frame copper shape of a pad region on a placed component.
 pub fn pad_copper_world(comp: &Component, c: &PadCopper) -> Shape2D {
     c.shape.map_points(|p| to_world(comp, p))
+}
+
+impl PinDef {
+    /// World-frame physical features for this pin's pad: each copper region as a
+    /// [`Role::Conductor`](geom::Role) prism on its layer's z, plus the drill (if
+    /// any) as a [`Role::Void`](geom::Role) prism spanning the board. Empty if the
+    /// pin has no pad.
+    ///
+    /// The component's position + cardinal [`Orient`](crate::doc::Orient) place the
+    /// geometry — copper via [`pad_copper_world`] (the pad's local offset is already
+    /// baked into the copper [`Shape2D`]); the drill is built in component-local
+    /// coords centred on the pad centre ([`PinDef::offset`] for a round drill, the
+    /// stored slot endpoints for a slot — both in `offset`'s frame) and mapped with
+    /// the same [`to_world`] transform. The [`Stackup`](geom::Stackup) resolves the
+    /// layer-relative [`PadLayers`] to absolute z: `Top`/`Bottom` to the outer copper
+    /// z, `Through` **fanned out** to one conductor feature per copper slab (the
+    /// "annulus on every copper layer" semantics). Features whose z is degenerate in
+    /// the stackup (a missing accessor) are skipped.
+    ///
+    /// This is the [`PadGeo`]-derives-`Feature`s fold of the geometry-model
+    /// convergence (docs/geometry-model-convergence.md, Decision 12): the compact
+    /// `PadGeo` stays stored on the pin; the features are the derived view. Purely
+    /// additive — it does not alter or replace any existing geometry.
+    pub fn pad_features(&self, comp: &Component, stackup: &geom::Stackup) -> Vec<geom::Feature> {
+        let Some(pad) = &self.pad else {
+            return Vec::new();
+        };
+        let mut features = Vec::new();
+        for cu in &pad.copper {
+            let world = pad_copper_world(comp, cu);
+            match cu.layers {
+                PadLayers::Top => {
+                    if let Some(z) = stackup.top_copper() {
+                        features.push(geom::Feature::prism(geom::Role::Conductor, world, z));
+                    }
+                }
+                PadLayers::Bottom => {
+                    if let Some(z) = stackup.bottom_copper() {
+                        features.push(geom::Feature::prism(geom::Role::Conductor, world, z));
+                    }
+                }
+                PadLayers::Through => {
+                    // Fan out: one conductor feature per copper slab, same world shape.
+                    for slab in stackup.copper_slabs() {
+                        features.push(geom::Feature::prism(
+                            geom::Role::Conductor,
+                            world.clone(),
+                            slab.z,
+                        ));
+                    }
+                }
+            }
+        }
+        if let Some(drill) = &pad.drill {
+            // The drill is a Void spanning the whole board, centred on the pad centre.
+            // A round drill carries no centre, so it sits at the pin offset; a slot's
+            // endpoints are already stored in the pin's local frame.
+            let local = match *drill {
+                Drill::Round { d } => Shape2D::disc(self.offset, d / 2),
+                Drill::Slot { a, b, d } => Shape2D::capsule(a, b, d / 2),
+            };
+            let world = local.map_points(|p| to_world(comp, p));
+            if let Some(z) = stackup.board_z() {
+                features.push(geom::Feature::prism(geom::Role::Void, world, z));
+            }
+        }
+        features
+    }
 }
 
 /// Default extra clearance added around a part's copper extent to form its
@@ -509,6 +578,135 @@ mod tests {
         let q = Orient::Deg90
             .rotate(Orient::Deg90.rotate(Orient::Deg90.rotate(Orient::Deg90.rotate(p))));
         assert_eq!(q, p);
+    }
+
+    use crate::geom::{self, Extent, Role, Shape2D, Stackup};
+
+    /// A surface pad: one copper region on `Top`, no drill.
+    fn surface_pad(shape: Shape2D) -> PadGeo {
+        PadGeo {
+            copper: vec![PadCopper {
+                shape,
+                layers: PadLayers::Top,
+            }],
+            drill: None,
+        }
+    }
+
+    fn prism_shape_z(f: &geom::Feature) -> (&Shape2D, geom::ZRange) {
+        match &f.extent {
+            Extent::Prism { shape, z } => (shape, *z),
+        }
+    }
+
+    #[test]
+    fn pad_features_surface_pad_one_conductor_on_top() {
+        let stackup = Stackup::default_2layer();
+        // A 1mm square pad offset (1mm,0) in the footprint frame.
+        let pad_shape = Shape2D::rect(Point { x: MM, y: 0 }, MM, MM);
+        let pin = PinDef {
+            name: "1".into(),
+            number: "1".into(),
+            role: PinRole::Passive,
+            offset: Point { x: MM, y: 0 },
+            pad: Some(surface_pad(pad_shape.clone())),
+        };
+        let c = comp("P", Point { x: 0, y: 0 }, Orient::Deg0);
+        let feats = pin.pad_features(&c, &stackup);
+        assert_eq!(feats.len(), 1, "one copper region, no drill");
+        assert_eq!(feats[0].role, Role::Conductor);
+        let (shape, z) = prism_shape_z(&feats[0]);
+        assert_eq!(z, stackup.top_copper().unwrap(), "Top → top copper z");
+        // At the origin with Deg0, the world shape == the local shape; bbox matches the
+        // world-mapped copper bbox.
+        let world = pad_copper_world(&c, &pin.pad.as_ref().unwrap().copper[0]);
+        assert_eq!(shape.bbox(), world.bbox());
+        assert_eq!(shape.bbox(), pad_shape.bbox());
+    }
+
+    #[test]
+    fn pad_features_through_pad_fans_out_with_drill_void() {
+        let stackup = Stackup::default_2layer();
+        let pad_shape = Shape2D::disc(Point { x: 0, y: 0 }, MM);
+        let pin = PinDef {
+            name: "1".into(),
+            number: "1".into(),
+            role: PinRole::Passive,
+            offset: Point { x: 0, y: 0 },
+            pad: Some(PadGeo {
+                copper: vec![PadCopper {
+                    shape: pad_shape.clone(),
+                    layers: PadLayers::Through,
+                }],
+                drill: Some(Drill::Round { d: MM / 2 }),
+            }),
+        };
+        let c = comp("P", Point { x: 0, y: 0 }, Orient::Deg0);
+        let feats = pin.pad_features(&c, &stackup);
+        let n_cu = stackup.copper_slabs().len();
+        assert_eq!(n_cu, 2, "default 2-layer stackup has two copper slabs");
+        let conductors: Vec<_> = feats.iter().filter(|f| f.role == Role::Conductor).collect();
+        let voids: Vec<_> = feats.iter().filter(|f| f.role == Role::Void).collect();
+        assert_eq!(conductors.len(), n_cu, "one conductor per copper slab");
+        assert_eq!(voids.len(), 1, "one drill void");
+        // All conductor features share the same world shape, one per slab z.
+        let world = pad_copper_world(&c, &pin.pad.as_ref().unwrap().copper[0]);
+        let mut zs: Vec<_> = conductors
+            .iter()
+            .map(|f| {
+                let (shape, z) = prism_shape_z(f);
+                assert_eq!(
+                    *shape, world,
+                    "every fan-out feature shares the world shape"
+                );
+                z
+            })
+            .collect();
+        zs.sort_by_key(|z| z.lo);
+        let slab_zs = {
+            let mut v: Vec<_> = stackup.copper_slabs().iter().map(|s| s.z).collect();
+            v.sort_by_key(|z| z.lo);
+            v
+        };
+        assert_eq!(zs, slab_zs, "fan-out covers every copper slab z");
+        // The void spans the whole board.
+        let (_, vz) = prism_shape_z(voids[0]);
+        assert_eq!(vz, stackup.board_z().unwrap(), "drill void spans the board");
+    }
+
+    #[test]
+    fn pad_features_rotated_component_rotates_world_shape() {
+        let stackup = Stackup::default_2layer();
+        // Pad at (2mm, 0) in the footprint frame; a Deg90 component rotates it to
+        // (0, 2mm). Reusing pad_copper_world means the feature shape moves with it.
+        let pad_shape = Shape2D::rect(Point { x: 2 * MM, y: 0 }, MM, MM);
+        let pin = PinDef {
+            name: "1".into(),
+            number: "1".into(),
+            role: PinRole::Passive,
+            offset: Point { x: 2 * MM, y: 0 },
+            pad: Some(surface_pad(pad_shape)),
+        };
+        let c = comp("P", Point { x: 0, y: 0 }, Orient::Deg90);
+        let feats = pin.pad_features(&c, &stackup);
+        assert_eq!(feats.len(), 1);
+        let (shape, _) = prism_shape_z(&feats[0]);
+        let (lo, hi) = shape.bbox().unwrap();
+        // The pad centre moved from (2mm,0) to (0,2mm); its bbox is now centred there.
+        let cx = (lo.x + hi.x) / 2;
+        let cy = (lo.y + hi.y) / 2;
+        assert_eq!((cx, cy), (0, 2 * MM), "Deg90 rotates the world shape");
+        // And it matches the world-mapped copper directly.
+        let world = pad_copper_world(&c, &pin.pad.as_ref().unwrap().copper[0]);
+        assert_eq!(shape.bbox(), world.bbox());
+    }
+
+    #[test]
+    fn pad_features_no_pad_is_empty() {
+        let stackup = Stackup::default_2layer();
+        let pin = pin("VIN", PinRole::PowerIn, Point { x: 0, y: 0 });
+        let c = comp("P", Point { x: 0, y: 0 }, Orient::Deg0);
+        assert!(pin.pad_features(&c, &stackup).is_empty());
     }
 
     #[test]
