@@ -107,6 +107,11 @@ impl Orient {
     /// origin. Exact integer for cardinals/flips; correctly-rounded otherwise. (Only
     /// the top-left 2×2 of the quaternion rotation matrix is needed, since the input
     /// lies in the z = 0 plane — out-of-plane rotation of a 3D point is reserved.)
+    ///
+    /// The i128 product `m·p` (`|m| ≤ 4c²`, c = max component magnitude, `|p| ≤ ~1e9`)
+    /// stays well within range for V1 (cardinals/flips, c ≤ 1) and overflows only for
+    /// `c ≳ 1e14` — far beyond the Stage-2 angle-approximation quaternions, but a bound
+    /// to respect when scaling those.
     pub fn apply(self, p: Point) -> Point {
         let (w, x, y, z) = (
             self.w as i128,
@@ -129,7 +134,14 @@ impl Orient {
     /// Flip the (already-rotated) part to the **board bottom**: compose a 180° rotation
     /// about the in-plane x-axis on top of this orientation. This is a *rotation* (you
     /// turn the part over), not a reflection — there is no mirror flag. Closed form of
-    /// `FLIP_x · q` where `FLIP_x = (0,1,0,0)`. Applying it twice returns to the start.
+    /// `FLIP_x · q` where `FLIP_x = (0,1,0,0)`.
+    ///
+    /// Note: `flipped().flipped()` returns the **antipode** `−q`, not `q`. As a rotation
+    /// `−q ≡ q` (every method here is quadratic in the components, so the two are
+    /// functionally identical), but they are **not** `==` under the derived `Eq`. V1
+    /// never composes flips (elaboration applies `flipped` at most once), so this is
+    /// unreachable today; Stage-2 quaternion composition must sign-normalise (or use a
+    /// rotation-aware compare) to avoid `−q ≠ q` surprises.
     pub fn flipped(self) -> Orient {
         Orient {
             w: -self.x,
@@ -232,8 +244,9 @@ pub struct Component {
     pub id: EntityId,
     pub part: String,
     pub pos: Dof<Point>,
-    /// Planar orientation (cardinal only). Default `Deg0`. Set from the generative
-    /// source via `GenDirective::Rotate`; used to place pins in world space.
+    /// Orientation ([`Orient`] quaternion). Default identity. Set from the generative
+    /// source via `GenDirective::Rotate` (planar rotation + optional bottom-side flip);
+    /// used to place pins/pads in world space.
     pub orient: Orient,
 }
 
