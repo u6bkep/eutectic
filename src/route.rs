@@ -344,7 +344,15 @@ pub(crate) fn layer_z(stackup: &Stackup, l: Layer) -> Option<ZRange> {
     match l {
         Layer::Top => stackup.top_copper(),
         Layer::Bottom => stackup.bottom_copper(),
-        Layer::Inner(n) => stackup.nth_copper_from_top(1 + n as usize),
+        Layer::Inner(n) => {
+            // Inner copper is strictly *between* the outer layers; the last copper
+            // slab is `Bottom`. Guard against `Inner(n)` aliasing onto `Bottom` (or
+            // past it) on a stackup with too few inner layers — return `None`, matching
+            // `copper_layers_z`, which only labels indices `1..len-1` as `Inner`.
+            let cu = stackup.copper_slabs();
+            let idx = 1 + n as usize;
+            (idx + 1 < cu.len()).then(|| cu[idx].z)
+        }
     }
 }
 
@@ -358,16 +366,16 @@ fn z_to_layer(stackup: &Stackup, z: ZRange) -> Option<Layer> {
         .map(|(l, _)| l)
 }
 
-/// World-frame copper as converged [`NetFeature`]s — the Feature-model counterpart of
-/// [`net_copper`], each paired with the single copper [`Layer`] it sits on. A trace is
-/// one `Conductor` prism on its layer's slab; a via **fans out** to one prism per
-/// copper slab it spans; a netted pad uses
+/// World-frame copper as converged [`NetFeature`]s — every trace, via, and netted pad
+/// reduced to a Feature prism, each paired with the single copper [`Layer`] it sits on.
+/// A trace is one `Conductor` prism on its layer's slab; a via **fans out** to one prism
+/// per copper slab it spans; a netted pad uses
 /// [`PinDef::pad_features`](crate::part::PinDef::pad_features) (its `Void` drill is not
 /// copper and is dropped here). Every emitted feature is single-slab, so a different-net
 /// pair that z-overlaps necessarily shares that slab — which is what lets [`check_drc`]
 /// gate clearance with [`Feature::clears`](crate::geom::Feature::clears) (z-overlap ∧
-/// distance) and report on that one layer. This is the converged producer that retires
-/// the `PieceLayers`/[`copper_layers_present`] same-layer model.
+/// distance) and report on that one layer. This is the converged producer that replaced
+/// the former discrete same-layer copper-piece model.
 pub(crate) fn net_features(
     doc: &Doc,
     lib: &PartLib,
@@ -446,7 +454,7 @@ pub struct PourFill {
 /// (connectivity through the fill is checked in a later stage). Pure function of the
 /// authored regions, the current copper, and the design rules.
 ///
-/// Foreign copper is the netted copper from [`net_copper`] on the pour's layer; each
+/// Foreign copper is the netted copper from [`net_features`] on the pour's layer; each
 /// obstacle is inflated by `min_clearance` (a [`Shape2D::inflated`] radius bump — the
 /// exact Minkowski offset) and unioned, then subtracted from the outline by the region
 /// kernel. (Floating/unnetted pads are an ERC fault and are not yet knocked out — a
@@ -735,6 +743,19 @@ mod pour_tests {
     use crate::geom::{Role, Shape2D};
     use crate::history::History;
     use crate::part::part_library;
+
+    #[test]
+    fn layer_z_inner_does_not_alias_bottom_on_two_layer() {
+        let su = crate::geom::Stackup::default_2layer();
+        assert_eq!(layer_z(&su, Layer::Top), su.top_copper());
+        assert_eq!(layer_z(&su, Layer::Bottom), su.bottom_copper());
+        // `Inner(0)` must NOT alias onto Bottom's slab z — there is no inner copper.
+        assert_eq!(
+            layer_z(&su, Layer::Inner(0)),
+            None,
+            "a 2-layer stackup has no inner copper layer"
+        );
+    }
 
     /// Netlist (membership only; roles irrelevant to pours) from a doc's nets.
     fn netlist_of(doc: &Doc) -> BTreeMap<NetId, Vec<(PinRef, PinRole)>> {

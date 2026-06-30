@@ -779,7 +779,8 @@ impl Feature {
 }
 
 /// A physical [`Feature`] paired with the electrical **net** it carries, if any.
-/// This is the converged form of the live `route::CopperPiece`: the net is an
+/// This is the converged copper-clearance currency (it replaced the former ad-hoc
+/// copper-piece type): the net is an
 /// *annotation alongside* the geometry, **never a field on [`Feature`]** —
 /// connectivity is authoritative and lives separately (see
 /// docs/geometry-model-convergence.md, Decision 12). `net == None` means no
