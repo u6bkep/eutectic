@@ -317,8 +317,8 @@ fn parse_pad_geometry(pad: &[Sexp], center: Point) -> Result<Option<PadGeo>, Str
     let copper = if let Some(size) = pad.iter().find_map(|s| s.list_headed("size")) {
         let w = mm_to_nm(size.get(1).and_then(Sexp::as_atom).ok_or("pad (size …) missing width")?)?;
         let h = mm_to_nm(size.get(2).and_then(Sexp::as_atom).ok_or("pad (size …) missing height")?)?;
-        let base = match shape_tok {
-            "circle" => Shape2D::disc(center, w / 2),
+        let shapes: Vec<Shape2D> = match shape_tok {
+            "circle" => vec![Shape2D::disc(center, w / 2)],
             "roundrect" => {
                 let rratio = pad
                     .iter()
@@ -328,13 +328,21 @@ fn parse_pad_geometry(pad: &[Sexp], center: Point) -> Result<Option<PadGeo>, Str
                     .and_then(|a| a.parse::<f64>().ok())
                     .unwrap_or(0.25);
                 let r = ((w.min(h) as f64) * rratio).round() as Nm;
-                Shape2D::round_rect(center, w, h, r)
+                vec![Shape2D::round_rect(center, w, h, r)]
             }
-            "oval" => oval_shape(center, w, h),
-            // rect / trapezoid / custom / chamfered_rect / …: bounding rectangle.
-            _ => Shape2D::rect(center, w, h),
+            "oval" => vec![oval_shape(center, w, h)],
+            // A custom pad is the union of its anchor + `(primitives …)` — including
+            // `gr_arc` edges, now that `Shape2D` carries arcs.
+            "custom" => parse_custom_copper(pad, center, w, h)?,
+            // trapezoid / chamfered_rect / …: bounding rectangle (a documented
+            // conservative fallback; only `custom` gets exact compound geometry).
+            _ => vec![Shape2D::rect(center, w, h)],
         };
-        vec![PadCopper { shape: rotate_shape(base, center, angle), layers }]
+        // The pad `(at)` angle rotates the whole compound shape.
+        shapes
+            .into_iter()
+            .map(|s| PadCopper { shape: rotate_shape(s, center, angle), layers })
+            .collect()
     } else {
         Vec::new()
     };
@@ -357,6 +365,146 @@ fn oval_shape(c: Point, w: Nm, h: Nm) -> Shape2D {
         let dy = (h - w) / 2;
         Shape2D::capsule(Point { x: c.x, y: c.y - dy }, Point { x: c.x, y: c.y + dy }, w / 2)
     }
+}
+
+/// The copper of a `custom` pad: its anchor shape (the `(size …)` rectangle, or a disc
+/// for `(anchor circle)`) **unioned** with every `(primitives …)` element, in
+/// pre-rotation world coords (centred at the pad `(at)`). KiCad renders a custom pad as
+/// exactly this union; [`PadGeo::copper`] is already a `Vec` for it. Unknown primitive
+/// kinds (e.g. `gr_text`) are skipped. The pad `(at)` rotation is applied by the caller.
+fn parse_custom_copper(pad: &[Sexp], center: Point, w: Nm, h: Nm) -> Result<Vec<Shape2D>, String> {
+    let anchor = pad
+        .iter()
+        .find_map(|s| s.list_headed("options"))
+        .and_then(|o| o.iter().find_map(|s| s.list_headed("anchor")))
+        .and_then(|a| a.get(1))
+        .and_then(Sexp::as_atom)
+        .unwrap_or("rect");
+    let mut shapes = vec![match anchor {
+        "circle" => Shape2D::disc(center, w.min(h) / 2),
+        _ => Shape2D::rect(center, w, h),
+    }];
+    if let Some(prims) = pad.iter().find_map(|s| s.list_headed("primitives")) {
+        for prim in &prims[1..] {
+            if let Some(shape) = parse_primitive(prim, center)? {
+                shapes.push(shape);
+            }
+        }
+    }
+    Ok(shapes)
+}
+
+/// One custom-pad primitive → a [`Shape2D`] in pre-rotation world coords (`center` +
+/// the primitive's pad-local coordinates). Handles `gr_circle` / `gr_line` / `gr_rect`
+/// / `gr_poly` / `gr_arc`; other kinds (text, etc.) return `None`. Filled primitives
+/// become filled shapes; stroked ones (`width > 0`) become the stroke ⊕ width/2.
+fn parse_primitive(prim: &Sexp, center: Point) -> Result<Option<Shape2D>, String> {
+    let Some(list) = prim.as_list() else { return Ok(None) };
+    let head = list.first().and_then(Sexp::as_atom).unwrap_or("");
+    let off = |p: Point| Point { x: center.x + p.x, y: center.y + p.y };
+    Ok(match head {
+        "gr_circle" => {
+            let c = prim_xy(list, "center")?.ok_or("gr_circle missing (center …)")?;
+            let e = prim_xy(list, "end")?.ok_or("gr_circle missing (end …)")?;
+            let r = dist_nm(c, e);
+            (r > 0).then(|| Shape2D::disc(off(c), r))
+        }
+        "gr_line" => {
+            let s = prim_xy(list, "start")?.ok_or("gr_line missing (start …)")?;
+            let e = prim_xy(list, "end")?.ok_or("gr_line missing (end …)")?;
+            let width = prim_width(list);
+            (width > 0).then(|| Shape2D::capsule(off(s), off(e), width / 2))
+        }
+        "gr_rect" => {
+            let s = prim_xy(list, "start")?.ok_or("gr_rect missing (start …)")?;
+            let e = prim_xy(list, "end")?.ok_or("gr_rect missing (end …)")?;
+            Some(Shape2D::polygon(vec![
+                off(s),
+                off(Point { x: e.x, y: s.y }),
+                off(e),
+                off(Point { x: s.x, y: e.y }),
+            ]))
+        }
+        "gr_poly" => {
+            let pts = prim_pts(list)?;
+            (pts.len() >= 3).then(|| Shape2D::polygon(pts.into_iter().map(off).collect()))
+        }
+        "gr_arc" => parse_gr_arc(list, center)?,
+        _ => None,
+    })
+}
+
+/// A `gr_arc` primitive → an arc-stroke [`Shape2D`]. Two KiCad encodings:
+///   - **3-point** `(start)(mid)(end)`: used directly (matches our [`Seg::Arc`]).
+///   - **legacy** `(start = centre)(end = arc start point)(angle = swept °)`: the end
+///     and mid are the arc-start rotated by `angle` and `angle/2` about the centre.
+///     Using the *same* `angle` for both guarantees the mid lands on the swept arc
+///     whatever the sign convention. Zero-width arcs carry no copper ⇒ `None`.
+fn parse_gr_arc(list: &[Sexp], center: Point) -> Result<Option<Shape2D>, String> {
+    let off = |p: Point| Point { x: center.x + p.x, y: center.y + p.y };
+    let width = prim_width(list);
+    if width <= 0 {
+        return Ok(None);
+    }
+    let start = prim_xy(list, "start")?.ok_or("gr_arc missing (start …)")?;
+    let end = prim_xy(list, "end")?.ok_or("gr_arc missing (end …)")?;
+    if let Some(mid) = prim_xy(list, "mid")? {
+        Ok(Some(Shape2D::arc(off(start), off(mid), off(end), width)))
+    } else if let Some(angle) = prim_angle(list) {
+        let (c, p0) = (off(start), off(end));
+        let p_end = rotate_point(p0, c, angle);
+        let p_mid = rotate_point(p0, c, angle / 2.0);
+        Ok(Some(Shape2D::arc(p0, p_mid, p_end, width)))
+    } else {
+        Err("gr_arc needs either (mid …) or (angle …)".into())
+    }
+}
+
+/// A `(<head> x y)` child of `list`, mm→nm. `Ok(None)` if absent, `Err` if malformed.
+fn prim_xy(list: &[Sexp], head: &str) -> Result<Option<Point>, String> {
+    let Some(l) = list.iter().find_map(|s| s.list_headed(head)) else { return Ok(None) };
+    let x = mm_to_nm(l.get(1).and_then(Sexp::as_atom).ok_or(format!("{head} missing x"))?)?;
+    let y = mm_to_nm(l.get(2).and_then(Sexp::as_atom).ok_or(format!("{head} missing y"))?)?;
+    Ok(Some(Point { x, y }))
+}
+
+/// A primitive's `(width w)` in nm (0 if absent ⇒ a filled, not stroked, primitive).
+fn prim_width(list: &[Sexp]) -> Nm {
+    list.iter()
+        .find_map(|s| s.list_headed("width"))
+        .and_then(|l| l.get(1))
+        .and_then(Sexp::as_atom)
+        .and_then(|a| mm_to_nm(a).ok())
+        .unwrap_or(0)
+}
+
+/// A primitive's `(angle a)` in degrees (legacy `gr_arc` sweep), if present.
+fn prim_angle(list: &[Sexp]) -> Option<f64> {
+    list.iter()
+        .find_map(|s| s.list_headed("angle"))
+        .and_then(|l| l.get(1))
+        .and_then(Sexp::as_atom)
+        .and_then(|a| a.parse::<f64>().ok())
+}
+
+/// A `gr_poly`'s `(pts (xy x y) …)` as points (mm→nm).
+fn prim_pts(list: &[Sexp]) -> Result<Vec<Point>, String> {
+    let Some(pts) = list.iter().find_map(|s| s.list_headed("pts")) else { return Ok(vec![]) };
+    let mut out = Vec::new();
+    for xy in &pts[1..] {
+        if let Some(l) = xy.list_headed("xy") {
+            let x = mm_to_nm(l.get(1).and_then(Sexp::as_atom).ok_or("xy missing x")?)?;
+            let y = mm_to_nm(l.get(2).and_then(Sexp::as_atom).ok_or("xy missing y")?)?;
+            out.push(Point { x, y });
+        }
+    }
+    Ok(out)
+}
+
+/// Distance between two points, nm, rounded (import-time float — like mm→nm rounding).
+fn dist_nm(a: Point, b: Point) -> Nm {
+    let (dx, dy) = ((a.x - b.x) as f64, (a.y - b.y) as f64);
+    (dx * dx + dy * dy).sqrt().round() as Nm
 }
 
 /// Rotate a point about `center` by `deg` (KiCad CCW degrees). Exact for the four
@@ -777,6 +925,7 @@ pub fn apply_role_map(mut part: PartDef, map: &[(&str, &str, PinRole)]) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geom::Seg;
 
     // `pin_role`/`pin_offset` now resolve a *stored identity* (pad number). These
     // helpers verify the join by functional **name** — finding the PinDef directly —
@@ -920,6 +1069,82 @@ mod tests {
         assert_eq!(p3.copper[0].layers, PadLayers::Bottom);
         let (min, max) = p3.copper[0].shape.bbox().unwrap();
         assert_eq!((max.x - min.x, max.y - min.y), (1_000_000, 2_000_000));
+    }
+
+    /// A custom pad is imported as the union of its anchor + `(primitives …)` — circle,
+    /// polygon, and a 3-point `gr_arc` (the modern KiCad encoding) — instead of the old
+    /// bounding-box collapse. Coordinates are pad-local (offset by the pad `(at)`).
+    #[test]
+    fn imports_custom_pad_primitives_as_compound_copper() {
+        let src = r#"
+(footprint "CUSTOM"
+  (pad "1" smd custom (at 1 2) (size 0.3 0.3) (layers "F.Cu")
+    (options (clearance outline) (anchor rect))
+    (primitives
+      (gr_circle (center 0 0.5) (end 0.2 0.5) (width 0) (fill yes))
+      (gr_poly (pts (xy 0 0) (xy 0.4 0) (xy 0.4 0.4)) (width 0) (fill yes))
+      (gr_arc (start 0 0) (mid 0.1 0.2) (end 0.2 0) (width 0.05))
+    ))
+)"#;
+        let p = import_footprint(src).unwrap();
+        let pad = p.pins.iter().find(|x| x.name == "1").unwrap().pad.clone().unwrap();
+        // Anchor rect + three primitives = four copper regions.
+        assert_eq!(pad.copper.len(), 4, "anchor + 3 primitives");
+        let shapes: Vec<&Shape2D> = pad.copper.iter().map(|c| &c.shape).collect();
+        // The gr_circle → a disc (lone-point stroke) at (1, 2.5) mm, radius 0.2mm.
+        assert!(
+            shapes.iter().any(|s| matches!(s, Shape2D::Stroke { path, radius }
+                if path.segs.is_empty() && *radius == 200_000
+                && path.start == Point { x: 1_000_000, y: 2_500_000 })),
+            "gr_circle imported as a disc at the offset centre"
+        );
+        // Exactly one region carries a Seg::Arc (the gr_arc).
+        let arcs: usize = shapes
+            .iter()
+            .map(|s| s.path().segs.iter().filter(|seg| matches!(seg, Seg::Arc { .. })).count())
+            .sum();
+        assert_eq!(arcs, 1, "the gr_arc became a real arc edge");
+        // The 3-point arc rides at the pad offset: start (1,2), mid (1.1,2.2), end (1.2,2).
+        assert!(shapes.iter().any(|s| s.path().segs.iter().any(|seg| matches!(seg,
+            Seg::Arc { mid, end }
+            if *mid == Point { x: 1_100_000, y: 2_200_000 }
+            && *end == Point { x: 1_200_000, y: 2_000_000 }))));
+    }
+
+    /// The legacy `gr_arc` encoding — `(start = centre)(end = arc start)(angle)` — is
+    /// converted by rotating the arc-start point by the swept angle (end) and half it
+    /// (mid). This is the form real footprints (e.g. MCP_48QFN) use.
+    #[test]
+    fn imports_legacy_gr_arc_centre_angle_form() {
+        let src = r#"
+(footprint "LEGACY_ARC"
+  (pad "1" smd custom (at 0 0) (size 0.2 0.2) (layers "F.Cu")
+    (options (anchor rect))
+    (primitives
+      (gr_arc (start 0 0) (end 0.5 0) (angle 90) (width 0.1))
+    ))
+)"#;
+        let p = import_footprint(src).unwrap();
+        let pad = p.pins.iter().find(|x| x.name == "1").unwrap().pad.clone().unwrap();
+        // anchor + one arc.
+        assert_eq!(pad.copper.len(), 2);
+        // Centre (0,0), arc-start (0.5mm,0) swept +90° ⇒ end ≈ (0, 0.5mm); the stroke
+        // half-width is 0.1/2 = 0.05mm.
+        let arc = pad
+            .copper
+            .iter()
+            .find_map(|c| match &c.shape {
+                Shape2D::Stroke { path, radius } => path
+                    .segs
+                    .iter()
+                    .find_map(|s| matches!(s, Seg::Arc { .. }).then_some((s.clone(), *radius))),
+                _ => None,
+            })
+            .expect("a legacy gr_arc imported as an arc stroke");
+        let (Seg::Arc { end, .. }, radius) = (&arc.0, arc.1) else { unreachable!() };
+        assert_eq!(radius, 50_000, "stroke half-width = width/2");
+        // 90° CCW of (0.5mm, 0) about origin = (0, 0.5mm), within nm rounding.
+        assert!((end.x).abs() < 10 && (end.y - 500_000).abs() < 10, "swept end ≈ (0, 0.5mm): {end:?}");
     }
 
     #[test]
