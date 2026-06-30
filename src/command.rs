@@ -12,7 +12,7 @@
 
 use crate::diagnostic::{Diagnostic, Location};
 use crate::doc::*;
-use crate::elaborate::{elaborate, Source};
+use crate::elaborate::{Source, elaborate};
 use crate::id::{EntityId, TraceId, ViaId};
 use crate::part::PartLib;
 use crate::route::{Trace, Via};
@@ -93,7 +93,12 @@ impl Transaction {
 /// Apply a transaction to a document. `tick` is the monotonic global revision
 /// used to stamp whichever inputs changed. Returns the new doc, or an error
 /// (leaving the caller's original untouched — atomicity).
-pub fn apply(doc: &Doc, txn: &Transaction, lib: &PartLib, tick: u64) -> Result<Doc, Vec<Diagnostic>> {
+pub fn apply(
+    doc: &Doc,
+    txn: &Transaction,
+    lib: &PartLib,
+    tick: u64,
+) -> Result<Doc, Vec<Diagnostic>> {
     // Work on a candidate clone; only the return value is observed by the caller.
     let mut next = doc.clone();
 
@@ -101,12 +106,22 @@ pub fn apply(doc: &Doc, txn: &Transaction, lib: &PartLib, tick: u64) -> Result<D
         match cmd {
             Command::SetSource(s) => next.source = s.clone(),
             Command::Nudge(id, p) => {
-                next.overrides
-                    .insert(id.clone(), Override { pos: Some(*p), strength: Strength::Hint });
+                next.overrides.insert(
+                    id.clone(),
+                    Override {
+                        pos: Some(*p),
+                        strength: Strength::Hint,
+                    },
+                );
             }
             Command::Pin(id, p) => {
-                next.overrides
-                    .insert(id.clone(), Override { pos: Some(*p), strength: Strength::Pin });
+                next.overrides.insert(
+                    id.clone(),
+                    Override {
+                        pos: Some(*p),
+                        strength: Strength::Pin,
+                    },
+                );
             }
             Command::ClearOverride(id) => {
                 next.overrides.remove(id);
@@ -116,7 +131,9 @@ pub fn apply(doc: &Doc, txn: &Transaction, lib: &PartLib, tick: u64) -> Result<D
                 next.source = source;
                 next.overrides = overrides;
             }
-            Command::Resolve(id, res) => apply_resolution(&mut next, id, res).map_err(|d| vec![d])?,
+            Command::Resolve(id, res) => {
+                apply_resolution(&mut next, id, res).map_err(|d| vec![d])?
+            }
             Command::AddTrace(id, trace) => {
                 if next.traces.contains_key(id) {
                     return Err(vec![Diagnostic::error(
@@ -219,7 +236,11 @@ pub fn apply(doc: &Doc, txn: &Transaction, lib: &PartLib, tick: u64) -> Result<D
     let geometry_changed = positions_changed(doc, &next)
         || crate::elaborate::regions(&next.source) != crate::elaborate::regions(&doc.source);
     let routing_changed = next.traces != doc.traces || next.vias != doc.vias;
-    next.conn_rev = if connectivity_changed { tick } else { doc.conn_rev };
+    next.conn_rev = if connectivity_changed {
+        tick
+    } else {
+        doc.conn_rev
+    };
     next.geom_rev = if geometry_changed { tick } else { doc.geom_rev };
     next.route_rev = if routing_changed { tick } else { doc.route_rev };
 
@@ -289,8 +310,13 @@ fn apply_resolution(next: &mut Doc, id: &EntityId, res: &Resolution) -> Result<(
                     Location::Entity(id.clone()),
                 ));
             }
-            next.overrides
-                .insert(id.clone(), Override { pos: Some(*p), strength: Strength::Pin });
+            next.overrides.insert(
+                id.clone(),
+                Override {
+                    pos: Some(*p),
+                    strength: Strength::Pin,
+                },
+            );
         }
         Resolution::DropRedundant => {
             if !next.report.redundant_pins.contains(id) {

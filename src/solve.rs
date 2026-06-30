@@ -68,7 +68,11 @@ pub struct Rect {
 #[derive(Clone, Debug)]
 pub enum Constraint {
     /// Keep `a` and `b` no further apart than `within`.
-    Near { a: EntityId, b: EntityId, within: Nm },
+    Near {
+        a: EntityId,
+        b: EntityId,
+        within: Nm,
+    },
     /// Keep `a` and `b` at least `gap` apart (clearance / non-overlap).
     MinSep { a: EntityId, b: EntityId, gap: Nm },
     /// Make all nodes share an x coordinate (a vertical line).
@@ -79,12 +83,22 @@ pub enum Constraint {
     /// world position is `pos[b] + b_off` each iteration, where `b_off` is the
     /// pin's local offset already rotated by `b`'s (fixed) orientation. Moving `b`
     /// carries its pin rigidly, so the correction is applied to `b`'s position.
-    NearPin { a: EntityId, b: EntityId, b_off: Point, within: Nm },
+    NearPin {
+        a: EntityId,
+        b: EntityId,
+        b_off: Point,
+        within: Nm,
+    },
     /// Two component courtyards (axis-aligned boxes, centred on each node, with the
     /// given half-extents already oriented) must not overlap (issue 0005). When they
     /// do, the nodes are pushed apart along the axis of least penetration. Two
     /// overlapping *fixed* parts cannot be separated and are reported as unsatisfied.
-    NoOverlap { a: EntityId, b: EntityId, a_half: (Nm, Nm), b_half: (Nm, Nm) },
+    NoOverlap {
+        a: EntityId,
+        b: EntityId,
+        a_half: (Nm, Nm),
+        b_half: (Nm, Nm),
+    },
 }
 
 pub struct Problem {
@@ -165,7 +179,10 @@ pub fn solve(p: &Problem) -> Solution {
                 if p.fixed.contains(id) {
                     continue;
                 }
-                let pt = Point { x: pp.0.round() as Nm, y: pp.1.round() as Nm };
+                let pt = Point {
+                    x: pp.0.round() as Nm,
+                    y: pp.1.round() as Nm,
+                };
                 if !board.contains(pt) {
                     let q = board.contain(pt);
                     pp.0 = q.x as f64;
@@ -203,7 +220,15 @@ pub fn solve(p: &Problem) -> Solution {
 
     let positions = pos
         .iter()
-        .map(|(k, &(x, y))| (k.clone(), Point { x: x.round() as i64, y: y.round() as i64 }))
+        .map(|(k, &(x, y))| {
+            (
+                k.clone(),
+                Point {
+                    x: x.round() as i64,
+                    y: y.round() as i64,
+                },
+            )
+        })
         .collect();
 
     let unsatisfied = if converged {
@@ -213,16 +238,28 @@ pub fn solve(p: &Problem) -> Solution {
             .iter()
             .filter_map(|c| {
                 let r = constraint_residual(c, &pos);
-                (r > RES_TOL).then(|| Unsatisfied { constraint: c.clone(), residual: r.round() as Nm })
+                (r > RES_TOL).then(|| Unsatisfied {
+                    constraint: c.clone(),
+                    residual: r.round() as Nm,
+                })
             })
             .collect()
     };
 
-    Solution { positions, converged, iters, unsatisfied }
+    Solution {
+        positions,
+        converged,
+        iters,
+        unsatisfied,
+    }
 }
 
 /// World point of `id` plus a local offset (used for pins rigidly attached to a node).
-fn point_of(pos: &BTreeMap<EntityId, (f64, f64)>, id: &EntityId, off: (f64, f64)) -> Option<(f64, f64)> {
+fn point_of(
+    pos: &BTreeMap<EntityId, (f64, f64)>,
+    id: &EntityId,
+    off: (f64, f64),
+) -> Option<(f64, f64)> {
     pos.get(id).map(|p| (p.0 + off.0, p.1 + off.1))
 }
 
@@ -231,15 +268,35 @@ fn point_of(pos: &BTreeMap<EntityId, (f64, f64)>, id: &EntityId, off: (f64, f64)
 fn constraint_residual(c: &Constraint, pos: &BTreeMap<EntityId, (f64, f64)>) -> f64 {
     let zero = (0.0, 0.0);
     match c {
-        Constraint::Near { a, b, within } => sep_residual(pos, a, zero, b, zero, *within as f64, true),
-        Constraint::MinSep { a, b, gap } => sep_residual(pos, a, zero, b, zero, *gap as f64, false),
-        Constraint::NearPin { a, b, b_off, within } => {
-            sep_residual(pos, a, zero, b, (b_off.x as f64, b_off.y as f64), *within as f64, true)
+        Constraint::Near { a, b, within } => {
+            sep_residual(pos, a, zero, b, zero, *within as f64, true)
         }
+        Constraint::MinSep { a, b, gap } => sep_residual(pos, a, zero, b, zero, *gap as f64, false),
+        Constraint::NearPin {
+            a,
+            b,
+            b_off,
+            within,
+        } => sep_residual(
+            pos,
+            a,
+            zero,
+            b,
+            (b_off.x as f64, b_off.y as f64),
+            *within as f64,
+            true,
+        ),
         Constraint::AlignX { nodes } => align_residual(pos, nodes, true),
         Constraint::AlignY { nodes } => align_residual(pos, nodes, false),
-        Constraint::NoOverlap { a, b, a_half, b_half } => {
-            let (Some(&pa), Some(&pb)) = (pos.get(a), pos.get(b)) else { return 0.0 };
+        Constraint::NoOverlap {
+            a,
+            b,
+            a_half,
+            b_half,
+        } => {
+            let (Some(&pa), Some(&pb)) = (pos.get(a), pos.get(b)) else {
+                return 0.0;
+            };
             aabb_push(pa, half_f64(*a_half), pb, half_f64(*b_half)).map_or(0.0, |(d, _, _)| d)
         }
     }
@@ -254,7 +311,12 @@ fn half_f64(h: (Nm, Nm)) -> (f64, f64) {
 /// `b` by `+depth·(ux,uy)` and `a` by `−depth·(ux,uy)` to just clear. `None` if the
 /// boxes are disjoint (touching counts as disjoint). Axis of least penetration; the
 /// push sign carries `b` to the far side, deterministic when centres coincide.
-fn aabb_push(pa: (f64, f64), ah: (f64, f64), pb: (f64, f64), bh: (f64, f64)) -> Option<(f64, f64, f64)> {
+fn aabb_push(
+    pa: (f64, f64),
+    ah: (f64, f64),
+    pb: (f64, f64),
+    bh: (f64, f64),
+) -> Option<(f64, f64, f64)> {
     let (dx, dy) = (pb.0 - pa.0, pb.1 - pa.1);
     let ox = (ah.0 + bh.0) - dx.abs();
     let oy = (ah.1 + bh.1) - dy.abs();
@@ -283,7 +345,11 @@ fn sep_residual(
         return 0.0;
     };
     let d = ((pb.0 - pa.0).powi(2) + (pb.1 - pa.1).powi(2)).sqrt();
-    if pull { (d - target).max(0.0) } else { (target - d).max(0.0) }
+    if pull {
+        (d - target).max(0.0)
+    } else {
+        (target - d).max(0.0)
+    }
 }
 
 /// Residual of an align constraint: the spread (max − min) of the aligned coordinate
@@ -291,8 +357,15 @@ fn sep_residual(
 /// two *fixed* members disagree — which is how a contradictory align is reported.
 fn align_residual(pos: &BTreeMap<EntityId, (f64, f64)>, nodes: &[EntityId], x_axis: bool) -> f64 {
     let coord = |p: (f64, f64)| if x_axis { p.0 } else { p.1 };
-    let present: Vec<f64> = nodes.iter().filter_map(|n| pos.get(n)).map(|p| coord(*p)).collect();
-    match (present.iter().cloned().fold(f64::INFINITY, f64::min), present.iter().cloned().fold(f64::NEG_INFINITY, f64::max)) {
+    let present: Vec<f64> = nodes
+        .iter()
+        .filter_map(|n| pos.get(n))
+        .map(|p| coord(*p))
+        .collect();
+    match (
+        present.iter().cloned().fold(f64::INFINITY, f64::min),
+        present.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+    ) {
         (lo, hi) if lo.is_finite() && hi.is_finite() => hi - lo,
         _ => 0.0,
     }
@@ -313,13 +386,26 @@ fn apply_constraint(
         }
         Constraint::AlignX { nodes } => align(pos, fixed, nodes, true),
         Constraint::AlignY { nodes } => align(pos, fixed, nodes, false),
-        Constraint::NearPin { a, b, b_off, within } => {
+        Constraint::NearPin {
+            a,
+            b,
+            b_off,
+            within,
+        } => {
             let off = (b_off.x as f64, b_off.y as f64);
             set_separation(pos, fixed, a, b, zero, off, *within as f64, true)
         }
-        Constraint::NoOverlap { a, b, a_half, b_half } => {
-            let (Some(&pa), Some(&pb)) = (pos.get(a), pos.get(b)) else { return };
-            let Some((depth, ux, uy)) = aabb_push(pa, half_f64(*a_half), pb, half_f64(*b_half)) else {
+        Constraint::NoOverlap {
+            a,
+            b,
+            a_half,
+            b_half,
+        } => {
+            let (Some(&pa), Some(&pb)) = (pos.get(a), pos.get(b)) else {
+                return;
+            };
+            let Some((depth, ux, uy)) = aabb_push(pa, half_f64(*a_half), pb, half_f64(*b_half))
+            else {
                 return;
             };
             let (a_fixed, b_fixed) = (fixed.contains(a), fixed.contains(b));
@@ -363,7 +449,10 @@ fn set_separation(
     let (Some(&pa), Some(&pb)) = (pos.get(a), pos.get(b)) else {
         return;
     };
-    let (pa, pb) = ((pa.0 + a_off.0, pa.1 + a_off.1), (pb.0 + b_off.0, pb.1 + b_off.1));
+    let (pa, pb) = (
+        (pa.0 + a_off.0, pa.1 + a_off.1),
+        (pb.0 + b_off.0, pb.1 + b_off.1),
+    );
     let (mut dx, mut dy) = (pb.0 - pa.0, pb.1 - pa.1);
     let mut d = (dx * dx + dy * dy).sqrt();
     if d < 1e-6 {
@@ -412,8 +501,16 @@ fn align(
         .and_then(|n| pos.get(n).copied())
         .map(coord)
         .unwrap_or_else(|| {
-            let present: Vec<f64> = nodes.iter().filter_map(|n| pos.get(n)).map(|p| coord(*p)).collect();
-            if present.is_empty() { 0.0 } else { present.iter().sum::<f64>() / present.len() as f64 }
+            let present: Vec<f64> = nodes
+                .iter()
+                .filter_map(|n| pos.get(n))
+                .map(|p| coord(*p))
+                .collect();
+            if present.is_empty() {
+                0.0
+            } else {
+                present.iter().sum::<f64>() / present.len() as f64
+            }
         });
     for n in nodes {
         if fixed.contains(n) {

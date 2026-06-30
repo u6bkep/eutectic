@@ -55,7 +55,10 @@ pub enum Location {
     Via(ViaId),
     /// Line/column in a parsed text document (1-based). Populated by the text
     /// front-end; column is best-effort (`1` when only the line is known).
-    Span { line: u32, col: u32 },
+    Span {
+        line: u32,
+        col: u32,
+    },
     /// No specific location (a whole-document or configuration-level issue).
     None,
 }
@@ -81,10 +84,26 @@ pub struct Diagnostic {
 
 impl Diagnostic {
     pub fn error(code: &'static str, message: impl Into<String>, location: Location) -> Diagnostic {
-        Diagnostic { severity: Severity::Error, code, message: message.into(), location, help: None }
+        Diagnostic {
+            severity: Severity::Error,
+            code,
+            message: message.into(),
+            location,
+            help: None,
+        }
     }
-    pub fn warning(code: &'static str, message: impl Into<String>, location: Location) -> Diagnostic {
-        Diagnostic { severity: Severity::Warning, code, message: message.into(), location, help: None }
+    pub fn warning(
+        code: &'static str,
+        message: impl Into<String>,
+        location: Location,
+    ) -> Diagnostic {
+        Diagnostic {
+            severity: Severity::Warning,
+            code,
+            message: message.into(),
+            location,
+            help: None,
+        }
     }
     /// Attach a help line (e.g. `"available pins: VDD, GND"`).
     pub fn with_help(mut self, help: impl Into<String>) -> Diagnostic {
@@ -174,7 +193,11 @@ mod tests {
     #[test]
     fn has_errors_detects_severity() {
         assert!(has_errors(&[Diagnostic::error("E", "x", Location::None)]));
-        assert!(!has_errors(&[Diagnostic::warning("W", "x", Location::None)]));
+        assert!(!has_errors(&[Diagnostic::warning(
+            "W",
+            "x",
+            Location::None
+        )]));
         assert!(!has_errors(&[]));
     }
 }

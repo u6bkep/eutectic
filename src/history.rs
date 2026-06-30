@@ -5,7 +5,7 @@
 //! version; replay re-applies a transaction sequence. The structural sharing that
 //! makes this cheap is a production concern (`im`); here we clone.
 
-use crate::command::{apply, Transaction};
+use crate::command::{Transaction, apply};
 use crate::doc::Doc;
 use crate::part::PartLib;
 
@@ -24,7 +24,11 @@ pub struct History {
 impl History {
     pub fn new(root: Doc) -> History {
         History {
-            versions: vec![Version { doc: root, parent: None, label: "root".into() }],
+            versions: vec![Version {
+                doc: root,
+                parent: None,
+                label: "root".into(),
+            }],
             head: 0,
             tick: 0,
         }
@@ -45,7 +49,11 @@ impl History {
         self.tick += 1;
         let next = apply(self.doc(), &txn, lib, self.tick)?;
         let parent = Some(self.head);
-        self.versions.push(Version { doc: next, parent, label: label.into() });
+        self.versions.push(Version {
+            doc: next,
+            parent,
+            label: label.into(),
+        });
         self.head = self.versions.len() - 1;
         Ok(self.head)
     }

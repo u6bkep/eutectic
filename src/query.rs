@@ -23,7 +23,7 @@ use crate::diagnostic::{Diagnostic, Location};
 use crate::doc::{Doc, InputId, PinRef};
 use crate::id::NetId;
 use crate::part::{PartLib, PinRole};
-use crate::route::{check_drc, DesignRules, Violation};
+use crate::route::{DesignRules, Violation, check_drc};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -142,7 +142,10 @@ impl Engine {
                         return false;
                     }
                 }
-                Dep::Query { key: sub, changed_at } => {
+                Dep::Query {
+                    key: sub,
+                    changed_at,
+                } => {
                     self.eval(doc, lib, *sub);
                     if self.memos[sub].changed_at > *changed_at {
                         return false; // a dependency's value moved
@@ -169,7 +172,12 @@ impl Engine {
         };
         self.memos.insert(
             key,
-            Memo { value, deps, verified_at: self.current_rev, changed_at },
+            Memo {
+                value,
+                deps,
+                verified_at: self.current_rev,
+                changed_at,
+            },
         );
     }
 
@@ -239,7 +247,9 @@ impl Engine {
                     doc.nets.values().flat_map(|n| n.members.iter()).collect();
                 let mut floats = Vec::new();
                 for c in doc.components.values() {
-                    let Some(def) = lib.get(&c.part) else { continue };
+                    let Some(def) = lib.get(&c.part) else {
+                        continue;
+                    };
                     for pad in &def.pins {
                         let pr = PinRef::new(&c.id, &pad.number);
                         if !connected.contains(&pr) && !doc.no_connects.contains(&pr) {

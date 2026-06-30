@@ -50,7 +50,9 @@ pub fn render(doc: &Doc) -> String {
             out.push_str(&format!("  ~ decayed hint `{id}` ({why})\n"));
         }
         for id in &r.pin_conflicts {
-            out.push_str(&format!("  ! pin `{id}` conflicts with a hard constraint\n"));
+            out.push_str(&format!(
+                "  ! pin `{id}` conflicts with a hard constraint\n"
+            ));
         }
         for id in &r.redundant_pins {
             out.push_str(&format!("  ? pin `{id}` no longer changes the outcome\n"));

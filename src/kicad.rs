@@ -205,7 +205,9 @@ fn mm_to_nm(s: &str) -> Result<Nm, String> {
     let int_val: i64 = if int_part.is_empty() {
         0
     } else {
-        int_part.parse().map_err(|_| format!("integer overflow: {s:?}"))?
+        int_part
+            .parse()
+            .map_err(|_| format!("integer overflow: {s:?}"))?
     };
     // Take 6 fractional digits (1 mm = 1e6 nm); the 7th decides rounding.
     let mut frac6: i64 = 0;
@@ -251,7 +253,9 @@ pub fn import_footprint(text: &str) -> Result<PartDef, String> {
     let mut pins: Vec<PinDef> = Vec::new();
     let mut seen: BTreeMap<String, ()> = BTreeMap::new();
     for item in items {
-        let Some(pad) = item.list_headed("pad") else { continue };
+        let Some(pad) = item.list_headed("pad") else {
+            continue;
+        };
         // (pad <name> <type> <shape> ... (at x y [angle]) ...)
         let pad_name = pad.get(1).and_then(Sexp::as_atom).unwrap_or("");
         if pad_name.is_empty() {
@@ -272,7 +276,10 @@ pub fn import_footprint(text: &str) -> Result<PartDef, String> {
             .get(2)
             .and_then(Sexp::as_atom)
             .ok_or_else(|| format!("pad {pad_name:?} (at ...) missing y"))?;
-        let offset = Point { x: mm_to_nm(x)?, y: mm_to_nm(y)? };
+        let offset = Point {
+            x: mm_to_nm(x)?,
+            y: mm_to_nm(y)?,
+        };
         // Real pad copper + drill geometry, in component-local coords centred at the
         // pad's `(at)`. The shape/size/drill/layers/rotation are all lifted here.
         let pad = parse_pad_geometry(pad, offset)?;
@@ -286,7 +293,11 @@ pub fn import_footprint(text: &str) -> Result<PartDef, String> {
         });
     }
 
-    Ok(PartDef { name, pins, interfaces: BTreeMap::new() })
+    Ok(PartDef {
+        name,
+        pins,
+        interfaces: BTreeMap::new(),
+    })
 }
 
 /// Lift a pad's real copper + drill geometry out of a
@@ -315,8 +326,16 @@ fn parse_pad_geometry(pad: &[Sexp], center: Point) -> Result<Option<PadGeo>, Str
     let layers = pad_layers(pad, pad_type);
 
     let copper = if let Some(size) = pad.iter().find_map(|s| s.list_headed("size")) {
-        let w = mm_to_nm(size.get(1).and_then(Sexp::as_atom).ok_or("pad (size …) missing width")?)?;
-        let h = mm_to_nm(size.get(2).and_then(Sexp::as_atom).ok_or("pad (size …) missing height")?)?;
+        let w = mm_to_nm(
+            size.get(1)
+                .and_then(Sexp::as_atom)
+                .ok_or("pad (size …) missing width")?,
+        )?;
+        let h = mm_to_nm(
+            size.get(2)
+                .and_then(Sexp::as_atom)
+                .ok_or("pad (size …) missing height")?,
+        )?;
         let shapes: Vec<Shape2D> = match shape_tok {
             "circle" => vec![Shape2D::disc(center, w / 2)],
             "roundrect" => {
@@ -341,7 +360,10 @@ fn parse_pad_geometry(pad: &[Sexp], center: Point) -> Result<Option<PadGeo>, Str
         // The pad `(at)` angle rotates the whole compound shape.
         shapes
             .into_iter()
-            .map(|s| PadCopper { shape: rotate_shape(s, center, angle), layers })
+            .map(|s| PadCopper {
+                shape: rotate_shape(s, center, angle),
+                layers,
+            })
             .collect()
     } else {
         Vec::new()
@@ -360,10 +382,30 @@ fn oval_shape(c: Point, w: Nm, h: Nm) -> Shape2D {
         Shape2D::disc(c, w / 2)
     } else if w > h {
         let dx = (w - h) / 2;
-        Shape2D::capsule(Point { x: c.x - dx, y: c.y }, Point { x: c.x + dx, y: c.y }, h / 2)
+        Shape2D::capsule(
+            Point {
+                x: c.x - dx,
+                y: c.y,
+            },
+            Point {
+                x: c.x + dx,
+                y: c.y,
+            },
+            h / 2,
+        )
     } else {
         let dy = (h - w) / 2;
-        Shape2D::capsule(Point { x: c.x, y: c.y - dy }, Point { x: c.x, y: c.y + dy }, w / 2)
+        Shape2D::capsule(
+            Point {
+                x: c.x,
+                y: c.y - dy,
+            },
+            Point {
+                x: c.x,
+                y: c.y + dy,
+            },
+            w / 2,
+        )
     }
 }
 
@@ -399,9 +441,14 @@ fn parse_custom_copper(pad: &[Sexp], center: Point, w: Nm, h: Nm) -> Result<Vec<
 /// / `gr_poly` / `gr_arc`; other kinds (text, etc.) return `None`. Filled primitives
 /// become filled shapes; stroked ones (`width > 0`) become the stroke ⊕ width/2.
 fn parse_primitive(prim: &Sexp, center: Point) -> Result<Option<Shape2D>, String> {
-    let Some(list) = prim.as_list() else { return Ok(None) };
+    let Some(list) = prim.as_list() else {
+        return Ok(None);
+    };
     let head = list.first().and_then(Sexp::as_atom).unwrap_or("");
-    let off = |p: Point| Point { x: center.x + p.x, y: center.y + p.y };
+    let off = |p: Point| Point {
+        x: center.x + p.x,
+        y: center.y + p.y,
+    };
     Ok(match head {
         "gr_circle" => {
             let c = prim_xy(list, "center")?.ok_or("gr_circle missing (center …)")?;
@@ -441,7 +488,10 @@ fn parse_primitive(prim: &Sexp, center: Point) -> Result<Option<Shape2D>, String
 ///     Using the *same* `angle` for both guarantees the mid lands on the swept arc
 ///     whatever the sign convention. Zero-width arcs carry no copper ⇒ `None`.
 fn parse_gr_arc(list: &[Sexp], center: Point) -> Result<Option<Shape2D>, String> {
-    let off = |p: Point| Point { x: center.x + p.x, y: center.y + p.y };
+    let off = |p: Point| Point {
+        x: center.x + p.x,
+        y: center.y + p.y,
+    };
     let width = prim_width(list);
     if width <= 0 {
         return Ok(None);
@@ -462,9 +512,19 @@ fn parse_gr_arc(list: &[Sexp], center: Point) -> Result<Option<Shape2D>, String>
 
 /// A `(<head> x y)` child of `list`, mm→nm. `Ok(None)` if absent, `Err` if malformed.
 fn prim_xy(list: &[Sexp], head: &str) -> Result<Option<Point>, String> {
-    let Some(l) = list.iter().find_map(|s| s.list_headed(head)) else { return Ok(None) };
-    let x = mm_to_nm(l.get(1).and_then(Sexp::as_atom).ok_or(format!("{head} missing x"))?)?;
-    let y = mm_to_nm(l.get(2).and_then(Sexp::as_atom).ok_or(format!("{head} missing y"))?)?;
+    let Some(l) = list.iter().find_map(|s| s.list_headed(head)) else {
+        return Ok(None);
+    };
+    let x = mm_to_nm(
+        l.get(1)
+            .and_then(Sexp::as_atom)
+            .ok_or(format!("{head} missing x"))?,
+    )?;
+    let y = mm_to_nm(
+        l.get(2)
+            .and_then(Sexp::as_atom)
+            .ok_or(format!("{head} missing y"))?,
+    )?;
     Ok(Some(Point { x, y }))
 }
 
@@ -489,7 +549,9 @@ fn prim_angle(list: &[Sexp]) -> Option<f64> {
 
 /// A `gr_poly`'s `(pts (xy x y) …)` as points (mm→nm).
 fn prim_pts(list: &[Sexp]) -> Result<Vec<Point>, String> {
-    let Some(pts) = list.iter().find_map(|s| s.list_headed("pts")) else { return Ok(vec![]) };
+    let Some(pts) = list.iter().find_map(|s| s.list_headed("pts")) else {
+        return Ok(vec![]);
+    };
     let mut out = Vec::new();
     for xy in &pts[1..] {
         if let Some(l) = xy.list_headed("xy") {
@@ -529,7 +591,10 @@ fn rotate_point(p: Point, center: Point, deg: f64) -> Point {
             ((dx as f64) * sin + (dy as f64) * cos).round() as Nm,
         )
     };
-    Point { x: center.x + rx, y: center.y + ry }
+    Point {
+        x: center.x + rx,
+        y: center.y + ry,
+    }
 }
 
 /// Rotate a shape's vertices about `center` by `deg` (see [`rotate_point`]).
@@ -547,14 +612,42 @@ fn parse_drill(pad: &[Sexp], center: Point, angle: f64) -> Result<Option<Drill>,
     };
     match d.get(1).and_then(Sexp::as_atom) {
         Some("oval") => {
-            let w = mm_to_nm(d.get(2).and_then(Sexp::as_atom).ok_or("drill oval missing w")?)?;
-            let h = mm_to_nm(d.get(3).and_then(Sexp::as_atom).ok_or("drill oval missing h")?)?;
+            let w = mm_to_nm(
+                d.get(2)
+                    .and_then(Sexp::as_atom)
+                    .ok_or("drill oval missing w")?,
+            )?;
+            let h = mm_to_nm(
+                d.get(3)
+                    .and_then(Sexp::as_atom)
+                    .ok_or("drill oval missing h")?,
+            )?;
             let (a, b, dia) = if w >= h {
                 let dx = (w - h) / 2;
-                (Point { x: center.x - dx, y: center.y }, Point { x: center.x + dx, y: center.y }, h)
+                (
+                    Point {
+                        x: center.x - dx,
+                        y: center.y,
+                    },
+                    Point {
+                        x: center.x + dx,
+                        y: center.y,
+                    },
+                    h,
+                )
             } else {
                 let dy = (h - w) / 2;
-                (Point { x: center.x, y: center.y - dy }, Point { x: center.x, y: center.y + dy }, w)
+                (
+                    Point {
+                        x: center.x,
+                        y: center.y - dy,
+                    },
+                    Point {
+                        x: center.x,
+                        y: center.y + dy,
+                    },
+                    w,
+                )
             };
             Ok(Some(Drill::Slot {
                 a: rotate_point(a, center, angle),
@@ -746,7 +839,11 @@ fn collect_symbol_pins(node: &[Sexp], out: &mut Vec<SymbolPin>, seen: &mut BTree
             if seen.insert(number.clone(), ()).is_some() {
                 continue; // first definition of this number wins
             }
-            out.push(SymbolPin { number, name, etype });
+            out.push(SymbolPin {
+                number,
+                name,
+                etype,
+            });
         } else if let Some(child) = item.list_headed("symbol") {
             // Nested unit symbol — recurse to gather its pins too.
             collect_symbol_pins(child, out, seen);
@@ -775,19 +872,26 @@ fn symbol_from_node(node: &[Sexp]) -> Result<Symbol, String> {
     let mut pins = Vec::new();
     let mut seen = BTreeMap::new();
     collect_symbol_pins(node, &mut pins, &mut seen);
-    Ok(Symbol { name, pins, footprint: footprint.map(str::to_string) })
+    Ok(Symbol {
+        name,
+        pins,
+        footprint: footprint.map(str::to_string),
+    })
 }
 
 /// Find every top-level `(symbol "Name" ...)` node in a parsed root, which is
 /// either a `(kicad_symbol_lib ... (symbol ...) ...)` library or a bare
 /// `(symbol ...)`.
 fn top_level_symbols(root: &Sexp) -> Vec<&[Sexp]> {
-    let Some(items) = root.as_list() else { return Vec::new() };
+    let Some(items) = root.as_list() else {
+        return Vec::new();
+    };
     match items.first().and_then(Sexp::as_atom) {
         Some("symbol") => vec![items],
-        Some("kicad_symbol_lib") => {
-            items.iter().filter_map(|s| s.list_headed("symbol")).collect()
-        }
+        Some("kicad_symbol_lib") => items
+            .iter()
+            .filter_map(|s| s.list_headed("symbol"))
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -866,8 +970,16 @@ pub fn join_symbol_footprint(symbol: &Symbol, footprint: &PartDef) -> JoinReport
 
     // Name the part after the footprint (the manufacturable artifact); roles and
     // interfaces beyond discrete pins are out of scope for this layer.
-    let part = PartDef { name: footprint.name.clone(), pins, interfaces: BTreeMap::new() };
-    JoinReport { part, symbol_only, footprint_only }
+    let part = PartDef {
+        name: footprint.name.clone(),
+        pins,
+        interfaces: BTreeMap::new(),
+    };
+    JoinReport {
+        part,
+        symbol_only,
+        footprint_only,
+    }
 }
 
 /// Convenience: parse the first symbol + the footprint, join them, and return the
@@ -916,7 +1028,10 @@ pub fn apply_role_map(mut part: PartDef, map: &[(&str, &str, PinRole)]) -> Resul
             }
         }
         if !hit {
-            return Err(format!("apply_role_map: part `{}` has no pad `{num}`", part.name));
+            return Err(format!(
+                "apply_role_map: part `{}` has no pad `{num}`",
+                part.name
+            ));
         }
     }
     Ok(part)
@@ -1011,11 +1126,29 @@ mod tests {
     fn imports_jst_sh_pad_offsets_in_nm() {
         let p = import_footprint(JST_SH_1X03).unwrap();
         // pad "1" at (-1, 1.325) mm
-        assert_eq!(p.pin_offset("1"), Some(Point { x: -1_000_000, y: 1_325_000 }));
+        assert_eq!(
+            p.pin_offset("1"),
+            Some(Point {
+                x: -1_000_000,
+                y: 1_325_000
+            })
+        );
         // pad "3" at (1, 1.325) mm
-        assert_eq!(p.pin_offset("3"), Some(Point { x: 1_000_000, y: 1_325_000 }));
+        assert_eq!(
+            p.pin_offset("3"),
+            Some(Point {
+                x: 1_000_000,
+                y: 1_325_000
+            })
+        );
         // first MP wins: (-2.3, -1.2) mm
-        assert_eq!(p.pin_offset("MP"), Some(Point { x: -2_300_000, y: -1_200_000 }));
+        assert_eq!(
+            p.pin_offset("MP"),
+            Some(Point {
+                x: -2_300_000,
+                y: -1_200_000
+            })
+        );
     }
 
     #[test]
@@ -1023,7 +1156,14 @@ mod tests {
         let p = import_footprint(JST_SH_1X03).unwrap();
         // pad "1": roundrect 0.6 x 1.55 mm → a single Polygon copper region whose
         // bbox (radius included) is the full pad size, on the top layer.
-        let pad1 = p.pins.iter().find(|pin| pin.name == "1").unwrap().pad.clone().unwrap();
+        let pad1 = p
+            .pins
+            .iter()
+            .find(|pin| pin.name == "1")
+            .unwrap()
+            .pad
+            .clone()
+            .unwrap();
         assert_eq!(pad1.copper.len(), 1);
         assert!(matches!(pad1.copper[0].shape, Shape2D::Polygon { .. }));
         assert_eq!(pad1.copper[0].layers, PadLayers::Top);
@@ -1031,7 +1171,14 @@ mod tests {
         assert_eq!((max.x - min.x, max.y - min.y), (600_000, 1_550_000));
         // A rect pad (FP_4) captures a rectangle of its size.
         let r = import_footprint(FP_4).unwrap();
-        let a1 = r.pins.iter().find(|pin| pin.name == "1").unwrap().pad.clone().unwrap();
+        let a1 = r
+            .pins
+            .iter()
+            .find(|pin| pin.name == "1")
+            .unwrap()
+            .pad
+            .clone()
+            .unwrap();
         let (min, max) = a1.copper[0].shape.bbox().unwrap();
         assert_eq!((max.x - min.x, max.y - min.y), (500_000, 500_000));
         // Geometry rides through the symbol/footprint join (footprint is the source).
@@ -1052,20 +1199,45 @@ mod tests {
         let p = import_footprint(src).unwrap();
 
         // Through-hole round pad: copper spans all layers, a round drill, disc copper.
-        let p1 = p.pins.iter().find(|x| x.name == "1").unwrap().pad.clone().unwrap();
+        let p1 = p
+            .pins
+            .iter()
+            .find(|x| x.name == "1")
+            .unwrap()
+            .pad
+            .clone()
+            .unwrap();
         assert_eq!(p1.copper[0].layers, PadLayers::Through);
         assert_eq!(p1.drill, Some(Drill::Round { d: 800_000 }));
         // A disc is a lone-point stroke: start, no segments.
-        assert!(matches!(&p1.copper[0].shape, Shape2D::Stroke { path, .. } if path.segs.is_empty()));
+        assert!(
+            matches!(&p1.copper[0].shape, Shape2D::Stroke { path, .. } if path.segs.is_empty())
+        );
 
         // Oval pad → a capsule (one-segment stroke) on the top layer.
-        let p2 = p.pins.iter().find(|x| x.name == "2").unwrap().pad.clone().unwrap();
-        assert!(matches!(&p2.copper[0].shape, Shape2D::Stroke { path, .. } if path.segs.len() == 1));
+        let p2 = p
+            .pins
+            .iter()
+            .find(|x| x.name == "2")
+            .unwrap()
+            .pad
+            .clone()
+            .unwrap();
+        assert!(
+            matches!(&p2.copper[0].shape, Shape2D::Stroke { path, .. } if path.segs.len() == 1)
+        );
         assert_eq!(p2.copper[0].layers, PadLayers::Top);
         assert_eq!(p2.drill, None);
 
         // Rect rotated 90°: a 2×1 pad's bbox becomes 1 wide × 2 tall; bottom layer.
-        let p3 = p.pins.iter().find(|x| x.name == "3").unwrap().pad.clone().unwrap();
+        let p3 = p
+            .pins
+            .iter()
+            .find(|x| x.name == "3")
+            .unwrap()
+            .pad
+            .clone()
+            .unwrap();
         assert_eq!(p3.copper[0].layers, PadLayers::Bottom);
         let (min, max) = p3.copper[0].shape.bbox().unwrap();
         assert_eq!((max.x - min.x, max.y - min.y), (1_000_000, 2_000_000));
@@ -1087,13 +1259,22 @@ mod tests {
     ))
 )"#;
         let p = import_footprint(src).unwrap();
-        let pad = p.pins.iter().find(|x| x.name == "1").unwrap().pad.clone().unwrap();
+        let pad = p
+            .pins
+            .iter()
+            .find(|x| x.name == "1")
+            .unwrap()
+            .pad
+            .clone()
+            .unwrap();
         // Anchor rect + three primitives = four copper regions.
         assert_eq!(pad.copper.len(), 4, "anchor + 3 primitives");
         let shapes: Vec<&Shape2D> = pad.copper.iter().map(|c| &c.shape).collect();
         // The gr_circle → a disc (lone-point stroke) at (1, 2.5) mm, radius 0.2mm.
         assert!(
-            shapes.iter().any(|s| matches!(s, Shape2D::Stroke { path, radius }
+            shapes
+                .iter()
+                .any(|s| matches!(s, Shape2D::Stroke { path, radius }
                 if path.segs.is_empty() && *radius == 200_000
                 && path.start == Point { x: 1_000_000, y: 2_500_000 })),
             "gr_circle imported as a disc at the offset centre"
@@ -1101,14 +1282,24 @@ mod tests {
         // Exactly one region carries a Seg::Arc (the gr_arc).
         let arcs: usize = shapes
             .iter()
-            .map(|s| s.path().segs.iter().filter(|seg| matches!(seg, Seg::Arc { .. })).count())
+            .map(|s| {
+                s.path()
+                    .segs
+                    .iter()
+                    .filter(|seg| matches!(seg, Seg::Arc { .. }))
+                    .count()
+            })
             .sum();
         assert_eq!(arcs, 1, "the gr_arc became a real arc edge");
         // The 3-point arc rides at the pad offset: start (1,2), mid (1.1,2.2), end (1.2,2).
-        assert!(shapes.iter().any(|s| s.path().segs.iter().any(|seg| matches!(seg,
+        assert!(
+            shapes
+                .iter()
+                .any(|s| s.path().segs.iter().any(|seg| matches!(seg,
             Seg::Arc { mid, end }
             if *mid == Point { x: 1_100_000, y: 2_200_000 }
-            && *end == Point { x: 1_200_000, y: 2_000_000 }))));
+            && *end == Point { x: 1_200_000, y: 2_000_000 })))
+        );
     }
 
     /// The legacy `gr_arc` encoding — `(start = centre)(end = arc start)(angle)` — is
@@ -1125,7 +1316,14 @@ mod tests {
     ))
 )"#;
         let p = import_footprint(src).unwrap();
-        let pad = p.pins.iter().find(|x| x.name == "1").unwrap().pad.clone().unwrap();
+        let pad = p
+            .pins
+            .iter()
+            .find(|x| x.name == "1")
+            .unwrap()
+            .pad
+            .clone()
+            .unwrap();
         // anchor + one arc.
         assert_eq!(pad.copper.len(), 2);
         // Centre (0,0), arc-start (0.5mm,0) swept +90° ⇒ end ≈ (0, 0.5mm); the stroke
@@ -1141,10 +1339,15 @@ mod tests {
                 _ => None,
             })
             .expect("a legacy gr_arc imported as an arc stroke");
-        let (Seg::Arc { end, .. }, radius) = (&arc.0, arc.1) else { unreachable!() };
+        let (Seg::Arc { end, .. }, radius) = (&arc.0, arc.1) else {
+            unreachable!()
+        };
         assert_eq!(radius, 50_000, "stroke half-width = width/2");
         // 90° CCW of (0.5mm, 0) about origin = (0, 0.5mm), within nm rounding.
-        assert!((end.x).abs() < 10 && (end.y - 500_000).abs() < 10, "swept end ≈ (0, 0.5mm): {end:?}");
+        assert!(
+            (end.x).abs() < 10 && (end.y - 500_000).abs() < 10,
+            "swept end ≈ (0, 0.5mm): {end:?}"
+        );
     }
 
     #[test]
@@ -1171,9 +1374,21 @@ mod tests {
         let p = import_footprint(src).unwrap();
         assert_eq!(p.name, "RP2040-QFN-56");
         assert_eq!(p.pins.len(), 2);
-        assert_eq!(p.pin_offset("56"), Some(Point { x: -2_600_000, y: -3_437_500 }));
+        assert_eq!(
+            p.pin_offset("56"),
+            Some(Point {
+                x: -2_600_000,
+                y: -3_437_500
+            })
+        );
         // angle is ignored; only x/y become the offset.
-        assert_eq!(p.pin_offset("1"), Some(Point { x: -1_200_000, y: -3_437_500 }));
+        assert_eq!(
+            p.pin_offset("1"),
+            Some(Point {
+                x: -1_200_000,
+                y: -3_437_500
+            })
+        );
     }
 
     #[test]
@@ -1184,7 +1399,13 @@ mod tests {
         let p = import_footprint(src).unwrap();
         assert_eq!(p.name, "Name With Spaces (rev 2)");
         assert_eq!(p.pins.len(), 1);
-        assert_eq!(p.pin_offset("A1"), Some(Point { x: 500_000, y: -500_000 }));
+        assert_eq!(
+            p.pin_offset("A1"),
+            Some(Point {
+                x: 500_000,
+                y: -500_000
+            })
+        );
     }
 
     #[test]
@@ -1218,7 +1439,13 @@ mod tests {
         assert_eq!(p.name, "JST_SH_BM03B-SRSS-TB_1x03-1MP_P1.00mm_Vertical");
         // 1,2,3 + deduped MP.
         assert_eq!(p.pins.len(), 4);
-        assert_eq!(p.pin_offset("1"), Some(Point { x: -1_000_000, y: 1_325_000 }));
+        assert_eq!(
+            p.pin_offset("1"),
+            Some(Point {
+                x: -1_000_000,
+                y: 1_325_000
+            })
+        );
     }
 
     // --- symbol / role layer ------------------------------------------------
@@ -1323,16 +1550,24 @@ mod tests {
         // A bare footprint imports role-less (name == number, Passive).
         let bare = import_footprint(FP_4).unwrap();
         assert_eq!(role_of(&bare, "VIN"), None);
-        let roled =
-            apply_role_map(bare, &[("1", "VIN", PinRole::PowerIn), ("4", "VOUT", PinRole::PowerOut)])
-                .unwrap();
+        let roled = apply_role_map(
+            bare,
+            &[
+                ("1", "VIN", PinRole::PowerIn),
+                ("4", "VOUT", PinRole::PowerOut),
+            ],
+        )
+        .unwrap();
         assert_eq!(role_of(&roled, "VIN"), Some(PinRole::PowerIn));
         assert_eq!(role_of(&roled, "VOUT"), Some(PinRole::PowerOut));
         // The overlaid name now resolves to its pad as a connection selector.
         assert_eq!(roled.resolve_selector("VIN"), vec!["1".to_string()]);
         // A map entry for a pad the footprint lacks is a hard error, not a no-op.
-        let err = apply_role_map(import_footprint(FP_4).unwrap(), &[("99", "X", PinRole::PowerIn)])
-            .unwrap_err();
+        let err = apply_role_map(
+            import_footprint(FP_4).unwrap(),
+            &[("99", "X", PinRole::PowerIn)],
+        )
+        .unwrap_err();
         assert!(err.contains("99"), "got {err}");
     }
 
@@ -1344,11 +1579,23 @@ mod tests {
 
         // Functional name resolves to symbol role; offset comes from the footprint.
         assert_eq!(role_of(&part, "VDD"), Some(PinRole::PowerIn));
-        assert_eq!(offset_of(&part, "VDD"), Some(Point { x: -1_000_000, y: 1_000_000 }));
+        assert_eq!(
+            offset_of(&part, "VDD"),
+            Some(Point {
+                x: -1_000_000,
+                y: 1_000_000
+            })
+        );
         assert_eq!(role_of(&part, "GPIO0"), Some(PinRole::Output));
         assert_eq!(role_of(&part, "SWDIO"), Some(PinRole::Bidir));
         assert_eq!(role_of(&part, "GND"), Some(PinRole::Passive));
-        assert_eq!(offset_of(&part, "GND"), Some(Point { x: -1_000_000, y: -1_000_000 }));
+        assert_eq!(
+            offset_of(&part, "GND"),
+            Some(Point {
+                x: -1_000_000,
+                y: -1_000_000
+            })
+        );
 
         // Stored identity is the pad number, and the name selector resolves to it.
         assert_eq!(part.resolve_selector("VDD"), vec!["1".to_string()]);
@@ -1400,15 +1647,17 @@ mod tests {
     /// `Footprint` property names. Guarded on existence (no-op without the repo).
     #[test]
     fn real_symbol_footprint_join_if_present() {
-        let sym_path =
-            "/home/ben/Documents/kalogon/git/Kalogon-KiCad-Repository/Power_Management_TI.kicad_sym";
+        let sym_path = "/home/ben/Documents/kalogon/git/Kalogon-KiCad-Repository/Power_Management_TI.kicad_sym";
         let fp_path = "/home/ben/Documents/kalogon/git/Kalogon-KiCad-Repository/footprints/eFuse_TI.pretty/Texas_RPW9919A_VQFN-HR-10.kicad_mod";
         if !std::path::Path::new(sym_path).exists() || !std::path::Path::new(fp_path).exists() {
             return;
         }
         let sym_text = std::fs::read_to_string(sym_path).unwrap();
         let symbol = import_symbol_named(&sym_text, "TPS25981x").unwrap();
-        assert_eq!(symbol.footprint.as_deref(), Some("eFuse_TI:Texas_RPW9919A_VQFN-HR-10"));
+        assert_eq!(
+            symbol.footprint.as_deref(),
+            Some("eFuse_TI:Texas_RPW9919A_VQFN-HR-10")
+        );
         let footprint = import_footprint_file(fp_path).unwrap();
         let report = join_symbol_footprint(&symbol, &footprint);
 
@@ -1435,7 +1684,8 @@ mod tests {
         if !std::path::Path::new(sym_path).exists() || !std::path::Path::new(fp_path).exists() {
             return;
         }
-        let sym = import_symbol_named(&std::fs::read_to_string(sym_path).unwrap(), "RP2350A").unwrap();
+        let sym =
+            import_symbol_named(&std::fs::read_to_string(sym_path).unwrap(), "RP2350A").unwrap();
         let footprint = import_footprint_file(fp_path).unwrap();
         let report = join_symbol_footprint(&sym, &footprint);
         // 60 signal/power pads + the exposed pad = 61 pins, clean both ways.
@@ -1450,8 +1700,19 @@ mod tests {
         // 6 IOVDD + 3 DVDD pads share a functional name. The fix: a name selector
         // fans out to ALL of them (distinct pad numbers), so connecting "IOVDD"
         // nets every pad — no uniquify workaround, no silently-floating power pads.
-        assert_eq!(report.part.pins.iter().filter(|p| p.name == "IOVDD").count(), 6);
-        assert_eq!(report.part.pins.iter().filter(|p| p.name == "DVDD").count(), 3);
+        assert_eq!(
+            report
+                .part
+                .pins
+                .iter()
+                .filter(|p| p.name == "IOVDD")
+                .count(),
+            6
+        );
+        assert_eq!(
+            report.part.pins.iter().filter(|p| p.name == "DVDD").count(),
+            3
+        );
         let iovdd_pads = report.part.resolve_selector("IOVDD");
         assert_eq!(iovdd_pads.len(), 6);
         assert_eq!(report.part.resolve_selector("DVDD").len(), 3);
@@ -1460,6 +1721,10 @@ mod tests {
         // `passive`, so the roles legitimately vary — what matters is all 6 are
         // present and connectable, which is the floating-power-pad fix.)
         assert!(iovdd_pads.iter().all(|n| report.part.pin_role(n).is_some()));
-        assert!(iovdd_pads.iter().any(|n| report.part.pin_role(n) == Some(PinRole::PowerIn)));
+        assert!(
+            iovdd_pads
+                .iter()
+                .any(|n| report.part.pin_role(n) == Some(PinRole::PowerIn))
+        );
     }
 }

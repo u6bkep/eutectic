@@ -32,7 +32,10 @@ pub struct Point {
 
 impl Point {
     pub fn mm(x: i64, y: i64) -> Point {
-        Point { x: x * MM, y: y * MM }
+        Point {
+            x: x * MM,
+            y: y * MM,
+        }
     }
 }
 
@@ -125,7 +128,10 @@ impl PinRef {
     /// must fan out through [`PartDef::resolve_selector`](crate::part::PartDef::resolve_selector)
     /// first — this constructor does no name resolution.
     pub fn new(comp: &EntityId, pin: &str) -> PinRef {
-        PinRef { comp: comp.clone(), pin: pin.into() }
+        PinRef {
+            comp: comp.clone(),
+            pin: pin.into(),
+        }
     }
 }
 

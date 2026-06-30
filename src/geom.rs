@@ -79,7 +79,10 @@ impl Seg {
     fn map(&self, f: &impl Fn(Point) -> Point) -> Seg {
         match self {
             Seg::Line { end } => Seg::Line { end: f(*end) },
-            Seg::Arc { mid, end } => Seg::Arc { mid: f(*mid), end: f(*end) },
+            Seg::Arc { mid, end } => Seg::Arc {
+                mid: f(*mid),
+                end: f(*end),
+            },
         }
     }
 }
@@ -100,7 +103,10 @@ impl Path {
     pub fn polyline(points: Vec<Point>) -> Path {
         let mut it = points.into_iter();
         let start = it.next().expect("Path::polyline needs ≥1 point");
-        Path { start, segs: it.map(|end| Seg::Line { end }).collect() }
+        Path {
+            start,
+            segs: it.map(|end| Seg::Line { end }).collect(),
+        }
     }
 
     /// Corner vertices in order: `start`, then each segment's `end`. Arc `mid`s are
@@ -131,7 +137,10 @@ impl Path {
     }
 
     fn map(&self, f: &impl Fn(Point) -> Point) -> Path {
-        Path { start: f(self.start), segs: self.segs.iter().map(|s| s.map(f)).collect() }
+        Path {
+            start: f(self.start),
+            segs: self.segs.iter().map(|s| s.map(f)).collect(),
+        }
     }
 }
 
@@ -150,21 +159,36 @@ pub enum Shape2D {
 impl Shape2D {
     /// A round pad / via annulus: a disc of `radius` centred at `c`.
     pub fn disc(c: Point, radius: Nm) -> Shape2D {
-        Shape2D::Stroke { path: Path { start: c, segs: vec![] }, radius }
+        Shape2D::Stroke {
+            path: Path {
+                start: c,
+                segs: vec![],
+            },
+            radius,
+        }
     }
     /// A pill/oval: the `radius`-inflation of segment `a`–`b`.
     pub fn capsule(a: Point, b: Point, radius: Nm) -> Shape2D {
-        Shape2D::Stroke { path: Path::polyline(vec![a, b]), radius }
+        Shape2D::Stroke {
+            path: Path::polyline(vec![a, b]),
+            radius,
+        }
     }
     /// A trace: a polyline of copper `width` wide (inflation `width/2`).
     pub fn trace(points: Vec<Point>, width: Nm) -> Shape2D {
-        Shape2D::Stroke { path: Path::polyline(points), radius: width / 2 }
+        Shape2D::Stroke {
+            path: Path::polyline(points),
+            radius: width / 2,
+        }
     }
     /// An open arc stroke: `width`-wide copper following the circular arc through
     /// `start`→`mid`→`end` (e.g. a curved trace). Sugar over the [`Path`]/[`Seg::Arc`] form.
     pub fn arc(start: Point, mid: Point, end: Point, width: Nm) -> Shape2D {
         Shape2D::Stroke {
-            path: Path { start, segs: vec![Seg::Arc { mid, end }] },
+            path: Path {
+                start,
+                segs: vec![Seg::Arc { mid, end }],
+            },
             radius: width / 2,
         }
     }
@@ -173,10 +197,22 @@ impl Shape2D {
         let (hw, hh) = (w / 2, h / 2);
         Shape2D::Polygon {
             path: Path::polyline(vec![
-                Point { x: c.x - hw, y: c.y - hh },
-                Point { x: c.x + hw, y: c.y - hh },
-                Point { x: c.x + hw, y: c.y + hh },
-                Point { x: c.x - hw, y: c.y + hh },
+                Point {
+                    x: c.x - hw,
+                    y: c.y - hh,
+                },
+                Point {
+                    x: c.x + hw,
+                    y: c.y - hh,
+                },
+                Point {
+                    x: c.x + hw,
+                    y: c.y + hh,
+                },
+                Point {
+                    x: c.x - hw,
+                    y: c.y + hh,
+                },
             ]),
             radius: 0,
         }
@@ -189,17 +225,32 @@ impl Shape2D {
         let (hw, hh) = (w / 2 - r, h / 2 - r);
         Shape2D::Polygon {
             path: Path::polyline(vec![
-                Point { x: c.x - hw, y: c.y - hh },
-                Point { x: c.x + hw, y: c.y - hh },
-                Point { x: c.x + hw, y: c.y + hh },
-                Point { x: c.x - hw, y: c.y + hh },
+                Point {
+                    x: c.x - hw,
+                    y: c.y - hh,
+                },
+                Point {
+                    x: c.x + hw,
+                    y: c.y - hh,
+                },
+                Point {
+                    x: c.x + hw,
+                    y: c.y + hh,
+                },
+                Point {
+                    x: c.x - hw,
+                    y: c.y + hh,
+                },
             ]),
             radius: r,
         }
     }
     /// A filled polygon from explicit points (e.g. a rotated or custom pad).
     pub fn polygon(points: Vec<Point>) -> Shape2D {
-        Shape2D::Polygon { path: Path::polyline(points), radius: 0 }
+        Shape2D::Polygon {
+            path: Path::polyline(points),
+            radius: 0,
+        }
     }
     /// A filled polygon from an explicit [`Path`] (edges may be arcs) and corner
     /// `radius`. The general constructor behind the sugar above.
@@ -228,12 +279,14 @@ impl Shape2D {
     /// a bespoke polygon-offset. `d` may be negative (deflate); the radius floors at 0.
     pub fn inflated(&self, d: Nm) -> Shape2D {
         match self {
-            Shape2D::Stroke { path, radius } => {
-                Shape2D::Stroke { path: path.clone(), radius: (radius + d).max(0) }
-            }
-            Shape2D::Polygon { path, radius } => {
-                Shape2D::Polygon { path: path.clone(), radius: (radius + d).max(0) }
-            }
+            Shape2D::Stroke { path, radius } => Shape2D::Stroke {
+                path: path.clone(),
+                radius: (radius + d).max(0),
+            },
+            Shape2D::Polygon { path, radius } => Shape2D::Polygon {
+                path: path.clone(),
+                radius: (radius + d).max(0),
+            },
         }
     }
 
@@ -242,12 +295,14 @@ impl Shape2D {
     /// pad shape into world coordinates.
     pub fn map_points(&self, f: impl Fn(Point) -> Point) -> Shape2D {
         match self {
-            Shape2D::Stroke { path, radius } => {
-                Shape2D::Stroke { path: path.map(&f), radius: *radius }
-            }
-            Shape2D::Polygon { path, radius } => {
-                Shape2D::Polygon { path: path.map(&f), radius: *radius }
-            }
+            Shape2D::Stroke { path, radius } => Shape2D::Stroke {
+                path: path.map(&f),
+                radius: *radius,
+            },
+            Shape2D::Polygon { path, radius } => Shape2D::Polygon {
+                path: path.map(&f),
+                radius: *radius,
+            },
         }
     }
 
@@ -265,7 +320,16 @@ impl Shape2D {
             max.y = max.y.max(p.y);
         }
         let r = self.radius();
-        Some((Point { x: min.x - r, y: min.y - r }, Point { x: max.x + r, y: max.y + r }))
+        Some((
+            Point {
+                x: min.x - r,
+                y: min.y - r,
+            },
+            Point {
+                x: max.x + r,
+                y: max.y + r,
+            },
+        ))
     }
 
     /// This shape's corner vertices in order (`start` + each segment's `end`). For
@@ -425,7 +489,10 @@ fn closest_on_segment(p: Point, a: Point, b: Point) -> Point {
         return a;
     }
     let t = (((p.x - a.x) as f64 * vx + (p.y - a.y) as f64 * vy) / len2).clamp(0.0, 1.0);
-    Point { x: (a.x as f64 + t * vx).round() as Nm, y: (a.y as f64 + t * vy).round() as Nm }
+    Point {
+        x: (a.x as f64 + t * vx).round() as Nm,
+        y: (a.y as f64 + t * vy).round() as Nm,
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -482,7 +549,14 @@ fn flatten_arc(start: Point, mid: Point, end: Point, tol: Nm, out: &mut Vec<Poin
 /// circle point whose turn matches, and the stop test is the true apex-to-chord sagitta.
 #[allow(clippy::too_many_arguments)]
 fn subdivide_arc(
-    p: Point, q: Point, cx: f64, cy: f64, r: f64, tol: f64, turn: i32, out: &mut Vec<Point>,
+    p: Point,
+    q: Point,
+    cx: f64,
+    cy: f64,
+    r: f64,
+    tol: f64,
+    turn: i32,
+    out: &mut Vec<Point>,
 ) {
     let (ex, ey) = (q.x as f64 - p.x as f64, q.y as f64 - p.y as f64);
     let elen = (ex * ex + ey * ey).sqrt();
@@ -502,7 +576,10 @@ fn subdivide_arc(
         out.push(q);
         return;
     }
-    let m = Point { x: mfx.round() as Nm, y: mfy.round() as Nm };
+    let m = Point {
+        x: mfx.round() as Nm,
+        y: mfy.round() as Nm,
+    };
     if m == p || m == q {
         out.push(q); // apex rounds onto an endpoint: at grid resolution
         return;
@@ -531,8 +608,7 @@ fn segs_within(a1: Point, a2: Point, b1: Point, b2: Point, thr2: i128) -> bool {
 
 /// 2D orientation sign of (a, b, c): +1 CCW, −1 CW, 0 collinear (exact i128).
 fn orient(a: Point, b: Point, c: Point) -> i32 {
-    let v = (b.x - a.x) as i128 * (c.y - a.y) as i128
-        - (b.y - a.y) as i128 * (c.x - a.x) as i128;
+    let v = (b.x - a.x) as i128 * (c.y - a.y) as i128 - (b.y - a.y) as i128 * (c.x - a.x) as i128;
     v.signum() as i32
 }
 
@@ -606,7 +682,10 @@ pub struct ZRange {
 
 impl ZRange {
     pub fn new(lo: Nm, hi: Nm) -> ZRange {
-        ZRange { lo: lo.min(hi), hi: lo.max(hi) }
+        ZRange {
+            lo: lo.min(hi),
+            hi: lo.max(hi),
+        }
     }
     /// Do two z-ranges overlap (touching counts)? This is the 2.5D "same/adjacent
     /// layer" test once z comes from discrete stackup slabs.
@@ -673,7 +752,11 @@ pub struct Feature {
 
 impl Feature {
     pub fn prism(role: Role, shape: Shape2D, z: ZRange) -> Feature {
-        Feature { role, material: None, extent: Extent::Prism { shape, z } }
+        Feature {
+            role,
+            material: None,
+            extent: Extent::Prism { shape, z },
+        }
     }
     pub fn with_material(mut self, m: Material) -> Feature {
         self.material = Some(m);
@@ -762,8 +845,14 @@ pub struct BoardShape {
 impl BoardShape {
     /// A rectangular board from opposite corners — sugar over the polygon form.
     pub fn rect(min: Point, max: Point) -> BoardShape {
-        let c = Point { x: (min.x + max.x) / 2, y: (min.y + max.y) / 2 };
-        BoardShape { outline: Shape2D::rect(c, max.x - min.x, max.y - min.y), cutouts: vec![] }
+        let c = Point {
+            x: (min.x + max.x) / 2,
+            y: (min.y + max.y) / 2,
+        };
+        BoardShape {
+            outline: Shape2D::rect(c, max.x - min.x, max.y - min.y),
+            cutouts: vec![],
+        }
     }
 
     /// Is `p` on the board: inside the outline and outside every cutout?
@@ -808,7 +897,10 @@ mod tests {
         let b = Shape2D::disc(pt(3 * MM, 0), MM); // centers 3mm apart, gap = 3-1-1 = 1mm
         assert!(clearance_violated(&a, &b, MM + 1), "gap 1mm < 1mm+ε");
         assert!(!clearance_violated(&a, &b, MM), "gap 1mm is not < 1mm");
-        assert!(!clearance_violated(&a, &b, MM / 2), "1mm gap clears 0.5mm rule");
+        assert!(
+            !clearance_violated(&a, &b, MM / 2),
+            "1mm gap clears 0.5mm rule"
+        );
     }
 
     #[test]
@@ -823,7 +915,10 @@ mod tests {
     fn point_inside_filled_rect_is_overlap() {
         let rect = Shape2D::rect(pt(0, 0), 4 * MM, 4 * MM); // covers [-2,2]^2
         let dot = Shape2D::disc(pt(0, 0), 1); // center inside the rect
-        assert!(clearance_violated(&rect, &dot, 1), "a point inside the pad area is an overlap");
+        assert!(
+            clearance_violated(&rect, &dot, 1),
+            "a point inside the pad area is an overlap"
+        );
     }
 
     #[test]
@@ -846,8 +941,14 @@ mod tests {
         // Probe just beyond the corner diagonally: sharp corner gap ≈ 0.14mm,
         // rounded corner gap ≈ 0.35mm. A 0.2mm rule separates them.
         let probe = Shape2D::disc(pt(11 * MM / 10, 11 * MM / 10), 1);
-        assert!(clearance_violated(&sharp, &probe, MM / 5), "sharp corner within 0.2mm");
-        assert!(!clearance_violated(&round, &probe, MM / 5), "rounded corner beyond 0.2mm");
+        assert!(
+            clearance_violated(&sharp, &probe, MM / 5),
+            "sharp corner within 0.2mm"
+        );
+        assert!(
+            !clearance_violated(&round, &probe, MM / 5),
+            "rounded corner beyond 0.2mm"
+        );
     }
 
     #[test]
@@ -857,7 +958,10 @@ mod tests {
         // probe 1.5mm from center clears it (a ballooned shape would not).
         let rr = Shape2D::round_rect(pt(0, 0), 2 * MM, 2 * MM, 10 * MM);
         let near = Shape2D::disc(pt(15 * MM / 10, 0), 1); // 1.5mm from center
-        assert!(!clearance_violated(&rr, &near, MM / 10), "clamped shape stays ~1mm radius");
+        assert!(
+            !clearance_violated(&rr, &near, MM / 10),
+            "clamped shape stays ~1mm radius"
+        );
         // A probe 0.9mm from center is inside the ~1mm clamped radius.
         let inside = Shape2D::disc(pt(9 * MM / 10, 0), 1);
         assert!(clearance_violated(&rr, &inside, 1));
@@ -868,14 +972,23 @@ mod tests {
         let su = Stackup::default_2layer();
         let top = su.slab_z("F.Cu").unwrap();
         let bot = su.slab_z("B.Cu").unwrap();
-        assert!(!top.overlaps(&bot), "top and bottom copper z must not overlap");
+        assert!(
+            !top.overlaps(&bot),
+            "top and bottom copper z must not overlap"
+        );
         // Two overlapping discs on opposite layers do NOT clash; same layer they do.
         let s = Shape2D::disc(pt(0, 0), MM);
         let a_top = Feature::prism(Role::Conductor, s.clone(), top);
         let b_top = Feature::prism(Role::Conductor, s.clone(), top);
         let b_bot = Feature::prism(Role::Conductor, s, bot);
-        assert!(!a_top.clears(&b_top, MM), "coincident copper on the same layer clashes");
-        assert!(a_top.clears(&b_bot, MM), "different layers do not clash geometrically");
+        assert!(
+            !a_top.clears(&b_top, MM),
+            "coincident copper on the same layer clashes"
+        );
+        assert!(
+            a_top.clears(&b_bot, MM),
+            "different layers do not clash geometrically"
+        );
     }
 
     #[test]
@@ -906,10 +1019,20 @@ mod tests {
         let r = 10 * MM;
         let arc = Shape2D::arc(pt(-r, 0), pt(0, r), pt(r, 0), 0);
         let pts = arc.path().flatten(DEFAULT_CHORD_TOL);
-        assert!(pts.len() > 16, "a 10mm semicircle subdivides into many chords");
-        assert_eq!(*pts.first().unwrap(), pt(-r, 0), "endpoints stay exact lattice pts");
+        assert!(
+            pts.len() > 16,
+            "a 10mm semicircle subdivides into many chords"
+        );
+        assert_eq!(
+            *pts.first().unwrap(),
+            pt(-r, 0),
+            "endpoints stay exact lattice pts"
+        );
         assert_eq!(*pts.last().unwrap(), pt(r, 0));
-        assert!(pts.contains(&pt(0, r)), "the defining midpoint is on the polyline");
+        assert!(
+            pts.contains(&pt(0, r)),
+            "the defining midpoint is on the polyline"
+        );
         // Every vertex lies on the circle to within rounding (a few nm).
         for p in &pts {
             let d = (((p.x as f64).powi(2) + (p.y as f64).powi(2)).sqrt() - r as f64).abs();
@@ -934,7 +1057,11 @@ mod tests {
         // An arc whose three points are collinear is just the straight chord.
         let arc = Shape2D::arc(pt(0, 0), pt(MM, 0), pt(2 * MM, 0), 0);
         let pts = arc.path().flatten(DEFAULT_CHORD_TOL);
-        assert_eq!(pts, vec![pt(0, 0), pt(2 * MM, 0)], "collinear ⇒ a single chord");
+        assert_eq!(
+            pts,
+            vec![pt(0, 0), pt(2 * MM, 0)],
+            "collinear ⇒ a single chord"
+        );
     }
 
     #[test]
@@ -946,10 +1073,15 @@ mod tests {
         let r = 10 * MM;
         let f = |deg: f64| {
             let a = deg.to_radians();
-            pt((r as f64 * a.cos()).round() as Nm, (r as f64 * a.sin()).round() as Nm)
+            pt(
+                (r as f64 * a.cos()).round() as Nm,
+                (r as f64 * a.sin()).round() as Nm,
+            )
         };
         let (start, mid, end) = (f(0.0), f(200.0), f(210.0));
-        let pts = Shape2D::arc(start, mid, end, 0).path().flatten(DEFAULT_CHORD_TOL);
+        let pts = Shape2D::arc(start, mid, end, 0)
+            .path()
+            .flatten(DEFAULT_CHORD_TOL);
         // All points lie on the circle…
         for p in &pts {
             let d = (((p.x as f64).powi(2) + (p.y as f64).powi(2)).sqrt() - r as f64).abs();
@@ -957,13 +1089,22 @@ mod tests {
         }
         // …the 0°→200° half must sweep through ~100° (its interior)…
         let saw_100 = pts.iter().any(|p| {
-            let ang = (p.y as f64).atan2(p.x as f64).to_degrees().rem_euclid(360.0);
+            let ang = (p.y as f64)
+                .atan2(p.x as f64)
+                .to_degrees()
+                .rem_euclid(360.0);
             (90.0..110.0).contains(&ang)
         });
-        assert!(saw_100, "the 0°→200° half must pass through ~100°, not the minor side");
+        assert!(
+            saw_100,
+            "the 0°→200° half must pass through ~100°, not the minor side"
+        );
         // …and no point may stray onto the complementary arc (215°..355°).
         let on_minor = pts.iter().any(|p| {
-            let ang = (p.y as f64).atan2(p.x as f64).to_degrees().rem_euclid(360.0);
+            let ang = (p.y as f64)
+                .atan2(p.x as f64)
+                .to_degrees()
+                .rem_euclid(360.0);
             (215.0..355.0).contains(&ang)
         });
         assert!(!on_minor, "no point may stray onto the complementary arc");
@@ -980,8 +1121,14 @@ mod tests {
         let trace = Shape2D::arc(pt(-r, 0), pt(0, r), pt(r, 0), MM / 5);
         let probe = Shape2D::disc(pt(0, 11 * MM), MM / 10);
         let gap = 8 * MM / 10;
-        assert!(clearance_violated(&trace, &probe, gap + 1), "0.8mm gap to the bulge");
-        assert!(!clearance_violated(&trace, &probe, gap), "0.8mm is not < 0.8mm");
+        assert!(
+            clearance_violated(&trace, &probe, gap + 1),
+            "0.8mm gap to the bulge"
+        );
+        assert!(
+            !clearance_violated(&trace, &probe, gap),
+            "0.8mm is not < 0.8mm"
+        );
         // Sanity: a far probe well outside the arc clears a small rule.
         let far = Shape2D::disc(pt(0, 13 * MM), MM / 10);
         assert!(!clearance_violated(&trace, &far, MM / 2));

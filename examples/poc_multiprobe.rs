@@ -18,8 +18,8 @@
 use ecad_core::autoroute::autoroute;
 use ecad_core::command::{Command, Transaction};
 use ecad_core::diagnostic::render;
-use ecad_core::doc::{Point, MM};
-use ecad_core::elaborate::{board_rect, GenDirective as G, Source};
+use ecad_core::doc::{MM, Point};
+use ecad_core::elaborate::{GenDirective as G, Source, board_rect};
 use ecad_core::export::{excellon_drill, gerber_set, netlist, placement_csv, svg};
 use ecad_core::history::History;
 use ecad_core::kicad::{
@@ -102,7 +102,12 @@ fn build_lib() -> (PartLib, PartDef) {
         "XTAL".into(),
         relabel(
             fp("Crystal_3225.kicad_mod"),
-            &[("1", "X1", Passive), ("2", "GNDa", Passive), ("3", "X2", Passive), ("4", "GNDb", Passive)],
+            &[
+                ("1", "X1", Passive),
+                ("2", "GNDa", Passive),
+                ("3", "X2", Passive),
+                ("4", "GNDb", Passive),
+            ],
         ),
     );
 
@@ -161,7 +166,12 @@ fn build_lib() -> (PartLib, PartDef) {
         "LED".into(),
         relabel(
             fp("LED_WS2812B.kicad_mod"),
-            &[("1", "VDD", PowerIn), ("2", "DOUT", Output), ("3", "GND", Passive), ("4", "DIN", Input)],
+            &[
+                ("1", "VDD", PowerIn),
+                ("2", "DOUT", Output),
+                ("3", "GND", Passive),
+                ("4", "DIN", Input),
+            ],
         ),
     );
 
@@ -185,16 +195,29 @@ struct Builder {
 }
 impl Builder {
     fn new() -> Self {
-        Builder { s: Vec::new(), nets: BTreeMap::new(), net_order: Vec::new() }
+        Builder {
+            s: Vec::new(),
+            nets: BTreeMap::new(),
+            net_order: Vec::new(),
+        }
     }
     fn inst(&mut self, path: &str, part: &str) {
-        self.s.push(G::Instance { path: path.into(), part: part.into() });
+        self.s.push(G::Instance {
+            path: path.into(),
+            part: part.into(),
+        });
     }
     fn place(&mut self, path: &str, x: i64, y: i64) {
-        self.s.push(G::Place { path: path.into(), pos: Point::mm(x, y) });
+        self.s.push(G::Place {
+            path: path.into(),
+            pos: Point::mm(x, y),
+        });
     }
     fn fix(&mut self, path: &str, x: i64, y: i64) {
-        self.s.push(G::Fix { path: path.into(), pos: Point::mm(x, y) });
+        self.s.push(G::Fix {
+            path: path.into(),
+            pos: Point::mm(x, y),
+        });
     }
     fn near_pin(&mut self, a: &str, bc: &str, bp: &str, within_mm: i64) {
         self.s.push(G::NearPin {
@@ -209,11 +232,17 @@ impl Builder {
         if !self.nets.contains_key(name) {
             self.net_order.push(name.to_string());
         }
-        self.nets.entry(name.to_string()).or_default().extend_from_slice(pins);
+        self.nets
+            .entry(name.to_string())
+            .or_default()
+            .extend_from_slice(pins);
     }
     fn finish(mut self) -> Source {
         for name in &self.net_order {
-            self.s.push(G::ConnectPins { net: name.clone(), pins: self.nets[name].clone() });
+            self.s.push(G::ConnectPins {
+                net: name.clone(),
+                pins: self.nets[name].clone(),
+            });
         }
         self.s
     }
@@ -276,7 +305,8 @@ fn build_source() -> Source {
         "VBUS",
         &[
             p("J11", "VBUS"),
-            p("U3", "VIN"), p("U3", "EN"), // EN tied high to VIN -> always on
+            p("U3", "VIN"),
+            p("U3", "EN"), // EN tied high to VIN -> always on
         ],
     );
     // +3V3 rail from regulator output to every 3.3 V consumer. "IOVDD" fans out to
@@ -298,7 +328,10 @@ fn build_source() -> Source {
     // Core buck: VREG_LX -> L1 -> +DVDD (1.1V); VREG_FB senses +DVDD; PGND->GND.
     b.net("VREG_LX", &[p("U1", "VREG_LX"), p("L1", "1")]);
     // "DVDD" fans out to all three DVDD pads.
-    b.net("+DVDD", &[p("L1", "2"), p("U1", "VREG_FB"), p("U1", "DVDD")]);
+    b.net(
+        "+DVDD",
+        &[p("L1", "2"), p("U1", "VREG_FB"), p("U1", "DVDD")],
+    );
     b.net("GND", &[p("U1", "GND"), p("U1", "VREG_PGND")]);
 
     // VREG_AVDD: 33R from +3V3 + 4.7uF to GND (RC filter).
@@ -326,7 +359,15 @@ fn build_source() -> Source {
     b.net("XIN", &[p("U1", "XIN"), p("Y1", "X1"), p("C_X1", "1")]);
     b.net("XOUT", &[p("U1", "XOUT"), p("R_X", "1")]);
     b.net("XTAL2", &[p("R_X", "2"), p("Y1", "X2"), p("C_X2", "1")]);
-    b.net("GND", &[p("Y1", "GNDa"), p("Y1", "GNDb"), p("C_X1", "2"), p("C_X2", "2")]);
+    b.net(
+        "GND",
+        &[
+            p("Y1", "GNDa"),
+            p("Y1", "GNDb"),
+            p("C_X1", "2"),
+            p("C_X2", "2"),
+        ],
+    );
 
     // --- USB front-end: 27R series on DP/DM, CC 5.1k pulldowns --------------
     b.inst("R_DP", "R");
@@ -346,10 +387,12 @@ fn build_source() -> Source {
     b.net(
         "GND",
         &[
-            p("R_CC1", "2"), p("R_CC2", "2"),
+            p("R_CC1", "2"),
+            p("R_CC2", "2"),
             p("J11", "GND"), // fans out to all four GND pads
             p("J11", "SHIELD"),
-            p("U3", "GND"), p("D1", "GND"),
+            p("U3", "GND"),
+            p("D1", "GND"),
         ],
     );
 
@@ -412,11 +455,21 @@ fn build_source() -> Source {
     // are unused by design.
     b.s.push(G::NoConnect {
         pins: vec![
-            p("U1", "SWCLK"), p("U1", "SWDIO"),
-            p("U1", "GPIO21"), p("U1", "GPIO22"), p("U1", "GPIO23"), p("U1", "GPIO24"),
-            p("U1", "GPIO25"), p("U1", "GPIO26/ADC0"), p("U1", "GPIO27/ADC1"),
-            p("U1", "GPIO28/ADC2"), p("U1", "GPIO29/ADC3"),
-            p("D1", "DOUT"), p("J11", "SBU1"), p("J11", "SBU2"), p("U3", "NC"),
+            p("U1", "SWCLK"),
+            p("U1", "SWDIO"),
+            p("U1", "GPIO21"),
+            p("U1", "GPIO22"),
+            p("U1", "GPIO23"),
+            p("U1", "GPIO24"),
+            p("U1", "GPIO25"),
+            p("U1", "GPIO26/ADC0"),
+            p("U1", "GPIO27/ADC1"),
+            p("U1", "GPIO28/ADC2"),
+            p("U1", "GPIO29/ADC3"),
+            p("D1", "DOUT"),
+            p("J11", "SBU1"),
+            p("J11", "SBU2"),
+            p("U3", "NC"),
         ],
     });
 
@@ -428,22 +481,35 @@ fn build_source() -> Source {
 fn main() {
     let (lib, rp2350) = build_lib();
     println!("== Stage 1: RP2350A QFN-60 sourced + verified through framework ==");
-    println!("  RP2350A joined pins: {} (60 signal/power + 1 EP)", rp2350.pins.len());
+    println!(
+        "  RP2350A joined pins: {} (60 signal/power + 1 EP)",
+        rp2350.pins.len()
+    );
 
     let src = build_source();
-    let n_inst = src.iter().filter(|d| matches!(d, G::Instance { .. })).count();
-    let n_nets = src.iter().filter(|d| matches!(d, G::ConnectPins { .. })).count();
+    let n_inst = src
+        .iter()
+        .filter(|d| matches!(d, G::Instance { .. }))
+        .count();
+    let n_nets = src
+        .iter()
+        .filter(|d| matches!(d, G::ConnectPins { .. }))
+        .count();
     println!("\n== Stage 3: design authored ==");
     println!("  components: {n_inst}   nets: {n_nets}");
 
     let mut h = History::new(Default::default());
-    h.commit(Transaction::one(Command::SetSource(src)), &lib, "poc").unwrap();
+    h.commit(Transaction::one(Command::SetSource(src)), &lib, "poc")
+        .unwrap();
     let doc = h.doc();
     println!("  elaborated components: {}", doc.components.len());
     println!("  elaborated nets:       {}", doc.nets.len());
     let rep = &doc.report;
     if !rep.pin_conflicts.is_empty() || !rep.orphaned.is_empty() {
-        println!("  recon report: conflicts={:?} orphaned={:?}", rep.pin_conflicts, rep.orphaned);
+        println!(
+            "  recon report: conflicts={:?} orphaned={:?}",
+            rep.pin_conflicts, rep.orphaned
+        );
     }
 
     // ERC
@@ -463,12 +529,26 @@ fn main() {
     let rules = DesignRules::default();
     println!("\n== Stage 4: place + autoroute + DRC ==");
     let before = eng.query(doc, &lib, Key::Drc).as_drc().to_vec();
-    let unrouted_before = before.iter().filter(|v| matches!(v, ecad_core::route::Violation::Unrouted { .. })).count();
-    println!("  DRC before routing: {} violations ({unrouted_before} unrouted nets)", before.len());
+    let unrouted_before = before
+        .iter()
+        .filter(|v| matches!(v, ecad_core::route::Violation::Unrouted { .. }))
+        .count();
+    println!(
+        "  DRC before routing: {} violations ({unrouted_before} unrouted nets)",
+        before.len()
+    );
 
     let result = autoroute(doc, &lib, &rules);
-    let traces = result.commands.iter().filter(|c| matches!(c, Command::AddTrace(..))).count();
-    let vias = result.commands.iter().filter(|c| matches!(c, Command::AddVia(..))).count();
+    let traces = result
+        .commands
+        .iter()
+        .filter(|c| matches!(c, Command::AddTrace(..)))
+        .count();
+    let vias = result
+        .commands
+        .iter()
+        .filter(|c| matches!(c, Command::AddVia(..)))
+        .count();
     println!(
         "  autoroute: {} routed nets, {} unrouted nets ({traces} traces, {vias} vias)",
         result.routed.len(),
@@ -478,7 +558,8 @@ fn main() {
     println!("  unrouted: {:?}", result.unrouted);
 
     if !result.commands.is_empty() {
-        h.commit(Transaction(result.commands), &lib, "autoroute").unwrap();
+        h.commit(Transaction(result.commands), &lib, "autoroute")
+            .unwrap();
     }
     let doc = h.doc();
     let after = eng.query(doc, &lib, Key::Drc).as_drc().to_vec();
@@ -521,7 +602,12 @@ fn main() {
     // gerber_set already includes board.drl (== excellon_drill(doc)); call it
     // explicitly too only to assert the two agree.
     let gset = gerber_set(doc, &lib);
-    assert_eq!(gset.iter().find(|(n, _)| n == "board.drl").map(|(_, c)| c.as_str()), Some(excellon_drill(doc).as_str()));
+    assert_eq!(
+        gset.iter()
+            .find(|(n, _)| n == "board.drl")
+            .map(|(_, c)| c.as_str()),
+        Some(excellon_drill(doc).as_str())
+    );
     for (name, content) in gset {
         write(&name, &content, &mut wrote);
     }

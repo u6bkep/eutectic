@@ -69,11 +69,11 @@
 //! ```
 
 use crate::diagnostic::{Diagnostic, Location};
-use crate::doc::{Doc, Nm, Override, Point, Strength, MM};
-use crate::elaborate::{board_rect, GenDirective, RegionDecl, Source};
+use crate::doc::{Doc, MM, Nm, Override, Point, Strength};
+use crate::elaborate::{GenDirective, RegionDecl, Source, board_rect};
 use crate::geom::{KeepoutKind, Path, Role, Seg, Shape2D};
-use crate::route::Layer;
 use crate::id::EntityId;
+use crate::route::Layer;
 use std::collections::BTreeMap;
 
 /// The parsed tier-1 state: the generative program plus the ID-keyed override map.
@@ -159,7 +159,12 @@ fn render_directive(d: &GenDirective) -> String {
             s
         }
         GenDirective::Rotate { path, deg } => format!("rotate {path} {deg}"),
-        GenDirective::NearPin { a, b_comp, b_pin, within } => {
+        GenDirective::NearPin {
+            a,
+            b_comp,
+            b_pin,
+            within,
+        } => {
             format!("nearpin {a} {b_comp}.{b_pin} {}", fmt_len(*within))
         }
     }
@@ -236,7 +241,7 @@ fn parse_role(tok: &str) -> Result<Role, String> {
         other => {
             return Err(format!(
                 "region: unknown role `{other}` (conductor | void | keepout[-component|-drill|-route])"
-            ))
+            ));
         }
     })
 }
@@ -264,7 +269,9 @@ fn parse_layer(t: &str) -> Result<Layer, String> {
                 .filter(|&n| (1..=256).contains(&n));
             match inner {
                 Some(n) => Ok(Layer::Inner((n - 1) as u8)),
-                None => Err(format!("region: unknown layer `{t}` (F.Cu | B.Cu | In<n>.Cu)")),
+                None => Err(format!(
+                    "region: unknown layer `{t}` (F.Cu | B.Cu | In<n>.Cu)"
+                )),
             }
         }
     }
@@ -303,7 +310,10 @@ pub fn parse(text: &str) -> Result<Parsed, Vec<Diagnostic>> {
             Err(e) => errors.push(Diagnostic::error(
                 "E_PARSE",
                 format!("{e} (in `{line}`)"),
-                Location::Span { line: lineno, col: 1 },
+                Location::Span {
+                    line: lineno,
+                    col: 1,
+                },
             )),
         }
     }
@@ -340,23 +350,34 @@ fn parse_line(line: &str) -> Result<Item, String> {
         "board" => {
             let path = extract_path(rest)?;
             if !path_is_polygon(&path) {
-                return Err("board needs ≥3 outline points (or an arc edge): board (x,y) (x,y) (x,y) ...".into());
+                return Err(
+                    "board needs ≥3 outline points (or an arc edge): board (x,y) (x,y) (x,y) ..."
+                        .into(),
+                );
             }
-            Item::Directive(GenDirective::Board { outline: Shape2D::polygon_path(path, 0) })
+            Item::Directive(GenDirective::Board {
+                outline: Shape2D::polygon_path(path, 0),
+            })
         }
         "boardrect" => {
             let pts = extract_points(rest)?;
             if pts.len() != 2 {
-                return Err("boardrect needs two corners: boardrect (minx,miny) (maxx,maxy)".into());
+                return Err(
+                    "boardrect needs two corners: boardrect (minx,miny) (maxx,maxy)".into(),
+                );
             }
             Item::Directive(board_rect(pts[0], pts[1]))
         }
         "cutout" => {
             let path = extract_path(rest)?;
             if !path_is_polygon(&path) {
-                return Err("cutout needs ≥3 points (or an arc edge): cutout (x,y) (x,y) (x,y) ...".into());
+                return Err(
+                    "cutout needs ≥3 points (or an arc edge): cutout (x,y) (x,y) (x,y) ...".into(),
+                );
             }
-            Item::Directive(GenDirective::Cutout { shape: Shape2D::polygon_path(path, 0) })
+            Item::Directive(GenDirective::Cutout {
+                shape: Shape2D::polygon_path(path, 0),
+            })
         }
         "region" => {
             // `region <role> [net=<n>] [layer=<layer>] (x,y) (x,y) (x,y) ...`. Prefix
@@ -400,8 +421,12 @@ fn parse_line(line: &str) -> Result<Item, String> {
             let (a, b, len) = two_tokens_and_len(rest, "minsep <a> <b> <len>")?;
             Item::Directive(GenDirective::MinSep { a, b, gap: len })
         }
-        "alignx" => Item::Directive(GenDirective::AlignX { nodes: node_list(rest, "alignx")? }),
-        "aligny" => Item::Directive(GenDirective::AlignY { nodes: node_list(rest, "aligny")? }),
+        "alignx" => Item::Directive(GenDirective::AlignX {
+            nodes: node_list(rest, "alignx")?,
+        }),
+        "aligny" => Item::Directive(GenDirective::AlignY {
+            nodes: node_list(rest, "aligny")?,
+        }),
         "rotate" => {
             let (path, deg) = two_tokens(rest, "rotate <path> <deg>")?;
             let deg: i32 = deg
@@ -412,7 +437,12 @@ fn parse_line(line: &str) -> Result<Item, String> {
         "nearpin" => {
             let (a, bpin, len) = two_tokens_and_len(rest, "nearpin <a> <bComp>.<bPin> <len>")?;
             let (b_comp, b_pin) = split_last_dot(&bpin, "pin")?;
-            Item::Directive(GenDirective::NearPin { a, b_comp, b_pin, within: len })
+            Item::Directive(GenDirective::NearPin {
+                a,
+                b_comp,
+                b_pin,
+                within: len,
+            })
         }
         "connect" => {
             let (a, b) = two_tokens(rest, "connect <compA>.<port> <compB>.<port>")?;
@@ -424,7 +454,9 @@ fn parse_line(line: &str) -> Result<Item, String> {
         "net" => {
             let toks: Vec<&str> = rest.split_whitespace().collect();
             if toks.len() < 2 {
-                return Err("net needs a name and at least one pin: net <name> <comp>.<pin> ...".into());
+                return Err(
+                    "net needs a name and at least one pin: net <name> <comp>.<pin> ...".into(),
+                );
             }
             let net = toks[0].to_string();
             let mut pins = Vec::new();
@@ -446,8 +478,18 @@ fn parse_line(line: &str) -> Result<Item, String> {
         }
         "hint" | "pin" => {
             let (path, pos) = path_and_point(rest)?;
-            let strength = if kw == "pin" { Strength::Pin } else { Strength::Hint };
-            Item::Override(EntityId::new(path), Override { pos: Some(pos), strength })
+            let strength = if kw == "pin" {
+                Strength::Pin
+            } else {
+                Strength::Hint
+            };
+            Item::Override(
+                EntityId::new(path),
+                Override {
+                    pos: Some(pos),
+                    strength,
+                },
+            )
         }
         other => return Err(format!("unknown directive `{other}`")),
     })
@@ -466,7 +508,11 @@ fn two_tokens_and_len(rest: &str, usage: &str) -> Result<(String, String, Nm), S
     if toks.len() != 3 {
         return Err(format!("expected: {usage}"));
     }
-    Ok((toks[0].to_string(), toks[1].to_string(), parse_len(toks[2])?))
+    Ok((
+        toks[0].to_string(),
+        toks[1].to_string(),
+        parse_len(toks[2])?,
+    ))
 }
 
 fn node_list(rest: &str, kw: &str) -> Result<Vec<String>, String> {
@@ -519,17 +565,24 @@ fn extract_path(s: &str) -> Result<Path, String> {
     while !rest.is_empty() {
         if let Some(after) = rest.strip_prefix('(') {
             let close = after.find(')').ok_or("unbalanced '(' in coordinate")?;
-            let (xs, ys) = after[..close].split_once(',').ok_or("coordinate must be `(x, y)`")?;
-            toks.push(PTok::Coord(Point { x: parse_len(xs.trim())?, y: parse_len(ys.trim())? }));
+            let (xs, ys) = after[..close]
+                .split_once(',')
+                .ok_or("coordinate must be `(x, y)`")?;
+            toks.push(PTok::Coord(Point {
+                x: parse_len(xs.trim())?,
+                y: parse_len(ys.trim())?,
+            }));
             rest = after[close + 1..].trim_start();
         } else {
-            let end = rest.find(|c: char| c.is_whitespace() || c == '(').unwrap_or(rest.len());
+            let end = rest
+                .find(|c: char| c.is_whitespace() || c == '(')
+                .unwrap_or(rest.len());
             match &rest[..end] {
                 "arc" => toks.push(PTok::Arc),
                 other => {
                     return Err(format!(
                         "unexpected token `{other}` in path (expected a coordinate or `arc`)"
-                    ))
+                    ));
                 }
             }
             rest = rest[end..].trim_start();
@@ -548,7 +601,9 @@ fn extract_path(s: &str) -> Result<Path, String> {
             PTok::Arc => {
                 let mid = match it.next() {
                     Some(PTok::Coord(p)) => p,
-                    _ => return Err("`arc` needs a midpoint coordinate: arc (mx,my) (ex,ey)".into()),
+                    _ => {
+                        return Err("`arc` needs a midpoint coordinate: arc (mx,my) (ex,ey)".into());
+                    }
                 };
                 let end = match it.next() {
                     Some(PTok::Coord(p)) => p,
@@ -573,11 +628,16 @@ fn extract_points(s: &str) -> Result<Vec<Point>, String> {
     let mut pts = Vec::new();
     let mut rest = s;
     while let Some(open) = rest.find('(') {
-        let close_rel = rest[open..].find(')').ok_or("unbalanced '(' in coordinate")?;
+        let close_rel = rest[open..]
+            .find(')')
+            .ok_or("unbalanced '(' in coordinate")?;
         let close = open + close_rel;
         let inner = &rest[open + 1..close];
         let (xs, ys) = inner.split_once(',').ok_or("coordinate must be `(x, y)`")?;
-        pts.push(Point { x: parse_len(xs.trim())?, y: parse_len(ys.trim())? });
+        pts.push(Point {
+            x: parse_len(xs.trim())?,
+            y: parse_len(ys.trim())?,
+        });
         rest = &rest[close + 1..];
     }
     // Anything non-whitespace outside the parens is a malformed coordinate.
@@ -622,10 +682,14 @@ fn parse_mm(body: &str) -> Result<Nm, String> {
     let whole: i64 = if whole_str.is_empty() {
         0
     } else {
-        whole_str.parse().map_err(|_| format!("`{body}mm` has a non-numeric whole part"))?
+        whole_str
+            .parse()
+            .map_err(|_| format!("`{body}mm` has a non-numeric whole part"))?
     };
     if frac_str.len() > 6 {
-        return Err(format!("`{body}mm` has sub-nanometre precision (max 6 decimal places)"));
+        return Err(format!(
+            "`{body}mm` has sub-nanometre precision (max 6 decimal places)"
+        ));
     }
     let frac: i64 = if frac_str.is_empty() {
         0
@@ -656,8 +720,14 @@ mod tests {
 
     fn uart_link() -> Source {
         vec![
-            GenDirective::Instance { path: "mcu".into(), part: "MCU".into() },
-            GenDirective::Instance { path: "sens".into(), part: "Sensor".into() },
+            GenDirective::Instance {
+                path: "mcu".into(),
+                part: "MCU".into(),
+            },
+            GenDirective::Instance {
+                path: "sens".into(),
+                part: "Sensor".into(),
+            },
             GenDirective::ConnectInterface {
                 a: ("mcu".into(), "uart".into()),
                 b: ("sens".into(), "uart".into()),
@@ -668,27 +738,74 @@ mod tests {
     /// A scene exercising Board / Near / MinSep / AlignY / Fix.
     fn placement_scene() -> Source {
         vec![
-            GenDirective::Instance { path: "reg".into(), part: "LDO".into() },
-            GenDirective::Instance { path: "c1".into(), part: "Cap".into() },
-            GenDirective::Instance { path: "c2".into(), part: "Cap".into() },
-            GenDirective::Fix { path: "reg".into(), pos: Point::mm(0, 0) },
+            GenDirective::Instance {
+                path: "reg".into(),
+                part: "LDO".into(),
+            },
+            GenDirective::Instance {
+                path: "c1".into(),
+                part: "Cap".into(),
+            },
+            GenDirective::Instance {
+                path: "c2".into(),
+                part: "Cap".into(),
+            },
+            GenDirective::Fix {
+                path: "reg".into(),
+                pos: Point::mm(0, 0),
+            },
             board_rect(Point::mm(0, 0), Point::mm(50, 50)),
-            GenDirective::Near { a: "c1".into(), b: "reg".into(), within: 3 * MM },
-            GenDirective::Near { a: "c2".into(), b: "reg".into(), within: 3 * MM },
-            GenDirective::MinSep { a: "c1".into(), b: "c2".into(), gap: 4 * MM },
-            GenDirective::AlignY { nodes: vec!["c1".into(), "c2".into()] },
+            GenDirective::Near {
+                a: "c1".into(),
+                b: "reg".into(),
+                within: 3 * MM,
+            },
+            GenDirective::Near {
+                a: "c2".into(),
+                b: "reg".into(),
+                within: 3 * MM,
+            },
+            GenDirective::MinSep {
+                a: "c1".into(),
+                b: "c2".into(),
+                gap: 4 * MM,
+            },
+            GenDirective::AlignY {
+                nodes: vec!["c1".into(), "c2".into()],
+            },
         ]
     }
 
     /// A hand-built source touching *every* GenDirective variant.
     fn all_variants() -> Source {
         vec![
-            GenDirective::Instance { path: "psu.reg".into(), part: "LDO".into() },
-            GenDirective::Instance { path: "psu.dec[0]".into(), part: "Cap".into() },
-            GenDirective::Instance { path: "mcu".into(), part: "MCU".into() },
-            GenDirective::Instance { path: "sens".into(), part: "Sensor".into() },
-            GenDirective::Place { path: "psu.dec[0]".into(), pos: Point::mm(5, 5) },
-            GenDirective::Fix { path: "psu.reg".into(), pos: Point { x: 1, y: -2_500_000 } },
+            GenDirective::Instance {
+                path: "psu.reg".into(),
+                part: "LDO".into(),
+            },
+            GenDirective::Instance {
+                path: "psu.dec[0]".into(),
+                part: "Cap".into(),
+            },
+            GenDirective::Instance {
+                path: "mcu".into(),
+                part: "MCU".into(),
+            },
+            GenDirective::Instance {
+                path: "sens".into(),
+                part: "Sensor".into(),
+            },
+            GenDirective::Place {
+                path: "psu.dec[0]".into(),
+                pos: Point::mm(5, 5),
+            },
+            GenDirective::Fix {
+                path: "psu.reg".into(),
+                pos: Point {
+                    x: 1,
+                    y: -2_500_000,
+                },
+            },
             board_rect(Point::mm(0, 0), Point::mm(50, 50)),
             GenDirective::Cutout {
                 shape: Shape2D::polygon(vec![
@@ -719,11 +836,26 @@ mod tests {
                 net: None,
                 layer: Layer::Top,
             }),
-            GenDirective::Near { a: "psu.dec[0]".into(), b: "psu.reg".into(), within: 2 * MM },
-            GenDirective::MinSep { a: "psu.dec[0]".into(), b: "mcu".into(), gap: MM },
-            GenDirective::AlignX { nodes: vec!["psu.reg".into(), "psu.dec[0]".into()] },
-            GenDirective::AlignY { nodes: vec!["mcu".into(), "sens".into()] },
-            GenDirective::Rotate { path: "psu.reg".into(), deg: 90 },
+            GenDirective::Near {
+                a: "psu.dec[0]".into(),
+                b: "psu.reg".into(),
+                within: 2 * MM,
+            },
+            GenDirective::MinSep {
+                a: "psu.dec[0]".into(),
+                b: "mcu".into(),
+                gap: MM,
+            },
+            GenDirective::AlignX {
+                nodes: vec!["psu.reg".into(), "psu.dec[0]".into()],
+            },
+            GenDirective::AlignY {
+                nodes: vec!["mcu".into(), "sens".into()],
+            },
+            GenDirective::Rotate {
+                path: "psu.reg".into(),
+                deg: 90,
+            },
             GenDirective::NearPin {
                 a: "psu.dec[0]".into(),
                 b_comp: "psu.reg".into(),
@@ -736,7 +868,10 @@ mod tests {
             },
             GenDirective::ConnectPins {
                 net: "VBUS".into(),
-                pins: vec![("psu.reg".into(), "VOUT".into()), ("psu.dec[0]".into(), "p1".into())],
+                pins: vec![
+                    ("psu.reg".into(), "VOUT".into()),
+                    ("psu.dec[0]".into(), "p1".into()),
+                ],
             },
             // GND is connected so the conductor pour above references a real net.
             GenDirective::ConnectPins {
@@ -744,19 +879,27 @@ mod tests {
                 pins: vec![("psu.dec[0]".into(), "p2".into())],
             },
             GenDirective::NoConnect {
-                pins: vec![("psu.reg".into(), "GND".into()), ("mcu".into(), "GPIO0".into())],
+                pins: vec![
+                    ("psu.reg".into(), "GND".into()),
+                    ("mcu".into(), "GPIO0".into()),
+                ],
             },
         ]
     }
 
     fn doc_of(source: Source, overrides: BTreeMap<EntityId, Override>) -> Doc {
-        Doc { source, overrides, ..Default::default() }
+        Doc {
+            source,
+            overrides,
+            ..Default::default()
+        }
     }
 
     fn placed(src: Source) -> Doc {
         let lib = part_library();
         let mut h = History::new(Default::default());
-        h.commit(Transaction::one(Command::SetSource(src)), &lib, "s").unwrap();
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "s")
+            .unwrap();
         h.doc().clone()
     }
 
@@ -769,11 +912,20 @@ mod tests {
         let mut overrides = BTreeMap::new();
         overrides.insert(
             EntityId::new("psu.dec[0]"),
-            Override { pos: Some(Point::mm(7, 3)), strength: Strength::Hint },
+            Override {
+                pos: Some(Point::mm(7, 3)),
+                strength: Strength::Hint,
+            },
         );
         overrides.insert(
             EntityId::new("mcu"),
-            Override { pos: Some(Point { x: 12_345_678, y: -500_000 }), strength: Strength::Pin },
+            Override {
+                pos: Some(Point {
+                    x: 12_345_678,
+                    y: -500_000,
+                }),
+                strength: Strength::Pin,
+            },
         );
         let doc = doc_of(all_variants(), overrides);
 
@@ -835,7 +987,10 @@ region conductor layer=F.Cu (0mm, 0mm) (4mm, 0mm) arc (5mm, 2mm) (4mm, 4mm) (0mm
                 outline: Shape2D::polygon_path(
                     Path {
                         start: Point::mm(-2, 0),
-                        segs: vec![Seg::Arc { mid: Point::mm(0, 2), end: Point::mm(2, 0) }],
+                        segs: vec![Seg::Arc {
+                            mid: Point::mm(0, 2),
+                            end: Point::mm(2, 0)
+                        }],
                     },
                     0,
                 )
@@ -846,9 +1001,16 @@ region conductor layer=F.Cu (0mm, 0mm) (4mm, 0mm) arc (5mm, 2mm) (4mm, 4mm) (0mm
             GenDirective::Region(r) => assert_eq!(
                 r.shape.path().segs,
                 vec![
-                    Seg::Line { end: Point::mm(4, 0) },
-                    Seg::Arc { mid: Point::mm(5, 2), end: Point::mm(4, 4) },
-                    Seg::Line { end: Point::mm(0, 4) },
+                    Seg::Line {
+                        end: Point::mm(4, 0)
+                    },
+                    Seg::Arc {
+                        mid: Point::mm(5, 2),
+                        end: Point::mm(4, 4)
+                    },
+                    Seg::Line {
+                        end: Point::mm(0, 4)
+                    },
                 ],
             ),
             other => panic!("expected a region, got {other:?}"),
@@ -856,15 +1018,27 @@ region conductor layer=F.Cu (0mm, 0mm) (4mm, 0mm) arc (5mm, 2mm) (4mm, 4mm) (0mm
         // Canonical serialization re-parses to the same source (arc markers survive).
         let doc = doc_of(src.clone(), BTreeMap::new());
         let canon = serialize(&doc);
-        assert!(canon.contains("arc ("), "serialized form carries `arc` markers:\n{canon}");
+        assert!(
+            canon.contains("arc ("),
+            "serialized form carries `arc` markers:\n{canon}"
+        );
         assert_eq!(parse(&canon).unwrap().0, src);
     }
 
     #[test]
     fn arc_path_parse_errors_are_reported() {
-        assert!(parse("board (0mm,0mm) arc (1mm,1mm)").is_err(), "arc needs mid AND end");
-        assert!(parse("board arc (0mm,0mm) (1mm,1mm)").is_err(), "path must start with a coord");
-        assert!(parse("board (0mm,0mm) bogus (1mm,1mm)").is_err(), "unknown path token");
+        assert!(
+            parse("board (0mm,0mm) arc (1mm,1mm)").is_err(),
+            "arc needs mid AND end"
+        );
+        assert!(
+            parse("board arc (0mm,0mm) (1mm,1mm)").is_err(),
+            "path must start with a coord"
+        );
+        assert!(
+            parse("board (0mm,0mm) bogus (1mm,1mm)").is_err(),
+            "unknown path token"
+        );
     }
 
     /// Regions are assembled by the shared reader and survive a real commit (they do
@@ -875,9 +1049,15 @@ region conductor layer=F.Cu (0mm, 0mm) (4mm, 0mm) arc (5mm, 2mm) (4mm, 4mm) (0mm
         let mut h = History::new(Default::default());
         let src = vec![
             board_rect(Point::mm(0, 0), Point::mm(20, 20)),
-            GenDirective::Instance { path: "c0".into(), part: "Cap".into() },
+            GenDirective::Instance {
+                path: "c0".into(),
+                part: "Cap".into(),
+            },
             // GND must be a connected net for the conductor pour to validate.
-            GenDirective::ConnectPins { net: "GND".into(), pins: vec![("c0".into(), "p2".into())] },
+            GenDirective::ConnectPins {
+                net: "GND".into(),
+                pins: vec![("c0".into(), "p2".into())],
+            },
             GenDirective::Region(RegionDecl {
                 shape: Shape2D::polygon(vec![Point::mm(0, 0), Point::mm(20, 0), Point::mm(20, 20)]),
                 role: Role::Conductor,
@@ -885,7 +1065,8 @@ region conductor layer=F.Cu (0mm, 0mm) (4mm, 0mm) arc (5mm, 2mm) (4mm, 4mm) (0mm
                 layer: Layer::Bottom,
             }),
         ];
-        h.commit(Transaction::one(Command::SetSource(src)), &lib, "r").expect("elaborates");
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "r")
+            .expect("elaborates");
         let regions = crate::elaborate::regions(&h.doc().source);
         assert_eq!(regions.len(), 1);
         assert_eq!(regions[0].role, Role::Conductor);
@@ -900,7 +1081,10 @@ region conductor layer=F.Cu (0mm, 0mm) (4mm, 0mm) arc (5mm, 2mm) (4mm, 4mm) (0mm
         let mut overrides = BTreeMap::new();
         overrides.insert(
             EntityId::new("psu.dec[0]"),
-            Override { pos: Some(Point { x: 1, y: 999_999 }), strength: Strength::Pin },
+            Override {
+                pos: Some(Point { x: 1, y: 999_999 }),
+                strength: Strength::Pin,
+            },
         );
         let doc = doc_of(all_variants(), overrides);
 
@@ -922,11 +1106,27 @@ region conductor layer=F.Cu (0mm, 0mm) (4mm, 0mm) arc (5mm, 2mm) (4mm, 4mm) (0mm
             near psu.reg psu.reg 0.5mm
         ";
         let (src, _ov) = parse(text).unwrap();
-        assert_eq!(src[1], GenDirective::Place { path: "psu.reg".into(), pos: Point::mm(30, 20) });
-        assert_eq!(src[2], GenDirective::Fix { path: "psu.reg".into(), pos: Point::mm(30, 20) });
+        assert_eq!(
+            src[1],
+            GenDirective::Place {
+                path: "psu.reg".into(),
+                pos: Point::mm(30, 20)
+            }
+        );
+        assert_eq!(
+            src[2],
+            GenDirective::Fix {
+                path: "psu.reg".into(),
+                pos: Point::mm(30, 20)
+            }
+        );
         assert_eq!(
             src[3],
-            GenDirective::Near { a: "psu.reg".into(), b: "psu.reg".into(), within: 500_000 }
+            GenDirective::Near {
+                a: "psu.reg".into(),
+                b: "psu.reg".into(),
+                within: 500_000
+            }
         );
     }
 
@@ -966,9 +1166,17 @@ region conductor layer=F.Cu (0mm, 0mm) (4mm, 0mm) arc (5mm, 2mm) (4mm, 4mm) (0mm
         // An *effective* nudge + pin: kept, report stays clean, so it round-trips.
         let lib = part_library();
         let mut h = History::new(Default::default());
-        h.commit(Transaction::one(Command::SetSource(psu_module(3))), &lib, "psu").unwrap();
         h.commit(
-            Transaction::one(Command::Nudge(EntityId::new("psu.dec[1]"), Point::mm(42, 7))),
+            Transaction::one(Command::SetSource(psu_module(3))),
+            &lib,
+            "psu",
+        )
+        .unwrap();
+        h.commit(
+            Transaction::one(Command::Nudge(
+                EntityId::new("psu.dec[1]"),
+                Point::mm(42, 7),
+            )),
             &lib,
             "nudge",
         )
@@ -980,7 +1188,10 @@ region conductor layer=F.Cu (0mm, 0mm) (4mm, 0mm) arc (5mm, 2mm) (4mm, 4mm) (0mm
         )
         .unwrap();
         let d = h.doc();
-        assert!(d.report.decayed.is_empty(), "fixture should not have decayed hints");
+        assert!(
+            d.report.decayed.is_empty(),
+            "fixture should not have decayed hints"
+        );
         assert_elaboration_equiv(d);
     }
 
@@ -999,10 +1210,22 @@ region conductor layer=F.Cu (0mm, 0mm) (4mm, 0mm) arc (5mm, 2mm) (4mm, 4mm) (0mm
     #[test]
     fn equiv_physical_scene() {
         let scene = vec![
-            GenDirective::Instance { path: "reg".into(), part: "LDO".into() },
-            GenDirective::Instance { path: "dec".into(), part: "Cap".into() },
-            GenDirective::Fix { path: "reg".into(), pos: Point::mm(0, 0) },
-            GenDirective::Rotate { path: "reg".into(), deg: 90 },
+            GenDirective::Instance {
+                path: "reg".into(),
+                part: "LDO".into(),
+            },
+            GenDirective::Instance {
+                path: "dec".into(),
+                part: "Cap".into(),
+            },
+            GenDirective::Fix {
+                path: "reg".into(),
+                pos: Point::mm(0, 0),
+            },
+            GenDirective::Rotate {
+                path: "reg".into(),
+                deg: 90,
+            },
             GenDirective::NearPin {
                 a: "dec".into(),
                 b_comp: "reg".into(),
@@ -1018,7 +1241,13 @@ region conductor layer=F.Cu (0mm, 0mm) (4mm, 0mm) arc (5mm, 2mm) (4mm, 4mm) (0mm
     #[test]
     fn parse_rotate_and_nearpin() {
         let (src, _ov) = parse("rotate u1 -90\nnearpin c1 u1.VOUT 1.5mm").unwrap();
-        assert_eq!(src[0], GenDirective::Rotate { path: "u1".into(), deg: -90 });
+        assert_eq!(
+            src[0],
+            GenDirective::Rotate {
+                path: "u1".into(),
+                deg: -90
+            }
+        );
         assert_eq!(
             src[1],
             GenDirective::NearPin {
@@ -1045,7 +1274,8 @@ region conductor layer=F.Cu (0mm, 0mm) (4mm, 0mm) arc (5mm, 2mm) (4mm, 4mm) (0mm
         // Same scene authored as text, loaded atomically.
         let text = serialize(&reference);
         let mut h = History::new(Default::default());
-        h.commit(Transaction::one(Command::LoadText(text)), &lib, "load").unwrap();
+        h.commit(Transaction::one(Command::LoadText(text)), &lib, "load")
+            .unwrap();
         let loaded = h.doc();
 
         assert_eq!(loaded.source, reference.source);
@@ -1057,7 +1287,12 @@ region conductor layer=F.Cu (0mm, 0mm) (4mm, 0mm) arc (5mm, 2mm) (4mm, 4mm) (0mm
     fn load_text_is_atomic_on_parse_error() {
         let lib = part_library();
         let mut h = History::new(Default::default());
-        h.commit(Transaction::one(Command::SetSource(psu_module(2))), &lib, "psu").unwrap();
+        h.commit(
+            Transaction::one(Command::SetSource(psu_module(2))),
+            &lib,
+            "psu",
+        )
+        .unwrap();
         let before = crate::project::render(h.doc());
         // Garbage text must fail and leave head untouched.
         let r = h.commit(
@@ -1075,13 +1310,19 @@ region conductor layer=F.Cu (0mm, 0mm) (4mm, 0mm) arc (5mm, 2mm) (4mm, 4mm) (0mm
     fn parse_error_unknown_directive() {
         let e = crate::diagnostic::render(&parse("frobnicate a b").unwrap_err());
         assert!(e.contains("unknown directive"), "got: {e}");
-        assert!(e.contains("frobnicate"), "error should name the offending line: {e}");
+        assert!(
+            e.contains("frobnicate"),
+            "error should name the offending line: {e}"
+        );
     }
 
     #[test]
     fn parse_error_bad_coordinate() {
         let e = crate::diagnostic::render(&parse("place foo (3mm)").unwrap_err());
-        assert!(e.contains("1:1"), "error should carry the line location: {e}");
+        assert!(
+            e.contains("1:1"),
+            "error should carry the line location: {e}"
+        );
     }
 
     #[test]
@@ -1097,7 +1338,10 @@ region conductor layer=F.Cu (0mm, 0mm) (4mm, 0mm) arc (5mm, 2mm) (4mm, 4mm) (0mm
         let diags = parse("frobnicate x\ninst u1 LDO\nplace foo (3mm)").unwrap_err();
         assert_eq!(diags.len(), 2, "both bad lines reported: {diags:?}");
         let text = crate::diagnostic::render(&diags);
-        assert!(text.contains("1:1") && text.contains("3:1"), "located by line: {text}");
+        assert!(
+            text.contains("1:1") && text.contains("3:1"),
+            "located by line: {text}"
+        );
     }
 
     #[test]

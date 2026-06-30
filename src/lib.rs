@@ -19,9 +19,9 @@ pub mod autoroute;
 pub mod command;
 pub mod diagnostic;
 pub mod doc;
-pub mod geom;
 pub mod elaborate;
 pub mod export;
+pub mod geom;
 pub mod history;
 pub mod id;
 pub mod kicad;
@@ -39,28 +39,33 @@ pub fn boot(
     lib: &part::PartLib,
 ) -> Result<doc::Doc, Vec<diagnostic::Diagnostic>> {
     let mut h = history::History::new(doc::Doc::default());
-    h.commit(command::Transaction::one(command::Command::SetSource(source)), lib, "boot")?;
+    h.commit(
+        command::Transaction::one(command::Command::SetSource(source)),
+        lib,
+        "boot",
+    )?;
     Ok(h.doc().clone())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::command::{suggested_resolutions, Command, Resolution, Transaction};
-    use super::doc::{DecayReason, Doc, Nm, Point, Provenance, MM};
-    use super::elaborate::{board_rect, psu_module, GenDirective, Source};
+    use super::command::{Command, Resolution, Transaction, suggested_resolutions};
+    use super::doc::{DecayReason, Doc, MM, Nm, Point, Provenance};
+    use super::elaborate::{GenDirective, Source, board_rect, psu_module};
     use super::geom::{BoardShape, Shape2D};
     use super::history::History;
     use super::id::{EntityId, NetId, TraceId, ViaId};
     use super::part::part_library;
     use super::query::{Engine, Key};
     use super::route::{Layer, Trace, Via, Violation};
-    use super::solve::{dist, solve, Constraint, Problem, PLACE_TOL};
+    use super::solve::{Constraint, PLACE_TOL, Problem, dist, solve};
     use std::collections::{BTreeMap, BTreeSet};
 
     fn placed(src: Source) -> Doc {
         let lib = part_library();
         let mut h = History::new(Default::default());
-        h.commit(Transaction::one(Command::SetSource(src)), &lib, "s").unwrap();
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "s")
+            .unwrap();
         h.doc().clone()
     }
     fn pos(d: &Doc, id: &str) -> Point {
@@ -69,8 +74,14 @@ mod tests {
 
     fn uart_link() -> Source {
         vec![
-            GenDirective::Instance { path: "mcu".into(), part: "MCU".into() },
-            GenDirective::Instance { path: "sens".into(), part: "Sensor".into() },
+            GenDirective::Instance {
+                path: "mcu".into(),
+                part: "MCU".into(),
+            },
+            GenDirective::Instance {
+                path: "sens".into(),
+                part: "Sensor".into(),
+            },
             GenDirective::ConnectInterface {
                 a: ("mcu".into(), "uart".into()),
                 b: ("sens".into(), "uart".into()),
@@ -82,7 +93,12 @@ mod tests {
     fn interface_connection_crosses_tx_rx() {
         let lib = part_library();
         let mut h = History::new(Default::default());
-        h.commit(Transaction::one(Command::SetSource(uart_link())), &lib, "uart").unwrap();
+        h.commit(
+            Transaction::one(Command::SetSource(uart_link())),
+            &lib,
+            "uart",
+        )
+        .unwrap();
         let mut eng = Engine::new();
         let nl = eng.query(h.doc(), &lib, Key::Netlist);
         let nl = nl.as_netlist();
@@ -91,11 +107,15 @@ mod tests {
         let tx_net = nl
             .iter()
             .find(|(_, pins)| {
-                pins.iter().any(|(p, _)| p.pin == "uart.tx" && p.comp.as_str() == "mcu")
+                pins.iter()
+                    .any(|(p, _)| p.pin == "uart.tx" && p.comp.as_str() == "mcu")
             })
             .expect("tx net");
-        let names: Vec<String> =
-            tx_net.1.iter().map(|(p, _)| format!("{}.{}", p.comp, p.pin)).collect();
+        let names: Vec<String> = tx_net
+            .1
+            .iter()
+            .map(|(p, _)| format!("{}.{}", p.comp, p.pin))
+            .collect();
         assert!(names.contains(&"sens.uart.rx".to_string()), "got {names:?}");
         assert!(!names.contains(&"sens.uart.tx".to_string()));
     }
@@ -104,10 +124,18 @@ mod tests {
     fn transaction_is_atomic_on_error() {
         let lib = part_library();
         let mut h = History::new(Default::default());
-        h.commit(Transaction::one(Command::SetSource(psu_module(2))), &lib, "psu").unwrap();
+        h.commit(
+            Transaction::one(Command::SetSource(psu_module(2))),
+            &lib,
+            "psu",
+        )
+        .unwrap();
         let before = super::project::render(h.doc());
         // A source referencing an unknown part must fail and leave head untouched.
-        let bad = vec![GenDirective::Instance { path: "x".into(), part: "Nope".into() }];
+        let bad = vec![GenDirective::Instance {
+            path: "x".into(),
+            part: "Nope".into(),
+        }];
         let r = h.commit(Transaction::one(Command::SetSource(bad)), &lib, "bad");
         assert!(r.is_err());
         assert_eq!(before, super::project::render(h.doc()));
@@ -117,7 +145,12 @@ mod tests {
     fn nudge_skips_both_queries_geometry_only() {
         let lib = part_library();
         let mut h = History::new(Default::default());
-        h.commit(Transaction::one(Command::SetSource(psu_module(2))), &lib, "psu").unwrap();
+        h.commit(
+            Transaction::one(Command::SetSource(psu_module(2))),
+            &lib,
+            "psu",
+        )
+        .unwrap();
         let mut eng = Engine::new();
         eng.query(h.doc(), &lib, Key::Erc);
         let (n0, e0) = (eng.count(Key::Netlist), eng.count(Key::Erc));
@@ -131,7 +164,11 @@ mod tests {
         .unwrap();
         eng.query(h.doc(), &lib, Key::Erc);
         // Neither query re-ran: connectivity input was untouched.
-        assert_eq!(eng.count(Key::Netlist), n0, "netlist must not recompute on a nudge");
+        assert_eq!(
+            eng.count(Key::Netlist),
+            n0,
+            "netlist must not recompute on a nudge"
+        );
         assert_eq!(eng.count(Key::Erc), e0, "erc must not recompute on a nudge");
     }
 
@@ -139,7 +176,12 @@ mod tests {
     fn early_cutoff_skips_erc_when_netlist_value_unchanged() {
         let lib = part_library();
         let mut h = History::new(Default::default());
-        h.commit(Transaction::one(Command::SetSource(psu_module(2))), &lib, "psu").unwrap();
+        h.commit(
+            Transaction::one(Command::SetSource(psu_module(2))),
+            &lib,
+            "psu",
+        )
+        .unwrap();
         let mut eng = Engine::new();
         eng.query(h.doc(), &lib, Key::Erc);
         let (n0, e0) = (eng.count(Key::Netlist), eng.count(Key::Erc));
@@ -148,8 +190,12 @@ mod tests {
         // changed) so Netlist recomputes, but the resolved netlist value is
         // identical -> ERC must be skipped by early cutoff.
         let mut src = psu_module(2);
-        src.push(GenDirective::Instance { path: "psu.spare".into(), part: "Cap".into() });
-        h.commit(Transaction::one(Command::SetSource(src)), &lib, "spare").unwrap();
+        src.push(GenDirective::Instance {
+            path: "psu.spare".into(),
+            part: "Cap".into(),
+        });
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "spare")
+            .unwrap();
         eng.query(h.doc(), &lib, Key::Erc);
         assert_eq!(eng.count(Key::Netlist), n0 + 1, "netlist should recompute");
         assert_eq!(eng.count(Key::Erc), e0, "erc should be cut off");
@@ -185,7 +231,10 @@ mod tests {
 
     fn dup_power_source() -> Source {
         vec![
-            GenDirective::Instance { path: "u1".into(), part: "PWRCHIP".into() },
+            GenDirective::Instance {
+                path: "u1".into(),
+                part: "PWRCHIP".into(),
+            },
             GenDirective::ConnectPins {
                 net: "+3V3".into(),
                 pins: vec![("u1".into(), "VDD".into())],
@@ -200,7 +249,12 @@ mod tests {
     fn duplicate_power_name_fans_out_to_every_pad() {
         let lib = dup_power_lib();
         let mut h = History::new(Default::default());
-        h.commit(Transaction::one(Command::SetSource(dup_power_source())), &lib, "s").unwrap();
+        h.commit(
+            Transaction::one(Command::SetSource(dup_power_source())),
+            &lib,
+            "s",
+        )
+        .unwrap();
         let net = &h.doc().nets[&NetId::new("+3V3")];
         let pads: BTreeSet<String> = net.members.iter().map(|p| p.pin.clone()).collect();
         assert_eq!(
@@ -216,7 +270,12 @@ mod tests {
     fn floating_pad_reported_until_netted_or_no_connect() {
         let lib = dup_power_lib();
         let mut h = History::new(Default::default());
-        h.commit(Transaction::one(Command::SetSource(dup_power_source())), &lib, "s").unwrap();
+        h.commit(
+            Transaction::one(Command::SetSource(dup_power_source())),
+            &lib,
+            "s",
+        )
+        .unwrap();
         let mut eng = Engine::new();
         // VDD pads are netted; GND is not → exactly one floating pad.
         let floats = eng.query(h.doc(), &lib, Key::Floating);
@@ -227,10 +286,17 @@ mod tests {
 
         // Marking GND no-connect clears it.
         let mut src = dup_power_source();
-        src.push(GenDirective::NoConnect { pins: vec![("u1".into(), "GND".into())] });
-        h.commit(Transaction::one(Command::SetSource(src)), &lib, "nc").unwrap();
+        src.push(GenDirective::NoConnect {
+            pins: vec![("u1".into(), "GND".into())],
+        });
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "nc")
+            .unwrap();
         let floats = eng.query(h.doc(), &lib, Key::Floating);
-        assert!(floats.as_floating().is_empty(), "no floats after NC: {:?}", floats.as_floating());
+        assert!(
+            floats.as_floating().is_empty(),
+            "no floats after NC: {:?}",
+            floats.as_floating()
+        );
     }
 
     /// Issue 0002: a connection to a pin the part doesn't have is a hard
@@ -241,13 +307,18 @@ mod tests {
         let lib = dup_power_lib();
         let mut h = History::new(Default::default());
         let src = vec![
-            GenDirective::Instance { path: "u1".into(), part: "PWRCHIP".into() },
+            GenDirective::Instance {
+                path: "u1".into(),
+                part: "PWRCHIP".into(),
+            },
             GenDirective::ConnectPins {
                 net: "x".into(),
                 pins: vec![("u1".into(), "TYPO".into())],
             },
         ];
-        let err = h.commit(Transaction::one(Command::SetSource(src)), &lib, "s").unwrap_err();
+        let err = h
+            .commit(Transaction::one(Command::SetSource(src)), &lib, "s")
+            .unwrap_err();
         assert!(err.iter().any(|d| d.code == "E_UNKNOWN_PIN"), "got {err:?}");
         let text = super::diagnostic::render(&err);
         assert!(text.contains("TYPO") && text.contains("u1"), "got {text}");
@@ -260,15 +331,36 @@ mod tests {
         let lib = dup_power_lib();
         let mut h = History::new(Default::default());
         let src = vec![
-            GenDirective::Instance { path: "u1".into(), part: "PWRCHIP".into() },
-            GenDirective::Instance { path: "u2".into(), part: "PWRCHIP".into() },
-            GenDirective::ConnectPins { net: "a".into(), pins: vec![("u1".into(), "TYPO1".into())] },
-            GenDirective::ConnectPins { net: "b".into(), pins: vec![("u2".into(), "TYPO2".into())] },
+            GenDirective::Instance {
+                path: "u1".into(),
+                part: "PWRCHIP".into(),
+            },
+            GenDirective::Instance {
+                path: "u2".into(),
+                part: "PWRCHIP".into(),
+            },
+            GenDirective::ConnectPins {
+                net: "a".into(),
+                pins: vec![("u1".into(), "TYPO1".into())],
+            },
+            GenDirective::ConnectPins {
+                net: "b".into(),
+                pins: vec![("u2".into(), "TYPO2".into())],
+            },
         ];
-        let errs = h.commit(Transaction::one(Command::SetSource(src)), &lib, "s").unwrap_err();
-        assert_eq!(errs.iter().filter(|d| d.code == "E_UNKNOWN_PIN").count(), 2, "both typos: {errs:?}");
+        let errs = h
+            .commit(Transaction::one(Command::SetSource(src)), &lib, "s")
+            .unwrap_err();
+        assert_eq!(
+            errs.iter().filter(|d| d.code == "E_UNKNOWN_PIN").count(),
+            2,
+            "both typos: {errs:?}"
+        );
         let text = super::diagnostic::render(&errs);
-        assert!(text.contains("TYPO1") && text.contains("TYPO2"), "got {text}");
+        assert!(
+            text.contains("TYPO1") && text.contains("TYPO2"),
+            "got {text}"
+        );
     }
 
     // A part with one pin carrying a real 0.5 mm square copper pad (top layer) — so
@@ -292,19 +384,41 @@ mod tests {
         let mut lib = super::part::PartLib::new();
         lib.insert(
             "PAD".into(),
-            PartDef { name: "PAD".into(), pins: vec![pin], interfaces: BTreeMap::new() },
+            PartDef {
+                name: "PAD".into(),
+                pins: vec![pin],
+                interfaces: BTreeMap::new(),
+            },
         );
         lib
     }
 
     fn two_pads_at(x2: Nm) -> Source {
         vec![
-            GenDirective::Instance { path: "p1".into(), part: "PAD".into() },
-            GenDirective::Instance { path: "p2".into(), part: "PAD".into() },
-            GenDirective::Fix { path: "p1".into(), pos: Point { x: 0, y: 0 } },
-            GenDirective::Fix { path: "p2".into(), pos: Point { x: x2, y: 0 } },
-            GenDirective::ConnectPins { net: "A".into(), pins: vec![("p1".into(), "1".into())] },
-            GenDirective::ConnectPins { net: "B".into(), pins: vec![("p2".into(), "1".into())] },
+            GenDirective::Instance {
+                path: "p1".into(),
+                part: "PAD".into(),
+            },
+            GenDirective::Instance {
+                path: "p2".into(),
+                part: "PAD".into(),
+            },
+            GenDirective::Fix {
+                path: "p1".into(),
+                pos: Point { x: 0, y: 0 },
+            },
+            GenDirective::Fix {
+                path: "p2".into(),
+                pos: Point { x: x2, y: 0 },
+            },
+            GenDirective::ConnectPins {
+                net: "A".into(),
+                pins: vec![("p1".into(), "1".into())],
+            },
+            GenDirective::ConnectPins {
+                net: "B".into(),
+                pins: vec![("p2".into(), "1".into())],
+            },
         ]
     }
 
@@ -317,17 +431,39 @@ mod tests {
         let outline = Shape2D::rect(Point::mm(10, 10), 20 * MM, 20 * MM);
         let cutout = Shape2D::rect(Point::mm(10, 10), 4 * MM, 4 * MM); // [8,12]²
         let src = vec![
-            GenDirective::Board { outline: outline.clone() },
-            GenDirective::Cutout { shape: cutout.clone() },
-            GenDirective::Instance { path: "a".into(), part: "Cap".into() },
-            GenDirective::Place { path: "a".into(), pos: Point::mm(50, 50) }, // far outside
-            GenDirective::Instance { path: "b".into(), part: "Cap".into() },
-            GenDirective::Place { path: "b".into(), pos: Point::mm(10, 10) }, // in the cutout
+            GenDirective::Board {
+                outline: outline.clone(),
+            },
+            GenDirective::Cutout {
+                shape: cutout.clone(),
+            },
+            GenDirective::Instance {
+                path: "a".into(),
+                part: "Cap".into(),
+            },
+            GenDirective::Place {
+                path: "a".into(),
+                pos: Point::mm(50, 50),
+            }, // far outside
+            GenDirective::Instance {
+                path: "b".into(),
+                part: "Cap".into(),
+            },
+            GenDirective::Place {
+                path: "b".into(),
+                pos: Point::mm(10, 10),
+            }, // in the cutout
         ];
         let d = placed(src);
-        let board = BoardShape { outline, cutouts: vec![cutout] };
+        let board = BoardShape {
+            outline,
+            cutouts: vec![cutout],
+        };
         let (pa, pb) = (pos(&d, "a"), pos(&d, "b"));
-        assert!(board.contains(pa), "part placed outside is pulled onto the board: {pa:?}");
+        assert!(
+            board.contains(pa),
+            "part placed outside is pulled onto the board: {pa:?}"
+        );
         // Pushed from the cutout centre to its boundary (~2 mm away).
         assert!(
             dist(pb, Point::mm(10, 10)) >= (2 * MM - PLACE_TOL) as f64,
@@ -343,13 +479,26 @@ mod tests {
     fn placement_avoids_courtyard_overlap() {
         let lib = pad_lib(); // PAD: a 0.5 mm pad → courtyard half-extent 0.25 mm + margin.
         let src = vec![
-            GenDirective::Instance { path: "p1".into(), part: "PAD".into() },
-            GenDirective::Instance { path: "p2".into(), part: "PAD".into() },
-            GenDirective::Place { path: "p1".into(), pos: Point { x: 0, y: 0 } },
-            GenDirective::Place { path: "p2".into(), pos: Point { x: 0, y: 0 } }, // coincident
+            GenDirective::Instance {
+                path: "p1".into(),
+                part: "PAD".into(),
+            },
+            GenDirective::Instance {
+                path: "p2".into(),
+                part: "PAD".into(),
+            },
+            GenDirective::Place {
+                path: "p1".into(),
+                pos: Point { x: 0, y: 0 },
+            },
+            GenDirective::Place {
+                path: "p2".into(),
+                pos: Point { x: 0, y: 0 },
+            }, // coincident
         ];
         let mut h = History::new(Default::default());
-        h.commit(Transaction::one(Command::SetSource(src)), &lib, "s").unwrap();
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "s")
+            .unwrap();
         let (a, b) = (pos(h.doc(), "p1"), pos(h.doc(), "p2"));
         // Courtyards must not overlap: separated by ≥ (sum of half-extents) on an axis.
         let sep = 2 * (250_000 + super::part::COURTYARD_MARGIN);
@@ -370,19 +519,34 @@ mod tests {
         // Separate engines: each History is its own document lineage (same revision
         // numbers), so one memoizing engine across both would return a stale result.
         let mut close = History::new(Default::default());
-        close.commit(Transaction::one(Command::SetSource(two_pads_at(600_000))), &lib, "close").unwrap();
+        close
+            .commit(
+                Transaction::one(Command::SetSource(two_pads_at(600_000))),
+                &lib,
+                "close",
+            )
+            .unwrap();
         let drc = Engine::new().query(close.doc(), &lib, Key::Drc);
         assert!(
-            drc.as_drc().iter().any(|v| matches!(v, Violation::Clearance { .. })),
+            drc.as_drc()
+                .iter()
+                .any(|v| matches!(v, Violation::Clearance { .. })),
             "fine-pitch different-net pads must clash (pad-aware): {:?}",
             drc.as_drc()
         );
 
         let mut far = History::new(Default::default());
-        far.commit(Transaction::one(Command::SetSource(two_pads_at(1_000_000))), &lib, "far").unwrap();
+        far.commit(
+            Transaction::one(Command::SetSource(two_pads_at(1_000_000))),
+            &lib,
+            "far",
+        )
+        .unwrap();
         let drc = Engine::new().query(far.doc(), &lib, Key::Drc);
         assert!(
-            !drc.as_drc().iter().any(|v| matches!(v, Violation::Clearance { .. })),
+            !drc.as_drc()
+                .iter()
+                .any(|v| matches!(v, Violation::Clearance { .. })),
             "well-separated pads are clearance-clean: {:?}",
             drc.as_drc()
         );
@@ -395,17 +559,31 @@ mod tests {
         let lib = dup_power_lib();
         let mut h = History::new(Default::default());
         let src = vec![
-            GenDirective::Instance { path: "u1".into(), part: "PWRCHIP".into() },
-            GenDirective::Near { a: "ghost".into(), b: "u1".into(), within: MM },
+            GenDirective::Instance {
+                path: "u1".into(),
+                part: "PWRCHIP".into(),
+            },
+            GenDirective::Near {
+                a: "ghost".into(),
+                b: "u1".into(),
+                within: MM,
+            },
             GenDirective::ConnectPins {
                 net: "a".into(),
                 pins: vec![("ghost".into(), "VDD".into()), ("u1".into(), "VDD".into())],
             },
-            GenDirective::ConnectPins { net: "b".into(), pins: vec![("ghost".into(), "GND".into())] },
+            GenDirective::ConnectPins {
+                net: "b".into(),
+                pins: vec![("ghost".into(), "GND".into())],
+            },
         ];
-        let errs = h.commit(Transaction::one(Command::SetSource(src)), &lib, "s").unwrap_err();
+        let errs = h
+            .commit(Transaction::one(Command::SetSource(src)), &lib, "s")
+            .unwrap_err();
         assert_eq!(
-            errs.iter().filter(|d| d.code == "E_UNKNOWN_INSTANCE").count(),
+            errs.iter()
+                .filter(|d| d.code == "E_UNKNOWN_INSTANCE")
+                .count(),
             1,
             "missing `ghost` reported once, cascade suppressed: {errs:?}"
         );
@@ -415,17 +593,30 @@ mod tests {
     fn override_survives_reelaboration_and_orphans_surface() {
         let lib = part_library();
         let mut h = History::new(Default::default());
-        h.commit(Transaction::one(Command::SetSource(psu_module(3))), &lib, "psu3").unwrap();
+        h.commit(
+            Transaction::one(Command::SetSource(psu_module(3))),
+            &lib,
+            "psu3",
+        )
+        .unwrap();
         // Pin dec[1].
         h.commit(
-            Transaction::one(Command::Nudge(EntityId::new("psu.dec[1]"), Point::mm(42, 7))),
+            Transaction::one(Command::Nudge(
+                EntityId::new("psu.dec[1]"),
+                Point::mm(42, 7),
+            )),
             &lib,
             "pin dec1",
         )
         .unwrap();
         // Grow the design: dec[1] still exists -> override sticks; others keep
         // their generated defaults (minimal perturbation).
-        h.commit(Transaction::one(Command::SetSource(psu_module(5))), &lib, "psu5").unwrap();
+        h.commit(
+            Transaction::one(Command::SetSource(psu_module(5))),
+            &lib,
+            "psu5",
+        )
+        .unwrap();
         let d = h.doc();
         let dec1 = &d.components[&EntityId::new("psu.dec[1]")];
         assert_eq!(dec1.pos.value, Point::mm(42, 7));
@@ -434,7 +625,12 @@ mod tests {
         assert!(d.report.is_clean());
 
         // Shrink so dec[1] disappears: the override is orphaned and surfaced.
-        h.commit(Transaction::one(Command::SetSource(psu_module(1))), &lib, "psu1").unwrap();
+        h.commit(
+            Transaction::one(Command::SetSource(psu_module(1))),
+            &lib,
+            "psu1",
+        )
+        .unwrap();
         let d = h.doc();
         assert!(!d.components.contains_key(&EntityId::new("psu.dec[1]")));
         assert!(
@@ -447,7 +643,12 @@ mod tests {
     fn pin_or_nudge_doc(n: usize) -> History {
         let lib = part_library();
         let mut h = History::new(Default::default());
-        h.commit(Transaction::one(Command::SetSource(psu_module(n))), &lib, "psu").unwrap();
+        h.commit(
+            Transaction::one(Command::SetSource(psu_module(n))),
+            &lib,
+            "psu",
+        )
+        .unwrap();
         h
     }
 
@@ -457,12 +658,23 @@ mod tests {
         let mut h = pin_or_nudge_doc(2);
         let dec0 = EntityId::new("psu.dec[0]");
         // Nudge dec[0] to exactly its generated default: the hint does nothing.
-        h.commit(Transaction::one(Command::Nudge(dec0.clone(), Point::mm(10, 0))), &lib, "noop")
-            .unwrap();
+        h.commit(
+            Transaction::one(Command::Nudge(dec0.clone(), Point::mm(10, 0))),
+            &lib,
+            "noop",
+        )
+        .unwrap();
         let d = h.doc();
-        assert!(!d.overrides.contains_key(&dec0), "redundant hint should be GC'd");
-        assert!(d.report.decayed.iter().any(|(id, r)| *id == dec0
-            && *r == DecayReason::RedundantWithDefault));
+        assert!(
+            !d.overrides.contains_key(&dec0),
+            "redundant hint should be GC'd"
+        );
+        assert!(
+            d.report
+                .decayed
+                .iter()
+                .any(|(id, r)| *id == dec0 && *r == DecayReason::RedundantWithDefault)
+        );
         assert_eq!(d.components[&dec0].pos.prov, Provenance::Free);
     }
 
@@ -472,19 +684,34 @@ mod tests {
         let mut h = pin_or_nudge_doc(2);
         let dec0 = EntityId::new("psu.dec[0]");
         // An effective nudge...
-        h.commit(Transaction::one(Command::Nudge(dec0.clone(), Point::mm(5, 5))), &lib, "nudge")
-            .unwrap();
+        h.commit(
+            Transaction::one(Command::Nudge(dec0.clone(), Point::mm(5, 5))),
+            &lib,
+            "nudge",
+        )
+        .unwrap();
         assert_eq!(h.doc().components[&dec0].pos.prov, Provenance::Hint);
         // ...then a hard constraint lands on the same part.
         let mut src = psu_module(2);
-        src.push(GenDirective::Fix { path: "psu.dec[0]".into(), pos: Point::mm(8, 8) });
-        h.commit(Transaction::one(Command::SetSource(src)), &lib, "fix").unwrap();
+        src.push(GenDirective::Fix {
+            path: "psu.dec[0]".into(),
+            pos: Point::mm(8, 8),
+        });
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "fix")
+            .unwrap();
         let d = h.doc();
         assert_eq!(d.components[&dec0].pos.value, Point::mm(8, 8));
         assert_eq!(d.components[&dec0].pos.prov, Provenance::Fixed);
-        assert!(!d.overrides.contains_key(&dec0), "yielding hint should decay");
-        assert!(d.report.decayed.iter().any(|(id, r)| *id == dec0
-            && *r == DecayReason::OverriddenByConstraint));
+        assert!(
+            !d.overrides.contains_key(&dec0),
+            "yielding hint should decay"
+        );
+        assert!(
+            d.report
+                .decayed
+                .iter()
+                .any(|(id, r)| *id == dec0 && *r == DecayReason::OverriddenByConstraint)
+        );
     }
 
     #[test]
@@ -492,16 +719,27 @@ mod tests {
         let lib = part_library();
         let mut h = pin_or_nudge_doc(2);
         let dec0 = EntityId::new("psu.dec[0]");
-        h.commit(Transaction::one(Command::Pin(dec0.clone(), Point::mm(5, 5))), &lib, "pin")
-            .unwrap();
+        h.commit(
+            Transaction::one(Command::Pin(dec0.clone(), Point::mm(5, 5))),
+            &lib,
+            "pin",
+        )
+        .unwrap();
         let mut src = psu_module(2);
-        src.push(GenDirective::Fix { path: "psu.dec[0]".into(), pos: Point::mm(8, 8) });
-        h.commit(Transaction::one(Command::SetSource(src)), &lib, "fix").unwrap();
+        src.push(GenDirective::Fix {
+            path: "psu.dec[0]".into(),
+            pos: Point::mm(8, 8),
+        });
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "fix")
+            .unwrap();
         let d = h.doc();
         // The constraint wins physically, but the pin is kept and the conflict is loud.
         assert_eq!(d.components[&dec0].pos.value, Point::mm(8, 8));
         assert!(d.report.pin_conflicts.contains(&dec0));
-        assert!(d.overrides.contains_key(&dec0), "a conflicting pin must not be silently dropped");
+        assert!(
+            d.overrides.contains_key(&dec0),
+            "a conflicting pin must not be silently dropped"
+        );
     }
 
     #[test]
@@ -510,11 +748,18 @@ mod tests {
         let mut h = pin_or_nudge_doc(2);
         let dec0 = EntityId::new("psu.dec[0]");
         // Pin at the default position: does nothing, but is explicit intent.
-        h.commit(Transaction::one(Command::Pin(dec0.clone(), Point::mm(10, 0))), &lib, "pin")
-            .unwrap();
+        h.commit(
+            Transaction::one(Command::Pin(dec0.clone(), Point::mm(10, 0))),
+            &lib,
+            "pin",
+        )
+        .unwrap();
         let d = h.doc();
         assert!(d.report.redundant_pins.contains(&dec0));
-        assert!(d.overrides.contains_key(&dec0), "a pin is advisory-flagged, never auto-removed");
+        assert!(
+            d.overrides.contains_key(&dec0),
+            "a pin is advisory-flagged, never auto-removed"
+        );
         assert_eq!(d.components[&dec0].pos.prov, Provenance::Pinned);
     }
 
@@ -522,9 +767,19 @@ mod tests {
     fn undo_restores_previous_version() {
         let lib = part_library();
         let mut h = History::new(Default::default());
-        h.commit(Transaction::one(Command::SetSource(psu_module(2))), &lib, "psu2").unwrap();
+        h.commit(
+            Transaction::one(Command::SetSource(psu_module(2))),
+            &lib,
+            "psu2",
+        )
+        .unwrap();
         let two = h.doc().components.len();
-        h.commit(Transaction::one(Command::SetSource(psu_module(4))), &lib, "psu4").unwrap();
+        h.commit(
+            Transaction::one(Command::SetSource(psu_module(4))),
+            &lib,
+            "psu4",
+        )
+        .unwrap();
         assert!(h.doc().components.len() > two);
         assert!(h.undo());
         assert_eq!(h.doc().components.len(), two);
@@ -536,9 +791,18 @@ mod tests {
     fn unconstrained_parts_do_not_move() {
         // No constraints: the solver leaves everything at its generated default.
         let d = placed(vec![
-            GenDirective::Instance { path: "reg".into(), part: "LDO".into() },
-            GenDirective::Instance { path: "c1".into(), part: "Cap".into() },
-            GenDirective::Instance { path: "c2".into(), part: "Cap".into() },
+            GenDirective::Instance {
+                path: "reg".into(),
+                part: "LDO".into(),
+            },
+            GenDirective::Instance {
+                path: "c1".into(),
+                part: "Cap".into(),
+            },
+            GenDirective::Instance {
+                path: "c2".into(),
+                part: "Cap".into(),
+            },
         ]);
         assert_eq!(pos(&d, "c1"), Point::mm(10, 0));
         assert_eq!(pos(&d, "c2"), Point::mm(20, 0));
@@ -547,9 +811,19 @@ mod tests {
     #[test]
     fn near_pulls_within_bound() {
         let d = placed(vec![
-            GenDirective::Instance { path: "a".into(), part: "LDO".into() },
-            GenDirective::Instance { path: "b".into(), part: "Cap".into() },
-            GenDirective::Near { a: "a".into(), b: "b".into(), within: 2 * MM },
+            GenDirective::Instance {
+                path: "a".into(),
+                part: "LDO".into(),
+            },
+            GenDirective::Instance {
+                path: "b".into(),
+                part: "Cap".into(),
+            },
+            GenDirective::Near {
+                a: "a".into(),
+                b: "b".into(),
+                within: 2 * MM,
+            },
         ]);
         assert!(dist(pos(&d, "a"), pos(&d, "b")) <= (2 * MM + PLACE_TOL) as f64);
     }
@@ -557,11 +831,27 @@ mod tests {
     #[test]
     fn minsep_pushes_apart() {
         let d = placed(vec![
-            GenDirective::Instance { path: "a".into(), part: "LDO".into() },
-            GenDirective::Instance { path: "b".into(), part: "Cap".into() },
-            GenDirective::Place { path: "a".into(), pos: Point::mm(0, 0) },
-            GenDirective::Place { path: "b".into(), pos: Point::mm(0, 0) },
-            GenDirective::MinSep { a: "a".into(), b: "b".into(), gap: 5 * MM },
+            GenDirective::Instance {
+                path: "a".into(),
+                part: "LDO".into(),
+            },
+            GenDirective::Instance {
+                path: "b".into(),
+                part: "Cap".into(),
+            },
+            GenDirective::Place {
+                path: "a".into(),
+                pos: Point::mm(0, 0),
+            },
+            GenDirective::Place {
+                path: "b".into(),
+                pos: Point::mm(0, 0),
+            },
+            GenDirective::MinSep {
+                a: "a".into(),
+                b: "b".into(),
+                gap: 5 * MM,
+            },
         ]);
         assert!(dist(pos(&d, "a"), pos(&d, "b")) >= (5 * MM - PLACE_TOL) as f64);
     }
@@ -569,8 +859,14 @@ mod tests {
     #[test]
     fn board_outline_contains_parts() {
         let d = placed(vec![
-            GenDirective::Instance { path: "a".into(), part: "LDO".into() },
-            GenDirective::Place { path: "a".into(), pos: Point::mm(100, 0) },
+            GenDirective::Instance {
+                path: "a".into(),
+                part: "LDO".into(),
+            },
+            GenDirective::Place {
+                path: "a".into(),
+                pos: Point::mm(100, 0),
+            },
             board_rect(Point::mm(0, 0), Point::mm(50, 50)),
         ]);
         assert!(pos(&d, "a").x <= 50 * MM + PLACE_TOL);
@@ -583,13 +879,22 @@ mod tests {
         // A Rotate directive sets the component's orientation attribute, and it
         // survives elaboration (and a re-elaboration via the same source).
         let d = placed(vec![
-            GenDirective::Instance { path: "u1".into(), part: "MCU".into() },
-            GenDirective::Rotate { path: "u1".into(), deg: 90 },
+            GenDirective::Instance {
+                path: "u1".into(),
+                part: "MCU".into(),
+            },
+            GenDirective::Rotate {
+                path: "u1".into(),
+                deg: 90,
+            },
         ]);
         use super::doc::Orient;
         assert_eq!(d.components[&EntityId::new("u1")].orient, Orient::Deg90);
         // Default orientation when no Rotate is given.
-        let d0 = placed(vec![GenDirective::Instance { path: "u1".into(), part: "MCU".into() }]);
+        let d0 = placed(vec![GenDirective::Instance {
+            path: "u1".into(),
+            part: "MCU".into(),
+        }]);
         assert_eq!(d0.components[&EntityId::new("u1")].orient, Orient::Deg0);
     }
 
@@ -599,8 +904,14 @@ mod tests {
         let mut h = History::new(Default::default());
         let r = h.commit(
             Transaction::one(Command::SetSource(vec![
-                GenDirective::Instance { path: "u1".into(), part: "MCU".into() },
-                GenDirective::Rotate { path: "u1".into(), deg: 45 },
+                GenDirective::Instance {
+                    path: "u1".into(),
+                    part: "MCU".into(),
+                },
+                GenDirective::Rotate {
+                    path: "u1".into(),
+                    deg: 45,
+                },
             ])),
             &lib,
             "bad-rot",
@@ -616,10 +927,22 @@ mod tests {
     fn near_to_pin_pulls_component_onto_rotated_pin() {
         use super::part::pin_world;
         let d = placed(vec![
-            GenDirective::Instance { path: "reg".into(), part: "LDO".into() },
-            GenDirective::Instance { path: "dec".into(), part: "Cap".into() },
-            GenDirective::Fix { path: "reg".into(), pos: Point::mm(0, 0) },
-            GenDirective::Rotate { path: "reg".into(), deg: 90 },
+            GenDirective::Instance {
+                path: "reg".into(),
+                part: "LDO".into(),
+            },
+            GenDirective::Instance {
+                path: "dec".into(),
+                part: "Cap".into(),
+            },
+            GenDirective::Fix {
+                path: "reg".into(),
+                pos: Point::mm(0, 0),
+            },
+            GenDirective::Rotate {
+                path: "reg".into(),
+                deg: 90,
+            },
             GenDirective::NearPin {
                 a: "dec".into(),
                 b_comp: "reg".into(),
@@ -651,19 +974,44 @@ mod tests {
         let lib = part_library();
         let mut h = History::new(Default::default());
         let src = vec![
-            GenDirective::Instance { path: "reg".into(), part: "LDO".into() },
-            GenDirective::Fix { path: "reg".into(), pos: Point::mm(0, 0) },
-            GenDirective::Instance { path: "dec".into(), part: "Cap".into() },
-            GenDirective::Near { a: "dec".into(), b: "reg".into(), within: 0 },
+            GenDirective::Instance {
+                path: "reg".into(),
+                part: "LDO".into(),
+            },
+            GenDirective::Fix {
+                path: "reg".into(),
+                pos: Point::mm(0, 0),
+            },
+            GenDirective::Instance {
+                path: "dec".into(),
+                part: "Cap".into(),
+            },
+            GenDirective::Near {
+                a: "dec".into(),
+                b: "reg".into(),
+                within: 0,
+            },
         ];
-        h.commit(Transaction::one(Command::SetSource(src)), &lib, "s").unwrap();
-        let dec = EntityId::new("dec");
-        h.commit(Transaction::one(Command::Nudge(dec.clone(), Point::mm(0, 0))), &lib, "nudge")
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "s")
             .unwrap();
+        let dec = EntityId::new("dec");
+        h.commit(
+            Transaction::one(Command::Nudge(dec.clone(), Point::mm(0, 0))),
+            &lib,
+            "nudge",
+        )
+        .unwrap();
         let d = h.doc();
-        assert!(d.report.decayed.iter().any(|(id, r)| *id == dec
-            && *r == DecayReason::RedundantWithDefault));
-        assert!(!d.overrides.contains_key(&dec), "ineffective hint should be GC'd");
+        assert!(
+            d.report
+                .decayed
+                .iter()
+                .any(|(id, r)| *id == dec && *r == DecayReason::RedundantWithDefault)
+        );
+        assert!(
+            !d.overrides.contains_key(&dec),
+            "ineffective hint should be GC'd"
+        );
         assert!(dist(pos(d, "dec"), Point::mm(0, 0)) <= PLACE_TOL as f64);
     }
 
@@ -675,11 +1023,19 @@ mod tests {
         let lib = part_library();
         let mut h = pin_or_nudge_doc(2);
         let dec0 = EntityId::new("psu.dec[0]");
-        h.commit(Transaction::one(Command::Pin(dec0.clone(), Point::mm(5, 5))), &lib, "pin")
-            .unwrap();
+        h.commit(
+            Transaction::one(Command::Pin(dec0.clone(), Point::mm(5, 5))),
+            &lib,
+            "pin",
+        )
+        .unwrap();
         let mut src = psu_module(2);
-        src.push(GenDirective::Fix { path: "psu.dec[0]".into(), pos: Point::mm(8, 8) });
-        h.commit(Transaction::one(Command::SetSource(src)), &lib, "fix").unwrap();
+        src.push(GenDirective::Fix {
+            path: "psu.dec[0]".into(),
+            pos: Point::mm(8, 8),
+        });
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "fix")
+            .unwrap();
         assert!(h.doc().report.pin_conflicts.contains(&dec0));
         h
     }
@@ -688,12 +1044,26 @@ mod tests {
     fn resolve_orphan_drops_dead_override() {
         let lib = part_library();
         let mut h = History::new(Default::default());
-        h.commit(Transaction::one(Command::SetSource(psu_module(3))), &lib, "psu3").unwrap();
+        h.commit(
+            Transaction::one(Command::SetSource(psu_module(3))),
+            &lib,
+            "psu3",
+        )
+        .unwrap();
         let dec1 = EntityId::new("psu.dec[1]");
-        h.commit(Transaction::one(Command::Pin(dec1.clone(), Point::mm(42, 7))), &lib, "pin")
-            .unwrap();
+        h.commit(
+            Transaction::one(Command::Pin(dec1.clone(), Point::mm(42, 7))),
+            &lib,
+            "pin",
+        )
+        .unwrap();
         // Shrink so dec[1] disappears -> its override is orphaned.
-        h.commit(Transaction::one(Command::SetSource(psu_module(1))), &lib, "psu1").unwrap();
+        h.commit(
+            Transaction::one(Command::SetSource(psu_module(1))),
+            &lib,
+            "psu1",
+        )
+        .unwrap();
         assert!(h.doc().report.orphaned.contains(&dec1));
         assert!(h.doc().overrides.contains_key(&dec1));
 
@@ -704,9 +1074,18 @@ mod tests {
         )
         .unwrap();
         let d = h.doc();
-        assert!(!d.overrides.contains_key(&dec1), "orphaned override should be dropped");
-        assert!(!d.report.orphaned.contains(&dec1), "orphan entry should be gone");
-        assert!(d.report.is_clean(), "report should be clean after resolving the only issue");
+        assert!(
+            !d.overrides.contains_key(&dec1),
+            "orphaned override should be dropped"
+        );
+        assert!(
+            !d.report.orphaned.contains(&dec1),
+            "orphan entry should be gone"
+        );
+        assert!(
+            d.report.is_clean(),
+            "report should be clean after resolving the only issue"
+        );
     }
 
     #[test]
@@ -725,8 +1104,14 @@ mod tests {
         // Part sits at the Fix position, as Fixed, with no override and a clean report.
         assert_eq!(d.components[&dec0].pos.value, Point::mm(8, 8));
         assert_eq!(d.components[&dec0].pos.prov, Provenance::Fixed);
-        assert!(!d.overrides.contains_key(&dec0), "no pin override should remain");
-        assert!(d.report.is_clean(), "report should be clean after accepting the constraint");
+        assert!(
+            !d.overrides.contains_key(&dec0),
+            "no pin override should remain"
+        );
+        assert!(
+            d.report.is_clean(),
+            "report should be clean after accepting the constraint"
+        );
     }
 
     #[test]
@@ -738,27 +1123,49 @@ mod tests {
         // Re-pin to a position that still differs from the Fix: the pin is kept and
         // moved, the Fix still wins physically, so the conflict deliberately persists.
         h.commit(
-            Transaction::one(Command::Resolve(dec0.clone(), Resolution::RePin(Point::mm(20, 20)))),
+            Transaction::one(Command::Resolve(
+                dec0.clone(),
+                Resolution::RePin(Point::mm(20, 20)),
+            )),
             &lib,
             "re-pin",
         )
         .unwrap();
         let d = h.doc();
-        let ov = d.overrides.get(&dec0).expect("re-pinned override should remain");
+        let ov = d
+            .overrides
+            .get(&dec0)
+            .expect("re-pinned override should remain");
         assert_eq!(ov.pos, Some(Point::mm(20, 20)));
-        assert_eq!(d.components[&dec0].pos.value, Point::mm(8, 8), "Fix still wins");
-        assert!(d.report.pin_conflicts.contains(&dec0), "re-pin onto a non-Fix point still conflicts");
+        assert_eq!(
+            d.components[&dec0].pos.value,
+            Point::mm(8, 8),
+            "Fix still wins"
+        );
+        assert!(
+            d.report.pin_conflicts.contains(&dec0),
+            "re-pin onto a non-Fix point still conflicts"
+        );
 
         // Re-pinning onto the Fix point itself makes the pin redundant, not conflicting.
         h.commit(
-            Transaction::one(Command::Resolve(dec0.clone(), Resolution::RePin(Point::mm(8, 8)))),
+            Transaction::one(Command::Resolve(
+                dec0.clone(),
+                Resolution::RePin(Point::mm(8, 8)),
+            )),
             &lib,
             "re-pin onto fix",
         )
         .unwrap();
         let d = h.doc();
-        assert!(!d.report.pin_conflicts.contains(&dec0), "no longer conflicting");
-        assert!(d.report.redundant_pins.contains(&dec0), "now redundant with the Fix");
+        assert!(
+            !d.report.pin_conflicts.contains(&dec0),
+            "no longer conflicting"
+        );
+        assert!(
+            d.report.redundant_pins.contains(&dec0),
+            "now redundant with the Fix"
+        );
     }
 
     #[test]
@@ -767,8 +1174,12 @@ mod tests {
         let mut h = pin_or_nudge_doc(2);
         let dec0 = EntityId::new("psu.dec[0]");
         // Pin at the default position: explicit but pointless -> flagged redundant.
-        h.commit(Transaction::one(Command::Pin(dec0.clone(), Point::mm(10, 0))), &lib, "pin")
-            .unwrap();
+        h.commit(
+            Transaction::one(Command::Pin(dec0.clone(), Point::mm(10, 0))),
+            &lib,
+            "pin",
+        )
+        .unwrap();
         assert!(h.doc().report.redundant_pins.contains(&dec0));
 
         h.commit(
@@ -778,8 +1189,14 @@ mod tests {
         )
         .unwrap();
         let d = h.doc();
-        assert!(!d.overrides.contains_key(&dec0), "redundant pin should be dropped");
-        assert!(!d.report.redundant_pins.contains(&dec0), "redundant entry should be gone");
+        assert!(
+            !d.overrides.contains_key(&dec0),
+            "redundant pin should be dropped"
+        );
+        assert!(
+            !d.report.redundant_pins.contains(&dec0),
+            "redundant entry should be gone"
+        );
         assert!(d.report.is_clean());
         // Position is unchanged (it was redundant), now solver-driven.
         assert_eq!(d.components[&dec0].pos.value, Point::mm(10, 0));
@@ -796,8 +1213,11 @@ mod tests {
         let before = super::project::render(h.doc());
 
         // Each resolution rejects an entity its category does not flag; head untouched.
-        for res in [Resolution::DropOrphan, Resolution::AcceptConstraint, Resolution::DropRedundant]
-        {
+        for res in [
+            Resolution::DropOrphan,
+            Resolution::AcceptConstraint,
+            Resolution::DropRedundant,
+        ] {
             let r = h.commit(
                 Transaction::one(Command::Resolve(dec0.clone(), res)),
                 &lib,
@@ -805,7 +1225,11 @@ mod tests {
             );
             assert!(r.is_err(), "resolving a non-issue must fail");
         }
-        assert_eq!(before, super::project::render(h.doc()), "failed resolves leave head untouched");
+        assert_eq!(
+            before,
+            super::project::render(h.doc()),
+            "failed resolves leave head untouched"
+        );
     }
 
     #[test]
@@ -819,14 +1243,19 @@ mod tests {
         assert_eq!(sugg.len(), 2);
         assert!(sugg.iter().all(|s| s.entity == dec0));
         let ready: Vec<&Command> = sugg.iter().filter_map(|s| s.command.as_ref()).collect();
-        assert_eq!(ready.len(), 1, "accept-constraint is ready; re-pin needs a position");
+        assert_eq!(
+            ready.len(),
+            1,
+            "accept-constraint is ready; re-pin needs a position"
+        );
         assert!(matches!(
             ready[0],
             Command::Resolve(id, Resolution::AcceptConstraint) if *id == dec0
         ));
 
         // The suggested command actually clears the issue when committed.
-        h.commit(Transaction::one(ready[0].clone()), &lib, "apply suggestion").unwrap();
+        h.commit(Transaction::one(ready[0].clone()), &lib, "apply suggestion")
+            .unwrap();
         assert!(h.doc().report.is_clean());
         assert!(suggested_resolutions(&h.doc().report).is_empty());
     }
@@ -843,17 +1272,42 @@ mod tests {
         // for nm rounding on output) and ~10–20x tighter than the old relaxation.
         const TOL: Nm = 10_000;
         let mut src = vec![
-            GenDirective::Instance { path: "reg".into(), part: "LDO".into() },
-            GenDirective::Fix { path: "reg".into(), pos: Point::mm(30, 30) },
+            GenDirective::Instance {
+                path: "reg".into(),
+                part: "LDO".into(),
+            },
+            GenDirective::Fix {
+                path: "reg".into(),
+                pos: Point::mm(30, 30),
+            },
         ];
         for i in 0..3 {
             let d = format!("dec{i}");
-            src.push(GenDirective::Instance { path: d.clone(), part: "Cap".into() });
-            src.push(GenDirective::Near { a: d, b: "reg".into(), within: 6 * MM });
+            src.push(GenDirective::Instance {
+                path: d.clone(),
+                part: "Cap".into(),
+            });
+            src.push(GenDirective::Near {
+                a: d,
+                b: "reg".into(),
+                within: 6 * MM,
+            });
         }
-        src.push(GenDirective::MinSep { a: "dec0".into(), b: "dec1".into(), gap: 3 * MM });
-        src.push(GenDirective::MinSep { a: "dec1".into(), b: "dec2".into(), gap: 3 * MM });
-        src.push(GenDirective::MinSep { a: "dec0".into(), b: "dec2".into(), gap: 3 * MM });
+        src.push(GenDirective::MinSep {
+            a: "dec0".into(),
+            b: "dec1".into(),
+            gap: 3 * MM,
+        });
+        src.push(GenDirective::MinSep {
+            a: "dec1".into(),
+            b: "dec2".into(),
+            gap: 3 * MM,
+        });
+        src.push(GenDirective::MinSep {
+            a: "dec0".into(),
+            b: "dec2".into(),
+            gap: 3 * MM,
+        });
         let d = placed(src);
 
         let reg = pos(&d, "reg");
@@ -868,7 +1322,11 @@ mod tests {
         }
         for (a, b) in [("dec0", "dec1"), ("dec1", "dec2"), ("dec0", "dec2")] {
             let sep = dist(pos(&d, a), pos(&d, b));
-            assert!(sep >= (3 * MM - TOL) as f64, "{a}-{b} sep {sep} nm, want >= {}", 3 * MM - TOL);
+            assert!(
+                sep >= (3 * MM - TOL) as f64,
+                "{a}-{b} sep {sep} nm, want >= {}",
+                3 * MM - TOL
+            );
         }
     }
 
@@ -890,11 +1348,22 @@ mod tests {
             anchors,
             fixed,
             board: None,
-            constraints: vec![Constraint::Near { a: a.clone(), b: b.clone(), within: MM }],
+            constraints: vec![Constraint::Near {
+                a: a.clone(),
+                b: b.clone(),
+                within: MM,
+            }],
         };
         let sol = solve(&prob);
-        assert!(!sol.converged, "an infeasible set must not report convergence");
-        assert_eq!(sol.unsatisfied.len(), 1, "the one violated constraint must be listed");
+        assert!(
+            !sol.converged,
+            "an infeasible set must not report convergence"
+        );
+        assert_eq!(
+            sol.unsatisfied.len(),
+            1,
+            "the one violated constraint must be listed"
+        );
         // Residual ~= 9 mm (10 mm actual − 1 mm allowed), reported, not hidden.
         assert!(
             (sol.unsatisfied[0].residual - 9 * MM).abs() < PLACE_TOL,
@@ -934,13 +1403,29 @@ mod tests {
     fn unconstrained_node_stays_exactly_at_anchor() {
         let n = EntityId::new("n");
         let mut anchors = BTreeMap::new();
-        anchors.insert(n.clone(), Point { x: 12_345_678, y: -9_876_543 });
-        let prob =
-            Problem { anchors, fixed: BTreeSet::new(), board: None, constraints: Vec::new() };
+        anchors.insert(
+            n.clone(),
+            Point {
+                x: 12_345_678,
+                y: -9_876_543,
+            },
+        );
+        let prob = Problem {
+            anchors,
+            fixed: BTreeSet::new(),
+            board: None,
+            constraints: Vec::new(),
+        };
         let sol = solve(&prob);
         assert!(sol.converged);
         assert!(sol.unsatisfied.is_empty());
-        assert_eq!(sol.positions[&n], Point { x: 12_345_678, y: -9_876_543 });
+        assert_eq!(
+            sol.positions[&n],
+            Point {
+                x: 12_345_678,
+                y: -9_876_543
+            }
+        );
     }
 
     /// Determinism: the same `Problem` solved twice yields identical positions,
@@ -957,7 +1442,11 @@ mod tests {
             for i in 0..3 {
                 let d = EntityId::new(format!("dec{i}"));
                 anchors.insert(d.clone(), Point::mm(10 * (i as i64 + 1), 0));
-                constraints.push(Constraint::Near { a: d, b: reg.clone(), within: 6 * MM });
+                constraints.push(Constraint::Near {
+                    a: d,
+                    b: reg.clone(),
+                    within: 6 * MM,
+                });
             }
             constraints.push(Constraint::MinSep {
                 a: EntityId::new("dec0"),
@@ -974,7 +1463,12 @@ mod tests {
                 b: EntityId::new("dec2"),
                 gap: 3 * MM,
             });
-            Problem { anchors, fixed, board: None, constraints }
+            Problem {
+                anchors,
+                fixed,
+                board: None,
+                constraints,
+            }
         };
         let s1 = solve(&make());
         let s2 = solve(&make());
@@ -994,10 +1488,22 @@ mod tests {
     /// (9,0) therefore lands on both pads.
     fn two_pin_design() -> Source {
         vec![
-            GenDirective::Instance { path: "reg".into(), part: "LDO".into() },
-            GenDirective::Instance { path: "dec".into(), part: "Cap".into() },
-            GenDirective::Place { path: "reg".into(), pos: Point::mm(0, 0) },
-            GenDirective::Place { path: "dec".into(), pos: Point::mm(10, 0) },
+            GenDirective::Instance {
+                path: "reg".into(),
+                part: "LDO".into(),
+            },
+            GenDirective::Instance {
+                path: "dec".into(),
+                part: "Cap".into(),
+            },
+            GenDirective::Place {
+                path: "reg".into(),
+                pos: Point::mm(0, 0),
+            },
+            GenDirective::Place {
+                path: "dec".into(),
+                pos: Point::mm(10, 0),
+            },
             GenDirective::ConnectPins {
                 net: "VBUS".into(),
                 pins: vec![("reg".into(), "VOUT".into()), ("dec".into(), "p1".into())],
@@ -1008,12 +1514,19 @@ mod tests {
     fn routed(src: Source) -> History {
         let lib = part_library();
         let mut h = History::new(Default::default());
-        h.commit(Transaction::one(Command::SetSource(src)), &lib, "src").unwrap();
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "src")
+            .unwrap();
         h
     }
 
     fn trace(net: &str, layer: Layer, path: Vec<Point>, width: Nm) -> Trace {
-        Trace { net: NetId::new(net), layer, path, width, prov: Provenance::Pinned }
+        Trace {
+            net: NetId::new(net),
+            layer,
+            path,
+            width,
+            prov: Provenance::Pinned,
+        }
     }
 
     /// A correctly hand-routed two-pin net passes DRC clean.
@@ -1021,11 +1534,25 @@ mod tests {
     fn drc_clean_on_routed_two_pin_net() {
         let lib = part_library();
         let mut h = routed(two_pin_design());
-        let t = trace("VBUS", Layer::Top, vec![Point::mm(2, 0), Point::mm(9, 0)], W);
-        h.commit(Transaction::one(Command::AddTrace(TraceId(1), t)), &lib, "route").unwrap();
+        let t = trace(
+            "VBUS",
+            Layer::Top,
+            vec![Point::mm(2, 0), Point::mm(9, 0)],
+            W,
+        );
+        h.commit(
+            Transaction::one(Command::AddTrace(TraceId(1), t)),
+            &lib,
+            "route",
+        )
+        .unwrap();
         let mut eng = Engine::new();
         let v = eng.query(h.doc(), &lib, Key::Drc);
-        assert!(v.as_drc().is_empty(), "clean route should pass: {:?}", v.as_drc());
+        assert!(
+            v.as_drc().is_empty(),
+            "clean route should pass: {:?}",
+            v.as_drc()
+        );
     }
 
     /// An unrouted net is flagged by the ratsnest check (its two pins form two
@@ -1038,7 +1565,10 @@ mod tests {
         let v = eng.query(h.doc(), &lib, Key::Drc);
         assert_eq!(
             v.as_drc(),
-            &[Violation::Unrouted { net: NetId::new("VBUS"), islands: 2 }]
+            &[Violation::Unrouted {
+                net: NetId::new("VBUS"),
+                islands: 2
+            }]
         );
     }
 
@@ -1048,22 +1578,59 @@ mod tests {
         let lib = part_library();
         // Two single-pin nets (ratsnest trivially satisfied) so only clearance fires.
         let src = vec![
-            GenDirective::Instance { path: "reg".into(), part: "LDO".into() },
-            GenDirective::Place { path: "reg".into(), pos: Point::mm(0, 0) },
-            GenDirective::ConnectPins { net: "A".into(), pins: vec![("reg".into(), "VOUT".into())] },
-            GenDirective::ConnectPins { net: "B".into(), pins: vec![("reg".into(), "GND".into())] },
+            GenDirective::Instance {
+                path: "reg".into(),
+                part: "LDO".into(),
+            },
+            GenDirective::Place {
+                path: "reg".into(),
+                pos: Point::mm(0, 0),
+            },
+            GenDirective::ConnectPins {
+                net: "A".into(),
+                pins: vec![("reg".into(), "VOUT".into())],
+            },
+            GenDirective::ConnectPins {
+                net: "B".into(),
+                pins: vec![("reg".into(), "GND".into())],
+            },
         ];
         let mut h = routed(src);
         // Parallel 0.2mm-wide traces 0.1mm apart: 0.1mm < 0.15 + 0.1 + 0.1 = 0.35mm.
         let a = trace("A", Layer::Top, vec![Point::mm(0, 0), Point::mm(10, 0)], W);
-        let b = trace("B", Layer::Top, vec![Point { x: 0, y: MM / 10 }, Point { x: 10 * MM, y: MM / 10 }], W);
-        h.commit(Transaction::one(Command::AddTrace(TraceId(1), a)), &lib, "a").unwrap();
-        h.commit(Transaction::one(Command::AddTrace(TraceId(2), b)), &lib, "b").unwrap();
+        let b = trace(
+            "B",
+            Layer::Top,
+            vec![
+                Point { x: 0, y: MM / 10 },
+                Point {
+                    x: 10 * MM,
+                    y: MM / 10,
+                },
+            ],
+            W,
+        );
+        h.commit(
+            Transaction::one(Command::AddTrace(TraceId(1), a)),
+            &lib,
+            "a",
+        )
+        .unwrap();
+        h.commit(
+            Transaction::one(Command::AddTrace(TraceId(2), b)),
+            &lib,
+            "b",
+        )
+        .unwrap();
         let mut eng = Engine::new();
         let v = eng.query(h.doc(), &lib, Key::Drc);
         assert_eq!(
             v.as_drc(),
-            &[Violation::Clearance { a: NetId::new("A"), b: NetId::new("B"), layer: Layer::Top }]
+            &[Violation::Clearance {
+                a: NetId::new("A"),
+                b: NetId::new("B"),
+                layer: Layer::Top
+            }]
         );
     }
 
@@ -1073,11 +1640,27 @@ mod tests {
     fn drc_catches_min_width() {
         let lib = part_library();
         let mut h = routed(two_pin_design());
-        let t = trace("VBUS", Layer::Top, vec![Point::mm(2, 0), Point::mm(9, 0)], MM / 10); // 0.1mm
-        h.commit(Transaction::one(Command::AddTrace(TraceId(1), t)), &lib, "thin").unwrap();
+        let t = trace(
+            "VBUS",
+            Layer::Top,
+            vec![Point::mm(2, 0), Point::mm(9, 0)],
+            MM / 10,
+        ); // 0.1mm
+        h.commit(
+            Transaction::one(Command::AddTrace(TraceId(1), t)),
+            &lib,
+            "thin",
+        )
+        .unwrap();
         let mut eng = Engine::new();
         let v = eng.query(h.doc(), &lib, Key::Drc);
-        assert_eq!(v.as_drc(), &[Violation::MinWidth { trace: TraceId(1), width: MM / 10 }]);
+        assert_eq!(
+            v.as_drc(),
+            &[Violation::MinWidth {
+                trace: TraceId(1),
+                width: MM / 10
+            }]
+        );
     }
 
     /// A two-layer route joined by a via passes the ratsnest: the via unions copper
@@ -1087,8 +1670,18 @@ mod tests {
         let lib = part_library();
         let mut h = routed(two_pin_design());
         // Top trace pad->via, bottom trace via->pad, via bridging Top..Bottom at (5,0).
-        let top = trace("VBUS", Layer::Top, vec![Point::mm(2, 0), Point::mm(5, 0)], W);
-        let bot = trace("VBUS", Layer::Bottom, vec![Point::mm(5, 0), Point::mm(9, 0)], W);
+        let top = trace(
+            "VBUS",
+            Layer::Top,
+            vec![Point::mm(2, 0), Point::mm(5, 0)],
+            W,
+        );
+        let bot = trace(
+            "VBUS",
+            Layer::Bottom,
+            vec![Point::mm(5, 0), Point::mm(9, 0)],
+            W,
+        );
         let via = Via {
             net: NetId::new("VBUS"),
             at: Point::mm(5, 0),
@@ -1098,14 +1691,33 @@ mod tests {
             pad: 600_000,
             prov: Provenance::Pinned,
         };
-        h.commit(Transaction::one(Command::AddTrace(TraceId(1), top)), &lib, "top").unwrap();
-        h.commit(Transaction::one(Command::AddTrace(TraceId(2), bot)), &lib, "bot").unwrap();
+        h.commit(
+            Transaction::one(Command::AddTrace(TraceId(1), top)),
+            &lib,
+            "top",
+        )
+        .unwrap();
+        h.commit(
+            Transaction::one(Command::AddTrace(TraceId(2), bot)),
+            &lib,
+            "bot",
+        )
+        .unwrap();
         let mut eng = Engine::new();
         // Without the via the two layers are disconnected: ratsnest fails.
         assert!(!eng.query(h.doc(), &lib, Key::Drc).as_drc().is_empty());
-        h.commit(Transaction::one(Command::AddVia(ViaId(1), via)), &lib, "via").unwrap();
+        h.commit(
+            Transaction::one(Command::AddVia(ViaId(1), via)),
+            &lib,
+            "via",
+        )
+        .unwrap();
         let v = eng.query(h.doc(), &lib, Key::Drc);
-        assert!(v.as_drc().is_empty(), "via should bridge the layers: {:?}", v.as_drc());
+        assert!(
+            v.as_drc().is_empty(),
+            "via should bridge the layers: {:?}",
+            v.as_drc()
+        );
     }
 
     /// Adding a trace bumps `route_rev` (and only that), and re-runs DRC — turning
@@ -1118,19 +1730,40 @@ mod tests {
         let v = eng.query(h.doc(), &lib, Key::Drc);
         assert!(!v.as_drc().is_empty(), "unrouted net should flag");
         let d0 = eng.count(Key::Drc);
-        let (conn0, geom0, route0) =
-            (h.doc().conn_rev, h.doc().geom_rev, h.doc().route_rev);
+        let (conn0, geom0, route0) = (h.doc().conn_rev, h.doc().geom_rev, h.doc().route_rev);
 
-        let t = trace("VBUS", Layer::Top, vec![Point::mm(2, 0), Point::mm(9, 0)], W);
-        h.commit(Transaction::one(Command::AddTrace(TraceId(1), t)), &lib, "route").unwrap();
+        let t = trace(
+            "VBUS",
+            Layer::Top,
+            vec![Point::mm(2, 0), Point::mm(9, 0)],
+            W,
+        );
+        h.commit(
+            Transaction::one(Command::AddTrace(TraceId(1), t)),
+            &lib,
+            "route",
+        )
+        .unwrap();
         // Only the routing input moved.
         assert!(h.doc().route_rev > route0, "route_rev must bump");
-        assert_eq!(h.doc().conn_rev, conn0, "a route edit must not bump conn_rev");
-        assert_eq!(h.doc().geom_rev, geom0, "a route edit must not bump geom_rev");
+        assert_eq!(
+            h.doc().conn_rev,
+            conn0,
+            "a route edit must not bump conn_rev"
+        );
+        assert_eq!(
+            h.doc().geom_rev,
+            geom0,
+            "a route edit must not bump geom_rev"
+        );
 
         let v = eng.query(h.doc(), &lib, Key::Drc);
         assert!(v.as_drc().is_empty(), "now routed: {:?}", v.as_drc());
-        assert_eq!(eng.count(Key::Drc), d0 + 1, "DRC must recompute after a route edit");
+        assert_eq!(
+            eng.count(Key::Drc),
+            d0 + 1,
+            "DRC must recompute after a route edit"
+        );
     }
 
     /// A routing edit re-runs DRC but does NOT touch ERC/Netlist: the new routing
@@ -1144,12 +1777,26 @@ mod tests {
         eng.query(h.doc(), &lib, Key::Drc);
         let (e0, n0) = (eng.count(Key::Erc), eng.count(Key::Netlist));
 
-        let t = trace("VBUS", Layer::Top, vec![Point::mm(2, 0), Point::mm(9, 0)], W);
-        h.commit(Transaction::one(Command::AddTrace(TraceId(1), t)), &lib, "route").unwrap();
+        let t = trace(
+            "VBUS",
+            Layer::Top,
+            vec![Point::mm(2, 0), Point::mm(9, 0)],
+            W,
+        );
+        h.commit(
+            Transaction::one(Command::AddTrace(TraceId(1), t)),
+            &lib,
+            "route",
+        )
+        .unwrap();
         eng.query(h.doc(), &lib, Key::Erc);
         eng.query(h.doc(), &lib, Key::Drc);
         assert_eq!(eng.count(Key::Erc), e0, "a route edit must not re-run ERC");
-        assert_eq!(eng.count(Key::Netlist), n0, "a route edit must not re-run Netlist");
+        assert_eq!(
+            eng.count(Key::Netlist),
+            n0,
+            "a route edit must not re-run Netlist"
+        );
     }
 
     /// A non-routing edit whose resolved netlist is unchanged does NOT recompute
@@ -1163,12 +1810,25 @@ mod tests {
         let lib = part_library();
         let spare = |part: &str| {
             let mut s = two_pin_design();
-            s.push(GenDirective::Instance { path: "spare".into(), part: part.into() });
+            s.push(GenDirective::Instance {
+                path: "spare".into(),
+                part: part.into(),
+            });
             s
         };
         let mut h = routed(spare("Cap"));
-        let t = trace("VBUS", Layer::Top, vec![Point::mm(2, 0), Point::mm(9, 0)], W);
-        h.commit(Transaction::one(Command::AddTrace(TraceId(1), t)), &lib, "route").unwrap();
+        let t = trace(
+            "VBUS",
+            Layer::Top,
+            vec![Point::mm(2, 0), Point::mm(9, 0)],
+            W,
+        );
+        h.commit(
+            Transaction::one(Command::AddTrace(TraceId(1), t)),
+            &lib,
+            "route",
+        )
+        .unwrap();
         let mut eng = Engine::new();
         eng.query(h.doc(), &lib, Key::Drc);
         let (n0, d0) = (eng.count(Key::Netlist), eng.count(Key::Drc));
@@ -1176,13 +1836,26 @@ mod tests {
 
         // Swap the unconnected spare's part type: connectivity-affecting (shape), but
         // geometry- and routing-neutral, and netlist-value-neutral.
-        h.commit(Transaction::one(Command::SetSource(spare("LDO"))), &lib, "swap").unwrap();
+        h.commit(
+            Transaction::one(Command::SetSource(spare("LDO"))),
+            &lib,
+            "swap",
+        )
+        .unwrap();
         assert_eq!(h.doc().geom_rev, geom0, "swap must not move geometry");
         assert_eq!(h.doc().route_rev, route0, "swap must not change routing");
 
         eng.query(h.doc(), &lib, Key::Drc);
-        assert_eq!(eng.count(Key::Netlist), n0 + 1, "Netlist re-runs (conn_rev bumped)");
-        assert_eq!(eng.count(Key::Drc), d0, "DRC must be cut off (its result is unchanged)");
+        assert_eq!(
+            eng.count(Key::Netlist),
+            n0 + 1,
+            "Netlist re-runs (conn_rev bumped)"
+        );
+        assert_eq!(
+            eng.count(Key::Drc),
+            d0,
+            "DRC must be cut off (its result is unchanged)"
+        );
     }
 
     /// Routing commands are validated and atomic: an unknown net, a degenerate
@@ -1193,13 +1866,43 @@ mod tests {
         let mut h = routed(two_pin_design());
         let before = h.doc().traces.len();
         // Unknown net.
-        let bad = trace("NOPE", Layer::Top, vec![Point::mm(0, 0), Point::mm(1, 0)], W);
-        assert!(h.commit(Transaction::one(Command::AddTrace(TraceId(1), bad)), &lib, "x").is_err());
+        let bad = trace(
+            "NOPE",
+            Layer::Top,
+            vec![Point::mm(0, 0), Point::mm(1, 0)],
+            W,
+        );
+        assert!(
+            h.commit(
+                Transaction::one(Command::AddTrace(TraceId(1), bad)),
+                &lib,
+                "x"
+            )
+            .is_err()
+        );
         // Degenerate polyline.
         let stub = trace("VBUS", Layer::Top, vec![Point::mm(0, 0)], W);
-        assert!(h.commit(Transaction::one(Command::AddTrace(TraceId(1), stub)), &lib, "x").is_err());
+        assert!(
+            h.commit(
+                Transaction::one(Command::AddTrace(TraceId(1), stub)),
+                &lib,
+                "x"
+            )
+            .is_err()
+        );
         // Remove a trace that does not exist.
-        assert!(h.commit(Transaction::one(Command::RemoveTrace(TraceId(9))), &lib, "x").is_err());
-        assert_eq!(h.doc().traces.len(), before, "no failed command mutated the doc");
+        assert!(
+            h.commit(
+                Transaction::one(Command::RemoveTrace(TraceId(9))),
+                &lib,
+                "x"
+            )
+            .is_err()
+        );
+        assert_eq!(
+            h.doc().traces.len(),
+            before,
+            "no failed command mutated the doc"
+        );
     }
 }

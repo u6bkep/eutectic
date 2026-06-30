@@ -53,11 +53,11 @@
 
 use crate::command::Command;
 use crate::doc::{Doc, Nm, PinRef, Point, Provenance};
-use crate::geom::{clearance_violated, Shape2D};
+use crate::geom::{Shape2D, clearance_violated};
 use crate::id::{NetId, TraceId, ViaId};
-use crate::part::{pin_world, PartLib, PinRole};
+use crate::part::{PartLib, PinRole, pin_world};
 use crate::route::{
-    copper_layers_present, net_copper, CopperPiece, DesignRules, Layer, PieceLayers, Trace, Via,
+    CopperPiece, DesignRules, Layer, PieceLayers, Trace, Via, copper_layers_present, net_copper,
 };
 use crate::solve::Rect;
 use std::cmp::Reverse;
@@ -182,7 +182,13 @@ fn verify_and_prune(doc: &Doc, lib: &PartLib, rules: &DesignRules, result: &mut 
         .nets
         .iter()
         .map(|(nid, net)| {
-            (nid.clone(), net.members.iter().map(|m| (m.clone(), PinRole::Passive)).collect())
+            (
+                nid.clone(),
+                net.members
+                    .iter()
+                    .map(|m| (m.clone(), PinRole::Passive))
+                    .collect(),
+            )
         })
         .collect();
     let existing = net_copper(doc, lib, &netlist);
@@ -206,16 +212,17 @@ fn verify_and_prune(doc: &Doc, lib: &PartLib, rules: &DesignRules, result: &mut 
     }
 
     let layers = copper_layers_present(doc);
-    let shares = |a: &CopperPiece, b: &CopperPiece| {
-        layers.iter().any(|&l| a.layers.on(l) && b.layers.on(l))
-    };
+    let shares =
+        |a: &CopperPiece, b: &CopperPiece| layers.iter().any(|&l| a.layers.on(l) && b.layers.on(l));
     let mut unclean: BTreeSet<NetId> = BTreeSet::new();
     for p in &proposed {
         if unclean.contains(&p.net) {
             continue;
         }
         let clashes = existing.iter().chain(proposed.iter()).any(|o| {
-            o.net != p.net && shares(p, o) && clearance_violated(&p.shape, &o.shape, rules.min_clearance)
+            o.net != p.net
+                && shares(p, o)
+                && clearance_violated(&p.shape, &o.shape, rules.min_clearance)
         });
         if clashes {
             unclean.insert(p.net.clone());
@@ -256,8 +263,14 @@ fn routing_area(doc: &Doc, net_pads: &BTreeMap<NetId, Vec<Point>>, pitch: Nm) ->
     }
     let m = 2 * pitch;
     Some(Rect {
-        min: Point { x: min.x - m, y: min.y - m },
-        max: Point { x: max.x + m, y: max.y + m },
+        min: Point {
+            x: min.x - m,
+            y: min.y - m,
+        },
+        max: Point {
+            x: max.x + m,
+            y: max.y + m,
+        },
     })
 }
 
@@ -276,10 +289,18 @@ impl Grid {
     fn new(area: Rect, pitch: Nm) -> Grid {
         let cols = ((area.max.x - area.min.x) / pitch).max(0) as usize + 1;
         let rows = ((area.max.y - area.min.y) / pitch).max(0) as usize + 1;
-        Grid { origin: area.min, pitch, cols, rows }
+        Grid {
+            origin: area.min,
+            pitch,
+            cols,
+            rows,
+        }
     }
     fn world(&self, i: usize, j: usize) -> Point {
-        Point { x: self.origin.x + i as Nm * self.pitch, y: self.origin.y + j as Nm * self.pitch }
+        Point {
+            x: self.origin.x + i as Nm * self.pitch,
+            y: self.origin.y + j as Nm * self.pitch,
+        }
     }
     fn idx(&self, i: usize, j: usize) -> usize {
         j * self.cols + i
@@ -343,7 +364,13 @@ struct BlockMap {
 }
 
 impl BlockMap {
-    fn build(grid: &Grid, obs: &[Obstacle], rules: &DesignRules, width: Nm, via_pad: Nm) -> BlockMap {
+    fn build(
+        grid: &Grid,
+        obs: &[Obstacle],
+        rules: &DesignRules,
+        width: Nm,
+        via_pad: Nm,
+    ) -> BlockMap {
         let n = grid.cols * grid.rows;
         let mut trace = [vec![false; n], vec![false; n]];
         let mut via = vec![false; n];
@@ -383,7 +410,8 @@ impl BlockMap {
                         }
                         Obstacle::Via(p, opad, from, to) => {
                             let spans = |l: Layer| {
-                                let (lo, hi) = (from.depth().min(to.depth()), from.depth().max(to.depth()));
+                                let (lo, hi) =
+                                    (from.depth().min(to.depth()), from.depth().max(to.depth()));
                                 lo <= l.depth() && l.depth() <= hi
                             };
                             for (li, l) in [(TOP, Layer::Top), (BOT, Layer::Bottom)] {
@@ -435,7 +463,11 @@ fn route_net(
 
     // Claim list for rollback if any pin fails (so a partial net blocks no one).
     let mut claimed: Vec<(usize, usize)> = Vec::new();
-    let claim = |owner: &mut [[i32; 2]], i: usize, j: usize, l: usize, claimed: &mut Vec<(usize, usize)>| {
+    let claim = |owner: &mut [[i32; 2]],
+                 i: usize,
+                 j: usize,
+                 l: usize,
+                 claimed: &mut Vec<(usize, usize)>| {
         let idx = grid.idx(i, j);
         if owner[idx][l] != net_seq {
             owner[idx][l] = net_seq;
@@ -452,7 +484,13 @@ fn route_net(
     if seed_world != pads[0] {
         commands.push(Command::AddTrace(
             TraceId(mint(next_tid)),
-            Trace { net: nid.clone(), layer: Layer::Top, path: vec![pads[0], seed_world], width, prov: Provenance::Free },
+            Trace {
+                net: nid.clone(),
+                layer: Layer::Top,
+                path: vec![pads[0], seed_world],
+                width,
+                prov: Provenance::Free,
+            },
         ));
     }
     // The set of (node, layer) currently in the net's connected copper.
@@ -501,7 +539,13 @@ fn route_net(
             if pts.len() >= 2 {
                 commands.push(Command::AddTrace(
                     TraceId(mint(next_tid)),
-                    Trace { net: nid.clone(), layer, path: pts, width, prov: Provenance::Free },
+                    Trace {
+                        net: nid.clone(),
+                        layer,
+                        path: pts,
+                        width,
+                        prov: Provenance::Free,
+                    },
                 ));
             }
         }
@@ -720,7 +764,7 @@ mod tests {
     use super::*;
     use crate::command::{Command, Transaction};
     use crate::doc::Point;
-    use crate::elaborate::{board_rect, GenDirective as G, Source};
+    use crate::elaborate::{GenDirective as G, Source, board_rect};
     use crate::history::History;
     use crate::id::TraceId;
     use crate::part::part_library;
@@ -731,7 +775,8 @@ mod tests {
     fn doc_of(src: Source) -> History {
         let lib = part_library();
         let mut h = History::new(Default::default());
-        h.commit(Transaction::one(Command::SetSource(src)), &lib, "src").unwrap();
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "src")
+            .unwrap();
         h
     }
 
@@ -759,16 +804,30 @@ mod tests {
         let mut lib = crate::part::PartLib::new();
         lib.insert(
             "PAD".into(),
-            PartDef { name: "PAD".into(), pins: vec![pin], interfaces: BTreeMap::new() },
+            PartDef {
+                name: "PAD".into(),
+                pins: vec![pin],
+                interfaces: BTreeMap::new(),
+            },
         );
         // Net B's pad sits at the origin; net A is a separate net.
         let src = vec![
-            G::Instance { path: "b".into(), part: "PAD".into() },
-            G::Fix { path: "b".into(), pos: Point { x: 0, y: 0 } },
-            G::ConnectPins { net: "B".into(), pins: vec![("b".into(), "1".into())] },
+            G::Instance {
+                path: "b".into(),
+                part: "PAD".into(),
+            },
+            G::Fix {
+                path: "b".into(),
+                pos: Point { x: 0, y: 0 },
+            },
+            G::ConnectPins {
+                net: "B".into(),
+                pins: vec![("b".into(), "1".into())],
+            },
         ];
         let mut h = History::new(Default::default());
-        h.commit(Transaction::one(Command::SetSource(src)), &lib, "src").unwrap();
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "src")
+            .unwrap();
 
         // A net-A trace whose centreline runs straight through net B's pad.
         let mut result = AutorouteResult {
@@ -786,9 +845,18 @@ mod tests {
             unrouted: vec![],
         };
         verify_and_prune(h.doc(), &lib, &DesignRules::default(), &mut result);
-        assert!(result.commands.is_empty(), "trace through a different-net pad must be pruned");
-        assert!(result.routed.is_empty(), "the clashing net must leave `routed`");
-        assert!(result.unrouted.contains(&NetId::new("A")), "and be reported unrouted");
+        assert!(
+            result.commands.is_empty(),
+            "trace through a different-net pad must be pruned"
+        );
+        assert!(
+            result.routed.is_empty(),
+            "the clashing net must leave `routed`"
+        );
+        assert!(
+            result.unrouted.contains(&NetId::new("A")),
+            "and be reported unrouted"
+        );
     }
 
     /// Apply a proposed transaction's commands to the history head.
@@ -805,7 +873,8 @@ mod tests {
     }
 
     fn has_clearance_or_width(v: &[Violation]) -> bool {
-        v.iter().any(|x| matches!(x, Violation::Clearance { .. } | Violation::MinWidth { .. }))
+        v.iter()
+            .any(|x| matches!(x, Violation::Clearance { .. } | Violation::MinWidth { .. }))
     }
 
     /// A two-net board on an explicit outline: VBUS (reg.VOUT↔dec.p1) and GND
@@ -813,10 +882,22 @@ mod tests {
     fn two_net_board() -> Source {
         vec![
             board_rect(Point::mm(-6, -10), Point::mm(18, 10)),
-            G::Instance { path: "reg".into(), part: "LDO".into() },
-            G::Instance { path: "dec".into(), part: "Cap".into() },
-            G::Place { path: "reg".into(), pos: Point::mm(0, 0) },
-            G::Place { path: "dec".into(), pos: Point::mm(12, 0) },
+            G::Instance {
+                path: "reg".into(),
+                part: "LDO".into(),
+            },
+            G::Instance {
+                path: "dec".into(),
+                part: "Cap".into(),
+            },
+            G::Place {
+                path: "reg".into(),
+                pos: Point::mm(0, 0),
+            },
+            G::Place {
+                path: "dec".into(),
+                pos: Point::mm(12, 0),
+            },
             G::ConnectPins {
                 net: "VBUS".into(),
                 pins: vec![("reg".into(), "VOUT".into()), ("dec".into(), "p1".into())],
@@ -838,7 +919,9 @@ mod tests {
         // Before: both nets are unrouted (ratsnest islands).
         let before = drc(&h);
         assert!(
-            before.iter().any(|v| matches!(v, Violation::Unrouted { .. })),
+            before
+                .iter()
+                .any(|v| matches!(v, Violation::Unrouted { .. })),
             "expected unrouted nets before routing: {before:?}"
         );
 
@@ -849,7 +932,10 @@ mod tests {
 
         apply_all(&mut h, r.commands);
         let after = drc(&h);
-        assert!(after.is_empty(), "routed board must be DRC clean, got {after:?}");
+        assert!(
+            after.is_empty(),
+            "routed board must be DRC clean, got {after:?}"
+        );
     }
 
     /// Determinism: the same document autoroutes to byte-identical commands.
@@ -872,16 +958,31 @@ mod tests {
         let lib = part_library();
         let src = vec![
             board_rect(Point::mm(-6, -10), Point::mm(18, 10)),
-            G::Instance { path: "reg".into(), part: "LDO".into() },
-            G::Instance { path: "dec".into(), part: "Cap".into() },
-            G::Place { path: "reg".into(), pos: Point::mm(0, 0) },
-            G::Place { path: "dec".into(), pos: Point::mm(12, 0) },
+            G::Instance {
+                path: "reg".into(),
+                part: "LDO".into(),
+            },
+            G::Instance {
+                path: "dec".into(),
+                part: "Cap".into(),
+            },
+            G::Place {
+                path: "reg".into(),
+                pos: Point::mm(0, 0),
+            },
+            G::Place {
+                path: "dec".into(),
+                pos: Point::mm(12, 0),
+            },
             G::ConnectPins {
                 net: "VBUS".into(),
                 pins: vec![("reg".into(), "VOUT".into()), ("dec".into(), "p1".into())],
             },
             // Single-pin net carrying a hand-routed wall (not itself routed).
-            G::ConnectPins { net: "WALL".into(), pins: vec![("reg".into(), "VIN".into())] },
+            G::ConnectPins {
+                net: "WALL".into(),
+                pins: vec![("reg".into(), "VIN".into())],
+            },
         ];
         let mut h = doc_of(src);
         // A Pinned wall on net WALL across x=6, full board height (on Top only).
@@ -892,10 +993,18 @@ mod tests {
             width: 200_000,
             prov: Provenance::Pinned,
         };
-        h.commit(Transaction::one(Command::AddTrace(TraceId(1), wall)), &lib, "wall").unwrap();
+        h.commit(
+            Transaction::one(Command::AddTrace(TraceId(1), wall)),
+            &lib,
+            "wall",
+        )
+        .unwrap();
 
         let r = autoroute(h.doc(), &lib, &DesignRules::default());
-        assert!(r.unrouted.is_empty(), "VBUS should route around/under the wall");
+        assert!(
+            r.unrouted.is_empty(),
+            "VBUS should route around/under the wall"
+        );
         // The detour around a full-height Top wall forces a layer change.
         assert!(
             r.commands.iter().any(|c| matches!(c, Command::AddVia(..))),
@@ -909,7 +1018,9 @@ mod tests {
             "routing around a Pinned obstacle must stay clearance-clean: {after:?}"
         );
         assert!(
-            !after.iter().any(|v| matches!(v, Violation::Unrouted { net, .. } if *net == NetId::new("VBUS"))),
+            !after.iter().any(
+                |v| matches!(v, Violation::Unrouted { net, .. } if *net == NetId::new("VBUS"))
+            ),
             "VBUS must be fully routed: {after:?}"
         );
     }
@@ -922,15 +1033,30 @@ mod tests {
         let lib = part_library();
         let src = vec![
             board_rect(Point::mm(-6, -10), Point::mm(18, 10)),
-            G::Instance { path: "reg".into(), part: "LDO".into() },
-            G::Instance { path: "dec".into(), part: "Cap".into() },
-            G::Place { path: "reg".into(), pos: Point::mm(0, 0) },
-            G::Place { path: "dec".into(), pos: Point::mm(12, 0) },
+            G::Instance {
+                path: "reg".into(),
+                part: "LDO".into(),
+            },
+            G::Instance {
+                path: "dec".into(),
+                part: "Cap".into(),
+            },
+            G::Place {
+                path: "reg".into(),
+                pos: Point::mm(0, 0),
+            },
+            G::Place {
+                path: "dec".into(),
+                pos: Point::mm(12, 0),
+            },
             G::ConnectPins {
                 net: "VBUS".into(),
                 pins: vec![("reg".into(), "VOUT".into()), ("dec".into(), "p1".into())],
             },
-            G::ConnectPins { net: "WALL".into(), pins: vec![("reg".into(), "VIN".into())] },
+            G::ConnectPins {
+                net: "WALL".into(),
+                pins: vec![("reg".into(), "VIN".into())],
+            },
         ];
         let mut h = doc_of(src);
         // Walls on BOTH layers spanning beyond the board: no crossing on either layer.
@@ -942,18 +1068,32 @@ mod tests {
                 width: 200_000,
                 prov: Provenance::Pinned,
             };
-            h.commit(Transaction::one(Command::AddTrace(id, wall)), &lib, "wall").unwrap();
+            h.commit(Transaction::one(Command::AddTrace(id, wall)), &lib, "wall")
+                .unwrap();
         }
 
         let r = autoroute(h.doc(), &lib, &DesignRules::default());
-        assert_eq!(r.unrouted, vec![NetId::new("VBUS")], "VBUS is walled off both layers");
-        assert!(r.commands.is_empty(), "a failed net must emit no copper, got {:?}", r.commands);
+        assert_eq!(
+            r.unrouted,
+            vec![NetId::new("VBUS")],
+            "VBUS is walled off both layers"
+        );
+        assert!(
+            r.commands.is_empty(),
+            "a failed net must emit no copper, got {:?}",
+            r.commands
+        );
 
         // Applying nothing changes nothing; DRC still flags VBUS unrouted, no new DRC errors.
         let after = drc(&h);
-        assert!(!has_clearance_or_width(&after), "no spurious clearance/width: {after:?}");
         assert!(
-            after.iter().any(|v| matches!(v, Violation::Unrouted { net, .. } if *net == NetId::new("VBUS"))),
+            !has_clearance_or_width(&after),
+            "no spurious clearance/width: {after:?}"
+        );
+        assert!(
+            after.iter().any(
+                |v| matches!(v, Violation::Unrouted { net, .. } if *net == NetId::new("VBUS"))
+            ),
             "VBUS should remain flagged unrouted: {after:?}"
         );
     }
@@ -965,12 +1105,30 @@ mod tests {
         // Three caps' p1 pads + reg.VOUT all on one net.
         let src = vec![
             board_rect(Point::mm(-6, -12), Point::mm(30, 12)),
-            G::Instance { path: "reg".into(), part: "LDO".into() },
-            G::Instance { path: "c0".into(), part: "Cap".into() },
-            G::Instance { path: "c1".into(), part: "Cap".into() },
-            G::Place { path: "reg".into(), pos: Point::mm(0, 0) },
-            G::Place { path: "c0".into(), pos: Point::mm(12, 6) },
-            G::Place { path: "c1".into(), pos: Point::mm(20, -6) },
+            G::Instance {
+                path: "reg".into(),
+                part: "LDO".into(),
+            },
+            G::Instance {
+                path: "c0".into(),
+                part: "Cap".into(),
+            },
+            G::Instance {
+                path: "c1".into(),
+                part: "Cap".into(),
+            },
+            G::Place {
+                path: "reg".into(),
+                pos: Point::mm(0, 0),
+            },
+            G::Place {
+                path: "c0".into(),
+                pos: Point::mm(12, 6),
+            },
+            G::Place {
+                path: "c1".into(),
+                pos: Point::mm(20, -6),
+            },
             G::ConnectPins {
                 net: "VBUS".into(),
                 pins: vec![
@@ -985,6 +1143,9 @@ mod tests {
         assert!(r.unrouted.is_empty(), "3-pin net should fully route");
         apply_all(&mut h, r.commands);
         let after = drc(&h);
-        assert!(after.is_empty(), "3-pin routed net must be DRC clean: {after:?}");
+        assert!(
+            after.is_empty(),
+            "3-pin routed net must be DRC clean: {after:?}"
+        );
     }
 }

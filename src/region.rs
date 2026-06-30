@@ -64,6 +64,7 @@ pub enum BoolOp {
 
 // 64 unit directions (CCW from +x), scaled by 2^30 = 1073741824.
 const CIRCLE_SCALE: i128 = 1073741824;
+#[rustfmt::skip] // a hand-laid 4-per-line lookup table; one-per-line is far less legible
 const CIRCLE_DIRS: [(i64, i64); 64] = [
     (1073741824, 0), (1068571464, 105245103), (1053110176, 209476638), (1027506862, 311690799),
     (992008094, 410903207), (946955747, 506158392), (892783698, 596538995), (830013654, 681174602),
@@ -119,7 +120,11 @@ fn point_on_seg(a: Point, b: Point, p: Point) -> bool {
 /// Round `num/den` to the nearest integer (half away from zero); `den > 0`.
 fn round_div(num: i128, den: i128) -> i128 {
     debug_assert!(den > 0);
-    if num >= 0 { (num + den / 2) / den } else { -((-num + den / 2) / den) }
+    if num >= 0 {
+        (num + den / 2) / den
+    } else {
+        -((-num + den / 2) / den)
+    }
 }
 
 /// Squared distance from point `p` to segment `a`–`b`, as `(num, den)` with
@@ -225,7 +230,11 @@ fn locate(p: Point, rings: &[Ring]) -> Loc {
             }
         }
     }
-    if winding(p, rings) != 0 { Loc::Inside } else { Loc::Outside }
+    if winding(p, rings) != 0 {
+        Loc::Inside
+    } else {
+        Loc::Outside
+    }
 }
 
 /// Twice the signed area of a ring (shoelace). CCW > 0, CW < 0.
@@ -258,7 +267,9 @@ impl Region {
 
     /// A region from a single CCW outer ring.
     pub fn from_ring(ring: Ring) -> Region {
-        Region { rings: vec![ensure_ccw(ring)] }
+        Region {
+            rings: vec![ensure_ccw(ring)],
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -300,7 +311,9 @@ impl Region {
         let mut holes: Vec<Ring> = Vec::new();
         for r in &self.rings {
             match signed_area2(r).cmp(&0) {
-                std::cmp::Ordering::Greater => islands.push(Region { rings: vec![r.clone()] }),
+                std::cmp::Ordering::Greater => islands.push(Region {
+                    rings: vec![r.clone()],
+                }),
                 std::cmp::Ordering::Less => holes.push(r.clone()),
                 std::cmp::Ordering::Equal => {} // degenerate (collinear / <3 verts): drop.
             }
@@ -355,7 +368,10 @@ fn crossings(a1: Point, a2: Point, b1: Point, b2: Point) -> Vec<(Point, bool, bo
         if (0..=d).contains(&tn) && (0..=d).contains(&sn) {
             let x = a1.x as i128 + round_div(tn * dax, d);
             let y = a1.y as i128 + round_div(tn * day, d);
-            let p = Point { x: x as Nm, y: y as Nm };
+            let p = Point {
+                x: x as Nm,
+                y: y as Nm,
+            };
             // Split an edge iff the crossing is strictly interior to it (parameter
             // in (0,d)); an endpoint touch (tn==0 || tn==d) is not a split.
             return vec![(p, tn > 0 && tn < d, sn > 0 && sn < d)];
@@ -472,7 +488,11 @@ fn side_of(frag: Edge, other: &Region) -> Loc {
 /// After subdivision, two fragments are collinear-coincident **iff** they share this
 /// key (two straight segments with the same endpoints are the same segment).
 fn edge_key(e: Edge) -> Edge {
-    if (e.0.x, e.0.y) <= (e.1.x, e.1.y) { (e.0, e.1) } else { (e.1, e.0) }
+    if (e.0.x, e.0.y) <= (e.1.x, e.1.y) {
+        (e.0, e.1)
+    } else {
+        (e.1, e.0)
+    }
 }
 
 /// The boolean of two regions. See the module docs for the method.
@@ -531,7 +551,9 @@ pub fn boolean(a: &Region, b: &Region, op: BoolOp) -> Region {
         }
     }
 
-    Region { rings: stitch(kept) }
+    Region {
+        rings: stitch(kept),
+    }
 }
 
 /// Convenience wrappers.
@@ -692,7 +714,10 @@ fn disc_ring(c: Point, radius: Nm, segs: usize) -> Ring {
         let (dx, dy) = CIRCLE_DIRS[i];
         let x = c.x as i128 + round_div(dx as i128 * r, CIRCLE_SCALE);
         let y = c.y as i128 + round_div(dy as i128 * r, CIRCLE_SCALE);
-        ring.push(Point { x: x as Nm, y: y as Nm });
+        ring.push(Point {
+            x: x as Nm,
+            y: y as Nm,
+        });
         i += step;
     }
     ring
@@ -710,7 +735,10 @@ fn segment_rect(a: Point, b: Point, r: Nm) -> Option<Ring> {
     // Left-perpendicular unit × r, rounded to nm.
     let px = (-dy / len * r as f64).round() as Nm;
     let py = (dx / len * r as f64).round() as Nm;
-    let off = |p: Point, sx: Nm, sy: Nm| Point { x: p.x + sx, y: p.y + sy };
+    let off = |p: Point, sx: Nm, sy: Nm| Point {
+        x: p.x + sx,
+        y: p.y + sy,
+    };
     // CCW: a+perp, b+perp, b−perp, a−perp.
     Some(vec![
         off(a, px, py),
@@ -803,7 +831,10 @@ mod tests {
         let mut cw = ccw.clone();
         cw.reverse();
         assert!(signed_area2(&cw) < 0);
-        assert_eq!(area_abs(&Region::from_ring(ccw)), 4 * MM as i128 * MM as i128);
+        assert_eq!(
+            area_abs(&Region::from_ring(ccw)),
+            4 * MM as i128 * MM as i128
+        );
     }
 
     #[test]
@@ -835,7 +866,11 @@ mod tests {
         let b = Region::from_ring(square(MM, 0, MM));
         let i = intersection(&a, &b);
         // Overlap [0,1]x[-1,1] = 1x2 = 2 mm^2.
-        assert_eq!(area_abs(&i), 2 * MM as i128 * MM as i128, "intersection area");
+        assert_eq!(
+            area_abs(&i),
+            2 * MM as i128 * MM as i128,
+            "intersection area"
+        );
     }
 
     #[test]
@@ -904,7 +939,10 @@ mod tests {
         let rr = Shape2D::round_rect(pt(0, 0), 2 * MM, 2 * MM, MM / 2);
         let region = shape_to_region(&rr, DEFAULT_CIRCLE_SEGS);
         let a = area_abs(&region) as f64 / (MM as f64 * MM as f64);
-        assert!((a - 3.785).abs() < 0.05, "rounded-rect area {a} mm^2 ~ 3.785");
+        assert!(
+            (a - 3.785).abs() < 0.05,
+            "rounded-rect area {a} mm^2 ~ 3.785"
+        );
     }
 
     #[test]
@@ -924,7 +962,10 @@ mod tests {
         // A 1mm disc inflated by 0.5mm clearance ⇒ a 1.5mm disc.
         let inflated = shape_to_region(&Shape2D::disc(pt(0, 0), MM + MM / 2), DEFAULT_CIRCLE_SEGS);
         assert!(inflated.contains_point(pt(14 * MM / 10, 0)), "within 1.5mm");
-        assert!(!inflated.contains_point(pt(16 * MM / 10, 0)), "beyond 1.5mm");
+        assert!(
+            !inflated.contains_point(pt(16 * MM / 10, 0)),
+            "beyond 1.5mm"
+        );
     }
 
     #[test]
@@ -938,7 +979,10 @@ mod tests {
         let a = area_abs(&pour) as f64 / (MM as f64 * MM as f64);
         assert!((a - 92.93).abs() < 0.1, "pour area {a} ~ 92.93");
         assert!(!pour.contains_point(pt(0, 0)), "pad knocked out");
-        assert!(pour.contains_point(pt(4 * MM, 4 * MM)), "copper in the corner");
+        assert!(
+            pour.contains_point(pt(4 * MM, 4 * MM)),
+            "copper in the corner"
+        );
     }
 
     #[test]
@@ -948,9 +992,16 @@ mod tests {
         let a = Region::from_ring(square(0, 0, MM)); // [-1,1]^2
         let b = Region::from_ring(square(2 * MM, 0, MM)); // [1,3]x[-1,1]
         let u = union(&a, &b);
-        assert_eq!(area_abs(&u), 8 * MM as i128 * MM as i128, "shared-edge union area");
+        assert_eq!(
+            area_abs(&u),
+            8 * MM as i128 * MM as i128,
+            "shared-edge union area"
+        );
         assert_eq!(u.rings.len(), 1, "merges into one ring, no internal edge");
-        assert!(u.contains_point(pt(MM, 0)), "former shared edge is now interior");
+        assert!(
+            u.contains_point(pt(MM, 0)),
+            "former shared edge is now interior"
+        );
     }
 
     #[test]
@@ -967,7 +1018,11 @@ mod tests {
         let a = Region::from_ring(square(0, 0, MM));
         let b = Region::from_ring(square(10 * MM, 0, MM));
         let d = difference(&a, &b);
-        assert_eq!(area_abs(&d), 4 * MM as i128 * MM as i128, "A−(disjoint B) = A");
+        assert_eq!(
+            area_abs(&d),
+            4 * MM as i128 * MM as i128,
+            "A−(disjoint B) = A"
+        );
     }
 
     #[test]
@@ -1010,14 +1065,26 @@ mod tests {
         // (area π·1.5² ≈ 7.07 each, disjoint) ⇒ pour ≈ 100 − 14.14 = 85.86 mm^2.
         let board = Region::from_ring(square(0, 0, 5 * MM));
         let pads = union_all(vec![
-            shape_to_region(&Shape2D::disc(pt(-2 * MM, 0), MM + MM / 2), DEFAULT_CIRCLE_SEGS),
-            shape_to_region(&Shape2D::disc(pt(2 * MM, 0), MM + MM / 2), DEFAULT_CIRCLE_SEGS),
+            shape_to_region(
+                &Shape2D::disc(pt(-2 * MM, 0), MM + MM / 2),
+                DEFAULT_CIRCLE_SEGS,
+            ),
+            shape_to_region(
+                &Shape2D::disc(pt(2 * MM, 0), MM + MM / 2),
+                DEFAULT_CIRCLE_SEGS,
+            ),
         ]);
         let pour = difference(&board, &pads);
         let a = area_abs(&pour) as f64 / (MM as f64 * MM as f64);
-        assert!((a - 85.86).abs() < 0.2, "two-knockout pour area {a} ~ 85.86");
+        assert!(
+            (a - 85.86).abs() < 0.2,
+            "two-knockout pour area {a} ~ 85.86"
+        );
         assert!(!pour.contains_point(pt(-2 * MM, 0)) && !pour.contains_point(pt(2 * MM, 0)));
-        assert!(pour.contains_point(pt(0, 0)), "copper survives between the two pads");
+        assert!(
+            pour.contains_point(pt(0, 0)),
+            "copper survives between the two pads"
+        );
     }
 
     #[test]
@@ -1037,8 +1104,14 @@ mod tests {
         assert!((a - expect).abs() < 0.1, "arc tube area {a} ~ {expect}");
         // A point on the arc centreline (the apex) is inside the copper; the hollow
         // centre of the semicircle (origin) is not.
-        assert!(region.contains_point(pt(0, r)), "copper covers the arc apex");
-        assert!(!region.contains_point(pt(0, 0)), "the tube is hollow at the centre");
+        assert!(
+            region.contains_point(pt(0, r)),
+            "copper covers the arc apex"
+        );
+        assert!(
+            !region.contains_point(pt(0, 0)),
+            "the tube is hollow at the centre"
+        );
     }
 
     #[test]
@@ -1051,7 +1124,10 @@ mod tests {
         let half = Shape2D::polygon_path(
             crate::geom::Path {
                 start: pt(-r, 0),
-                segs: vec![crate::geom::Seg::Arc { mid: pt(0, r), end: pt(r, 0) }],
+                segs: vec![crate::geom::Seg::Arc {
+                    mid: pt(0, r),
+                    end: pt(r, 0),
+                }],
             },
             0,
         );
@@ -1060,9 +1136,18 @@ mod tests {
         let expect = 2.0 * std::f64::consts::PI;
         assert!((a - expect).abs() < 0.1, "half-disc area {a} ~ {expect}");
         assert!(region.contains_point(pt(0, MM)), "interior point is filled");
-        assert!(region.contains_point(pt(0, 18 * MM / 10)), "point under the apex is filled");
-        assert!(!region.contains_point(pt(0, -MM / 2)), "below the diameter is outside");
-        assert!(!region.contains_point(pt(18 * MM / 10, 18 * MM / 10)), "outside the circle");
+        assert!(
+            region.contains_point(pt(0, 18 * MM / 10)),
+            "point under the apex is filled"
+        );
+        assert!(
+            !region.contains_point(pt(0, -MM / 2)),
+            "below the diameter is outside"
+        );
+        assert!(
+            !region.contains_point(pt(18 * MM / 10, 18 * MM / 10)),
+            "outside the circle"
+        );
     }
 
     #[test]
@@ -1072,16 +1157,31 @@ mod tests {
         // 2.3̄ mm), so the crossing rounds to a lattice point on neither integer line.
         // A = 4x2 rect (area 8). B = triangle (1,0),(3,0),(2,3) (area 3); B's tip above
         // y=2 is clipped, so A∩B = 3 − tip(1/3) = 8/3 ≈ 2.667 mm^2; A∪B = 25/3 ≈ 8.333.
-        let a = Region::from_ring(vec![pt(0, 0), pt(4 * MM, 0), pt(4 * MM, 2 * MM), pt(0, 2 * MM)]);
+        let a = Region::from_ring(vec![
+            pt(0, 0),
+            pt(4 * MM, 0),
+            pt(4 * MM, 2 * MM),
+            pt(0, 2 * MM),
+        ]);
         let b = Region::from_ring(vec![pt(MM, 0), pt(3 * MM, 0), pt(2 * MM, 3 * MM)]);
         let inter = intersection(&a, &b);
         let uni = union(&a, &b);
         let mm2 = MM as f64 * MM as f64;
-        assert!((area_abs(&inter) as f64 / mm2 - 8.0 / 3.0).abs() < 0.001, "A∩B = 8/3");
-        assert!((area_abs(&uni) as f64 / mm2 - 25.0 / 3.0).abs() < 0.001, "A∪B = 25/3");
+        assert!(
+            (area_abs(&inter) as f64 / mm2 - 8.0 / 3.0).abs() < 0.001,
+            "A∩B = 8/3"
+        );
+        assert!(
+            (area_abs(&uni) as f64 / mm2 - 25.0 / 3.0).abs() < 0.001,
+            "A∪B = 25/3"
+        );
         // The crossing must split BOTH edges identically (no crack): re-running is
         // byte-identical, and a point just inside the clipped overlap is contained.
-        assert_eq!(inter, intersection(&a, &b), "deterministic under non-lattice crossings");
+        assert_eq!(
+            inter,
+            intersection(&a, &b),
+            "deterministic under non-lattice crossings"
+        );
         assert!(inter.contains_point(pt(2 * MM, MM)), "overlap interior");
     }
 
@@ -1092,10 +1192,22 @@ mod tests {
         let t1 = Region::from_ring(vec![pt(0, 0), pt(2 * MM, 0), pt(2 * MM, 2 * MM)]);
         let t2 = Region::from_ring(vec![pt(0, 0), pt(2 * MM, 2 * MM), pt(0, 2 * MM)]);
         let u = union(&t1, &t2);
-        assert_eq!(area_abs(&u), 4 * MM as i128 * MM as i128, "two triangles → square");
-        assert_eq!(u.rings.len(), 1, "shared diagonal becomes interior, one ring");
+        assert_eq!(
+            area_abs(&u),
+            4 * MM as i128 * MM as i128,
+            "two triangles → square"
+        );
+        assert_eq!(
+            u.rings.len(),
+            1,
+            "shared diagonal becomes interior, one ring"
+        );
         // Intersection of the two triangles (share only the diagonal) has no area.
-        assert_eq!(area_abs(&intersection(&t1, &t2)), 0, "triangles meet only on the diagonal");
+        assert_eq!(
+            area_abs(&intersection(&t1, &t2)),
+            0,
+            "triangles meet only on the diagonal"
+        );
     }
 
     #[test]
@@ -1116,8 +1228,14 @@ mod tests {
         ]);
         let pour = difference(&board, &diamond);
         let a = area_abs(&pour) as f64 / (MM as f64 * MM as f64);
-        assert!((a - 95.5).abs() < 0.01, "rotated-diamond pour area {a} ~ 95.5");
-        assert!(!pour.contains_point(pt(4 * MM, 5 * MM)), "copper knocked out near the corner");
+        assert!(
+            (a - 95.5).abs() < 0.01,
+            "rotated-diamond pour area {a} ~ 95.5"
+        );
+        assert!(
+            !pour.contains_point(pt(4 * MM, 5 * MM)),
+            "copper knocked out near the corner"
+        );
     }
 
     #[test]
@@ -1129,5 +1247,3 @@ mod tests {
         assert_eq!(d1, d2, "same inputs ⇒ identical region");
     }
 }
-
-

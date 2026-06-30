@@ -5,7 +5,7 @@
 //! itself encodes how two instances mate (UART crosses tx<->rx). A designer never
 //! wires individual signals, so connecting tx-to-tx is not expressible.
 
-use crate::doc::{Component, Nm, Point, MM};
+use crate::doc::{Component, MM, Nm, Point};
 use crate::geom::Shape2D;
 use crate::part::Dir::*;
 use std::collections::BTreeMap;
@@ -154,10 +154,7 @@ impl PartDef {
             let iface = self.interfaces.get(port)?;
             iface.signals.get(sig).copied().map(PinRole::from_dir)
         } else {
-            self.pins
-                .iter()
-                .find(|p| p.number == id)
-                .map(|p| p.role)
+            self.pins.iter().find(|p| p.number == id).map(|p| p.role)
         }
     }
 
@@ -198,13 +195,21 @@ impl PartDef {
                 _ => Vec::new(),
             };
         }
-        let by_name: Vec<String> =
-            self.pins.iter().filter(|p| p.name == sel).map(|p| p.number.clone()).collect();
+        let by_name: Vec<String> = self
+            .pins
+            .iter()
+            .filter(|p| p.name == sel)
+            .map(|p| p.number.clone())
+            .collect();
         if !by_name.is_empty() {
             return by_name;
         }
         // Fall back to a direct pad-number reference.
-        self.pins.iter().filter(|p| p.number == sel).map(|p| p.number.clone()).collect()
+        self.pins
+            .iter()
+            .filter(|p| p.number == sel)
+            .map(|p| p.number.clone())
+            .collect()
     }
 }
 
@@ -214,14 +219,20 @@ impl PartDef {
 pub fn pin_world(comp: &Component, def: &PartDef, pin: &str) -> Option<Point> {
     let off = def.pin_offset(pin)?;
     let r = comp.orient.rotate(off);
-    Some(Point { x: comp.pos.value.x + r.x, y: comp.pos.value.y + r.y })
+    Some(Point {
+        x: comp.pos.value.x + r.x,
+        y: comp.pos.value.y + r.y,
+    })
 }
 
 /// Lift a component-local point into world space on a placed component: rotate by
 /// the cardinal orientation, translate to the component position. Exact (integer).
 pub fn to_world(comp: &Component, p: Point) -> Point {
     let r = comp.orient.rotate(p);
-    Point { x: comp.pos.value.x + r.x, y: comp.pos.value.y + r.y }
+    Point {
+        x: comp.pos.value.x + r.x,
+        y: comp.pos.value.y + r.y,
+    }
 }
 
 /// World-frame copper shape of a pad region on a placed component.
@@ -283,7 +294,13 @@ fn uart() -> InterfaceDef {
 fn pin(name: &str, role: PinRole, offset: Point) -> PinDef {
     // No distinct pad numbering in the toy library: number defaults to the name.
     // The toy parts carry no footprint, so they have no pad copper geometry.
-    PinDef { name: name.into(), number: name.into(), role, offset, pad: None }
+    PinDef {
+        name: name.into(),
+        number: name.into(),
+        role,
+        offset,
+        pad: None,
+    }
 }
 
 /// A small built-in library sufficient for the M1 demo.
@@ -321,8 +338,22 @@ pub fn part_library() -> PartLib {
         PartDef {
             name: "MCU".into(),
             pins: vec![
-                pin("VDD", PowerIn, Point { x: -3 * MM, y: 3 * MM }),
-                pin("GND", Passive, Point { x: -3 * MM, y: -3 * MM }),
+                pin(
+                    "VDD",
+                    PowerIn,
+                    Point {
+                        x: -3 * MM,
+                        y: 3 * MM,
+                    },
+                ),
+                pin(
+                    "GND",
+                    Passive,
+                    Point {
+                        x: -3 * MM,
+                        y: -3 * MM,
+                    },
+                ),
             ],
             interfaces: BTreeMap::from([("uart".into(), uart())]),
         },
@@ -332,8 +363,22 @@ pub fn part_library() -> PartLib {
         PartDef {
             name: "Sensor".into(),
             pins: vec![
-                pin("VDD", PowerIn, Point { x: -3 * MM, y: 3 * MM }),
-                pin("GND", Passive, Point { x: -3 * MM, y: -3 * MM }),
+                pin(
+                    "VDD",
+                    PowerIn,
+                    Point {
+                        x: -3 * MM,
+                        y: 3 * MM,
+                    },
+                ),
+                pin(
+                    "GND",
+                    Passive,
+                    Point {
+                        x: -3 * MM,
+                        y: -3 * MM,
+                    },
+                ),
             ],
             interfaces: BTreeMap::from([("uart".into(), uart())]),
         },
@@ -351,7 +396,10 @@ mod tests {
         Component {
             id: EntityId::new("u1"),
             part: part.into(),
-            pos: Dof { value: pos, prov: Provenance::Free },
+            pos: Dof {
+                value: pos,
+                prov: Provenance::Free,
+            },
             orient,
         }
     }
@@ -382,11 +430,18 @@ mod tests {
             name: "P".into(),
             // Two pads share the name VDD (distinct numbers) — the duplicate-power
             // case; numbers are out of order to prove order follows declaration.
-            pins: vec![mk("VDD", "1", PowerIn), mk("VDD", "8", PowerIn), mk("GND", "4", Passive)],
+            pins: vec![
+                mk("VDD", "1", PowerIn),
+                mk("VDD", "8", PowerIn),
+                mk("GND", "4", Passive),
+            ],
             interfaces: BTreeMap::new(),
         };
         // A functional name fans out to *every* matching pad number.
-        assert_eq!(part.resolve_selector("VDD"), vec!["1".to_string(), "8".to_string()]);
+        assert_eq!(
+            part.resolve_selector("VDD"),
+            vec!["1".to_string(), "8".to_string()]
+        );
         assert_eq!(part.resolve_selector("GND"), vec!["4".to_string()]);
         // No name matches -> fall back to a direct pad-number reference.
         assert_eq!(part.resolve_selector("8"), vec!["8".to_string()]);
@@ -405,14 +460,43 @@ mod tests {
         // VOUT local offset is (2mm, 0); component at (10mm, 5mm).
         let at = Point::mm(10, 5);
         let cases = [
-            (Orient::Deg0, Point { x: 12 * MM, y: 5 * MM }),   // (+2, 0)
-            (Orient::Deg90, Point { x: 10 * MM, y: 7 * MM }),  // (0, +2)
-            (Orient::Deg180, Point { x: 8 * MM, y: 5 * MM }),  // (-2, 0)
-            (Orient::Deg270, Point { x: 10 * MM, y: 3 * MM }), // (0, -2)
+            (
+                Orient::Deg0,
+                Point {
+                    x: 12 * MM,
+                    y: 5 * MM,
+                },
+            ), // (+2, 0)
+            (
+                Orient::Deg90,
+                Point {
+                    x: 10 * MM,
+                    y: 7 * MM,
+                },
+            ), // (0, +2)
+            (
+                Orient::Deg180,
+                Point {
+                    x: 8 * MM,
+                    y: 5 * MM,
+                },
+            ), // (-2, 0)
+            (
+                Orient::Deg270,
+                Point {
+                    x: 10 * MM,
+                    y: 3 * MM,
+                },
+            ), // (0, -2)
         ];
         for (o, expected) in cases {
             let c = comp("LDO", at, o);
-            assert_eq!(pin_world(&c, ldo, "VOUT"), Some(expected), "rotation {:?}", o);
+            assert_eq!(
+                pin_world(&c, ldo, "VOUT"),
+                Some(expected),
+                "rotation {:?}",
+                o
+            );
         }
     }
 
@@ -422,7 +506,8 @@ mod tests {
         assert_eq!(Orient::Deg0.rotate(p), p);
         // Two 180s (or four 90s) return to the original — exact, no drift.
         assert_eq!(Orient::Deg180.rotate(Orient::Deg180.rotate(p)), p);
-        let q = Orient::Deg90.rotate(Orient::Deg90.rotate(Orient::Deg90.rotate(Orient::Deg90.rotate(p))));
+        let q = Orient::Deg90
+            .rotate(Orient::Deg90.rotate(Orient::Deg90.rotate(Orient::Deg90.rotate(p))));
         assert_eq!(q, p);
     }
 

@@ -15,9 +15,9 @@ use crate::diagnostic::{Diagnostic, Location};
 use crate::doc::*;
 use crate::geom::{BoardShape, Role, Shape2D};
 use crate::id::{EntityId, NetId};
-use crate::part::{courtyard_half_extents, Dir, PartDef, PartLib};
+use crate::part::{Dir, PartDef, PartLib, courtyard_half_extents};
 use crate::route::Layer;
-use crate::solve::{dist, solve, Constraint, Problem, PLACE_TOL};
+use crate::solve::{Constraint, PLACE_TOL, Problem, dist, solve};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// An authored **filled region**: a `Shape2D` area carrying a [`Role`] — a copper
@@ -41,26 +41,51 @@ pub struct RegionDecl {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GenDirective {
     /// Instantiate `part` at hierarchical `path`.
-    Instance { path: String, part: String },
+    Instance {
+        path: String,
+        part: String,
+    },
     /// Source-provided default placement (a *free* DOF unless overridden).
-    Place { path: String, pos: Point },
+    Place {
+        path: String,
+        pos: Point,
+    },
     /// A hard placement constraint (e.g. a connector mated to a mechanical
     /// datum). Outranks user overrides; surfaces conflicts rather than yielding.
-    Fix { path: String, pos: Point },
+    Fix {
+        path: String,
+        pos: Point,
+    },
     /// Board outline (a [`Shape2D`] — rounded/concave/CAD-imported all expressible);
     /// movable components are kept inside it. Use [`board_rect`] for the common
     /// rectangle. The last `Board` in the source wins.
-    Board { outline: Shape2D },
+    Board {
+        outline: Shape2D,
+    },
     /// An interior board cutout / void ([`Shape2D`]); components are kept out of it.
-    Cutout { shape: Shape2D },
+    Cutout {
+        shape: Shape2D,
+    },
     /// An authored filled region — a copper pour, keep-out, or filled void. See
     /// [`RegionDecl`]. Read by [`regions`]; the knockout fill is derived downstream.
     Region(RegionDecl),
     /// Relational placement constraint solved by the least-change solver.
-    Near { a: String, b: String, within: Nm },
-    MinSep { a: String, b: String, gap: Nm },
-    AlignX { nodes: Vec<String> },
-    AlignY { nodes: Vec<String> },
+    Near {
+        a: String,
+        b: String,
+        within: Nm,
+    },
+    MinSep {
+        a: String,
+        b: String,
+        gap: Nm,
+    },
+    AlignX {
+        nodes: Vec<String>,
+    },
+    AlignY {
+        nodes: Vec<String>,
+    },
     /// Connect two interface ports. The crossing is determined by the interface
     /// type's mate map, so it cannot be wired backwards.
     ConnectInterface {
@@ -71,17 +96,30 @@ pub enum GenDirective {
     /// resolved against the component's part: a functional name fans out to *every*
     /// pad with that name (so `IOVDD` connects all six pads), a pad number selects
     /// that one pad. An unresolvable selector aborts elaboration (no silent dangle).
-    ConnectPins { net: String, pins: Vec<(String, String)> }, // (comp path, selector)
+    ConnectPins {
+        net: String,
+        pins: Vec<(String, String)>,
+    }, // (comp path, selector)
     /// Mark pads as deliberately unconnected. Same `(comp path, selector)` shape as
     /// `ConnectPins`; the resolved pads are exempt from the floating-pad check.
-    NoConnect { pins: Vec<(String, String)> },
+    NoConnect {
+        pins: Vec<(String, String)>,
+    },
     /// Set a component's planar orientation (cardinal degrees: 0/90/180/270). A
     /// settable attribute, not a solver DOF.
-    Rotate { path: String, deg: i32 },
+    Rotate {
+        path: String,
+        deg: i32,
+    },
     /// Like `Near`, but the target is a specific *pin* (`b_comp`.`b_pin`) rather
     /// than a component centroid. The pin's world position tracks its component's
     /// position + orientation during solving.
-    NearPin { a: String, b_comp: String, b_pin: String, within: Nm },
+    NearPin {
+        a: String,
+        b_comp: String,
+        b_pin: String,
+        within: Nm,
+    },
 }
 
 /// The generative program (tier 1 authoritative).
@@ -145,13 +183,21 @@ pub fn elaborate(
             }
             // Default placement: a free DOF, laid out in a row.
             let pos = Dof {
-                value: Point { x: order * 10 * MM, y: 0 },
+                value: Point {
+                    x: order * 10 * MM,
+                    y: 0,
+                },
                 prov: Provenance::Free,
             };
             order += 1;
             components.insert(
                 id.clone(),
-                Component { id, part: part.clone(), pos, orient: Orient::default() },
+                Component {
+                    id,
+                    part: part.clone(),
+                    pos,
+                    orient: Orient::default(),
+                },
             );
         }
     }
@@ -160,10 +206,20 @@ pub fn elaborate(
     for d in source {
         if let GenDirective::Place { path, pos } = d {
             let id = EntityId::new(path.clone());
-            if note_missing(&id, &components, &mut reported_missing, &mut errors, "place") {
+            if note_missing(
+                &id,
+                &components,
+                &mut reported_missing,
+                &mut errors,
+                "place",
+            ) {
                 continue;
             }
-            components.get_mut(&id).expect("note_missing confirmed presence").pos.value = *pos;
+            components
+                .get_mut(&id)
+                .expect("note_missing confirmed presence")
+                .pos
+                .value = *pos;
         }
     }
 
@@ -172,12 +228,21 @@ pub fn elaborate(
     for d in source {
         if let GenDirective::Rotate { path, deg } = d {
             let id = EntityId::new(path.clone());
-            if note_missing(&id, &components, &mut reported_missing, &mut errors, "rotate") {
+            if note_missing(
+                &id,
+                &components,
+                &mut reported_missing,
+                &mut errors,
+                "rotate",
+            ) {
                 continue;
             }
             match Orient::from_deg(*deg) {
                 Some(o) => {
-                    components.get_mut(&id).expect("note_missing confirmed presence").orient = o
+                    components
+                        .get_mut(&id)
+                        .expect("note_missing confirmed presence")
+                        .orient = o
                 }
                 None => errors.push(Diagnostic::error(
                     "E_BAD_ROTATION",
@@ -212,13 +277,34 @@ pub fn elaborate(
                 if am || bm {
                     continue;
                 }
-                relational.push(Constraint::Near { a, b, within: *within });
+                relational.push(Constraint::Near {
+                    a,
+                    b,
+                    within: *within,
+                });
             }
-            GenDirective::NearPin { a, b_comp, b_pin, within } => {
+            GenDirective::NearPin {
+                a,
+                b_comp,
+                b_pin,
+                within,
+            } => {
                 let aid = EntityId::new(a.clone());
                 let bid = EntityId::new(b_comp.clone());
-                let am = note_missing(&aid, &components, &mut reported_missing, &mut errors, "nearpin");
-                let bm = note_missing(&bid, &components, &mut reported_missing, &mut errors, "nearpin");
+                let am = note_missing(
+                    &aid,
+                    &components,
+                    &mut reported_missing,
+                    &mut errors,
+                    "nearpin",
+                );
+                let bm = note_missing(
+                    &bid,
+                    &components,
+                    &mut reported_missing,
+                    &mut errors,
+                    "nearpin",
+                );
                 if am || bm {
                     continue;
                 }
@@ -249,7 +335,10 @@ pub fn elaborate(
                     None => errors.push(
                         Diagnostic::error(
                             "E_UNKNOWN_PIN",
-                            format!("nearpin: `{b_comp}` (part `{}`) has no pin `{b_pin}`", bc.part),
+                            format!(
+                                "nearpin: `{b_comp}` (part `{}`) has no pin `{b_pin}`",
+                                bc.part
+                            ),
                             Location::Entity(bid),
                         )
                         .with_help(available_pins(bdef)),
@@ -258,8 +347,20 @@ pub fn elaborate(
             }
             GenDirective::MinSep { a, b, gap } => {
                 let (a, b) = (EntityId::new(a.clone()), EntityId::new(b.clone()));
-                let am = note_missing(&a, &components, &mut reported_missing, &mut errors, "minsep");
-                let bm = note_missing(&b, &components, &mut reported_missing, &mut errors, "minsep");
+                let am = note_missing(
+                    &a,
+                    &components,
+                    &mut reported_missing,
+                    &mut errors,
+                    "minsep",
+                );
+                let bm = note_missing(
+                    &b,
+                    &components,
+                    &mut reported_missing,
+                    &mut errors,
+                    "minsep",
+                );
                 if am || bm {
                     continue;
                 }
@@ -323,8 +424,20 @@ pub fn elaborate(
             GenDirective::ConnectInterface { a, b } => {
                 let aid = EntityId::new(a.0.clone());
                 let bid = EntityId::new(b.0.clone());
-                let am = note_missing(&aid, &components, &mut reported_missing, &mut errors, "connect");
-                let bm = note_missing(&bid, &components, &mut reported_missing, &mut errors, "connect");
+                let am = note_missing(
+                    &aid,
+                    &components,
+                    &mut reported_missing,
+                    &mut errors,
+                    "connect",
+                );
+                let bm = note_missing(
+                    &bid,
+                    &components,
+                    &mut reported_missing,
+                    &mut errors,
+                    "connect",
+                );
                 if am || bm {
                     continue;
                 }
@@ -349,7 +462,10 @@ pub fn elaborate(
                         errors.push(
                             Diagnostic::error(
                                 "E_UNKNOWN_PIN",
-                                format!("{ctx}: `{comp}` (part `{}`) has no pin `{sel}`", components[&cid].part),
+                                format!(
+                                    "{ctx}: `{comp}` (part `{}`) has no pin `{sel}`",
+                                    components[&cid].part
+                                ),
                                 Location::Entity(cid.clone()),
                             )
                             .with_help(available_pins(def)),
@@ -364,7 +480,13 @@ pub fn elaborate(
             GenDirective::NoConnect { pins } => {
                 for (comp, sel) in pins {
                     let cid = EntityId::new(comp.clone());
-                    if note_missing(&cid, &components, &mut reported_missing, &mut errors, "no-connect") {
+                    if note_missing(
+                        &cid,
+                        &components,
+                        &mut reported_missing,
+                        &mut errors,
+                        "no-connect",
+                    ) {
                         continue;
                     }
                     let def = &lib[&components[&cid].part];
@@ -373,7 +495,10 @@ pub fn elaborate(
                         errors.push(
                             Diagnostic::error(
                                 "E_UNKNOWN_PIN",
-                                format!("no-connect: `{comp}` (part `{}`) has no pin `{sel}`", components[&cid].part),
+                                format!(
+                                    "no-connect: `{comp}` (part `{}`) has no pin `{sel}`",
+                                    components[&cid].part
+                                ),
                                 Location::Entity(cid.clone()),
                             )
                             .with_help(available_pins(def)),
@@ -403,10 +528,14 @@ pub fn elaborate(
                     errors.push(
                         Diagnostic::error(
                             "E_UNKNOWN_NET",
-                            format!("copper pour references net `{name}`, which no directive connects"),
+                            format!(
+                                "copper pour references net `{name}`, which no directive connects"
+                            ),
                             Location::Net(NetId::new(name.clone())),
                         )
-                        .with_help("connect that net (e.g. `net <name> ...`), or fix the pour's net name"),
+                        .with_help(
+                            "connect that net (e.g. `net <name> ...`), or fix the pour's net name",
+                        ),
                     );
                 }
                 None => errors.push(
@@ -415,7 +544,9 @@ pub fn elaborate(
                         "copper pour has no net; a conductor region must name the net it fills",
                         Location::None,
                     )
-                    .with_help("add `net=<name>` to the region, or make it a keep-out/void instead"),
+                    .with_help(
+                        "add `net=<name>` to the region, or make it a keep-out/void instead",
+                    ),
                 ),
                 _ => {}
             }
@@ -437,8 +568,10 @@ pub fn elaborate(
     // i.e. the solver/constraints would have put it there anyway. Ineffective
     // hints decay, ineffective pins are flagged, and a pin a hard Fix contradicts
     // raises a loud conflict.
-    let base: BTreeMap<EntityId, Point> =
-        components.iter().map(|(k, c)| (k.clone(), c.pos.value)).collect();
+    let base: BTreeMap<EntityId, Point> = components
+        .iter()
+        .map(|(k, c)| (k.clone(), c.pos.value))
+        .collect();
     let no_suppress = BTreeSet::new();
     // We use only `.positions` here: reconciliation's least-change/decay logic is
     // defined purely by where the solver places nodes. The new `Solution` also
@@ -446,7 +579,12 @@ pub fn elaborate(
     // surface in a future milestone; today the placement is what reconciliation
     // consumes, so the semantics below are unchanged from the relaxation solver.
     let solved_all = solve(&assemble_problem(
-        &base, &fixmap, overrides, board.as_ref(), &relational, &no_suppress,
+        &base,
+        &fixmap,
+        overrides,
+        board.as_ref(),
+        &relational,
+        &no_suppress,
     ))
     .positions;
 
@@ -464,7 +602,9 @@ pub fn elaborate(
         if let Some(fp) = fix {
             match ov.strength {
                 Strength::Hint => {
-                    report.decayed.push((id.clone(), DecayReason::OverriddenByConstraint));
+                    report
+                        .decayed
+                        .push((id.clone(), DecayReason::OverriddenByConstraint));
                     decayed.insert(id.clone());
                 }
                 Strength::Pin => {
@@ -481,9 +621,15 @@ pub fn elaborate(
         // No hard constraint: is the override doing anything? Re-solve without it.
         let mut suppress = BTreeSet::new();
         suppress.insert(id.clone());
-        let solved_wo =
-            solve(&assemble_problem(&base, &fixmap, overrides, board.as_ref(), &relational, &suppress))
-                .positions;
+        let solved_wo = solve(&assemble_problem(
+            &base,
+            &fixmap,
+            overrides,
+            board.as_ref(),
+            &relational,
+            &suppress,
+        ))
+        .positions;
         let effective = dist(solved_all[id], solved_wo[id]) > PLACE_TOL as f64;
 
         match ov.strength {
@@ -491,7 +637,9 @@ pub fn elaborate(
                 if effective {
                     prov_map.insert(id.clone(), Provenance::Hint);
                 } else {
-                    report.decayed.push((id.clone(), DecayReason::RedundantWithDefault));
+                    report
+                        .decayed
+                        .push((id.clone(), DecayReason::RedundantWithDefault));
                     decayed.insert(id.clone());
                 }
             }
@@ -506,9 +654,15 @@ pub fn elaborate(
 
     // Final placement with decayed hints freed back to their defaults. This is
     // what a fresh elaboration (after GC) would produce, so the result is stable.
-    let solved_final =
-        solve(&assemble_problem(&base, &fixmap, overrides, board.as_ref(), &relational, &decayed))
-            .positions;
+    let solved_final = solve(&assemble_problem(
+        &base,
+        &fixmap,
+        overrides,
+        board.as_ref(),
+        &relational,
+        &decayed,
+    ))
+    .positions;
 
     for (id, c) in components.iter_mut() {
         let prov = if fixmap.contains_key(id) {
@@ -516,7 +670,10 @@ pub fn elaborate(
         } else {
             prov_map.get(id).copied().unwrap_or(Provenance::Free)
         };
-        c.pos = Dof { value: solved_final[id], prov };
+        c.pos = Dof {
+            value: solved_final[id],
+            prov,
+        };
     }
 
     // Orphaned overrides: target no longer exists. Surfaced, never dropped.
@@ -526,7 +683,12 @@ pub fn elaborate(
         }
     }
 
-    Ok(Elaborated { components, nets, no_connects, report })
+    Ok(Elaborated {
+        components,
+        nets,
+        no_connects,
+        report,
+    })
 }
 
 /// Record (once) that a referenced entity does not exist, and report it as a
@@ -598,7 +760,11 @@ fn assemble_problem(
             fixed.insert(id.clone());
             continue;
         }
-        let ov = if suppress.contains(id) { None } else { overrides.get(id) };
+        let ov = if suppress.contains(id) {
+            None
+        } else {
+            overrides.get(id)
+        };
         match ov.and_then(|o| o.pos.map(|p| (p, o.strength))) {
             Some((p, Strength::Pin)) => {
                 anchors.insert(id.clone(), p);
@@ -612,7 +778,12 @@ fn assemble_problem(
             }
         }
     }
-    Problem { anchors, fixed, board: board.cloned(), constraints: relational.to_vec() }
+    Problem {
+        anchors,
+        fixed,
+        board: board.cloned(),
+        constraints: relational.to_vec(),
+    }
 }
 
 /// Assemble the board outline + cutouts from the source. The outline is the last
@@ -651,8 +822,13 @@ pub fn regions(source: &Source) -> Vec<RegionDecl> {
 /// Build a rectangular [`Board`](GenDirective::Board) directive from opposite corners
 /// — sugar over the polygon outline form for the common case.
 pub fn board_rect(min: Point, max: Point) -> GenDirective {
-    let c = Point { x: (min.x + max.x) / 2, y: (min.y + max.y) / 2 };
-    GenDirective::Board { outline: Shape2D::rect(c, max.x - min.x, max.y - min.y) }
+    let c = Point {
+        x: (min.x + max.x) / 2,
+        y: (min.y + max.y) / 2,
+    };
+    GenDirective::Board {
+        outline: Shape2D::rect(c, max.x - min.x, max.y - min.y),
+    }
 }
 
 /// Connect two interface ports using the interface type's mate map. The mate map
@@ -683,14 +859,20 @@ fn connect_interface(
         if !adef.interfaces.contains_key(aport) {
             errors.push(Diagnostic::error(
                 "E_UNKNOWN_INTERFACE",
-                format!("`{ap}` (part `{}`) has no interface port `{aport}`", ac.part),
+                format!(
+                    "`{ap}` (part `{}`) has no interface port `{aport}`",
+                    ac.part
+                ),
                 Location::Entity(aid),
             ));
         }
         if !bdef.interfaces.contains_key(bport) {
             errors.push(Diagnostic::error(
                 "E_UNKNOWN_INTERFACE",
-                format!("`{bp}` (part `{}`) has no interface port `{bport}`", bc.part),
+                format!(
+                    "`{bp}` (part `{}`) has no interface port `{bport}`",
+                    bc.part
+                ),
                 Location::Entity(bid),
             ));
         }
@@ -699,7 +881,10 @@ fn connect_interface(
     if aiface.type_name != biface.type_name {
         errors.push(Diagnostic::error(
             "E_INTERFACE_MISMATCH",
-            format!("interface type mismatch: {} vs {}", aiface.type_name, biface.type_name),
+            format!(
+                "interface type mismatch: {} vs {}",
+                aiface.type_name, biface.type_name
+            ),
             Location::Entity(aid),
         ));
         return;
@@ -711,7 +896,10 @@ fn connect_interface(
         let (Some(da), Some(db)) = (da, db) else {
             errors.push(Diagnostic::error(
                 "E_INTERFACE_SIGNAL",
-                format!("interface `{}` mate references a missing signal", aiface.type_name),
+                format!(
+                    "interface `{}` mate references a missing signal",
+                    aiface.type_name
+                ),
                 Location::Entity(aid.clone()),
             ));
             continue;
@@ -732,8 +920,10 @@ fn connect_interface(
             name: net_name,
             members: BTreeSet::new(),
         });
-        net.members.insert(PinRef::new(&aid, &format!("{aport}.{sa}")));
-        net.members.insert(PinRef::new(&bid, &format!("{bport}.{sb}")));
+        net.members
+            .insert(PinRef::new(&aid, &format!("{aport}.{sa}")));
+        net.members
+            .insert(PinRef::new(&bid, &format!("{bport}.{sb}")));
     }
 }
 
@@ -743,13 +933,22 @@ fn connect_interface(
 /// regulator output. This is the "generator" whose output we later override and
 /// re-elaborate to test minimal-perturbation reconciliation.
 pub fn psu_module(n: usize) -> Source {
-    let mut s = vec![GenDirective::Instance { path: "psu.reg".into(), part: "LDO".into() }];
+    let mut s = vec![GenDirective::Instance {
+        path: "psu.reg".into(),
+        part: "LDO".into(),
+    }];
     for i in 0..n {
         let dec = format!("psu.dec[{i}]");
-        s.push(GenDirective::Instance { path: dec.clone(), part: "Cap".into() });
+        s.push(GenDirective::Instance {
+            path: dec.clone(),
+            part: "Cap".into(),
+        });
         s.push(GenDirective::ConnectPins {
             net: "VBUS".into(),
-            pins: vec![("psu.reg".into(), "VOUT".into()), (dec.clone(), "p1".into())],
+            pins: vec![
+                ("psu.reg".into(), "VOUT".into()),
+                (dec.clone(), "p1".into()),
+            ],
         });
         s.push(GenDirective::ConnectPins {
             net: "GND".into(),

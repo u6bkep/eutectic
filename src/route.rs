@@ -14,10 +14,10 @@
 //! nanometres; distance comparisons are done in exact `i128` arithmetic against
 //! *squared* thresholds, so no float nondeterminism leaks into a violation set.
 
-use crate::doc::{Doc, Nm, Point, PinRef, MM};
-use crate::geom::{clearance_violated, Shape2D};
+use crate::doc::{Doc, MM, Nm, PinRef, Point};
+use crate::geom::{Shape2D, clearance_violated};
 use crate::id::{NetId, TraceId};
-use crate::part::{pad_copper_world, pin_world, PadLayers, PartLib, PinRole};
+use crate::part::{PadLayers, PartLib, PinRole, pad_copper_world, pin_world};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -86,7 +86,10 @@ pub struct Via {
 impl Via {
     /// Does this via connect copper on `layer`? (Is `layer` within its span?)
     pub fn spans(&self, layer: Layer) -> bool {
-        let (lo, hi) = (self.from.depth().min(self.to.depth()), self.from.depth().max(self.to.depth()));
+        let (lo, hi) = (
+            self.from.depth().min(self.to.depth()),
+            self.from.depth().max(self.to.depth()),
+        );
         let d = layer.depth();
         lo <= d && d <= hi
     }
@@ -117,10 +120,10 @@ pub struct DesignRules {
 impl Default for DesignRules {
     fn default() -> Self {
         DesignRules {
-            min_clearance: 150_000,        // 0.15 mm
-            min_trace_width: 150_000,      // 0.15 mm
-            touch_tol: MM / 100,           // 0.01 mm
-            mask_expansion: 50_000,        // 0.05 mm
+            min_clearance: 150_000,   // 0.15 mm
+            min_trace_width: 150_000, // 0.15 mm
+            touch_tol: MM / 100,      // 0.01 mm
+            mask_expansion: 50_000,   // 0.05 mm
         }
     }
 }
@@ -186,7 +189,10 @@ pub fn check_drc(
     // --- 1. Minimum width: every trace's width >= the rule. ---
     for (tid, t) in &doc.traces {
         if t.width < rules.min_trace_width {
-            out.push(Violation::MinWidth { trace: *tid, width: t.width });
+            out.push(Violation::MinWidth {
+                trace: *tid,
+                width: t.width,
+            });
         }
     }
 
@@ -271,12 +277,18 @@ pub fn check_drc(
         let net_islands: Vec<(Layer, crate::region::Region)> = by_layer
             .into_iter()
             .flat_map(|(layer, fills)| {
-                crate::region::union_all(fills).islands().into_iter().map(move |i| (layer, i))
+                crate::region::union_all(fills)
+                    .islands()
+                    .into_iter()
+                    .map(move |i| (layer, i))
             })
             .collect();
         let islands = pin_islands(pts, &net_traces, &net_vias, &net_islands, rules.touch_tol);
         if islands > 1 {
-            out.push(Violation::Unrouted { net: nid.clone(), islands });
+            out.push(Violation::Unrouted {
+                net: nid.clone(),
+                islands,
+            });
         }
     }
 
@@ -287,8 +299,16 @@ pub fn check_drc(
 
 /// Normalised clearance violation: net ids sorted so a pair reports once.
 fn clearance(a: &NetId, b: &NetId, layer: Layer) -> Violation {
-    let (lo, hi) = if a <= b { (a.clone(), b.clone()) } else { (b.clone(), a.clone()) };
-    Violation::Clearance { a: lo, b: hi, layer }
+    let (lo, hi) = if a <= b {
+        (a.clone(), b.clone())
+    } else {
+        (b.clone(), a.clone())
+    };
+    Violation::Clearance {
+        a: lo,
+        b: hi,
+        layer,
+    }
 }
 
 /// A piece of world-frame copper for clearance: its net, 2D shape, and the layer(s)
@@ -354,10 +374,14 @@ pub(crate) fn net_copper(
         });
     }
     for c in doc.components.values() {
-        let Some(def) = lib.get(&c.part) else { continue };
+        let Some(def) = lib.get(&c.part) else {
+            continue;
+        };
         for pin in &def.pins {
             let Some(pad) = &pin.pad else { continue };
-            let Some(net) = pin_net.get(&PinRef::new(&c.id, &pin.number)) else { continue };
+            let Some(net) = pin_net.get(&PinRef::new(&c.id, &pin.number)) else {
+                continue;
+            };
             for cu in &pad.copper {
                 pieces.push(CopperPiece {
                     net: net.clone(),
@@ -420,7 +444,7 @@ pub fn pour_fills(
     netlist: &BTreeMap<NetId, Vec<(PinRef, PinRole)>>,
     rules: &DesignRules,
 ) -> Vec<PourFill> {
-    use crate::region::{difference, shape_to_region, union_all, DEFAULT_CIRCLE_SEGS};
+    use crate::region::{DEFAULT_CIRCLE_SEGS, difference, shape_to_region, union_all};
     let pieces = net_copper(doc, lib, netlist);
     let mut out = Vec::new();
     for r in crate::elaborate::regions(&doc.source) {
@@ -436,7 +460,11 @@ pub fn pour_fills(
             .map(|p| shape_to_region(&p.shape.inflated(rules.min_clearance), DEFAULT_CIRCLE_SEGS))
             .collect();
         let fill = difference(&outline, &union_all(obstacles));
-        out.push(PourFill { net, layer: r.layer, fill });
+        out.push(PourFill {
+            net,
+            layer: r.layer,
+            fill,
+        });
     }
     out
 }
@@ -451,7 +479,9 @@ struct UnionFind {
 }
 impl UnionFind {
     fn new(n: usize) -> Self {
-        UnionFind { parent: (0..n).collect() }
+        UnionFind {
+            parent: (0..n).collect(),
+        }
     }
     fn find(&mut self, mut x: usize) -> usize {
         while self.parent[x] != x {
@@ -585,10 +615,7 @@ fn cross(o: Point, a: Point, b: Point) -> i128 {
 
 /// Is collinear point `p` within the bounding box of segment a–b?
 fn on_segment(a: Point, b: Point, p: Point) -> bool {
-    a.x.min(b.x) <= p.x
-        && p.x <= a.x.max(b.x)
-        && a.y.min(b.y) <= p.y
-        && p.y <= a.y.max(b.y)
+    a.x.min(b.x) <= p.x && p.x <= a.x.max(b.x) && a.y.min(b.y) <= p.y && p.y <= a.y.max(b.y)
 }
 
 /// Do segments a–b and c–d intersect (proper crossing or collinear touch)?
@@ -642,7 +669,13 @@ fn seg_within(a: Point, b: Point, c: Point, d: Point, t: Nm, strict: bool) -> bo
     if segments_intersect(a, b, c, d) {
         return if strict { t > 0 } else { true };
     }
-    let hit = |ord: Ordering| if strict { ord == Ordering::Less } else { ord != Ordering::Greater };
+    let hit = |ord: Ordering| {
+        if strict {
+            ord == Ordering::Less
+        } else {
+            ord != Ordering::Greater
+        }
+    };
     hit(point_seg_cmp(a, c, d, t))
         || hit(point_seg_cmp(b, c, d, t))
         || hit(point_seg_cmp(c, a, b, t))
@@ -660,21 +693,26 @@ fn segments(path: &[Point]) -> Vec<(Point, Point)> {
 
 /// Is point `p` within `tol` (inclusive) of any segment of `path`?
 fn point_on_polyline(p: Point, path: &[Point], tol: Nm) -> bool {
-    segments(path).iter().any(|(a, b)| seg_within(p, p, *a, *b, tol, false))
+    segments(path)
+        .iter()
+        .any(|(a, b)| seg_within(p, p, *a, *b, tol, false))
 }
 
 /// Are two polylines within `tol` (inclusive) anywhere? (incidence)
 fn polylines_closer_than_inc(p: &[Point], q: &[Point], tol: Nm) -> bool {
     let (sp, sq) = (segments(p), segments(q));
-    sp.iter().any(|(a, b)| sq.iter().any(|(c, d)| seg_within(*a, *b, *c, *d, tol, false)))
+    sp.iter().any(|(a, b)| {
+        sq.iter()
+            .any(|(c, d)| seg_within(*a, *b, *c, *d, tol, false))
+    })
 }
 
 #[cfg(test)]
 mod pour_tests {
     use super::*;
     use crate::command::{Command, Transaction};
-    use crate::doc::{Point, MM};
-    use crate::elaborate::{board_rect, GenDirective as G, RegionDecl};
+    use crate::doc::{MM, Point};
+    use crate::elaborate::{GenDirective as G, RegionDecl, board_rect};
     use crate::geom::{Role, Shape2D};
     use crate::history::History;
     use crate::part::part_library;
@@ -684,7 +722,13 @@ mod pour_tests {
         doc.nets
             .iter()
             .map(|(nid, net)| {
-                (nid.clone(), net.members.iter().map(|pr| (pr.clone(), PinRole::Passive)).collect())
+                (
+                    nid.clone(),
+                    net.members
+                        .iter()
+                        .map(|pr| (pr.clone(), PinRole::Passive))
+                        .collect(),
+                )
             })
             .collect()
     }
@@ -712,12 +756,30 @@ mod pour_tests {
         ]);
         let src = vec![
             board_rect(Point::mm(0, 0), Point::mm(20, 20)),
-            G::Instance { path: "g".into(), part: "PT".into() },
-            G::Instance { path: "s".into(), part: "PS".into() },
-            G::Place { path: "g".into(), pos: Point::mm(5, 5) },
-            G::Place { path: "s".into(), pos: Point::mm(15, 5) },
-            G::ConnectPins { net: "GND".into(), pins: vec![("g".into(), "1".into())] },
-            G::ConnectPins { net: "SIG".into(), pins: vec![("s".into(), "1".into())] },
+            G::Instance {
+                path: "g".into(),
+                part: "PT".into(),
+            },
+            G::Instance {
+                path: "s".into(),
+                part: "PS".into(),
+            },
+            G::Place {
+                path: "g".into(),
+                pos: Point::mm(5, 5),
+            },
+            G::Place {
+                path: "s".into(),
+                pos: Point::mm(15, 5),
+            },
+            G::ConnectPins {
+                net: "GND".into(),
+                pins: vec![("g".into(), "1".into())],
+            },
+            G::ConnectPins {
+                net: "SIG".into(),
+                pins: vec![("s".into(), "1".into())],
+            },
             G::Region(RegionDecl {
                 shape: outline,
                 role: Role::Conductor,
@@ -726,7 +788,8 @@ mod pour_tests {
             }),
         ];
         let mut h = History::new(Default::default());
-        h.commit(Transaction::one(Command::SetSource(src)), &lib, "pour").expect("elaborates");
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "pour")
+            .expect("elaborates");
         (h.doc().clone(), lib)
     }
 
@@ -740,12 +803,27 @@ mod pour_tests {
         assert_eq!(f.net, NetId::new("GND"));
         assert_eq!(f.layer, Layer::Top);
         // Same-net pad stays inside the pour (it connects to it).
-        assert!(f.fill.contains_point(Point::mm(5, 5)), "GND pad inside the pour");
+        assert!(
+            f.fill.contains_point(Point::mm(5, 5)),
+            "GND pad inside the pour"
+        );
         // Foreign pad is knocked out, with clearance: its centre and a point just
         // inside the clearance ring are not copper; a point beyond the ring is.
-        assert!(!f.fill.contains_point(Point::mm(15, 5)), "SIG pad knocked out");
-        assert!(!f.fill.contains_point(Point { x: 14_400_000, y: 5 * MM }), "inside clearance ring");
-        assert!(f.fill.contains_point(Point::mm(14, 5)), "beyond the clearance ring is copper");
+        assert!(
+            !f.fill.contains_point(Point::mm(15, 5)),
+            "SIG pad knocked out"
+        );
+        assert!(
+            !f.fill.contains_point(Point {
+                x: 14_400_000,
+                y: 5 * MM
+            }),
+            "inside clearance ring"
+        );
+        assert!(
+            f.fill.contains_point(Point::mm(14, 5)),
+            "beyond the clearance ring is copper"
+        );
         // Open board area is copper.
         assert!(f.fill.contains_point(Point::mm(10, 15)));
     }
@@ -756,7 +834,10 @@ mod pour_tests {
         let (doc, lib) = board_pour_scene("B.Cu");
         let nl = netlist_of(&doc);
         let fills = pour_fills(&doc, &lib, &nl, &DesignRules::default());
-        assert!(fills[0].fill.contains_point(Point::mm(15, 5)), "different-layer copper is not knocked out");
+        assert!(
+            fills[0].fill.contains_point(Point::mm(15, 5)),
+            "different-layer copper is not knocked out"
+        );
     }
 
     #[test]
@@ -765,8 +846,14 @@ mod pour_tests {
         lib.insert("PT".into(), one_pad("F.Cu"));
         let src = vec![
             board_rect(Point::mm(0, 0), Point::mm(10, 10)),
-            G::Instance { path: "g".into(), part: "PT".into() },
-            G::ConnectPins { net: "GND".into(), pins: vec![("g".into(), "1".into())] },
+            G::Instance {
+                path: "g".into(),
+                part: "PT".into(),
+            },
+            G::ConnectPins {
+                net: "GND".into(),
+                pins: vec![("g".into(), "1".into())],
+            },
             G::Region(RegionDecl {
                 shape: Shape2D::polygon(vec![Point::mm(0, 0), Point::mm(10, 0), Point::mm(10, 10)]),
                 role: Role::Conductor,
@@ -775,8 +862,13 @@ mod pour_tests {
             }),
         ];
         let mut h = History::new(Default::default());
-        let err = h.commit(Transaction::one(Command::SetSource(src)), &lib, "bad").unwrap_err();
-        assert!(err.iter().any(|d| d.code == "E_UNKNOWN_NET"), "typo'd pour net is a hard fault: {err:?}");
+        let err = h
+            .commit(Transaction::one(Command::SetSource(src)), &lib, "bad")
+            .unwrap_err();
+        assert!(
+            err.iter().any(|d| d.code == "E_UNKNOWN_NET"),
+            "typo'd pour net is a hard fault: {err:?}"
+        );
     }
 
     #[test]
@@ -792,8 +884,13 @@ mod pour_tests {
             }),
         ];
         let mut h = History::new(Default::default());
-        let err = h.commit(Transaction::one(Command::SetSource(src)), &lib, "nonet").unwrap_err();
-        assert!(err.iter().any(|d| d.code == "E_POUR_NO_NET"), "netless conductor pour rejected: {err:?}");
+        let err = h
+            .commit(Transaction::one(Command::SetSource(src)), &lib, "nonet")
+            .unwrap_err();
+        assert!(
+            err.iter().any(|d| d.code == "E_POUR_NO_NET"),
+            "netless conductor pour rejected: {err:?}"
+        );
     }
 
     #[test]
@@ -801,7 +898,10 @@ mod pour_tests {
         let (doc, lib) = board_pour_scene("F.Cu");
         let nl = netlist_of(&doc);
         let rules = DesignRules::default();
-        assert_eq!(pour_fills(&doc, &lib, &nl, &rules), pour_fills(&doc, &lib, &nl, &rules));
+        assert_eq!(
+            pour_fills(&doc, &lib, &nl, &rules),
+            pour_fills(&doc, &lib, &nl, &rules)
+        );
     }
 
     fn drc(doc: &Doc, lib: &PartLib) -> Vec<Violation> {
@@ -822,10 +922,22 @@ mod pour_tests {
         ]);
         let base = vec![
             board_rect(Point::mm(0, 0), Point::mm(20, 20)),
-            G::Instance { path: "g1".into(), part: "PT".into() },
-            G::Instance { path: "g2".into(), part: "PT".into() },
-            G::Place { path: "g1".into(), pos: Point::mm(5, 5) },
-            G::Place { path: "g2".into(), pos: Point::mm(15, 15) },
+            G::Instance {
+                path: "g1".into(),
+                part: "PT".into(),
+            },
+            G::Instance {
+                path: "g2".into(),
+                part: "PT".into(),
+            },
+            G::Place {
+                path: "g1".into(),
+                pos: Point::mm(5, 5),
+            },
+            G::Place {
+                path: "g2".into(),
+                pos: Point::mm(15, 15),
+            },
             G::ConnectPins {
                 net: "GND".into(),
                 pins: vec![("g1".into(), "1".into()), ("g2".into(), "1".into())],
@@ -833,7 +945,12 @@ mod pour_tests {
         ];
         // Without a pour and without traces: GND's two pads are disconnected.
         let mut h = History::new(Default::default());
-        h.commit(Transaction::one(Command::SetSource(base.clone())), &lib, "no-pour").unwrap();
+        h.commit(
+            Transaction::one(Command::SetSource(base.clone())),
+            &lib,
+            "no-pour",
+        )
+        .unwrap();
         assert!(
             drc(h.doc(), &lib)
                 .iter()
@@ -849,7 +966,12 @@ mod pour_tests {
             layer: Layer::Top,
         }));
         let mut h2 = History::new(Default::default());
-        h2.commit(Transaction::one(Command::SetSource(with_pour)), &lib, "pour").unwrap();
+        h2.commit(
+            Transaction::one(Command::SetSource(with_pour)),
+            &lib,
+            "pour",
+        )
+        .unwrap();
         assert!(
             !drc(h2.doc(), &lib)
                 .iter()
@@ -873,17 +995,38 @@ mod pour_tests {
         ]);
         let src = vec![
             board_rect(Point::mm(0, 0), Point::mm(20, 20)),
-            G::Instance { path: "g1".into(), part: "PT".into() },
-            G::Instance { path: "g2".into(), part: "PT".into() },
-            G::Instance { path: "s".into(), part: "PT".into() },
-            G::Place { path: "g1".into(), pos: Point::mm(5, 5) },   // below the cut
-            G::Place { path: "g2".into(), pos: Point::mm(5, 15) },  // above the cut
-            G::Place { path: "s".into(), pos: Point::mm(10, 10) },
+            G::Instance {
+                path: "g1".into(),
+                part: "PT".into(),
+            },
+            G::Instance {
+                path: "g2".into(),
+                part: "PT".into(),
+            },
+            G::Instance {
+                path: "s".into(),
+                part: "PT".into(),
+            },
+            G::Place {
+                path: "g1".into(),
+                pos: Point::mm(5, 5),
+            }, // below the cut
+            G::Place {
+                path: "g2".into(),
+                pos: Point::mm(5, 15),
+            }, // above the cut
+            G::Place {
+                path: "s".into(),
+                pos: Point::mm(10, 10),
+            },
             G::ConnectPins {
                 net: "GND".into(),
                 pins: vec![("g1".into(), "1".into()), ("g2".into(), "1".into())],
             },
-            G::ConnectPins { net: "SIG".into(), pins: vec![("s".into(), "1".into())] },
+            G::ConnectPins {
+                net: "SIG".into(),
+                pins: vec![("s".into(), "1".into())],
+            },
             G::Region(RegionDecl {
                 shape: outline,
                 role: Role::Conductor,
@@ -892,7 +1035,8 @@ mod pour_tests {
             }),
         ];
         let mut h = History::new(Default::default());
-        h.commit(Transaction::one(Command::SetSource(src)), &lib, "frag").unwrap();
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "frag")
+            .unwrap();
         // A full-width SIG trace at y=10 cuts the GND pour into top/bottom islands.
         let cut = Trace {
             net: NetId::new("SIG"),
@@ -901,7 +1045,12 @@ mod pour_tests {
             width: 150_000,
             prov: crate::doc::Provenance::Pinned,
         };
-        h.commit(Transaction::one(Command::AddTrace(TraceId(1), cut)), &lib, "cut").unwrap();
+        h.commit(
+            Transaction::one(Command::AddTrace(TraceId(1), cut)),
+            &lib,
+            "cut",
+        )
+        .unwrap();
         assert!(
             drc(h.doc(), &lib).iter().any(|v| matches!(
                 v,
@@ -928,10 +1077,22 @@ mod pour_tests {
         ]);
         let src = vec![
             board_rect(Point::mm(0, 0), Point::mm(30, 10)),
-            G::Instance { path: "g1".into(), part: "PT".into() },
-            G::Instance { path: "g2".into(), part: "PT".into() },
-            G::Place { path: "g1".into(), pos: Point::mm(5, 5) },  // under the F.Cu pour
-            G::Place { path: "g2".into(), pos: Point::mm(25, 5) }, // outside the pour
+            G::Instance {
+                path: "g1".into(),
+                part: "PT".into(),
+            },
+            G::Instance {
+                path: "g2".into(),
+                part: "PT".into(),
+            },
+            G::Place {
+                path: "g1".into(),
+                pos: Point::mm(5, 5),
+            }, // under the F.Cu pour
+            G::Place {
+                path: "g2".into(),
+                pos: Point::mm(25, 5),
+            }, // outside the pour
             G::ConnectPins {
                 net: "GND".into(),
                 pins: vec![("g1".into(), "1".into()), ("g2".into(), "1".into())],
@@ -944,7 +1105,8 @@ mod pour_tests {
             }),
         ];
         let mut h = History::new(Default::default());
-        h.commit(Transaction::one(Command::SetSource(src)), &lib, "xlayer").unwrap();
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "xlayer")
+            .unwrap();
         // A B.Cu GND trace from g2 running left *under* the F.Cu pour (x=10 is inside
         // the pour), but on the bottom layer with no via.
         let t = Trace {
@@ -954,7 +1116,12 @@ mod pour_tests {
             width: 150_000,
             prov: crate::doc::Provenance::Pinned,
         };
-        h.commit(Transaction::one(Command::AddTrace(TraceId(1), t)), &lib, "btrace").unwrap();
+        h.commit(
+            Transaction::one(Command::AddTrace(TraceId(1), t)),
+            &lib,
+            "btrace",
+        )
+        .unwrap();
         assert!(
             drc(h.doc(), &lib).iter().any(|v| matches!(
                 v,
@@ -986,19 +1153,42 @@ mod pour_tests {
         ]);
         let src = vec![
             board_rect(Point::mm(0, 0), Point::mm(30, 10)),
-            G::Instance { path: "g1".into(), part: "PT".into() },
-            G::Instance { path: "g2".into(), part: "PT".into() },
-            G::Place { path: "g1".into(), pos: Point::mm(5, 5) },  // pour A only
-            G::Place { path: "g2".into(), pos: Point::mm(25, 5) }, // pour B only
+            G::Instance {
+                path: "g1".into(),
+                part: "PT".into(),
+            },
+            G::Instance {
+                path: "g2".into(),
+                part: "PT".into(),
+            },
+            G::Place {
+                path: "g1".into(),
+                pos: Point::mm(5, 5),
+            }, // pour A only
+            G::Place {
+                path: "g2".into(),
+                pos: Point::mm(25, 5),
+            }, // pour B only
             G::ConnectPins {
                 net: "GND".into(),
                 pins: vec![("g1".into(), "1".into()), ("g2".into(), "1".into())],
             },
-            G::Region(RegionDecl { shape: a, role: Role::Conductor, net: Some("GND".into()), layer: Layer::Top }),
-            G::Region(RegionDecl { shape: b, role: Role::Conductor, net: Some("GND".into()), layer: Layer::Top }),
+            G::Region(RegionDecl {
+                shape: a,
+                role: Role::Conductor,
+                net: Some("GND".into()),
+                layer: Layer::Top,
+            }),
+            G::Region(RegionDecl {
+                shape: b,
+                role: Role::Conductor,
+                net: Some("GND".into()),
+                layer: Layer::Top,
+            }),
         ];
         let mut h = History::new(Default::default());
-        h.commit(Transaction::one(Command::SetSource(src)), &lib, "twopours").unwrap();
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "twopours")
+            .unwrap();
         assert!(
             !drc(h.doc(), &lib).iter().any(|v| matches!(
                 v,
@@ -1028,17 +1218,46 @@ mod pour_tests {
         ]);
         let src = vec![
             board_rect(Point::mm(0, 0), Point::mm(20, 20)),
-            G::Instance { path: "a".into(), part: "PT".into() },
-            G::Instance { path: "b".into(), part: "PT".into() },
-            G::Place { path: "a".into(), pos: Point::mm(2, 2) },
-            G::Place { path: "b".into(), pos: Point::mm(18, 18) },
-            G::ConnectPins { net: "GND".into(), pins: vec![("a".into(), "1".into())] },
-            G::ConnectPins { net: "PWR".into(), pins: vec![("b".into(), "1".into())] },
-            G::Region(RegionDecl { shape: left, role: Role::Conductor, net: Some("GND".into()), layer: Layer::Top }),
-            G::Region(RegionDecl { shape: right, role: Role::Conductor, net: Some("PWR".into()), layer: Layer::Top }),
+            G::Instance {
+                path: "a".into(),
+                part: "PT".into(),
+            },
+            G::Instance {
+                path: "b".into(),
+                part: "PT".into(),
+            },
+            G::Place {
+                path: "a".into(),
+                pos: Point::mm(2, 2),
+            },
+            G::Place {
+                path: "b".into(),
+                pos: Point::mm(18, 18),
+            },
+            G::ConnectPins {
+                net: "GND".into(),
+                pins: vec![("a".into(), "1".into())],
+            },
+            G::ConnectPins {
+                net: "PWR".into(),
+                pins: vec![("b".into(), "1".into())],
+            },
+            G::Region(RegionDecl {
+                shape: left,
+                role: Role::Conductor,
+                net: Some("GND".into()),
+                layer: Layer::Top,
+            }),
+            G::Region(RegionDecl {
+                shape: right,
+                role: Role::Conductor,
+                net: Some("PWR".into()),
+                layer: Layer::Top,
+            }),
         ];
         let mut h = History::new(Default::default());
-        h.commit(Transaction::one(Command::SetSource(src)), &lib, "shorts").unwrap();
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "shorts")
+            .unwrap();
         assert!(
             drc(h.doc(), &lib).iter().any(|v| matches!(
                 v,

@@ -6,7 +6,7 @@
 use ecad_core::autoroute::autoroute;
 use ecad_core::command::{Command, Transaction};
 use ecad_core::doc::Point;
-use ecad_core::elaborate::{board_rect, GenDirective as G};
+use ecad_core::elaborate::{GenDirective as G, board_rect};
 use ecad_core::history::History;
 use ecad_core::part::part_library;
 use ecad_core::query::{Engine, Key};
@@ -21,12 +21,30 @@ fn main() {
     // direct VBUS path on Top, so the autorouter must detour (and use a via).
     let src = vec![
         board_rect(Point::mm(-6, -10), Point::mm(18, 10)),
-        G::Instance { path: "reg".into(), part: "LDO".into() },
-        G::Instance { path: "c0".into(), part: "Cap".into() },
-        G::Instance { path: "c1".into(), part: "Cap".into() },
-        G::Place { path: "reg".into(), pos: Point::mm(0, 0) },
-        G::Place { path: "c0".into(), pos: Point::mm(12, 5) },
-        G::Place { path: "c1".into(), pos: Point::mm(12, -5) },
+        G::Instance {
+            path: "reg".into(),
+            part: "LDO".into(),
+        },
+        G::Instance {
+            path: "c0".into(),
+            part: "Cap".into(),
+        },
+        G::Instance {
+            path: "c1".into(),
+            part: "Cap".into(),
+        },
+        G::Place {
+            path: "reg".into(),
+            pos: Point::mm(0, 0),
+        },
+        G::Place {
+            path: "c0".into(),
+            pos: Point::mm(12, 5),
+        },
+        G::Place {
+            path: "c1".into(),
+            pos: Point::mm(12, -5),
+        },
         G::ConnectPins {
             net: "VBUS".into(),
             pins: vec![
@@ -46,15 +64,24 @@ fn main() {
     ];
 
     let mut h = History::new(Default::default());
-    h.commit(Transaction::one(Command::SetSource(src)), &lib, "place").unwrap();
+    h.commit(Transaction::one(Command::SetSource(src)), &lib, "place")
+        .unwrap();
 
     let mut eng = Engine::new();
     println!("==== DRC before routing ====");
     print_drc(eng.query(h.doc(), &lib, Key::Drc).as_drc());
 
     let result = autoroute(h.doc(), &lib, &rules);
-    let traces = result.commands.iter().filter(|c| matches!(c, Command::AddTrace(..))).count();
-    let vias = result.commands.iter().filter(|c| matches!(c, Command::AddVia(..))).count();
+    let traces = result
+        .commands
+        .iter()
+        .filter(|c| matches!(c, Command::AddTrace(..)))
+        .count();
+    let vias = result
+        .commands
+        .iter()
+        .filter(|c| matches!(c, Command::AddVia(..)))
+        .count();
     println!(
         "\n==== autoroute proposed {} commands ({traces} traces, {vias} vias) ====",
         result.commands.len()
@@ -63,7 +90,8 @@ fn main() {
     println!("unrouted: {:?}", result.unrouted);
 
     // Apply the proposed transaction through the ordinary atomic command path.
-    h.commit(Transaction(result.commands), &lib, "autoroute").unwrap();
+    h.commit(Transaction(result.commands), &lib, "autoroute")
+        .unwrap();
 
     println!("\n==== DRC after routing ====");
     print_drc(eng.query(h.doc(), &lib, Key::Drc).as_drc());

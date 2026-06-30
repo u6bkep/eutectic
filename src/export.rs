@@ -17,9 +17,9 @@
 //! determinism invariant holds end to end. See docs/architecture.md, "Prototype
 //! status (Gerber/fab output)".
 
-use crate::doc::{Doc, Nm, Point, MM};
-use crate::geom::{circumcenter, BoardShape, Seg, Shape2D};
-use crate::part::{pad_copper_world, pin_world, PadLayers, PartDef, PartLib};
+use crate::doc::{Doc, MM, Nm, Point};
+use crate::geom::{BoardShape, Seg, Shape2D, circumcenter};
+use crate::part::{PadLayers, PartDef, PartLib, pad_copper_world, pin_world};
 use crate::route::{DesignRules, Layer, Trace, Via};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -51,8 +51,11 @@ pub fn netlist(doc: &Doc) -> String {
     let mut out = String::new();
     out.push_str("# netlist\n");
     for net in doc.nets.values() {
-        let pins: Vec<String> =
-            net.members.iter().map(|p| format!("{}.{}", p.comp, p.pin)).collect();
+        let pins: Vec<String> = net
+            .members
+            .iter()
+            .map(|p| format!("{}.{}", p.comp, p.pin))
+            .collect();
         out.push_str(&format!("{}: {}\n", net.name, pins.join(" ")));
     }
     out
@@ -101,7 +104,9 @@ fn part_pin_ids(def: &PartDef) -> Vec<String> {
 
 /// Minimal XML text escaping for labels.
 fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// A board sketch as deterministic SVG: the board outline (the source `Board`
@@ -179,8 +184,10 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> String {
     // Board outline + cutouts (the real shape), or the implicit bounding box when
     // the source carries no board. A polygon renders rect / rounded / concave alike.
     let svg_poly = |class: &str, points: &[Point]| -> String {
-        let pts: Vec<String> =
-            points.iter().map(|p| format!("{},{}", fmt_mm(p.x), fmt_mm(flip(p.y)))).collect();
+        let pts: Vec<String> = points
+            .iter()
+            .map(|p| format!("{},{}", fmt_mm(p.x), fmt_mm(flip(p.y))))
+            .collect();
         format!(
             "  <polygon class=\"{class}\" points=\"{}\" fill=\"none\" stroke=\"black\" stroke-width=\"0.1\"/>\n",
             pts.join(" ")
@@ -245,7 +252,10 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> String {
 
     // One group per component: pads, an origin marker, and an id label.
     for c in doc.components.values() {
-        out.push_str(&format!("  <g class=\"component\" data-id=\"{}\">\n", xml_escape(c.id.as_str())));
+        out.push_str(&format!(
+            "  <g class=\"component\" data-id=\"{}\">\n",
+            xml_escape(c.id.as_str())
+        ));
         if let Some(def) = lib.get(&c.part) {
             for id in part_pin_ids(def) {
                 if let Some(w) = pin_world(c, def, &id) {
@@ -338,7 +348,13 @@ fn pour_fills_of(doc: &Doc, lib: &PartLib) -> Vec<crate::route::PourFill> {
         .nets
         .iter()
         .map(|(nid, net)| {
-            (nid.clone(), net.members.iter().map(|pr| (pr.clone(), PinRole::Passive)).collect())
+            (
+                nid.clone(),
+                net.members
+                    .iter()
+                    .map(|pr| (pr.clone(), PinRole::Passive))
+                    .collect(),
+            )
         })
         .collect();
     crate::route::pour_fills(doc, lib, &netlist, &crate::route::DesignRules::default())
@@ -376,7 +392,16 @@ fn placement_bbox(doc: &Doc, lib: &PartLib) -> (Point, Point) {
         x1 = x1.max(p.x);
         y1 = y1.max(p.y);
     }
-    (Point { x: x0 - MARGIN, y: y0 - MARGIN }, Point { x: x1 + MARGIN, y: y1 + MARGIN })
+    (
+        Point {
+            x: x0 - MARGIN,
+            y: y0 - MARGIN,
+        },
+        Point {
+            x: x1 + MARGIN,
+            y: y1 + MARGIN,
+        },
+    )
 }
 
 /// A Gerber aperture — the standard primitives this exporter needs. `Ord` so a
@@ -410,7 +435,10 @@ impl Aperture {
 /// exact geometry lives in the model for DRC. `None` for an empty shape.
 fn shape_flash(s: &Shape2D) -> Option<(Point, Aperture)> {
     let (min, max) = s.bbox()?;
-    let center = Point { x: (min.x + max.x) / 2, y: (min.y + max.y) / 2 };
+    let center = Point {
+        x: (min.x + max.x) / 2,
+        y: (min.y + max.y) / 2,
+    };
     let (w, h) = (max.x - min.x, max.y - min.y);
     let ap = match s {
         Shape2D::Stroke { path, radius } if path.segs.is_empty() => Aperture::Circle(2 * radius),
@@ -442,13 +470,20 @@ fn gbr_coord(nm: Nm) -> String {
 /// `den`. Exact i128 ⇒ byte-stable across platforms (no float).
 fn rdiv(num: i128, den: i128) -> i128 {
     let (n, d) = if den < 0 { (-num, -den) } else { (num, den) };
-    if n >= 0 { (n + d / 2) / d } else { -((-n + d / 2) / d) }
+    if n >= 0 {
+        (n + d / 2) / d
+    } else {
+        -((-n + d / 2) / d)
+    }
 }
 
 /// Does this shape's skeleton contain any arc edge? Straight shapes keep their exact
 /// legacy export (polygon / G01 lines); only arc-bearing shapes take the arc path.
 fn has_arc(s: &Shape2D) -> bool {
-    s.path().segs.iter().any(|seg| matches!(seg, Seg::Arc { .. }))
+    s.path()
+        .segs
+        .iter()
+        .any(|seg| matches!(seg, Seg::Arc { .. }))
 }
 
 /// `mid` and `end` re-expressed relative to `start` (so `start` becomes the origin).
@@ -458,8 +493,14 @@ fn has_arc(s: &Shape2D) -> bool {
 /// for a board referenced far from the origin.
 fn rel_to_start(start: Point, mid: Point, end: Point) -> (Point, Point) {
     (
-        Point { x: mid.x - start.x, y: mid.y - start.y },
-        Point { x: end.x - start.x, y: end.y - start.y },
+        Point {
+            x: mid.x - start.x,
+            y: mid.y - start.y,
+        },
+        Point {
+            x: end.x - start.x,
+            y: end.y - start.y,
+        },
     )
 }
 
@@ -474,7 +515,10 @@ fn arc_ij_turn(start: Point, mid: Point, end: Point) -> Option<(Point, i32)> {
     if den == 0 {
         return None;
     }
-    let ij = Point { x: rdiv(ux, den) as Nm, y: rdiv(uy, den) as Nm };
+    let ij = Point {
+        x: rdiv(ux, den) as Nm,
+        y: rdiv(uy, den) as Nm,
+    };
     Some((ij, den.signum() as i32))
 }
 
@@ -503,7 +547,11 @@ fn svg_arc_params(start: Point, mid: Point, end: Point) -> Option<(Nm, u8, u8)> 
     let side_mid = c.x as i128 * b.y as i128 - c.y as i128 * b.x as i128;
     let num = c.x as i128 * uy - c.y as i128 * ux;
     let side_c = num.signum() * den.signum();
-    let large: u8 = if side_mid.signum() == side_c && side_mid != 0 { 1 } else { 0 };
+    let large: u8 = if side_mid.signum() == side_c && side_mid != 0 {
+        1
+    } else {
+        0
+    };
     Some((radius, large, sweep))
 }
 
@@ -545,7 +593,11 @@ fn svg_path_d(shape: &Shape2D, flip: &impl Fn(Nm) -> Nm) -> String {
 fn gerber_contour<'a>(shape: &Shape2D, out: &mut String, mode: &mut &'a str, g75: &mut bool) {
     let path = shape.path();
     let start = path.start;
-    out.push_str(&format!("X{}Y{}D02*\n", gbr_coord(start.x), gbr_coord(start.y)));
+    out.push_str(&format!(
+        "X{}Y{}D02*\n",
+        gbr_coord(start.x),
+        gbr_coord(start.y)
+    ));
     let mut cur = start;
     let line_to = |p: Point, out: &mut String, mode: &mut &'a str| {
         if *mode != "G01" {
@@ -631,7 +683,9 @@ fn component_pad_flashes(
 ) -> Vec<(Point, Aperture)> {
     let mut out = Vec::new();
     for c in doc.components.values() {
-        let Some(def) = lib.get(&c.part) else { continue };
+        let Some(def) = lib.get(&c.part) else {
+            continue;
+        };
         for pin in &def.pins {
             let Some(pad) = &pin.pad else { continue };
             for copper in &pad.copper {
@@ -670,8 +724,11 @@ pub fn gerber_layer(doc: &Doc, lib: &PartLib, layer: Layer) -> String {
     for (_, a) in &pads {
         aps.insert(*a);
     }
-    let codes: BTreeMap<Aperture, u32> =
-        aps.iter().enumerate().map(|(i, a)| (*a, 10 + i as u32)).collect();
+    let codes: BTreeMap<Aperture, u32> = aps
+        .iter()
+        .enumerate()
+        .map(|(i, a)| (*a, 10 + i as u32))
+        .collect();
 
     let mut out = String::new();
     out.push_str(&format!("G04 {} *\n", layer_file(layer)));
@@ -695,7 +752,11 @@ pub fn gerber_layer(doc: &Doc, lib: &PartLib, layer: Layer) -> String {
     for v in &vias {
         let code = codes[&Aperture::Circle(v.pad)];
         out.push_str(&format!("D{code}*\n"));
-        out.push_str(&format!("X{}Y{}D03*\n", gbr_coord(v.at.x), gbr_coord(v.at.y)));
+        out.push_str(&format!(
+            "X{}Y{}D03*\n",
+            gbr_coord(v.at.x),
+            gbr_coord(v.at.y)
+        ));
     }
     // Component pad flashes (all-layer model).
     for (p, a) in &pads {
@@ -767,8 +828,11 @@ pub fn excellon_drill(doc: &Doc) -> String {
     for v in doc.vias.values() {
         dias.insert(v.drill);
     }
-    let tools: BTreeMap<Nm, u32> =
-        dias.iter().enumerate().map(|(i, d)| (*d, 1 + i as u32)).collect();
+    let tools: BTreeMap<Nm, u32> = dias
+        .iter()
+        .enumerate()
+        .map(|(i, d)| (*d, 1 + i as u32))
+        .collect();
 
     let mut out = String::new();
     out.push_str("M48\n");
@@ -807,8 +871,11 @@ pub fn gerber_mask(doc: &Doc, lib: &PartLib, side: Layer) -> String {
     for (_, a) in &openings {
         aps.insert(*a);
     }
-    let codes: BTreeMap<Aperture, u32> =
-        aps.iter().enumerate().map(|(i, a)| (*a, 10 + i as u32)).collect();
+    let codes: BTreeMap<Aperture, u32> = aps
+        .iter()
+        .enumerate()
+        .map(|(i, a)| (*a, 10 + i as u32))
+        .collect();
 
     let mut out = String::new();
     out.push_str(&format!("G04 {} *\n", mask_file(side)));
@@ -843,11 +910,23 @@ fn mask_file(side: Layer) -> &'static str {
 pub fn gerber_set(doc: &Doc, lib: &PartLib) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for layer in copper_layers(doc, lib) {
-        out.push((format!("board-{}.gbr", layer_file(layer)), gerber_layer(doc, lib, layer)));
+        out.push((
+            format!("board-{}.gbr", layer_file(layer)),
+            gerber_layer(doc, lib, layer),
+        ));
     }
-    out.push(("board-F_Mask.gbr".to_string(), gerber_mask(doc, lib, Layer::Top)));
-    out.push(("board-B_Mask.gbr".to_string(), gerber_mask(doc, lib, Layer::Bottom)));
-    out.push(("board-Edge_Cuts.gbr".to_string(), gerber_edge_cuts(doc, lib)));
+    out.push((
+        "board-F_Mask.gbr".to_string(),
+        gerber_mask(doc, lib, Layer::Top),
+    ));
+    out.push((
+        "board-B_Mask.gbr".to_string(),
+        gerber_mask(doc, lib, Layer::Bottom),
+    ));
+    out.push((
+        "board-Edge_Cuts.gbr".to_string(),
+        gerber_edge_cuts(doc, lib),
+    ));
     out.push(("board.drl".to_string(), excellon_drill(doc)));
     out
 }
@@ -864,7 +943,12 @@ mod tests {
     fn doc_psu(n: usize) -> (Doc, PartLib) {
         let lib = part_library();
         let mut h = History::new(Default::default());
-        h.commit(Transaction::one(Command::SetSource(psu_module(n))), &lib, "psu").unwrap();
+        h.commit(
+            Transaction::one(Command::SetSource(psu_module(n))),
+            &lib,
+            "psu",
+        )
+        .unwrap();
         (h.doc().clone(), lib)
     }
 
@@ -913,8 +997,14 @@ psu.reg,LDO,0.000000,0.000000,0
         let mut h = History::new(Default::default());
         h.commit(
             Transaction::one(Command::SetSource(vec![
-                G::Instance { path: "u1".into(), part: "MCU".into() },
-                G::Rotate { path: "u1".into(), deg: 90 },
+                G::Instance {
+                    path: "u1".into(),
+                    part: "MCU".into(),
+                },
+                G::Rotate {
+                    path: "u1".into(),
+                    deg: 90,
+                },
             ])),
             &lib,
             "rot",
@@ -931,13 +1021,17 @@ psu.reg,LDO,0.000000,0.000000,0
         let mut h = History::new(Default::default());
         let mut src = psu_module(2);
         src.insert(0, board_rect(Point::mm(0, 0), Point::mm(60, 40)));
-        h.commit(Transaction::one(Command::SetSource(src)), &lib, "board").unwrap();
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "board")
+            .unwrap();
         let s = svg(h.doc(), &lib);
 
         assert!(s.starts_with("<?xml"));
         assert!(s.contains("<svg "));
         assert!(s.contains("viewBox="));
-        assert!(s.contains("class=\"outline-board\""), "explicit board outline expected");
+        assert!(
+            s.contains("class=\"outline-board\""),
+            "explicit board outline expected"
+        );
         assert!(s.contains("data-id=\"psu.reg\""));
         assert!(s.contains(">psu.dec[0]</text>"));
         assert!(s.contains("class=\"pad\""), "pin pads expected");
@@ -948,7 +1042,10 @@ psu.reg,LDO,0.000000,0.000000,0
     fn svg_falls_back_to_bounding_box_without_board() {
         let (doc, lib) = doc_psu(2);
         let s = svg(&doc, &lib);
-        assert!(s.contains("class=\"outline-bbox\""), "implicit bbox outline expected");
+        assert!(
+            s.contains("class=\"outline-bbox\""),
+            "implicit bbox outline expected"
+        );
     }
 
     #[test]
@@ -974,16 +1071,29 @@ psu.reg,LDO,0.000000,0.000000,0
         let mut h = History::new(Default::default());
         let src = vec![
             board_rect(Point::mm(0, 0), Point::mm(20, 10)),
-            G::Instance { path: "c0".into(), part: "Cap".into() },
-            G::Instance { path: "c1".into(), part: "Cap".into() },
-            G::Place { path: "c0".into(), pos: Point::mm(5, 5) },
-            G::Place { path: "c1".into(), pos: Point::mm(15, 5) },
+            G::Instance {
+                path: "c0".into(),
+                part: "Cap".into(),
+            },
+            G::Instance {
+                path: "c1".into(),
+                part: "Cap".into(),
+            },
+            G::Place {
+                path: "c0".into(),
+                pos: Point::mm(5, 5),
+            },
+            G::Place {
+                path: "c1".into(),
+                pos: Point::mm(15, 5),
+            },
             G::ConnectPins {
                 net: "N".into(),
                 pins: vec![("c0".into(), "p1".into()), ("c1".into(), "p1".into())],
             },
         ];
-        h.commit(Transaction::one(Command::SetSource(src)), &lib, "place").unwrap();
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "place")
+            .unwrap();
         let net = NetId::new("N");
         let t0 = Trace {
             net: net.clone(),
@@ -1081,7 +1191,13 @@ psu.reg,LDO,0.000000,0.000000,0
     /// A filled half-disc (D-shape): an arc over the top closed by the flat diameter.
     fn half_disc(r: Nm) -> Shape2D {
         Shape2D::polygon_path(
-            crate::geom::Path { start: tp(-r, 0), segs: vec![Seg::Arc { mid: tp(0, r), end: tp(r, 0) }] },
+            crate::geom::Path {
+                start: tp(-r, 0),
+                segs: vec![Seg::Arc {
+                    mid: tp(0, r),
+                    end: tp(r, 0),
+                }],
+            },
             0,
         )
     }
@@ -1108,7 +1224,10 @@ psu.reg,LDO,0.000000,0.000000,0
         let r = 10 * TMM;
         let f = |deg: f64| {
             let a = deg.to_radians();
-            tp((r as f64 * a.cos()).round() as Nm, (r as f64 * a.sin()).round() as Nm)
+            tp(
+                (r as f64 * a.cos()).round() as Nm,
+                (r as f64 * a.sin()).round() as Nm,
+            )
         };
         // 0°→200°→210°: a 210° CCW major arc.
         let (_, large, sweep) = svg_arc_params(f(0.0), f(200.0), f(210.0)).unwrap();
@@ -1128,9 +1247,12 @@ psu.reg,LDO,0.000000,0.000000,0
         // Far-from-origin placement: the same arc shifted by (1e9, 1e9) nm must give the
         // identical I/J (the start-relative computation is overflow-safe and invariant).
         let s = 1_000_000_000;
-        let (ij2, turn2) =
-            arc_ij_turn(tp(s - r, s), tp(s, s + r), tp(s + r, s)).unwrap();
-        assert_eq!((ij2, turn2), (tp(r, 0), -1), "translation-invariant, no overflow");
+        let (ij2, turn2) = arc_ij_turn(tp(s - r, s), tp(s, s + r), tp(s + r, s)).unwrap();
+        assert_eq!(
+            (ij2, turn2),
+            (tp(r, 0), -1),
+            "translation-invariant, no overflow"
+        );
     }
 
     #[test]
@@ -1147,12 +1269,24 @@ psu.reg,LDO,0.000000,0.000000,0
         let (mut mode, mut g75) = ("G01", false);
         gerber_contour(&half_disc(10 * TMM), &mut out, &mut mode, &mut g75);
         assert!(out.contains("X-10000000Y0D02*"), "move to start:\n{out}");
-        assert!(out.contains("G75*"), "multi-quadrant enabled before the arc:\n{out}");
-        assert!(out.contains("G02*"), "the upper semicircle is CW (G02):\n{out}");
+        assert!(
+            out.contains("G75*"),
+            "multi-quadrant enabled before the arc:\n{out}"
+        );
+        assert!(
+            out.contains("G02*"),
+            "the upper semicircle is CW (G02):\n{out}"
+        );
         // Arc to end (R,0) with I/J = centre(0,0) − start(−R,0) = (R, 0).
-        assert!(out.contains("X10000000Y0I10000000J0D01*"), "arc draw with I/J:\n{out}");
+        assert!(
+            out.contains("X10000000Y0I10000000J0D01*"),
+            "arc draw with I/J:\n{out}"
+        );
         // The flat diameter closes the contour with a straight line back to start.
-        assert!(out.contains("G01*\nX-10000000Y0D01*"), "straight closing edge:\n{out}");
+        assert!(
+            out.contains("G01*\nX-10000000Y0D01*"),
+            "straight closing edge:\n{out}"
+        );
     }
 
     #[test]
@@ -1162,14 +1296,24 @@ psu.reg,LDO,0.000000,0.000000,0
         let lib = part_library();
         let (src, _) = crate::text::parse("board (-2mm, 0mm) arc (0mm, 2mm) (2mm, 0mm)").unwrap();
         let mut h = History::new(Default::default());
-        h.commit(Transaction::one(Command::SetSource(src)), &lib, "arc board").unwrap();
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "arc board")
+            .unwrap();
         let doc = h.doc().clone();
         let g = gerber_edge_cuts(&doc, &lib);
         assert!(g.contains("G75*"), "Edge.Cuts enables multi-quadrant:\n{g}");
-        assert!(g.contains("G02*") || g.contains("G03*"), "Edge.Cuts draws an arc:\n{g}");
+        assert!(
+            g.contains("G02*") || g.contains("G03*"),
+            "Edge.Cuts draws an arc:\n{g}"
+        );
         let s = svg(&doc, &lib);
-        assert!(s.contains("<path class=\"outline-board\""), "outline is a path:\n{s}");
-        assert!(s.contains(" A "), "SVG outline carries an arc command:\n{s}");
+        assert!(
+            s.contains("<path class=\"outline-board\""),
+            "outline is a path:\n{s}"
+        );
+        assert!(
+            s.contains(" A "),
+            "SVG outline carries an arc command:\n{s}"
+        );
     }
 
     #[test]
@@ -1214,10 +1358,17 @@ psu.reg,LDO,0.000000,0.000000,0
         lib.insert("PADX".into(), fp);
         let mut h = History::new(Default::default());
         let src = vec![
-            G::Instance { path: "u1".into(), part: "PADX".into() },
-            G::Place { path: "u1".into(), pos: Point::mm(5, 5) },
+            G::Instance {
+                path: "u1".into(),
+                part: "PADX".into(),
+            },
+            G::Place {
+                path: "u1".into(),
+                pos: Point::mm(5, 5),
+            },
         ];
-        h.commit(Transaction::one(Command::SetSource(src)), &lib, "p").unwrap();
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "p")
+            .unwrap();
         (h.doc().clone(), lib)
     }
 
@@ -1238,7 +1389,10 @@ psu.reg,LDO,0.000000,0.000000,0
     fn fab_exporters_are_deterministic() {
         let (doc, lib) = hand_routed_board();
         assert_eq!(gerber_set(&doc, &lib), gerber_set(&doc, &lib));
-        assert_eq!(gerber_layer(&doc, &lib, Layer::Top), gerber_layer(&doc, &lib, Layer::Top));
+        assert_eq!(
+            gerber_layer(&doc, &lib, Layer::Top),
+            gerber_layer(&doc, &lib, Layer::Top)
+        );
         assert_eq!(excellon_drill(&doc), excellon_drill(&doc));
         assert_eq!(gerber_edge_cuts(&doc, &lib), gerber_edge_cuts(&doc, &lib));
     }
@@ -1250,12 +1404,30 @@ psu.reg,LDO,0.000000,0.000000,0
         let lib = part_library();
         let src = vec![
             board_rect(Point::mm(-6, -10), Point::mm(18, 10)),
-            G::Instance { path: "reg".into(), part: "LDO".into() },
-            G::Instance { path: "c0".into(), part: "Cap".into() },
-            G::Instance { path: "c1".into(), part: "Cap".into() },
-            G::Place { path: "reg".into(), pos: Point::mm(0, 0) },
-            G::Place { path: "c0".into(), pos: Point::mm(12, 5) },
-            G::Place { path: "c1".into(), pos: Point::mm(12, -5) },
+            G::Instance {
+                path: "reg".into(),
+                part: "LDO".into(),
+            },
+            G::Instance {
+                path: "c0".into(),
+                part: "Cap".into(),
+            },
+            G::Instance {
+                path: "c1".into(),
+                part: "Cap".into(),
+            },
+            G::Place {
+                path: "reg".into(),
+                pos: Point::mm(0, 0),
+            },
+            G::Place {
+                path: "c0".into(),
+                pos: Point::mm(12, 5),
+            },
+            G::Place {
+                path: "c1".into(),
+                pos: Point::mm(12, -5),
+            },
             G::ConnectPins {
                 net: "VBUS".into(),
                 pins: vec![
@@ -1274,9 +1446,11 @@ psu.reg,LDO,0.000000,0.000000,0
             },
         ];
         let mut h = History::new(Default::default());
-        h.commit(Transaction::one(Command::SetSource(src)), &lib, "place").unwrap();
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "place")
+            .unwrap();
         let result = autoroute(h.doc(), &lib, &DesignRules::default());
-        h.commit(Transaction(result.commands), &lib, "route").unwrap();
+        h.commit(Transaction(result.commands), &lib, "route")
+            .unwrap();
         let doc = h.doc();
         // The autorouter laid real copper, so the F_Cu Gerber has trace draws.
         assert!(!doc.traces.is_empty());
@@ -1305,12 +1479,30 @@ psu.reg,LDO,0.000000,0.000000,0
         ]);
         let src = vec![
             board_rect(Point::mm(0, 0), Point::mm(20, 20)),
-            G::Instance { path: "g".into(), part: "P1".into() },
-            G::Instance { path: "s".into(), part: "P1".into() },
-            G::Place { path: "g".into(), pos: Point::mm(5, 5) },
-            G::Place { path: "s".into(), pos: Point::mm(15, 5) },
-            G::ConnectPins { net: "GND".into(), pins: vec![("g".into(), "1".into())] },
-            G::ConnectPins { net: "SIG".into(), pins: vec![("s".into(), "1".into())] },
+            G::Instance {
+                path: "g".into(),
+                part: "P1".into(),
+            },
+            G::Instance {
+                path: "s".into(),
+                part: "P1".into(),
+            },
+            G::Place {
+                path: "g".into(),
+                pos: Point::mm(5, 5),
+            },
+            G::Place {
+                path: "s".into(),
+                pos: Point::mm(15, 5),
+            },
+            G::ConnectPins {
+                net: "GND".into(),
+                pins: vec![("g".into(), "1".into())],
+            },
+            G::ConnectPins {
+                net: "SIG".into(),
+                pins: vec![("s".into(), "1".into())],
+            },
             G::Region(RegionDecl {
                 shape: outline,
                 role: Role::Conductor,
@@ -1319,7 +1511,8 @@ psu.reg,LDO,0.000000,0.000000,0
             }),
         ];
         let mut h = History::new(Default::default());
-        h.commit(Transaction::one(Command::SetSource(src)), &lib, "pour").unwrap();
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "pour")
+            .unwrap();
         (h.doc().clone(), lib)
     }
 
@@ -1331,8 +1524,17 @@ psu.reg,LDO,0.000000,0.000000,0
         assert!(top.contains("G37*"), "pour region closes");
         // Outer board contour + a knockout hole around the SIG pad ⇒ ≥2 contours
         // (≥2 D02 moves) inside the single G36/G37 block.
-        let block = top.split("G36*").nth(1).unwrap().split("G37*").next().unwrap();
-        assert!(block.matches("D02*").count() >= 2, "outer + hole contours:\n{block}");
+        let block = top
+            .split("G36*")
+            .nth(1)
+            .unwrap()
+            .split("G37*")
+            .next()
+            .unwrap();
+        assert!(
+            block.matches("D02*").count() >= 2,
+            "outer + hole contours:\n{block}"
+        );
         // The bottom layer carries no pour.
         assert!(!gerber_layer(&doc, &lib, Layer::Bottom).contains("G36*"));
     }
@@ -1341,7 +1543,10 @@ psu.reg,LDO,0.000000,0.000000,0
     fn svg_draws_pour_with_holes() {
         let (doc, lib) = poured_board();
         let s = svg(&doc, &lib);
-        assert!(s.contains("class=\"pour pour-top\""), "pour path present:\n{s}");
+        assert!(
+            s.contains("class=\"pour pour-top\""),
+            "pour path present:\n{s}"
+        );
         assert!(s.contains("fill-rule=\"evenodd\""), "holes via even-odd");
         assert!(s.contains("data-net=\"GND\""));
     }
@@ -1362,11 +1567,19 @@ psu.reg,LDO,0.000000,0.000000,0
         let (doc, lib) = padded_board();
         let f = gerber_mask(&doc, &lib, Layer::Top);
         assert!(f.contains("F_Mask"));
-        assert!(f.contains("R,0.700000X1.300000*%"), "expanded rect opening:\n{f}");
+        assert!(
+            f.contains("R,0.700000X1.300000*%"),
+            "expanded rect opening:\n{f}"
+        );
         assert!(f.contains("C,0.900000*%"), "expanded circle opening:\n{f}");
         assert_eq!(f.matches("D03*").count(), 2, "one opening per pad");
         // No bottom-side pads ⇒ no openings on B_Mask.
-        assert_eq!(gerber_mask(&doc, &lib, Layer::Bottom).matches("D03*").count(), 0);
+        assert_eq!(
+            gerber_mask(&doc, &lib, Layer::Bottom)
+                .matches("D03*")
+                .count(),
+            0
+        );
     }
 
     #[test]
@@ -1380,8 +1593,14 @@ psu.reg,LDO,0.000000,0.000000,0
         let mut h = History::new(Default::default());
         h.commit(
             Transaction::one(Command::SetSource(vec![
-                G::Instance { path: "j".into(), part: "TH".into() },
-                G::Place { path: "j".into(), pos: Point::mm(5, 5) },
+                G::Instance {
+                    path: "j".into(),
+                    part: "TH".into(),
+                },
+                G::Place {
+                    path: "j".into(),
+                    pos: Point::mm(5, 5),
+                },
             ])),
             &lib,
             "th",
@@ -1389,7 +1608,15 @@ psu.reg,LDO,0.000000,0.000000,0
         .unwrap();
         let doc = h.doc();
         // A through-hole pad is exposed on both faces, so it opens on both masks.
-        assert_eq!(gerber_mask(doc, &lib, Layer::Top).matches("D03*").count(), 1);
-        assert_eq!(gerber_mask(doc, &lib, Layer::Bottom).matches("D03*").count(), 1);
+        assert_eq!(
+            gerber_mask(doc, &lib, Layer::Top).matches("D03*").count(),
+            1
+        );
+        assert_eq!(
+            gerber_mask(doc, &lib, Layer::Bottom)
+                .matches("D03*")
+                .count(),
+            1
+        );
     }
 }
