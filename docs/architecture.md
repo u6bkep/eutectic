@@ -518,11 +518,14 @@ kernel** once (`src/region.rs`) and let every consumer fall out of it.
   `radius`; inflating by clearance `c` is `radius += c` (disc Minkowski sums add radii — exact).
   `region::shape_to_region` then realises any inflated shape as a filled `Region` by the **dilation
   decomposition** (core area ∪ one rect per skeleton edge ∪ one disc per vertex) — which reuses
-  `union`, so there is exactly one boolean engine. Arcs are tessellated at a fixed fine resolution
-  (integer direction table; the only float is the correctly-rounded IEEE `sqrt` for an edge normal,
-  matching the `closest_on_segment` precedent). The fill is a **derived (tier-3)** result, so this
-  tessellation is never baked into stored state — keeping the door open to arc-exact boundaries later
-  without a data migration.
+  `union`, so there is exactly one boolean engine. The radius-disc is tessellated at a fixed fine
+  resolution (integer direction table; the only float is the correctly-rounded IEEE `sqrt` for an
+  edge normal, matching the `closest_on_segment` precedent). **Skeleton arcs** (a `Seg::Arc` edge,
+  3-point start/mid/end) are flattened at the geometry seam (`Path::flatten`, chord tolerance
+  `DEFAULT_CHORD_TOL`) so the boolean only ever sees straight edges (**strategy A**); the
+  authoritative model carries the arc, the flattening is a transient the kernel/derived-fill consume,
+  never stored — so an arc-exact boolean could replace the tessellation later with no change to the
+  representation or to export. The fill is itself a **derived (tier-3)** result, doubly transient.
 
 **Stage 1 done:** the `region` kernel — `Region`, `union`/`intersection`/`difference`,
 `shape_to_region` (offset via dilation), and exact-integer predicates — landed standalone with a
@@ -567,10 +570,11 @@ gets its own Gerber). SVG draws each pour as a translucent layer-coloured `<path
 membership netlist and calls `route::pour_fills`, so DRC and fab see identical fills. Tests: Gerber
 emits `G36`/`G37` with outer + knockout-hole contours (bottom layer has none); SVG draws the pour
 path; fab output deterministic with a pour. **Scope note:** the custom-pad / rounded-outline
-bounding-box-collapse fidelity debt was *not* repaid here — true `G02`/`G03` arc export needs the
-arc-capable `Shape2D` (the deferred representation extension), and routing complex *pads* through
-region fills would churn the existing aperture-flash path; both are left as focused follow-ups (the
-bounding-box pad flash is conservative, not a regression). **Stage 6 done (the family is complete):**
+bounding-box-collapse fidelity debt was not repaid by the pour work itself — it was repaid
+afterwards by the **arc-capable `Shape2D`** (see "Arc support" below): custom pads now import as
+compound copper including `gr_arc` edges, and arc-bearing outlines export as true `G02`/`G03`.
+Routing complex *pads* through region fills (vs. the aperture-flash path) is still a focused
+follow-up. **Stage 6 done (the family is complete):**
 solder mask is the **dual** of the pour, and falls out of the same offset. `export::gerber_mask(side)`
 emits the `F.Mask`/`B.Mask` layer as the **openings** — every component pad on that side flashed as
 its copper aperture inflated by `DesignRules::mask_expansion` (the fab inverts to coverage); through-
@@ -581,11 +585,32 @@ offset+boolean kernel now serves pours (offset + difference) **and** mask (offse
 when wanted. **0004's copper-pour / plane / mask family is now complete end-to-end** (author → DRC
 connect+clearance → Gerber/SVG fab output) for 2-layer boards; the separate **multilayer-routing** half
 of 0004 (a router that lays inner-layer copper, the stackup driving real layer count) stays in 0008's
-orbit. The DRC pass is `O(N²)` (broadphase spatial index deferred — see performance notes); arc-exact
-boundaries and the 3D-`Solid` boolean are deferred but representable. (Noted limits: custom-pad /
-rounded-outline still flash as bounding boxes — awaits arc-capable `Shape2D`; floating/unnetted pads
-not yet knocked out of a pour; SMD-pad↔pour incidence is all-layer like the rest of the pin model;
-Gerber not yet viewer-validated — 0009.)
+orbit. The DRC pass is `O(N²)` (broadphase spatial index deferred — see performance notes); an
+arc-*exact* boolean (vs. the current flatten-at-the-seam) and the 3D-`Solid` boolean are deferred but
+representable. (Noted limits: floating/unnetted pads not yet knocked out of a pour; SMD-pad↔pour
+incidence is all-layer like the rest of the pin model; Gerber not yet viewer-validated — 0009.)
+
+### Arc support — `Shape2D` carries circular arcs (5 stages, done)
+
+The `Shape2D` skeleton became a `Path { start, segs: Vec<Seg> }` where `Seg = Line | Arc{mid,end}` —
+a **3-point** circular arc (three lattice points: no over-determination, centre/radius derived as
+exact rationals at export). The enum is open so a `Cubic` Bézier slots in later as one tessellation
+arm + export arms, with no kernel churn (non-circular curves are roadmapped for MCAD, deferred). The
+design choice — **"strategy A"**: arcs are authoritative, the exact-integer clearance/boolean kernel
+never sees a curve (it consumes a transient flattening at one seam, `Path::flatten`), and export
+reads arcs directly — keeps the proven integer kernel untouched and the door open to an arc-exact
+kernel later. Tessellation is trig-free (perpendicular-bisector bisection, correctly-rounded `sqrt`
+only; turn-sign-aware so a ≥180° sub-arc tessellates the intended side). Stages: (1) representation +
+kernel seam; (2) tolerance policy + clearance/region regressions (flattening is *inscribed* ⇒ DRC
+optimistic by ≤ one sagitta, ~1µm); (3) export — `G02`/`G03` + `G75` (I/J from the exact-rational
+circumcentre, computed start-relative so it can't overflow far from origin) and SVG `A` arcs (flags
+exact-integer), straight shapes byte-identical; (4-text) `arc <mid> <end>` in the text grammar, so an
+authored half-disc board flows author → DRC → fab end-to-end; (4-import) KiCad `custom` pads import as
+compound copper including `gr_arc` (3-point **and** legacy centre/angle), validated against real
+footprints (MCP_48QFN: 144 arcs). Two adversarial reviews caught real bugs (≥180° wrong-side
+tessellation; a `hypot` determinism leak; the far-from-origin overflow margin) — all fixed with
+regressions. Deferred follow-ups: footprint *graphics* import (0016), a `.kicad_pcb` Edge.Cuts
+importer (0017), and the `Cubic`/NURBS curve primitive for MCAD bodies.
 
 ---
 
