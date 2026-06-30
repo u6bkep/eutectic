@@ -21,6 +21,7 @@ pub mod diagnostic;
 pub mod doc;
 pub mod elaborate;
 pub mod export;
+pub mod font;
 pub mod geom;
 pub mod history;
 pub mod id;

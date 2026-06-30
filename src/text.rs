@@ -210,6 +210,61 @@ fn render_directive(d: &GenDirective) -> String {
         } => {
             format!("nearpin {a} {b_comp}.{b_pin} {}", fmt_len(*within))
         }
+        GenDirective::Text {
+            string,
+            at,
+            height,
+            layer,
+            orient,
+        } => {
+            // `text "<string>" (x,y) h=<len> layer=<silk> [rot=<deg> | rotq=(w,x,y,z)]`.
+            // The string is double-quoted (may contain spaces). Identity orientation is
+            // omitted; a cardinal about-z rotation serialises readably as `rot=<deg>`,
+            // any other rotation as the exact `rotq=(w,x,y,z)` (so it round-trips). The
+            // double-quote/backslash escaping of arbitrary strings is a noted follow-up.
+            let mut s = format!(
+                "text \"{string}\" {} h={} layer={}",
+                fmt_point(*at),
+                fmt_len(*height),
+                silk_layer_token(*layer),
+            );
+            if *orient != Orient::IDENTITY {
+                let cardinal = [0, 90, 180, 270]
+                    .into_iter()
+                    .find(|&d| orient.same_rotation(Orient::from_deg(d).unwrap()));
+                match cardinal {
+                    Some(d) => s.push_str(&format!(" rot={d}")),
+                    None => s.push_str(&format!(
+                        " rotq=({},{},{},{})",
+                        orient.w, orient.x, orient.y, orient.z
+                    )),
+                }
+            }
+            s
+        }
+    }
+}
+
+/// Canonical silk-layer token for a board-text [`Layer`]: the outer copper sides map to
+/// the KiCad silkscreen names `F.SilkS` / `B.SilkS` (board text is a surface marking
+/// tied to the outer surface z); an inner layer — unusual for text — falls back to the
+/// copper token. The inverse of [`parse_silk_layer`].
+fn silk_layer_token(l: Layer) -> String {
+    match l {
+        Layer::Top => "F.SilkS".into(),
+        Layer::Bottom => "B.SilkS".into(),
+        Layer::Inner(_) => layer_token(l),
+    }
+}
+
+/// Parse a board-text layer token. Accepts the silkscreen names `F.SilkS` / `B.SilkS`
+/// (the canonical form), plus everything [`parse_layer`] accepts (`F.Cu`, `B.Cu`,
+/// `In<n>.Cu`, `top`, `bottom`) as aliases for the corresponding side.
+fn parse_silk_layer(t: &str) -> Result<Layer, String> {
+    match t {
+        "F.SilkS" => Ok(Layer::Top),
+        "B.SilkS" => Ok(Layer::Bottom),
+        _ => parse_layer(t),
     }
 }
 
@@ -329,6 +384,53 @@ fn parse_layer(t: &str) -> Result<Layer, String> {
             }
         }
     }
+}
+
+/// Parse a `rot=` degree value into an [`Orient`] (about z): an integer cardinal uses
+/// the tiny exact quaternion, any other finite angle lowers once (at parse) to a scaled
+/// quaternion (same lowering as the `rotate` directive). Mirrors that directive's angle
+/// handling; text-side flipping (`bottom`) is a follow-up.
+fn parse_rot_deg(r: &str) -> Result<Orient, String> {
+    if let Ok(d) = r.parse::<i32>() {
+        Ok(Orient::from_deg(d).unwrap_or_else(|| Orient::from_angle_deg(d as f64)))
+    } else {
+        let deg: f64 = r
+            .parse()
+            .map_err(|_| format!("`{r}` is not a number of degrees"))?;
+        if !deg.is_finite() {
+            return Err(format!("rotation angle `{r}` must be finite"));
+        }
+        Ok(Orient::from_angle_deg(deg))
+    }
+}
+
+/// Parse a `rotq=` value `(w,x,y,z)` into an exact integer-quaternion [`Orient`] (the
+/// canonical serialised form for a non-cardinal text rotation). The all-zero quaternion
+/// is rejected (not a rotation).
+fn parse_quat_tok(q: &str) -> Result<Orient, String> {
+    let inner = q
+        .strip_prefix('(')
+        .and_then(|s| s.strip_suffix(')'))
+        .ok_or("rotq must be written rotq=(w,x,y,z)")?;
+    let n: Vec<&str> = inner.split(',').collect();
+    if n.len() != 4 {
+        return Err("rotq needs four integer components: rotq=(w,x,y,z)".into());
+    }
+    let pi = |t: &str| {
+        t.trim()
+            .parse::<i64>()
+            .map_err(|_| format!("`{}` is not an integer", t.trim()))
+    };
+    let o = Orient {
+        w: pi(n[0])?,
+        x: pi(n[1])?,
+        y: pi(n[2])?,
+        z: pi(n[3])?,
+    };
+    if (o.w, o.x, o.y, o.z) == (0, 0, 0, 0) {
+        return Err("rotq=(0,0,0,0) is not a rotation".into());
+    }
+    Ok(o)
 }
 
 // ----------------------------------------------------------------------------
@@ -573,6 +675,55 @@ fn parse_line(line: &str) -> Result<Item, String> {
                 b_comp,
                 b_pin,
                 within: len,
+            })
+        }
+        "text" => {
+            // `text "<string>" (x,y) h=<len> layer=<silk> [rot=<deg> | rotq=(w,x,y,z)]`.
+            // Pull the double-quoted string off first (it may contain spaces), then the
+            // coordinate, then the remaining `key=value` tokens.
+            const USAGE: &str =
+                "text \"<string>\" (x,y) h=<len> layer=<silk> [rot=<deg> | rotq=(w,x,y,z)]";
+            let q1 = rest.find('"').ok_or(USAGE)?;
+            let q2 = rest[q1 + 1..]
+                .find('"')
+                .map(|i| q1 + 1 + i)
+                .ok_or("text: string is missing its closing quote")?;
+            let string = rest[q1 + 1..q2].to_string();
+            let after = rest[q2 + 1..].trim();
+            // The single coordinate `(x, y)`.
+            let open = after.find('(').ok_or(USAGE)?;
+            let close = after[open..]
+                .find(')')
+                .map(|i| open + i)
+                .ok_or("unbalanced '(' in coordinate")?;
+            let pts = extract_points(&after[open..=close])?;
+            if pts.len() != 1 {
+                return Err("text needs exactly one coordinate `(x, y)`".into());
+            }
+            let at = pts[0];
+            // Trailing key=value tokens: h= (required), layer= (required), rot=/rotq=.
+            let mut height: Option<Nm> = None;
+            let mut layer: Option<Layer> = None;
+            let mut orient = Orient::IDENTITY;
+            for tok in after[close + 1..].split_whitespace() {
+                if let Some(h) = tok.strip_prefix("h=") {
+                    height = Some(parse_len(h)?);
+                } else if let Some(l) = tok.strip_prefix("layer=") {
+                    layer = Some(parse_silk_layer(l)?);
+                } else if let Some(q) = tok.strip_prefix("rotq=") {
+                    orient = parse_quat_tok(q)?;
+                } else if let Some(r) = tok.strip_prefix("rot=") {
+                    orient = parse_rot_deg(r)?;
+                } else {
+                    return Err(format!("text: unexpected token `{tok}`"));
+                }
+            }
+            Item::Directive(GenDirective::Text {
+                string,
+                at,
+                height: height.ok_or("text needs h=<len>")?,
+                layer: layer.ok_or("text needs layer=<silk>")?,
+                orient,
             })
         }
         "connect" => {
@@ -1063,6 +1214,21 @@ mod tests {
                 b_pin: "VOUT".into(),
                 within: 2 * MM,
             },
+            // Board text (silk): an identity-oriented label and a cardinally-rotated one.
+            GenDirective::Text {
+                string: "REF 1".into(),
+                at: Point::mm(2, 40),
+                height: MM,
+                layer: Layer::Top,
+                orient: Orient::IDENTITY,
+            },
+            GenDirective::Text {
+                string: "B1".into(),
+                at: Point::mm(10, 40),
+                height: 800_000,
+                layer: Layer::Bottom,
+                orient: Orient::from_deg(90).unwrap(),
+            },
             GenDirective::ConnectInterface {
                 a: ("mcu".into(), "uart".into()),
                 b: ("sens".into(), "uart".into()),
@@ -1208,6 +1374,42 @@ region keepout-drill layer=In2.Cu (1mm, 1mm) (2mm, 1mm) (2mm, 2mm)";
         // Canonical serialization re-parses to the same source.
         let doc = doc_of(src.clone(), BTreeMap::new());
         assert_eq!(parse(&serialize(&doc)).unwrap().0, src);
+    }
+
+    /// A `text` directive parses to the expected `GenDirective::Text` and round-trips,
+    /// with and without `rot=`. A quoted string containing a space survives intact.
+    #[test]
+    fn text_directive_parses_and_round_trips() {
+        let text = "\
+text \"R12\" (0mm, 0mm) h=1mm layer=F.SilkS
+text \"VAL 3V3\" (2mm, 5mm) h=0.8mm layer=B.SilkS rot=90";
+        let (src, _) = parse(text).expect("parse");
+        assert_eq!(
+            src[0],
+            GenDirective::Text {
+                string: "R12".into(),
+                at: Point::mm(0, 0),
+                height: MM,
+                layer: Layer::Top,
+                orient: Orient::IDENTITY,
+            }
+        );
+        assert_eq!(
+            src[1],
+            GenDirective::Text {
+                string: "VAL 3V3".into(), // a quoted string with a space round-trips
+                at: Point::mm(2, 5),
+                height: 800_000,
+                layer: Layer::Bottom,
+                orient: Orient::from_deg(90).unwrap(),
+            }
+        );
+        // Canonical serialization re-parses identically (silk tokens + rot survive).
+        let doc = doc_of(src.clone(), BTreeMap::new());
+        let canon = serialize(&doc);
+        assert!(canon.contains("layer=F.SilkS"), "silk token:\n{canon}");
+        assert!(canon.contains("rot=90"), "cardinal rot token:\n{canon}");
+        assert_eq!(parse(&canon).unwrap().0, src);
     }
 
     /// `arc <mid> <end>` edges parse into `Seg::Arc`, mixed freely with straight edges,

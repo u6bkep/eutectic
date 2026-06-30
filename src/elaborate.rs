@@ -128,6 +128,21 @@ pub enum GenDirective {
         b_pin: String,
         within: Nm,
     },
+    /// Authored **board text** — a mutable string lowered to silkscreen (per
+    /// Decision 9 in docs/geometry-model-convergence.md). The **authoritative** form
+    /// is exactly these fields (string + placement + `height` + `layer` + `orient`);
+    /// the `Shape2D` strokes are *derived* by [`features`] through the built-in
+    /// stroke [`crate::font`] — never stored, so a rename re-derives. `orient`
+    /// defaults to [`Orient::IDENTITY`] (rotated labels are a follow-up). This is
+    /// **not** a placement/connectivity directive — elaboration's passes ignore it
+    /// (the main matches have `_ => {}` arms); it is read only by the lowering.
+    Text {
+        string: String,
+        at: Point,
+        height: Nm,
+        layer: Layer,
+        orient: Orient,
+    },
 }
 
 /// The generative program (tier 1 authoritative).
@@ -933,6 +948,68 @@ pub fn features(source: &Source) -> Vec<crate::geom::NetFeature> {
         }
     }
 
+    // Text: every authored string lowers to stroke-font `Marking` features (Decision
+    // 9). The strokes are derived here, never stored, so a renamed label re-derives.
+    for d in source {
+        if let GenDirective::Text {
+            string,
+            at,
+            height,
+            layer,
+            orient,
+        } = d
+        {
+            out.extend(text_features(string, *at, *height, *layer, *orient, &su));
+        }
+    }
+
+    out
+}
+
+/// Lower one authored [`GenDirective::Text`] into stroke-font [`Role::Marking`]
+/// features (Decision 9). For each character, its centreline polylines (from
+/// [`crate::font`]) are scaled cell→world by `height / CELL_HEIGHT`, advanced in +x by
+/// `GLYPH_ADVANCE` font-units per character, rotated by `orient` about the text origin
+/// (exact for [`Orient::IDENTITY`]), then translated to `at`. Each stroke is traced at
+/// a pen width of `height / 8` on the layer's z (via the shared [`layer_z`]). The
+/// markings are **netless** — silk carries no electrical identity.
+fn text_features(
+    string: &str,
+    at: Point,
+    height: Nm,
+    layer: Layer,
+    orient: Orient,
+    su: &Stackup,
+) -> Vec<NetFeature> {
+    let z = layer_z(su, layer);
+    let pen = (height / 8).max(1); // a visible stroke width even for tiny heights
+    let cell_h = crate::font::CELL_HEIGHT as Nm;
+    let mut out = Vec::new();
+    for (i, ch) in string.chars().enumerate() {
+        let dx = i as i32 * crate::font::GLYPH_ADVANCE;
+        for stroke in crate::font::glyph_strokes(ch) {
+            let pts: Vec<Point> = stroke
+                .iter()
+                .map(|&(cx, cy)| {
+                    // cell → world (integer scale), rotate about origin, then place.
+                    let local = Point {
+                        x: (dx + cx) as Nm * height / cell_h,
+                        y: cy as Nm * height / cell_h,
+                    };
+                    let r = orient.apply(local);
+                    Point {
+                        x: r.x + at.x,
+                        y: r.y + at.y,
+                    }
+                })
+                .collect();
+            out.push(NetFeature::netless(Feature::prism(
+                Role::Marking,
+                Shape2D::trace(pts, pen),
+                z,
+            )));
+        }
+    }
     out
 }
 
@@ -1226,6 +1303,52 @@ mod tests {
         let Extent::Prism { shape, .. } = &subs[0].feature.extent;
         assert_eq!(*shape, last, "the LAST board outline becomes the substrate");
         assert_ne!(*shape, first, "the earlier board is dropped");
+    }
+
+    /// A `text` directive lowers to several `Role::Marking` stroke features sitting on
+    /// the layer's z, advancing in +x across the string (Decision 9).
+    #[test]
+    fn features_lowers_text_to_marking_strokes() {
+        let su = Stackup::default_2layer();
+        let src = vec![GenDirective::Text {
+            string: "R12".into(),
+            at: pt(0, 0),
+            height: MM,
+            layer: Layer::Top,
+            orient: Orient::IDENTITY,
+        }];
+
+        let feats = features(&src);
+        let marks: Vec<&NetFeature> = feats
+            .iter()
+            .filter(|f| f.feature.role == Role::Marking)
+            .collect();
+        // "R12": R(2) + 1(2) + 2(1) = 5 strokes; in any case several, all netless.
+        assert!(
+            marks.len() >= 3,
+            "expected several marking strokes, got {}",
+            marks.len()
+        );
+        assert!(marks.iter().all(|f| f.net.is_none()), "silk is netless");
+
+        // All markings sit on the Top-copper z (silk side z, via the shared layer_z).
+        let top_z = su.top_copper().unwrap();
+        for m in &marks {
+            let Extent::Prism { z, .. } = m.feature.extent;
+            assert_eq!(z, top_z, "marking on the Top z");
+        }
+
+        // The text advances in +x: the rightmost stroke point of the 3-char string
+        // lies well to the right of the origin (the '1' and '2' are advanced glyphs).
+        let max_x = marks
+            .iter()
+            .flat_map(|m| {
+                let Extent::Prism { shape, .. } = &m.feature.extent;
+                shape.points().into_iter().map(|p| p.x)
+            })
+            .max()
+            .unwrap();
+        assert!(max_x > MM, "string advances past the first glyph in +x");
     }
 
     /// A source with `Slab` directives makes `stackup()` return *those* slabs, in

@@ -150,6 +150,13 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> String {
     for v in doc.vias.values() {
         pts.push(v.at);
     }
+    // Silk markings (lowered board text) must be in view so labels aren't clipped.
+    for nf in crate::elaborate::features(&doc.source) {
+        if nf.feature.role == Role::Marking {
+            let Extent::Prism { shape, .. } = &nf.feature.extent;
+            pts.extend(shape.points());
+        }
+    }
 
     // Content bounds (+ margin). Fall back to a 10mm box for an empty document so
     // the viewBox is never degenerate.
@@ -364,6 +371,26 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> String {
             fmt_mm(v.at.x),
             fmt_mm(flip(v.at.y)),
             fmt_mm(v.pad / 2),
+        ));
+    }
+
+    // Silkscreen: lowered board text. Each derived stroke-font `Role::Marking` feature
+    // (from the converged `features` view) is drawn as a thin stroked centreline
+    // polyline, giving a silk-layer look. Source order ⇒ deterministic.
+    for nf in crate::elaborate::features(&doc.source) {
+        if nf.feature.role != Role::Marking {
+            continue;
+        }
+        let Extent::Prism { shape, .. } = &nf.feature.extent;
+        let path: Vec<String> = shape
+            .points()
+            .iter()
+            .map(|p| format!("{},{}", fmt_mm(p.x), fmt_mm(flip(p.y))))
+            .collect();
+        out.push_str(&format!(
+            "  <polyline class=\"silk\" points=\"{}\" fill=\"none\" stroke=\"#888888\" stroke-width=\"{}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n",
+            path.join(" "),
+            fmt_mm(shape.radius() * 2),
         ));
     }
 
@@ -1218,6 +1245,36 @@ psu.reg,LDO,0.000000,0.000000,0,T
             !s.contains("<circle class=\"pad\""),
             "the r=0.3 pad-dot lie should be gone for a real pad:\n{s}"
         );
+    }
+
+    #[test]
+    fn svg_renders_board_text_as_silk_strokes() {
+        use crate::doc::Orient;
+        use crate::elaborate::GenDirective as G;
+        let lib = part_library();
+        let mut h = History::new(Default::default());
+        h.commit(
+            Transaction::one(Command::SetSource(vec![
+                board_rect(Point::mm(0, 0), Point::mm(20, 20)),
+                G::Text {
+                    string: "R12".into(),
+                    at: Point::mm(2, 10),
+                    height: MM,
+                    layer: Layer::Top,
+                    orient: Orient::IDENTITY,
+                },
+            ])),
+            &lib,
+            "text",
+        )
+        .unwrap();
+        let s = svg(h.doc(), &lib);
+        assert!(
+            s.contains("class=\"silk\""),
+            "lowered board text should render as silk strokes:\n{s}"
+        );
+        // Several glyph strokes ⇒ more than one silk polyline.
+        assert!(s.matches("class=\"silk\"").count() >= 3, "got:\n{s}");
     }
 
     #[test]
