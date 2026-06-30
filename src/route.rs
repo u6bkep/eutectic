@@ -423,7 +423,7 @@ fn copper_layers_z(stackup: &Stackup) -> Vec<(Layer, ZRange)> {
 /// Lower an abstract copper [`Layer`] to its slab `ZRange` via the stackup
 /// (`Top`→top outer copper, `Bottom`→bottom outer, `Inner(n)`→the `1+n`-th from top).
 /// `None` if that copper layer is absent (e.g. `Inner` on a 2-layer stackup).
-fn layer_z(stackup: &Stackup, l: Layer) -> Option<ZRange> {
+pub(crate) fn layer_z(stackup: &Stackup, l: Layer) -> Option<ZRange> {
     match l {
         Layer::Top => stackup.top_copper(),
         Layer::Bottom => stackup.bottom_copper(),
@@ -558,7 +558,8 @@ pub fn pour_fills(
     rules: &DesignRules,
 ) -> Vec<PourFill> {
     use crate::region::{DEFAULT_CIRCLE_SEGS, difference, shape_to_region, union_all};
-    let pieces = net_copper(doc, lib, netlist);
+    let su = stackup(&doc.source);
+    let feats = net_features(doc, lib, netlist, &su);
     let mut out = Vec::new();
     for r in crate::elaborate::regions(&doc.source) {
         if r.role != crate::geom::Role::Conductor {
@@ -567,10 +568,15 @@ pub fn pour_fills(
         let Some(name) = &r.net else { continue };
         let net = NetId::new(name.clone());
         let outline = shape_to_region(&r.shape, DEFAULT_CIRCLE_SEGS);
-        let obstacles: Vec<crate::region::Region> = pieces
+        // Foreign copper on this pour's layer. Each feature is single-slab, so the
+        // `layer == r.layer` match reproduces the old `PieceLayers::on(r.layer)`.
+        let obstacles: Vec<crate::region::Region> = feats
             .iter()
-            .filter(|p| p.net != net && p.layers.on(r.layer))
-            .map(|p| shape_to_region(&p.shape.inflated(rules.min_clearance), DEFAULT_CIRCLE_SEGS))
+            .filter(|(layer, nf)| *layer == r.layer && nf.net.as_ref() != Some(&net))
+            .map(|(_, nf)| {
+                let Extent::Prism { shape, .. } = &nf.feature.extent;
+                shape_to_region(&shape.inflated(rules.min_clearance), DEFAULT_CIRCLE_SEGS)
+            })
             .collect();
         let fill = difference(&outline, &union_all(obstacles));
         out.push(PourFill {

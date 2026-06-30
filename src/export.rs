@@ -18,8 +18,8 @@
 //! status (Gerber/fab output)".
 
 use crate::doc::{Doc, MM, Nm, Point};
-use crate::geom::{BoardShape, Seg, Shape2D, circumcenter};
-use crate::part::{PadLayers, PartDef, PartLib, pad_copper_world, pin_world};
+use crate::geom::{BoardShape, Extent, Role, Seg, Shape2D, circumcenter};
+use crate::part::{PartDef, PartLib, pin_world};
 use crate::route::{DesignRules, Layer, Trace, Via};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -448,16 +448,6 @@ fn shape_flash(s: &Shape2D) -> Option<(Point, Aperture)> {
     Some((center, ap))
 }
 
-/// Does a pad on `layers` flash on copper `layer`? Through-hole copper appears on
-/// every copper layer (annulus); an SMD pad only on its own outer layer.
-fn pad_on_layer(layers: PadLayers, layer: Layer) -> bool {
-    match layers {
-        PadLayers::Through => true,
-        PadLayers::Top => layer == Layer::Top,
-        PadLayers::Bottom => layer == Layer::Bottom,
-    }
-}
-
 /// A Gerber coordinate in the `%FSLAX46Y46*%` fixed-point format: 4 integer + 6
 /// fractional digits of millimetre, leading zeros omitted. Because 1 mm =
 /// 1_000_000 nm, the integer the file carries *is exactly the nanometre value* — so
@@ -681,20 +671,29 @@ fn component_pad_flashes(
     layer: Layer,
     inflate: Nm,
 ) -> Vec<(Point, Aperture)> {
+    // Derive each pad's converged copper features and flash those whose slab is this
+    // Gerber `layer`. `pad_features` already world-maps + assigns z; we match the slab
+    // z of `layer`, so a Through pad flashes on every copper layer and an SMD pad only
+    // on its own — exactly the old `pad_on_layer` selection, now off the Feature model.
+    let su = crate::elaborate::stackup(&doc.source);
+    let Some(target_z) = crate::route::layer_z(&su, layer) else {
+        return Vec::new(); // this layer is not in the stackup
+    };
     let mut out = Vec::new();
     for c in doc.components.values() {
         let Some(def) = lib.get(&c.part) else {
             continue;
         };
         for pin in &def.pins {
-            let Some(pad) = &pin.pad else { continue };
-            for copper in &pad.copper {
-                if !pad_on_layer(copper.layers, layer) {
+            for f in pin.pad_features(c, &su) {
+                if f.role != Role::Conductor {
+                    continue; // the Void drill does not flash on a copper layer
+                }
+                let Extent::Prism { shape, z } = &f.extent;
+                if *z != target_z {
                     continue;
                 }
-                if let Some((center, ap)) =
-                    shape_flash(&pad_copper_world(c, copper).inflated(inflate))
-                {
+                if let Some((center, ap)) = shape_flash(&shape.inflated(inflate)) {
                     out.push((center, ap));
                 }
             }
