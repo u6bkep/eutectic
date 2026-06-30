@@ -18,7 +18,7 @@
 //! status (Gerber/fab output)".
 
 use crate::doc::{Doc, Nm, Point, MM};
-use crate::geom::{BoardShape, Shape2D};
+use crate::geom::{circumcenter, BoardShape, Seg, Shape2D};
 use crate::part::{pad_copper_world, pin_world, PadLayers, PartDef, PartLib};
 use crate::route::{DesignRules, Layer, Trace, Via};
 use std::collections::{BTreeMap, BTreeSet};
@@ -186,11 +186,23 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> String {
             pts.join(" ")
         )
     };
+    // An arc-bearing outline/cutout emits a `<path>` (true `A` arcs); a straight one
+    // keeps the byte-identical `<polygon>`.
+    let svg_outline = |class: &str, shape: &Shape2D| -> String {
+        if has_arc(shape) {
+            format!(
+                "  <path class=\"{class}\" d=\"{}\" fill=\"none\" stroke=\"black\" stroke-width=\"0.1\"/>\n",
+                svg_path_d(shape, &flip)
+            )
+        } else {
+            svg_poly(class, &shape.points())
+        }
+    };
     match &board {
         Some(b) => {
-            out.push_str(&svg_poly("outline-board", &b.outline.points()));
+            out.push_str(&svg_outline("outline-board", &b.outline));
             for c in &b.cutouts {
-                out.push_str(&svg_poly("outline-cutout", &c.points()));
+                out.push_str(&svg_outline("outline-cutout", c));
             }
         }
         None => {
@@ -426,6 +438,156 @@ fn gbr_coord(nm: Nm) -> String {
     nm.to_string()
 }
 
+/// Round `num/den` to the nearest integer (half away from zero), for either sign of
+/// `den`. Exact i128 ⇒ byte-stable across platforms (no float).
+fn rdiv(num: i128, den: i128) -> i128 {
+    let (n, d) = if den < 0 { (-num, -den) } else { (num, den) };
+    if n >= 0 { (n + d / 2) / d } else { -((-n + d / 2) / d) }
+}
+
+/// Does this shape's skeleton contain any arc edge? Straight shapes keep their exact
+/// legacy export (polygon / G01 lines); only arc-bearing shapes take the arc path.
+fn has_arc(s: &Shape2D) -> bool {
+    s.path().segs.iter().any(|seg| matches!(seg, Seg::Arc { .. }))
+}
+
+/// `mid` and `end` re-expressed relative to `start` (so `start` becomes the origin).
+/// All arc predicates work in this frame: translation-invariant, but the degree-4 side
+/// test then scales with the board *extent* (the arc's own span, ~cm) rather than the
+/// absolute coordinate magnitude, keeping the i128 arithmetic far from overflow even
+/// for a board referenced far from the origin.
+fn rel_to_start(start: Point, mid: Point, end: Point) -> (Point, Point) {
+    (
+        Point { x: mid.x - start.x, y: mid.y - start.y },
+        Point { x: end.x - start.x, y: end.y - start.y },
+    )
+}
+
+/// The Gerber arc I/J `(centre − start)` (rounded to nm) and turn (`+1` CCW / `−1` CW)
+/// of the 3-point arc `start`→`mid`→`end`. Since the arc's start *is* the current point,
+/// the start-relative centre is exactly the I/J offset Gerber wants. `None` if collinear
+/// (caller draws a straight line). Exact-rational [`circumcenter`], [`rdiv`]-rounded —
+/// byte-stable.
+fn arc_ij_turn(start: Point, mid: Point, end: Point) -> Option<(Point, i32)> {
+    let (b, c) = rel_to_start(start, mid, end);
+    let (ux, uy, den) = circumcenter(Point { x: 0, y: 0 }, b, c);
+    if den == 0 {
+        return None;
+    }
+    let ij = Point { x: rdiv(ux, den) as Nm, y: rdiv(uy, den) as Nm };
+    Some((ij, den.signum() as i32))
+}
+
+/// SVG elliptical-arc parameters `(radius, large_arc_flag, sweep_flag)` for the arc
+/// `start`→`mid`→`end`. The flags are computed **exactly** (integer predicates, in the
+/// start-relative frame so they can't overflow at board scale), so the SVG is
+/// byte-stable; only the radius uses correctly-rounded `sqrt`.
+///
+/// - `sweep`: SVG's y axis points *down* (we emit flipped y), which reverses turn
+///   handedness, so a model-CCW arc (`turn > 0`) is a screen-CW arc ⇒ `sweep = 0`, and
+///   model-CW ⇒ `sweep = 1`.
+/// - `large_arc`: 1 iff the sweep exceeds 180°, i.e. the centre and `mid` lie on the
+///   **same** side of the chord `start`→`end` (for a minor arc they are on opposite
+///   sides; a semicircle puts the centre on the chord ⇒ 0).
+fn svg_arc_params(start: Point, mid: Point, end: Point) -> Option<(Nm, u8, u8)> {
+    let (b, c) = rel_to_start(start, mid, end); // origin, b=mid, c=end
+    let (ux, uy, den) = circumcenter(Point { x: 0, y: 0 }, b, c);
+    if den == 0 {
+        return None;
+    }
+    // Centre is start-relative, so radius = |centre − start| = |(cx, cy)|.
+    let (cx, cy) = (ux as f64 / den as f64, uy as f64 / den as f64);
+    let radius = (cx * cx + cy * cy).sqrt().round() as Nm;
+    let sweep: u8 = if den < 0 { 1 } else { 0 };
+    // Side of the chord (origin→c) that `mid` (= b) and the centre fall on.
+    let side_mid = c.x as i128 * b.y as i128 - c.y as i128 * b.x as i128;
+    let num = c.x as i128 * uy - c.y as i128 * ux;
+    let side_c = num.signum() * den.signum();
+    let large: u8 = if side_mid.signum() == side_c && side_mid != 0 { 1 } else { 0 };
+    Some((radius, large, sweep))
+}
+
+/// Build an SVG path `d` for a closed `shape`, walking its skeleton so arc edges become
+/// `A` commands (and straight edges `L`). `flip` lifts model-y (up) to SVG-y (down).
+fn svg_path_d(shape: &Shape2D, flip: &impl Fn(Nm) -> Nm) -> String {
+    let path = shape.path();
+    let mut d = format!("M {},{}", fmt_mm(path.start.x), fmt_mm(flip(path.start.y)));
+    let mut cur = path.start;
+    for seg in &path.segs {
+        match seg {
+            Seg::Line { end } => {
+                d.push_str(&format!(" L {},{}", fmt_mm(end.x), fmt_mm(flip(end.y))));
+            }
+            Seg::Arc { mid, end } => match svg_arc_params(cur, *mid, *end) {
+                Some((r, large, sweep)) => d.push_str(&format!(
+                    " A {} {} 0 {} {} {},{}",
+                    fmt_mm(r),
+                    fmt_mm(r),
+                    large,
+                    sweep,
+                    fmt_mm(end.x),
+                    fmt_mm(flip(end.y)),
+                )),
+                None => d.push_str(&format!(" L {},{}", fmt_mm(end.x), fmt_mm(flip(end.y)))),
+            },
+        }
+        cur = seg.end();
+    }
+    d.push_str(" Z");
+    d
+}
+
+/// Emit one closed contour of `shape` as Gerber draws into `out`, walking the skeleton
+/// so an arc edge becomes a `G02`/`G03` multi-quadrant draw. `mode` tracks the current
+/// interpolation code and `g75` whether multi-quadrant has been enabled, so a
+/// straight-only contour emits no spurious mode lines (byte-identical to the legacy
+/// output). A polygon closes with a straight edge back to `start`.
+fn gerber_contour<'a>(shape: &Shape2D, out: &mut String, mode: &mut &'a str, g75: &mut bool) {
+    let path = shape.path();
+    let start = path.start;
+    out.push_str(&format!("X{}Y{}D02*\n", gbr_coord(start.x), gbr_coord(start.y)));
+    let mut cur = start;
+    let line_to = |p: Point, out: &mut String, mode: &mut &'a str| {
+        if *mode != "G01" {
+            out.push_str("G01*\n");
+            *mode = "G01";
+        }
+        out.push_str(&format!("X{}Y{}D01*\n", gbr_coord(p.x), gbr_coord(p.y)));
+    };
+    for seg in &path.segs {
+        match seg {
+            Seg::Line { end } => line_to(*end, out, mode),
+            Seg::Arc { mid, end } => match arc_ij_turn(cur, *mid, *end) {
+                Some((ij, turn)) => {
+                    if !*g75 {
+                        out.push_str("G75*\n");
+                        *g75 = true;
+                    }
+                    let dir = if turn > 0 { "G03" } else { "G02" };
+                    if *mode != dir {
+                        out.push_str(&format!("{dir}*\n"));
+                        *mode = dir;
+                    }
+                    // I/J is the centre relative to the arc start (= cur), which is
+                    // exactly what `arc_ij_turn` returns.
+                    out.push_str(&format!(
+                        "X{}Y{}I{}J{}D01*\n",
+                        gbr_coord(end.x),
+                        gbr_coord(end.y),
+                        gbr_coord(ij.x),
+                        gbr_coord(ij.y),
+                    ));
+                }
+                None => line_to(*end, out, mode),
+            },
+        }
+        cur = seg.end();
+    }
+    if cur != start {
+        line_to(start, out, mode); // implicit straight closing edge
+    }
+}
+
 /// The KiCad-style layer token used in fab filenames: `F_Cu` / `B_Cu` / `In<n>_Cu`.
 fn layer_file(l: Layer) -> String {
     match l {
@@ -582,18 +744,14 @@ pub fn gerber_edge_cuts(doc: &Doc, lib: &PartLib) -> String {
     out.push_str("%ADD10C,0.100000*%\n");
     out.push_str("D10*\n");
     out.push_str("G01*\n");
-    // Each contour (outline, then every cutout) as a closed D02-move + D01-draws
-    // loop. Rounded corners (a Shape2D radius) are drawn as the polygon at this
-    // fidelity — a documented approximation, like the pad flashes.
-    let contour = |points: &[Point], out: &mut String| {
-        for (i, p) in points.iter().chain(points.first()).enumerate() {
-            let op = if i == 0 { "D02" } else { "D01" };
-            out.push_str(&format!("X{}Y{}{}*\n", gbr_coord(p.x), gbr_coord(p.y), op));
-        }
-    };
-    contour(&board.outline.points(), &mut out);
+    // Each contour (outline, then every cutout) walks the skeleton: straight edges draw
+    // as G01 lines, arc edges as G02/G03 multi-quadrant arcs (true curved board edges).
+    // `mode`/`g75` are modal so a straight-only board is byte-identical to before.
+    let mut mode = "G01";
+    let mut g75 = false;
+    gerber_contour(&board.outline, &mut out, &mut mode, &mut g75);
     for c in &board.cutouts {
-        contour(&c.points(), &mut out);
+        gerber_contour(c, &mut out, &mut mode, &mut g75);
     }
     out.push_str("M02*\n");
     out
@@ -910,6 +1068,91 @@ psu.reg,LDO,0.000000,0.000000,0
         assert!(e.contains("X20000000Y0D01*"));
         assert!(e.contains("X20000000Y10000000D01*"));
         assert!(e.contains("X0Y10000000D01*"));
+    }
+
+    // --- stage 3: arc-aware export helpers --------------------------------------
+    // (Until import/text can author arcs, no arc board reaches export end-to-end, so
+    //  the helpers are exercised directly here on constructed arc shapes.)
+
+    const TMM: Nm = 1_000_000;
+    fn tp(x: Nm, y: Nm) -> Point {
+        Point { x, y }
+    }
+    /// A filled half-disc (D-shape): an arc over the top closed by the flat diameter.
+    fn half_disc(r: Nm) -> Shape2D {
+        Shape2D::polygon_path(
+            crate::geom::Path { start: tp(-r, 0), segs: vec![Seg::Arc { mid: tp(0, r), end: tp(r, 0) }] },
+            0,
+        )
+    }
+
+    #[test]
+    fn svg_arc_params_match_hand_computed_flags() {
+        let r = 10 * TMM;
+        // Upper semicircle (-R,0)→(0,R)→(R,0): model-CW after y-flip ⇒ sweep 1; the
+        // 180° span puts the centre on the chord ⇒ large 0.
+        let (rad, large, sweep) = svg_arc_params(tp(-r, 0), tp(0, r), tp(r, 0)).unwrap();
+        assert_eq!((large, sweep), (0, 1));
+        assert!((rad - r).abs() < 10, "radius ~ R, got {rad}");
+        // Minor CCW quarter (R,0)→45°→(0,R): turn > 0 ⇒ sweep 0; < 180° ⇒ large 0.
+        let m = (r as f64 * std::f64::consts::FRAC_1_SQRT_2).round() as Nm;
+        let (rad2, large2, sweep2) = svg_arc_params(tp(r, 0), tp(m, m), tp(0, r)).unwrap();
+        assert_eq!((large2, sweep2), (0, 0));
+        assert!((rad2 - r).abs() < 10);
+        // Collinear ⇒ None (caller draws a straight line).
+        assert!(svg_arc_params(tp(0, 0), tp(TMM, 0), tp(2 * TMM, 0)).is_none());
+    }
+
+    #[test]
+    fn svg_arc_params_major_arc_sets_large_flag() {
+        let r = 10 * TMM;
+        let f = |deg: f64| {
+            let a = deg.to_radians();
+            tp((r as f64 * a.cos()).round() as Nm, (r as f64 * a.sin()).round() as Nm)
+        };
+        // 0°→200°→210°: a 210° CCW major arc.
+        let (_, large, sweep) = svg_arc_params(f(0.0), f(200.0), f(210.0)).unwrap();
+        assert_eq!(large, 1, "sweep > 180° sets large-arc");
+        assert_eq!(sweep, 0, "CCW in model ⇒ sweep 0");
+    }
+
+    #[test]
+    fn arc_ij_turn_is_exact_and_oriented() {
+        let r = 10 * TMM;
+        // Upper semicircle: centre origin, start (−R,0) ⇒ I/J = centre − start = (R,0);
+        // CW ⇒ turn −1.
+        let (ij, turn) = arc_ij_turn(tp(-r, 0), tp(0, r), tp(r, 0)).unwrap();
+        assert_eq!(ij, tp(r, 0));
+        assert_eq!(turn, -1);
+        assert!(arc_ij_turn(tp(0, 0), tp(TMM, 0), tp(2 * TMM, 0)).is_none());
+        // Far-from-origin placement: the same arc shifted by (1e9, 1e9) nm must give the
+        // identical I/J (the start-relative computation is overflow-safe and invariant).
+        let s = 1_000_000_000;
+        let (ij2, turn2) =
+            arc_ij_turn(tp(s - r, s), tp(s, s + r), tp(s + r, s)).unwrap();
+        assert_eq!((ij2, turn2), (tp(r, 0), -1), "translation-invariant, no overflow");
+    }
+
+    #[test]
+    fn svg_path_d_emits_an_arc_command() {
+        let d = svg_path_d(&half_disc(10 * TMM), &(|y: Nm| -y));
+        assert!(d.starts_with("M "), "{d}");
+        assert!(d.contains(" A "), "carries an SVG arc command: {d}");
+        assert!(d.ends_with(" Z"), "closed: {d}");
+    }
+
+    #[test]
+    fn gerber_contour_emits_g02_arc_with_ij() {
+        let mut out = String::new();
+        let (mut mode, mut g75) = ("G01", false);
+        gerber_contour(&half_disc(10 * TMM), &mut out, &mut mode, &mut g75);
+        assert!(out.contains("X-10000000Y0D02*"), "move to start:\n{out}");
+        assert!(out.contains("G75*"), "multi-quadrant enabled before the arc:\n{out}");
+        assert!(out.contains("G02*"), "the upper semicircle is CW (G02):\n{out}");
+        // Arc to end (R,0) with I/J = centre(0,0) − start(−R,0) = (R, 0).
+        assert!(out.contains("X10000000Y0I10000000J0D01*"), "arc draw with I/J:\n{out}");
+        // The flat diameter closes the contour with a straight line back to start.
+        assert!(out.contains("G01*\nX-10000000Y0D01*"), "straight closing edge:\n{out}");
     }
 
     #[test]
