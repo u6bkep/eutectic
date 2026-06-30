@@ -32,7 +32,8 @@
 //! headers are accepted; pad names may be quoted or bare.
 
 use crate::doc::{Nm, Point};
-use crate::geom::Shape2D;
+use crate::geom;
+use crate::geom::{Seg, Shape2D};
 use crate::part::{Drill, PadCopper, PadGeo, PadLayers, PartDef, PinDef, PinRole};
 use std::collections::BTreeMap;
 
@@ -488,23 +489,38 @@ fn parse_primitive(prim: &Sexp, center: Point) -> Result<Option<Shape2D>, String
 ///     Using the *same* `angle` for both guarantees the mid lands on the swept arc
 ///     whatever the sign convention. Zero-width arcs carry no copper ⇒ `None`.
 fn parse_gr_arc(list: &[Sexp], center: Point) -> Result<Option<Shape2D>, String> {
-    let off = |p: Point| Point {
-        x: center.x + p.x,
-        y: center.y + p.y,
-    };
     let width = prim_width(list);
     if width <= 0 {
         return Ok(None);
     }
+    let (start, mid, end) = gr_arc_points(list, center)?;
+    Ok(Some(Shape2D::arc(start, mid, end, width)))
+}
+
+/// The three lattice points `(start, mid, end)` of a `gr_arc`, in `center`-offset
+/// coords, normalising both KiCad encodings (the shared core of [`parse_gr_arc`] and
+/// the board-outline importer, neither of which cares about stroke width):
+///   - **3-point** `(start)(mid)(end)`: used directly (matches our [`Seg::Arc`]).
+///   - **legacy** `(start = centre)(end = arc start)(angle = swept °)`: the arc runs
+///     from the arc-start point, with `end`/`mid` its rotation by `angle`/`angle/2`
+///     about the centre (the same `angle` for both keeps the mid on the swept side
+///     whatever the sign convention).
+fn gr_arc_points(list: &[Sexp], center: Point) -> Result<(Point, Point, Point), String> {
+    let off = |p: Point| Point {
+        x: center.x + p.x,
+        y: center.y + p.y,
+    };
     let start = prim_xy(list, "start")?.ok_or("gr_arc missing (start …)")?;
     let end = prim_xy(list, "end")?.ok_or("gr_arc missing (end …)")?;
     if let Some(mid) = prim_xy(list, "mid")? {
-        Ok(Some(Shape2D::arc(off(start), off(mid), off(end), width)))
+        Ok((off(start), off(mid), off(end)))
     } else if let Some(angle) = prim_angle(list) {
         let (c, p0) = (off(start), off(end));
-        let p_end = rotate_point(p0, c, angle);
-        let p_mid = rotate_point(p0, c, angle / 2.0);
-        Ok(Some(Shape2D::arc(p0, p_mid, p_end, width)))
+        Ok((
+            p0,
+            rotate_point(p0, c, angle / 2.0),
+            rotate_point(p0, c, angle),
+        ))
     } else {
         Err("gr_arc needs either (mid …) or (angle …)".into())
     }
@@ -684,6 +700,225 @@ fn pad_layers(pad: &[Sexp], pad_type: &str) -> PadLayers {
 pub fn import_footprint_file(path: &str) -> Result<PartDef, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("reading {path:?}: {e}"))?;
     import_footprint(&text)
+}
+
+// =============================================================================
+// Board outline (.kicad_pcb `Edge.Cuts`) → BoardShape
+// =============================================================================
+//
+// A `.kicad_pcb` is one big S-expression `(kicad_pcb …)`, so we reuse the
+// tokenizer/reader/`Sexp` machinery above (no second parser). This importer lifts
+// **only the board boundary**: the top-level `gr_line` / `gr_arc` / `gr_circle`
+// graphics on the `Edge.Cuts` layer, stitched into closed loops and classified into
+// an outline + cutouts.
+//
+// **Scope.** Outline + cutouts only. Placed footprints, their positions/rotations,
+// nets, tracks, zones, and vias are *not* imported — that is the larger
+// board-round-trip feature (see issue 0017) and is deliberately out of scope here.
+//
+// Coordinates are mm in the file → integer nm via [`mm_to_nm`], matching the
+// fixed-point invariant. Disjoint edges are chained by matching endpoints within a
+// tiny [`TOUCH_TOL`] slack (KiCad coordinates are exact nm, but the slack tolerates
+// any rounding); each closed loop becomes a [`Shape2D::Polygon`] whose edges are
+// `Seg::Line`/`Seg::Arc`. The loop of largest area is the `outline`; the rest are
+// `cutouts`.
+
+/// Endpoint-match slack for stitching `Edge.Cuts` segments into loops, in nm (1 µm).
+/// KiCad writes exact nm so consecutive edges normally share an endpoint exactly;
+/// this only absorbs sub-µm rounding noise.
+const TOUCH_TOL: Nm = 1_000;
+
+/// One `Edge.Cuts` graphic as an undirected edge: endpoints `a`/`b` plus, for an arc,
+/// the on-curve `mid` point. Emitted as a [`Seg`] in whichever direction the stitch
+/// walks it (an arc's `mid` stays on the curve when reversed).
+struct EdgeSeg {
+    a: Point,
+    b: Point,
+    mid: Option<Point>,
+}
+
+impl EdgeSeg {
+    /// The [`Seg`] for walking this edge away from endpoint `from` (`~a` ⇒ ends at
+    /// `b`, else ends at `a`); also returns the far endpoint reached.
+    fn seg_from(&self, from: Point) -> (Seg, Point) {
+        let end = if near(from, self.a) { self.b } else { self.a };
+        match self.mid {
+            Some(mid) => (Seg::Arc { mid, end }, end),
+            None => (Seg::Line { end }, end),
+        }
+    }
+}
+
+/// Are two points within [`TOUCH_TOL`] of each other (squared, exact i128)?
+fn near(p: Point, q: Point) -> bool {
+    let (dx, dy) = ((p.x - q.x) as i128, (p.y - q.y) as i128);
+    dx * dx + dy * dy <= (TOUCH_TOL as i128) * (TOUCH_TOL as i128)
+}
+
+/// Does a graphic item carry `(layer "Edge.Cuts")` (quoted or bare)?
+fn on_edge_cuts(list: &[Sexp]) -> bool {
+    list.iter()
+        .find_map(|s| s.list_headed("layer"))
+        .and_then(|l| l.get(1))
+        .and_then(Sexp::as_atom)
+        == Some("Edge.Cuts")
+}
+
+/// Import a `.kicad_pcb`'s board outline: parse the `Edge.Cuts` `gr_line`/`gr_arc`/
+/// `gr_circle` graphics, stitch them into closed loops, and return the
+/// [`geom::BoardShape`] (largest-area loop = `outline`, the rest = `cutouts`).
+///
+/// **Only the board boundary is imported** — no placed footprints, nets, tracks or
+/// zones (that full round-trip is a separate, larger feature; see issue 0017). Errors
+/// if there is no `Edge.Cuts` geometry or if its segments do not close into a loop.
+pub fn import_board_outline(text: &str) -> Result<geom::BoardShape, String> {
+    let toks = tokenize(text)?;
+    let root = read(&toks)?;
+    let items = root.as_list().ok_or("top-level expression is not a list")?;
+    if items.first().and_then(Sexp::as_atom) != Some("kicad_pcb") {
+        return Err(format!(
+            "expected '(kicad_pcb …)', got {:?}",
+            items.first().and_then(Sexp::as_atom)
+        ));
+    }
+
+    // gr_line / gr_arc become open edges to be stitched; gr_circle is already a
+    // closed loop and goes straight into the loop list.
+    let mut edges: Vec<EdgeSeg> = Vec::new();
+    let mut loops: Vec<geom::Path> = Vec::new();
+    for item in items {
+        let Some(list) = item.as_list() else { continue };
+        let head = list.first().and_then(Sexp::as_atom).unwrap_or("");
+        if !matches!(head, "gr_line" | "gr_arc" | "gr_circle") || !on_edge_cuts(list) {
+            continue;
+        }
+        match head {
+            "gr_line" => {
+                let a = prim_xy(list, "start")?.ok_or("gr_line missing (start …)")?;
+                let b = prim_xy(list, "end")?.ok_or("gr_line missing (end …)")?;
+                edges.push(EdgeSeg { a, b, mid: None });
+            }
+            "gr_arc" => {
+                let (s, m, e) = gr_arc_points(list, Point { x: 0, y: 0 })?;
+                edges.push(EdgeSeg {
+                    a: s,
+                    b: e,
+                    mid: Some(m),
+                });
+            }
+            "gr_circle" => loops.push(circle_loop(list)?),
+            _ => unreachable!(),
+        }
+    }
+
+    if edges.is_empty() && loops.is_empty() {
+        return Err("no Edge.Cuts graphics found in board".into());
+    }
+    loops.extend(stitch_loops(edges)?);
+
+    // Classify by area: the largest loop is the board outline, the rest are cutouts.
+    // (For real boards the outline both has the largest area and contains the others.)
+    let mut indexed: Vec<(i128, geom::Shape2D)> = loops
+        .into_iter()
+        .map(|path| {
+            let shape = geom::Shape2D::polygon_path(path, 0);
+            (loop_area(&shape), shape)
+        })
+        .collect();
+    indexed.sort_by_key(|y| std::cmp::Reverse(y.0));
+    let mut shapes = indexed.into_iter().map(|(_, s)| s);
+    let outline = shapes
+        .next()
+        .ok_or("Edge.Cuts has no closed loop to use as the board outline")?;
+    Ok(geom::BoardShape {
+        outline,
+        cutouts: shapes.collect(),
+    })
+}
+
+/// Convenience wrapper: read a `.kicad_pcb` file from disk and import its outline.
+pub fn import_board_outline_file(path: &str) -> Result<geom::BoardShape, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("reading {path:?}: {e}"))?;
+    import_board_outline(&text)
+}
+
+/// A `gr_circle (center …)(end …)` → a closed two-semicircle-arc [`geom::Path`]. `end`
+/// is a point on the circle, so the radius is `|center − end|`; we walk the circle via
+/// the four axis points (cardinal), independent of where `end` sits.
+fn circle_loop(list: &[Sexp]) -> Result<geom::Path, String> {
+    let c = prim_xy(list, "center")?.ok_or("gr_circle missing (center …)")?;
+    let e = prim_xy(list, "end")?.ok_or("gr_circle missing (end …)")?;
+    let r = dist_nm(c, e);
+    if r <= 0 {
+        return Err("gr_circle has zero radius".into());
+    }
+    let right = Point { x: c.x + r, y: c.y };
+    let top = Point { x: c.x, y: c.y + r };
+    let left = Point { x: c.x - r, y: c.y };
+    let bottom = Point { x: c.x, y: c.y - r };
+    Ok(geom::Path {
+        start: right,
+        segs: vec![
+            Seg::Arc {
+                mid: top,
+                end: left,
+            },
+            Seg::Arc {
+                mid: bottom,
+                end: right,
+            },
+        ],
+    })
+}
+
+/// Chain undirected [`EdgeSeg`]s into closed loops by matching endpoints within
+/// [`TOUCH_TOL`]. Greedy: take any unused edge as a loop seed, then keep appending the
+/// edge touching the current open end (in either direction) until it returns to the
+/// loop's start. Errors if an edge has no continuation (an open contour, which is not
+/// a valid board boundary).
+fn stitch_loops(mut edges: Vec<EdgeSeg>) -> Result<Vec<geom::Path>, String> {
+    let mut loops = Vec::new();
+    while let Some(first) = edges.pop() {
+        let loop_start = first.a;
+        let (seg0, mut cur) = first.seg_from(loop_start);
+        let mut segs = vec![seg0];
+        while !near(cur, loop_start) {
+            let Some(idx) = edges.iter().position(|e| near(e.a, cur) || near(e.b, cur)) else {
+                return Err("Edge.Cuts segments do not form a closed loop (open contour)".into());
+            };
+            let e = edges.remove(idx);
+            let (seg, next) = e.seg_from(cur);
+            segs.push(seg);
+            cur = next;
+        }
+        // The loop closes back at `loop_start`. A closing straight edge is the
+        // polygon's *implicit* final `Line`, so drop it to avoid a redundant repeated
+        // vertex (keep a closing `Arc` — it carries real curvature the implicit line
+        // can't). Guard so we never collapse below a triangle.
+        if segs.len() >= 3 && matches!(segs.last(), Some(Seg::Line { .. })) {
+            segs.pop();
+        }
+        loops.push(geom::Path {
+            start: loop_start,
+            segs,
+        });
+    }
+    Ok(loops)
+}
+
+/// Signed area ×2 of a closed loop, via the shoelace formula over the polygon's
+/// flattened skeleton (arcs subdivided to [`geom::DEFAULT_CHORD_TOL`]). Exact i128;
+/// magnitude only is used (orientation is irrelevant to classification).
+fn loop_area(shape: &geom::Shape2D) -> i128 {
+    let pts = shape.path().flatten(geom::DEFAULT_CHORD_TOL);
+    let n = pts.len();
+    let mut a2: i128 = 0;
+    for i in 0..n {
+        let p = pts[i];
+        let q = pts[(i + 1) % n];
+        a2 += p.x as i128 * q.y as i128 - q.x as i128 * p.y as i128;
+    }
+    a2.abs()
 }
 
 // =============================================================================
@@ -1726,5 +1961,151 @@ mod tests {
                 .iter()
                 .any(|n| report.part.pin_role(n) == Some(PinRole::PowerIn))
         );
+    }
+
+    // --- board outline (.kicad_pcb Edge.Cuts) -------------------------------
+
+    /// Count the arc segments across a shape's skeleton path.
+    fn arc_segs(s: &Shape2D) -> usize {
+        s.path()
+            .segs
+            .iter()
+            .filter(|seg| matches!(seg, Seg::Arc { .. }))
+            .count()
+    }
+
+    /// A rectangular outline authored as four `gr_line`s on `Edge.Cuts` (with the
+    /// real `.kicad_pcb` nesting: a header, a `(stroke …)`, layer last). The lines
+    /// are intentionally out of order to exercise the endpoint stitching.
+    #[test]
+    fn imports_rectangular_outline_from_gr_lines() {
+        let src = r#"
+(kicad_pcb
+  (version 20240108)
+  (generator "pcbnew")
+  (general (thickness 1.6))
+  (gr_line (start 0 0) (end 10 0) (stroke (width 0.1) (type default)) (layer "Edge.Cuts"))
+  (gr_line (start 10 20) (end 0 20) (stroke (width 0.1) (type default)) (layer "Edge.Cuts"))
+  (gr_line (start 0 20) (end 0 0) (stroke (width 0.1) (type default)) (layer "Edge.Cuts"))
+  (gr_line (start 10 0) (end 10 20) (stroke (width 0.1) (type default)) (layer "Edge.Cuts"))
+  (gr_line (start -5 -5) (end -5 5) (stroke (width 0.1)) (layer "F.SilkS"))
+)"#;
+        let b = import_board_outline(src).unwrap();
+        assert!(b.cutouts.is_empty());
+        // 0..10 mm × 0..20 mm rectangle: a midpoint is inside, an outside point is not.
+        assert!(b.contains(Point {
+            x: 5_000_000,
+            y: 10_000_000
+        }));
+        assert!(!b.contains(Point {
+            x: 15_000_000,
+            y: 10_000_000
+        }));
+        // The non-Edge.Cuts silkscreen line is ignored: a pure 4-line rectangle.
+        assert_eq!(b.outline.points().len(), 4);
+        assert_eq!(arc_segs(&b.outline), 0);
+    }
+
+    /// An outline with one curved edge: three `gr_line`s + one 3-point `gr_arc` close a
+    /// loop, and the arc lands in the path as a `Seg::Arc`.
+    #[test]
+    fn imports_outline_with_arc_edge() {
+        // A "D"-ish loop: bottom, right, top straight edges, then an arc bowing left
+        // from the top-left back down to the start.
+        let src = r#"
+(kicad_pcb
+  (gr_line (start 0 0) (end 10 0) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (gr_line (start 10 0) (end 10 10) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (gr_line (start 10 10) (end 0 10) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (gr_arc (start 0 10) (mid -2 5) (end 0 0) (stroke (width 0.1)) (layer "Edge.Cuts"))
+)"#;
+        let b = import_board_outline(src).unwrap();
+        assert!(b.cutouts.is_empty());
+        assert_eq!(arc_segs(&b.outline), 1, "the gr_arc became a Seg::Arc edge");
+        // The arc's mid (-2,5)mm is the stored on-curve point.
+        assert!(b.outline.path().segs.iter().any(|seg| matches!(seg,
+            Seg::Arc { mid, .. } if *mid == Point { x: -2_000_000, y: 5_000_000 })));
+        // A point well inside the rectangular body is on the board; one past the arc
+        // bulge to the left is off it.
+        assert!(b.contains(Point {
+            x: 5_000_000,
+            y: 5_000_000
+        }));
+        assert!(!b.contains(Point {
+            x: -3_000_000,
+            y: 5_000_000
+        }));
+    }
+
+    /// A rectangular outline with an inner rectangular cutout: two disjoint closed
+    /// loops → the larger is the outline, the smaller a cutout.
+    #[test]
+    fn imports_outline_with_inner_cutout() {
+        let src = r#"
+(kicad_pcb
+  (gr_line (start 0 0) (end 30 0) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (gr_line (start 30 0) (end 30 30) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (gr_line (start 30 30) (end 0 30) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (gr_line (start 0 30) (end 0 0) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (gr_line (start 10 10) (end 20 10) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (gr_line (start 20 10) (end 20 20) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (gr_line (start 20 20) (end 10 20) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (gr_line (start 10 20) (end 10 10) (stroke (width 0.1)) (layer "Edge.Cuts"))
+)"#;
+        let b = import_board_outline(src).unwrap();
+        assert_eq!(b.cutouts.len(), 1, "inner loop classified as a cutout");
+        // Inside the outer rect but outside the inner cutout: on the board.
+        assert!(b.contains(Point {
+            x: 5_000_000,
+            y: 5_000_000
+        }));
+        // Centre of the inner cutout: inside the outline, but carved out ⇒ off-board.
+        assert!(b.outline.contains_point(Point {
+            x: 15_000_000,
+            y: 15_000_000
+        }));
+        assert!(!b.contains(Point {
+            x: 15_000_000,
+            y: 15_000_000
+        }));
+    }
+
+    /// A circular board: one `gr_circle` becomes a closed two-arc outline.
+    #[test]
+    fn imports_circular_outline_from_gr_circle() {
+        let src = r#"
+(kicad_pcb
+  (gr_circle (center 0 0) (end 10 0) (stroke (width 0.1)) (layer "Edge.Cuts"))
+)"#;
+        let b = import_board_outline(src).unwrap();
+        assert!(b.cutouts.is_empty());
+        assert_eq!(
+            arc_segs(&b.outline),
+            2,
+            "circle modelled as two semicircle arcs"
+        );
+        // Radius 10mm about the origin: centre is inside, a point past the radius is not.
+        assert!(b.contains(Point { x: 0, y: 0 }));
+        assert!(b.contains(Point { x: 9_000_000, y: 0 }));
+        assert!(!b.contains(Point {
+            x: 11_000_000,
+            y: 0
+        }));
+    }
+
+    #[test]
+    fn board_outline_errors_are_not_panics() {
+        // Wrong top-level head.
+        assert!(import_board_outline(r#"(footprint "x")"#).is_err());
+        // No Edge.Cuts geometry at all.
+        assert!(import_board_outline(r#"(kicad_pcb (version 1))"#).is_err());
+        // An open contour (3 sides of a rect, never closed).
+        let open = r#"
+(kicad_pcb
+  (gr_line (start 0 0) (end 10 0) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (gr_line (start 10 0) (end 10 10) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (gr_line (start 10 10) (end 0 10) (stroke (width 0.1)) (layer "Edge.Cuts"))
+)"#;
+        assert!(import_board_outline(open).is_err());
     }
 }
