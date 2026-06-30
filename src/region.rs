@@ -25,13 +25,15 @@
 //!   decomposition**: the set of points within `r` of the skeleton is the union of the
 //!   core area (for a polygon), one rectangle per skeleton edge, and one disc per
 //!   skeleton vertex. That reuses `union`, so there is exactly one boolean engine.
-//! - **No runtime trig.** Arc tessellation steps through the integer [`CIRCLE_DIRS`]
-//!   table; the only float anywhere is the IEEE `sqrt` used for an edge's
-//!   perpendicular offset, which is correctly-rounded (hence cross-platform
-//!   deterministic) — mirroring the existing `geom::closest_on_segment` precedent.
-//!   Tessellation is a fixed polygonal approximation of arcs at this stage; arc-exact
-//!   boundaries are a later representation extension (does not change this kernel's
-//!   callers).
+//! - **No runtime trig.** The radius-disc steps through the integer [`CIRCLE_DIRS`]
+//!   table; a skeleton *arc* edge is flattened at the geometry seam
+//!   ([`geom::Path::flatten`], chord tolerance [`geom::DEFAULT_CHORD_TOL`]) into the
+//!   chord polyline this kernel sees — so the boolean only ever operates on straight
+//!   edges (strategy A). The only float anywhere is the correctly-rounded IEEE `sqrt`
+//!   used for those offsets, mirroring the `geom::closest_on_segment` precedent. The
+//!   authoritative model now carries arcs (in [`Shape2D`]); flattening is a transient
+//!   the kernel consumes, never stored — keeping the door open to an arc-exact boolean
+//!   later with no change to the representation or to export.
 
 use crate::doc::{Nm, Point};
 use crate::geom::Shape2D;
@@ -1016,6 +1018,51 @@ mod tests {
         assert!((a - 85.86).abs() < 0.2, "two-knockout pour area {a} ~ 85.86");
         assert!(!pour.contains_point(pt(-2 * MM, 0)) && !pour.contains_point(pt(2 * MM, 0)));
         assert!(pour.contains_point(pt(0, 0)), "copper survives between the two pads");
+    }
+
+    #[test]
+    fn arc_stroke_dilates_to_a_curved_tube() {
+        // A semicircular trace (skeleton arc, R=2mm) of width 1mm (r=0.5mm). Its copper
+        // is the r-tube around the arc: a half annulus from 1.5 to 2.5mm plus the two
+        // end-cap half-discs. Area = ½π(2.5²−1.5²) + π·0.5² = 2π + 0.25π ≈ 7.07 mm².
+        // This exercises the boolean closing a fan of fat segments + discs along a curve
+        // (no cracks) — the integration test for arc input to the kernel. (R is kept
+        // small: at 1µm tol a large arc flattens to hundreds of edges and the O(N²)
+        // union dominates — a documented perf characteristic, not needed to test here.)
+        let r = 2 * MM;
+        let arc = Shape2D::arc(pt(-r, 0), pt(0, r), pt(r, 0), MM); // width 1mm
+        let region = shape_to_region(&arc, DEFAULT_CIRCLE_SEGS);
+        let a = area_abs(&region) as f64 / (MM as f64 * MM as f64);
+        let expect = 2.0 * std::f64::consts::PI + 0.25 * std::f64::consts::PI;
+        assert!((a - expect).abs() < 0.1, "arc tube area {a} ~ {expect}");
+        // A point on the arc centreline (the apex) is inside the copper; the hollow
+        // centre of the semicircle (origin) is not.
+        assert!(region.contains_point(pt(0, r)), "copper covers the arc apex");
+        assert!(!region.contains_point(pt(0, 0)), "the tube is hollow at the centre");
+    }
+
+    #[test]
+    fn arc_edged_polygon_is_a_filled_half_disc() {
+        // A filled half-disc (D-shape): start (-2mm,0), an Arc through the apex (0,2mm)
+        // to (2mm,0), closed by the implicit straight diameter. Area = ½πR² = 2π
+        // ≈ 6.28 mm². Confirms a Polygon's arc edge tessellates into the core ring and
+        // the implicit closing Line seals it.
+        let r = 2 * MM;
+        let half = Shape2D::polygon_path(
+            crate::geom::Path {
+                start: pt(-r, 0),
+                segs: vec![crate::geom::Seg::Arc { mid: pt(0, r), end: pt(r, 0) }],
+            },
+            0,
+        );
+        let region = shape_to_region(&half, DEFAULT_CIRCLE_SEGS);
+        let a = area_abs(&region) as f64 / (MM as f64 * MM as f64);
+        let expect = 2.0 * std::f64::consts::PI;
+        assert!((a - expect).abs() < 0.1, "half-disc area {a} ~ {expect}");
+        assert!(region.contains_point(pt(0, MM)), "interior point is filled");
+        assert!(region.contains_point(pt(0, 18 * MM / 10)), "point under the apex is filled");
+        assert!(!region.contains_point(pt(0, -MM / 2)), "below the diameter is outside");
+        assert!(!region.contains_point(pt(18 * MM / 10, 18 * MM / 10)), "outside the circle");
     }
 
     #[test]

@@ -39,6 +39,12 @@ pub const COPPER_THICKNESS: Nm = 35_000;
 /// Default arc chord tolerance for tessellation: max sagitta (arc-to-chord deviation),
 /// in nm. 1 µm — finer than the 64-gon disc approximation at pad scale, coarse enough
 /// to keep segment counts modest for large-radius board-outline arcs.
+///
+/// The flattening is **inscribed** (vertices sit *on* the arc, chords cut inside), so
+/// for DRC the tessellated copper is at most one sagitta smaller than the true arc and
+/// a clearance check is *optimistic* by at most that amount. At 1 µm against ≥ 100 µm
+/// clearances this is < 1 %; keep it well under the fab margin. (A conservative DRC
+/// would circumscribe instead — deferred; not worth the complexity at this tolerance.)
 pub const DEFAULT_CHORD_TOL: Nm = 1_000;
 
 // ----------------------------------------------------------------------------
@@ -961,6 +967,24 @@ mod tests {
             (215.0..355.0).contains(&ang)
         });
         assert!(!on_minor, "no point may stray onto the complementary arc");
+    }
+
+    #[test]
+    fn arc_trace_clearance_is_measured_to_the_curve() {
+        // A semicircular trace (-10mm,0)→(0,10mm)→(10mm,0), width 0.2mm (r=0.1mm),
+        // bulging up to (0,10mm). A probe disc (r=0.1mm) sits 1mm above the bulge at
+        // (0,11mm). Edge-to-edge gap = 1mm − 0.1 − 0.1 = 0.8mm — measured to the ARC's
+        // top. (The straight chord between the endpoints lies on y=0, ~11mm away; if the
+        // kernel mis-measured to the chord this rule would clear.)
+        let r = 10 * MM;
+        let trace = Shape2D::arc(pt(-r, 0), pt(0, r), pt(r, 0), MM / 5);
+        let probe = Shape2D::disc(pt(0, 11 * MM), MM / 10);
+        let gap = 8 * MM / 10;
+        assert!(clearance_violated(&trace, &probe, gap + 1), "0.8mm gap to the bulge");
+        assert!(!clearance_violated(&trace, &probe, gap), "0.8mm is not < 0.8mm");
+        // Sanity: a far probe well outside the arc clears a small rule.
+        let far = Shape2D::disc(pt(0, 13 * MM), MM / 10);
+        assert!(!clearance_violated(&trace, &far, MM / 2));
     }
 
     #[test]
