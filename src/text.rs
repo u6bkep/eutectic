@@ -437,6 +437,20 @@ fn parse_quat_tok(q: &str) -> Result<Orient, String> {
 // Parse
 // ----------------------------------------------------------------------------
 
+/// The code part of a line: everything before the first `#` that is **not** inside a
+/// double-quoted string. Quote-aware so a text label may contain `#` (`text "A#1" …`).
+fn strip_comment(raw: &str) -> &str {
+    let mut in_str = false;
+    for (i, c) in raw.char_indices() {
+        match c {
+            '"' => in_str = !in_str,
+            '#' if !in_str => return &raw[..i],
+            _ => {}
+        }
+    }
+    raw
+}
+
 /// Parse canonical (or human-authored) text back into tier-1 state. Comments
 /// (`#`...) and blank lines are skipped. Never panics. *Collect-all*: every
 /// malformed line is reported (located by line number via [`Location::Span`]), so
@@ -449,12 +463,11 @@ pub fn parse(text: &str) -> Result<Parsed, Vec<Diagnostic>> {
 
     for (i, raw) in text.lines().enumerate() {
         let lineno = (i + 1) as u32;
-        // Strip comments and surrounding whitespace.
-        let line = match raw.split_once('#') {
-            Some((code, _)) => code,
-            None => raw,
-        }
-        .trim();
+        // Strip comments and surrounding whitespace. The `#` scan is **quote-aware**:
+        // a `#` inside a double-quoted string (a text label) is literal, not a comment,
+        // so `text "A#1" …` round-trips. (Embedded `"`/`\` in a string still need
+        // escaping — a documented follow-up.)
+        let line = strip_comment(raw).trim();
         if line.is_empty() {
             continue;
         }
@@ -1410,6 +1423,27 @@ text \"VAL 3V3\" (2mm, 5mm) h=0.8mm layer=B.SilkS rot=90";
         assert!(canon.contains("layer=F.SilkS"), "silk token:\n{canon}");
         assert!(canon.contains("rot=90"), "cardinal rot token:\n{canon}");
         assert_eq!(parse(&canon).unwrap().0, src);
+    }
+
+    #[test]
+    fn text_string_may_contain_a_hash() {
+        // A `#` inside a quoted text label is literal, not a comment (quote-aware strip),
+        // so it round-trips. (`#` outside quotes still starts a comment.)
+        let (src, _) =
+            parse("text \"P#1\" (0mm, 0mm) h=1mm layer=F.SilkS  # a real comment").expect("parse");
+        let GenDirective::Text { string, .. } = &src[0] else {
+            panic!("expected text, got {:?}", src[0]);
+        };
+        assert_eq!(
+            string, "P#1",
+            "the in-string # survived; the trailing # was stripped"
+        );
+        let canon = serialize(&doc_of(src.clone(), BTreeMap::new()));
+        assert_eq!(
+            parse(&canon).unwrap().0,
+            src,
+            "round-trips with the # intact"
+        );
     }
 
     /// `arc <mid> <end>` edges parse into `Seg::Arc`, mixed freely with straight edges,
