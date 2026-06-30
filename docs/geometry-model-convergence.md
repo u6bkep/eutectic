@@ -405,6 +405,11 @@ is stored but never exported — both fixable as PadGeo is converted.
 
 ## 7. Convergence plan: sequential foundation → parallel fan-out → sequential spine
 
+> **Status: executed (2026-06-30).** Every phase and post-convergence step below has
+> landed on `main` — see the Status header at the top of this doc for the commits and
+> what's still open. This section is retained as the *record of how it was sequenced*
+> (the foundation→fan-out→spine shape, and the parallel-batch approach), not a live TODO.
+
 Contention is concentrated in `route.rs` (`check_drc`/`net_copper`/`pour_fills`) and
 `export.rs`, which both the DRC migration and the Region/Pad lowerings touch. That
 bounds parallelism to a single fan-out, bracketed by sequential work:
@@ -427,18 +432,26 @@ bounds parallelism to a single fan-out, bracketed by sequential work:
 
 Then the post-convergence steps proceed on the corrected foundation:
 
-5. **General placement transform** (Decisions 6, 7, 8) — integer direction + mirror;
-   derived geometry rounded; tolerance-aware predicate audit.
-6. **Text** (Decision 9) — string+font authoritative, strokes derived.
-7. **Importers (0016/0017)** become near-trivial — they produce `Feature`s, a
-   `BoardShape` *view*, and `LibraryRef` instantiations (Decision 11). Courtyard import
-   (Decision 10) lands here.
+5. **General placement transform** (Decisions 6, 7, 8) — **done**: an integer
+   *quaternion* (no mirror flag — refined from the original "direction + mirror"; side
+   derived), derived geometry correctly-rounded, arbitrary planar angle + ring-of-N.
+6. **Text** (Decision 9) — **first slice done**: stroke font + board-level text →
+   `Marking` features. Outline/TTF, footprint/auto-text, real silk layer (0020) follow.
+7. **Importers** — `.kicad_pcb` Edge.Cuts (**0017 done**) + SVG board outline **done**;
+   footprint graphics (**0016**) is the remaining one (builds on text + 0020).
 
-## 8. Open items to settle before/within each step
+## 8. Open items
 
-- Precision policy for direction-vector approximation (bit width / max denominator).
+- ~~Precision policy for the angle→quaternion lowering~~ — **resolved**:
+  `ORIENT_ANGLE_SCALE = 1e6` (≈1e-6 rad; see `doc::Orient::from_angle_deg`).
+- **Real non-copper layers (0020)** — silk/mask have no layer; geometry-layer identity
+  should be a *named slab*, not the copper-only `route::Layer`. Surfaced by the text
+  slice (silk stopgapped at copper-z). Pairs with 0016.
 - Whether component bodies get a dedicated role/material or reuse `Keepout`.
 - Relation to issue 0004 (planes / multilayer): the volumetric convergence is the
   natural home for that work.
+- Coordinate-range / i128 ceiling (0018); polygon-courtyard solver packing (0019).
+- This record still wants folding into `architecture.md` §8 (whose "Stages 1–3" prose
+  predates the convergence — flagged by the §8 callout there).
 </content>
 </invoke>
