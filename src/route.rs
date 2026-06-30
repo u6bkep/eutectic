@@ -15,7 +15,8 @@
 //! *squared* thresholds, so no float nondeterminism leaks into a violation set.
 
 use crate::doc::{Doc, MM, Nm, PinRef, Point};
-use crate::geom::{Shape2D, clearance_violated};
+use crate::elaborate::stackup;
+use crate::geom::{Extent, Feature, NetFeature, Role, Shape2D, Stackup, ZRange};
 use crate::id::{NetId, TraceId};
 use crate::part::{PadLayers, PartLib, PinRole, pad_copper_world, pin_world};
 use std::cmp::Ordering;
@@ -218,21 +219,24 @@ pub fn check_drc(
     // tagged with the layer(s) it occupies (the uniform "copper has extent" model;
     // pads are no longer points). A different-net pair sharing a layer is checked
     // edge-to-edge by `geom::clearance_violated`.
-    let pieces = net_copper(doc, lib, netlist);
-    let layers = copper_layers_present(doc);
-    for i in 0..pieces.len() {
-        for j in (i + 1)..pieces.len() {
-            let (a, b) = (&pieces[i], &pieces[j]);
-            if a.net == b.net {
-                continue;
-            }
-            // The first (deterministic) layer both occupy, if any; the 2D shapes are
-            // layer-independent, so one geometric test settles the pair.
-            let Some(&l) = layers.iter().find(|&&l| a.layers.on(l) && b.layers.on(l)) else {
+    let su = stackup(&doc.source);
+    let feats = net_features(doc, lib, netlist, &su);
+    for i in 0..feats.len() {
+        for j in (i + 1)..feats.len() {
+            let (la, a) = &feats[i];
+            let (_lb, b) = &feats[j];
+            let (Some(an), Some(bn)) = (&a.net, &b.net) else {
                 continue;
             };
-            if clearance_violated(&a.shape, &b.shape, rules.min_clearance) {
-                out.push(clearance(&a.net, &b.net, l));
+            if an == bn {
+                continue;
+            }
+            // `Feature::clears` fuses the z-overlap and edge-distance tests. Every
+            // feature is single-slab, so a z-overlapping different-net pair shares that
+            // slab — `la == lb` — and one geometric test settles the pair. (For the
+            // default 2-layer stackup this is exactly the old discrete same-layer gate.)
+            if !a.feature.clears(&b.feature, rules.min_clearance) {
+                out.push(clearance(an, bn, *la));
             }
         }
     }
@@ -392,6 +396,115 @@ pub(crate) fn net_copper(
         }
     }
     pieces
+}
+
+/// The copper layers of a stackup with their slab z, top-down, as `(Layer, ZRange)`.
+/// `Top` is the highest-z copper, `Bottom` the lowest, `Inner(k)` those between —
+/// the inverse of [`layer_z`], and consistent with [`Layer::depth`].
+fn copper_layers_z(stackup: &Stackup) -> Vec<(Layer, ZRange)> {
+    let slabs = stackup.copper_slabs();
+    let n = slabs.len();
+    slabs
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let layer = if i == 0 {
+                Layer::Top
+            } else if i + 1 == n {
+                Layer::Bottom
+            } else {
+                Layer::Inner((i - 1) as u8)
+            };
+            (layer, s.z)
+        })
+        .collect()
+}
+
+/// Lower an abstract copper [`Layer`] to its slab `ZRange` via the stackup
+/// (`Top`→top outer copper, `Bottom`→bottom outer, `Inner(n)`→the `1+n`-th from top).
+/// `None` if that copper layer is absent (e.g. `Inner` on a 2-layer stackup).
+fn layer_z(stackup: &Stackup, l: Layer) -> Option<ZRange> {
+    match l {
+        Layer::Top => stackup.top_copper(),
+        Layer::Bottom => stackup.bottom_copper(),
+        Layer::Inner(n) => stackup.nth_copper_from_top(1 + n as usize),
+    }
+}
+
+/// Which copper [`Layer`] a slab `ZRange` is — the inverse of [`layer_z`], by exact
+/// slab match. Used to attribute a pad feature (built at a slab's z by
+/// [`PinDef::pad_features`](crate::part::PinDef::pad_features)) back to its layer.
+fn z_to_layer(stackup: &Stackup, z: ZRange) -> Option<Layer> {
+    copper_layers_z(stackup)
+        .into_iter()
+        .find(|(_, sz)| *sz == z)
+        .map(|(l, _)| l)
+}
+
+/// World-frame copper as converged [`NetFeature`]s — the Feature-model counterpart of
+/// [`net_copper`], each paired with the single copper [`Layer`] it sits on. A trace is
+/// one `Conductor` prism on its layer's slab; a via **fans out** to one prism per
+/// copper slab it spans; a netted pad uses
+/// [`PinDef::pad_features`](crate::part::PinDef::pad_features) (its `Void` drill is not
+/// copper and is dropped here). Every emitted feature is single-slab, so a different-net
+/// pair that z-overlaps necessarily shares that slab — which is what lets [`check_drc`]
+/// gate clearance with [`Feature::clears`](crate::geom::Feature::clears) (z-overlap ∧
+/// distance) and report on that one layer. This is the converged producer that retires
+/// the `PieceLayers`/[`copper_layers_present`] same-layer model.
+pub(crate) fn net_features(
+    doc: &Doc,
+    lib: &PartLib,
+    netlist: &BTreeMap<NetId, Vec<(PinRef, PinRole)>>,
+    stackup: &Stackup,
+) -> Vec<(Layer, NetFeature)> {
+    let mut pin_net: BTreeMap<PinRef, NetId> = BTreeMap::new();
+    for (nid, pins) in netlist {
+        for (pr, _) in pins {
+            pin_net.insert(pr.clone(), nid.clone());
+        }
+    }
+    let mut out: Vec<(Layer, NetFeature)> = Vec::new();
+
+    // Traces: one Conductor prism on the trace's layer.
+    for t in doc.traces.values() {
+        if let Some(z) = layer_z(stackup, t.layer) {
+            let f = Feature::prism(Role::Conductor, Shape2D::trace(t.path.clone(), t.width), z);
+            out.push((t.layer, NetFeature::new(Some(t.net.clone()), f)));
+        }
+    }
+
+    // Vias: one Conductor prism per copper slab the via spans (single-slab fan-out,
+    // reproducing `PieceLayers::Via(from,to).on(l)` for every l in the span).
+    for v in doc.vias.values() {
+        for (layer, z) in copper_layers_z(stackup) {
+            if v.spans(layer) {
+                let f = Feature::prism(Role::Conductor, Shape2D::disc(v.at, v.pad / 2), z);
+                out.push((layer, NetFeature::new(Some(v.net.clone()), f)));
+            }
+        }
+    }
+
+    // Pads: reuse the Phase-1 lowering; attribute each Conductor feature to its layer.
+    for c in doc.components.values() {
+        let Some(def) = lib.get(&c.part) else {
+            continue;
+        };
+        for pin in &def.pins {
+            let Some(net) = pin_net.get(&PinRef::new(&c.id, &pin.number)) else {
+                continue;
+            };
+            for f in pin.pad_features(c, stackup) {
+                if f.role != Role::Conductor {
+                    continue; // the Void drill is not copper-clearance geometry
+                }
+                let Extent::Prism { z, .. } = &f.extent;
+                if let Some(layer) = z_to_layer(stackup, *z) {
+                    out.push((layer, NetFeature::new(Some(net.clone()), f)));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The copper layers present in a design (outer layers always; plus any layer a
