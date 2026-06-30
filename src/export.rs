@@ -206,6 +206,30 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> String {
             svg_poly(class, &shape.points())
         }
     };
+    // A pad's real copper as a *filled* shape (the footprint's honest extent),
+    // mirroring `svg_outline`: a curve-aware `<path>` when the boundary bends
+    // (rounded / oval pads), else the byte-identical `<polygon>`. No explicit fill
+    // (defaults to black, like the legacy pad dot) and tagged `class="pad"` so the
+    // existing structure/classes hold. Indented one level deeper than outlines since
+    // pads live inside a component `<g>`.
+    let svg_pad = |shape: &Shape2D| -> String {
+        if has_curve(shape) {
+            format!(
+                "    <path class=\"pad\" d=\"{}\"/>\n",
+                svg_path_d(shape, &flip)
+            )
+        } else {
+            let pts: Vec<String> = shape
+                .points()
+                .iter()
+                .map(|p| format!("{},{}", fmt_mm(p.x), fmt_mm(flip(p.y))))
+                .collect();
+            format!(
+                "    <polygon class=\"pad\" points=\"{}\"/>\n",
+                pts.join(" ")
+            )
+        }
+    };
     match &board {
         Some(b) => {
             out.push_str(&svg_outline("outline-board", &b.outline));
@@ -251,6 +275,12 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> String {
         }
     }
 
+    // The stackup resolves each pad's layer-relative copper to absolute z, so pads
+    // fan out correctly (a through-hole pad becomes one conductor feature per copper
+    // slab). Today this is the default 2-layer stackup; the reader is the one place
+    // that changes when authored stackups land.
+    let su = crate::elaborate::stackup(&doc.source);
+
     // One group per component: pads, an origin marker, and an id label.
     for c in doc.components.values() {
         out.push_str(&format!(
@@ -259,12 +289,38 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> String {
         ));
         if let Some(def) = lib.get(&c.part) {
             for id in part_pin_ids(def) {
-                if let Some(w) = pin_world(c, def, &id) {
-                    out.push_str(&format!(
-                        "    <circle class=\"pad\" cx=\"{}\" cy=\"{}\" r=\"0.3\"/>\n",
-                        fmt_mm(w.x),
-                        fmt_mm(flip(w.y)),
-                    ));
+                // Real pad copper when the pin carries a footprint pad: each
+                // `Role::Conductor` region's world `Shape2D`, drawn as filled copper.
+                // A through pad fans out to one identical conductor per copper slab and
+                // this top-down sketch shows them as a single outline, so we draw each
+                // distinct shape once. Non-conductor features (the drill `Void`) are
+                // skipped. Pins with no pad — toy-library pins and interface ports
+                // (which are not `PinDef`s) — keep a small fallback dot at the pin's
+                // world point so they stay visible.
+                let mut shapes: Vec<Shape2D> = Vec::new();
+                if let Some(pin) = def.pins.iter().find(|p| p.number == id) {
+                    for f in pin.pad_features(c, &su) {
+                        if f.role != Role::Conductor {
+                            continue;
+                        }
+                        let Extent::Prism { shape, .. } = f.extent;
+                        if !shapes.contains(&shape) {
+                            shapes.push(shape);
+                        }
+                    }
+                }
+                if shapes.is_empty() {
+                    if let Some(w) = pin_world(c, def, &id) {
+                        out.push_str(&format!(
+                            "    <circle class=\"pad\" cx=\"{}\" cy=\"{}\" r=\"0.3\"/>\n",
+                            fmt_mm(w.x),
+                            fmt_mm(flip(w.y)),
+                        ));
+                    }
+                } else {
+                    for shape in &shapes {
+                        out.push_str(&svg_pad(shape));
+                    }
                 }
             }
         }
@@ -1109,6 +1165,58 @@ psu.reg,LDO,0.000000,0.000000,0,T
         assert!(
             s.contains("class=\"outline-bbox\""),
             "implicit bbox outline expected"
+        );
+    }
+
+    #[test]
+    fn svg_draws_real_pad_copper_not_a_dot() {
+        use crate::elaborate::GenDirective as G;
+        use crate::part::{PadCopper, PadGeo, PadLayers, PinDef, PinRole};
+
+        // A part whose single pin carries real copper: a 1mm square pad on Top
+        // (straight edges ⇒ a filled `<polygon>`, no curve).
+        let mut lib = PartLib::new();
+        lib.insert(
+            "PAD".into(),
+            PartDef {
+                name: "PAD".into(),
+                pins: vec![PinDef {
+                    name: "1".into(),
+                    number: "1".into(),
+                    role: PinRole::Passive,
+                    offset: Point { x: 0, y: 0 },
+                    pad: Some(PadGeo {
+                        copper: vec![PadCopper {
+                            shape: Shape2D::rect(Point { x: 0, y: 0 }, MM, MM),
+                            layers: PadLayers::Top,
+                        }],
+                        drill: None,
+                    }),
+                }],
+                interfaces: BTreeMap::new(),
+            },
+        );
+        let mut h = History::new(Default::default());
+        h.commit(
+            Transaction::one(Command::SetSource(vec![G::Instance {
+                path: "u1".into(),
+                part: "PAD".into(),
+            }])),
+            &lib,
+            "pad",
+        )
+        .unwrap();
+        let s = svg(h.doc(), &lib);
+
+        // The footprint's real copper is drawn as a filled pad polygon...
+        assert!(
+            s.contains("<polygon class=\"pad\""),
+            "real pad copper expected as a filled polygon:\n{s}"
+        );
+        // ...replacing the old fixed r=0.3 circle render-lie for a padded pin.
+        assert!(
+            !s.contains("<circle class=\"pad\""),
+            "the r=0.3 pad-dot lie should be gone for a real pad:\n{s}"
         );
     }
 
