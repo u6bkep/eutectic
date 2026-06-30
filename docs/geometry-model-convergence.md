@@ -7,10 +7,17 @@ Gerber, and the autorouter all gate on `Feature::clears`, and the parallel
 `copper_layers_present`) has been deleted. Commits `45d3df6` (Phase 0) →
 `53f344a`/`f1a59e3` (Phase 1 lowerings) → `b2aa6d9`/`5d5d517`/`812a203` (Phase 2a–d)
 → `0c124f8` (review fixes). Decisions 1, 2, 4, 5, 11, 12 are realized in code.
-**Still open** (post-convergence, see §7): placement transform (Decisions 6–8), text
-(Decision 9), courtyard→polygon (Decision 10), the `GenDirective::Stackup` authoring
-grammar, the SVG render-uses-points rider, and the importers (0016/0017). This record
-is still meant to be folded into `architecture.md` §8.
+**Bézier curve primitive** done (`Seg::Quadratic`/`Cubic`, integer de Casteljau,
+SVG/Gerber export, text grammar — commits `…`→`9e98a26`), unblocking outline fonts +
+SVG import + curved traces. **Placement transform Stages 1 + 1b** done (`3ec4fa6`,
+`3f60b5d`, `92d6e2a`): `doc::Orient` is now an **integer quaternion** (Decision 6,
+refined — no mirror flag, bottom-side is a rotation, side derived), and **bottom-side
+placement** works end-to-end (flip authoring + derived pad-layer swap).
+**Still open** (see §7): placement transform **Stage 2** (arbitrary planar-angle
+authoring + ring-of-N), text (Decision 9), courtyard→polygon (Decision 10), the
+`GenDirective::Stackup` authoring grammar, the SVG render-uses-points rider, and the
+importers (0016/0017 + SVG import). This record is still meant to be folded into
+`architecture.md` §8.
 
 This record captures the foundation decisions; it *realigned the implementation* with
 what §8 already stated and sharpened three points (the single primitive, the placement
