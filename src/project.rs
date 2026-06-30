@@ -17,7 +17,7 @@ pub fn render(doc: &Doc) -> String {
             Provenance::Pinned => "pinned",
             Provenance::Fixed => "fixed",
         };
-        let rot = if c.orient == Orient::Deg0 {
+        let rot = if c.orient == Orient::IDENTITY {
             String::new()
         } else {
             format!(" rot={}", c.orient.to_deg())

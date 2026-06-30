@@ -323,7 +323,7 @@ pub fn elaborate(
                         Some(off) => relational.push(Constraint::NearPin {
                             a: aid,
                             b: bid,
-                            b_off: bc.orient.rotate(off),
+                            b_off: bc.orient.apply(off),
                             within: *within,
                         }),
                         None => errors.push(Diagnostic::error(
@@ -716,14 +716,16 @@ fn note_missing(
     true
 }
 
-/// A part's courtyard half-extents oriented for a placed component: a cardinal
-/// 90°/270° turn swaps width and height.
+/// A part's courtyard half-extents oriented for a placed component. The courtyard is
+/// the axis-aligned box `±hw × ±hh`; under the orientation its AABB half-extents are
+/// the summed absolute contributions of each rotated axis (so a cardinal 90°/270° turn
+/// swaps w/h exactly, and any orientation is handled). Routes through
+/// [`Orient::apply`], so it stays exact for cardinals.
 fn oriented_courtyard(def: &PartDef, orient: Orient) -> (Nm, Nm) {
     let (hw, hh) = courtyard_half_extents(def);
-    match orient {
-        Orient::Deg90 | Orient::Deg270 => (hh, hw),
-        Orient::Deg0 | Orient::Deg180 => (hw, hh),
-    }
+    let ax = orient.apply(Point { x: hw, y: 0 });
+    let ay = orient.apply(Point { x: 0, y: hh });
+    (ax.x.abs() + ay.x.abs(), ax.y.abs() + ay.y.abs())
 }
 
 /// A `help:` line listing a part's distinct functional pin names — the candidates

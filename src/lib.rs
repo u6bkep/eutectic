@@ -889,13 +889,19 @@ mod tests {
             },
         ]);
         use super::doc::Orient;
-        assert_eq!(d.components[&EntityId::new("u1")].orient, Orient::Deg90);
+        assert_eq!(
+            d.components[&EntityId::new("u1")].orient,
+            Orient::from_deg(90).unwrap()
+        );
         // Default orientation when no Rotate is given.
         let d0 = placed(vec![GenDirective::Instance {
             path: "u1".into(),
             part: "MCU".into(),
         }]);
-        assert_eq!(d0.components[&EntityId::new("u1")].orient, Orient::Deg0);
+        assert_eq!(
+            d0.components[&EntityId::new("u1")].orient,
+            Orient::from_deg(0).unwrap()
+        );
     }
 
     #[test]

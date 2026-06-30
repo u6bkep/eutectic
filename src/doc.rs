@@ -39,50 +39,128 @@ impl Point {
     }
 }
 
-/// A component's planar orientation, restricted to the four cardinal rotations so
-/// that rotated pin positions stay exact integers (no float/trig nondeterminism
-/// leaking into stored coordinates or diffs). Orientation is a *settable* DOF for
-/// now — the solver does not optimise over it (that is nonlinear; out of scope).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
-pub enum Orient {
-    #[default]
-    Deg0,
-    Deg90,
-    Deg180,
-    Deg270,
+/// A component's orientation: an **integer quaternion** rotation (see
+/// docs/geometry-model-convergence.md, Decision 6). Storing the quaternion — rather
+/// than a cardinal enum or a float angle — keeps orientation exact and deterministic
+/// while generalising cleanly to 3D: a planar rotation about z is `(w,0,0,z)`, a
+/// flip-to-bottom is a 180° rotation about an in-plane axis, an off-axis tilt is any
+/// `(w,x,y,z)`. There is **no mirror flag**: bottom-side is a *rotation* (determinant
+/// +1, you flip the part over), and the mirrored *appearance* is a property of the 2D
+/// top-view projection, not of the stored transform. "Which side" is derived
+/// ([`is_bottom`](Orient::is_bottom)).
+///
+/// [`apply`](Orient::apply) is the world-map: an integer matrix·point ÷ `|q|²` — no
+/// `sin`/`cos`, no `sqrt`. It is **exact** for the lattice-symmetry orientations
+/// (cardinals + flips, where `|q|²` divides cleanly) and correctly-rounded
+/// (round-half-away) otherwise. Orientation is a *settable* DOF; the solver does not
+/// optimise over it (nonlinear; out of scope).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Orient {
+    pub w: i64,
+    pub x: i64,
+    pub y: i64,
+    pub z: i64,
+}
+
+impl Default for Orient {
+    fn default() -> Self {
+        Orient::IDENTITY
+    }
 }
 
 impl Orient {
-    /// Build from a degree count. Accepts any integer congruent to 0/90/180/270
-    /// mod 360 (so -90 == 270, 450 == 90); returns `None` for off-axis angles.
+    /// No rotation.
+    pub const IDENTITY: Orient = Orient {
+        w: 1,
+        x: 0,
+        y: 0,
+        z: 0,
+    };
+
+    /// Build a planar (about-z) orientation from a cardinal degree count. Accepts any
+    /// integer congruent to 0/90/180/270 mod 360 (so −90 == 270, 450 == 90); returns
+    /// `None` for off-axis angles (arbitrary planar angles arrive via the Stage-2
+    /// authoring lowering). Cardinals are tiny exact quaternions (`|q|²` is 1 or 2).
     pub fn from_deg(d: i32) -> Option<Orient> {
+        let q = |w, x, y, z| Some(Orient { w, x, y, z });
         match d.rem_euclid(360) {
-            0 => Some(Orient::Deg0),
-            90 => Some(Orient::Deg90),
-            180 => Some(Orient::Deg180),
-            270 => Some(Orient::Deg270),
+            0 => q(1, 0, 0, 0),
+            90 => q(1, 0, 0, 1),
+            180 => q(0, 0, 0, 1),
+            270 => q(1, 0, 0, -1),
             _ => None,
         }
     }
 
-    pub fn to_deg(self) -> i32 {
-        match self {
-            Orient::Deg0 => 0,
-            Orient::Deg90 => 90,
-            Orient::Deg180 => 180,
-            Orient::Deg270 => 270,
+    /// `|q|² = w²+x²+y²+z²` — the rotation matrix's common (integer) denominator.
+    fn norm2(self) -> i128 {
+        let (w, x, y, z) = (
+            self.w as i128,
+            self.x as i128,
+            self.y as i128,
+            self.z as i128,
+        );
+        w * w + x * x + y * y + z * z
+    }
+
+    /// Apply this orientation to a planar (z = 0) local point, rotating about the
+    /// origin. Exact integer for cardinals/flips; correctly-rounded otherwise. (Only
+    /// the top-left 2×2 of the quaternion rotation matrix is needed, since the input
+    /// lies in the z = 0 plane — out-of-plane rotation of a 3D point is reserved.)
+    pub fn apply(self, p: Point) -> Point {
+        let (w, x, y, z) = (
+            self.w as i128,
+            self.x as i128,
+            self.y as i128,
+            self.z as i128,
+        );
+        let m00 = w * w + x * x - y * y - z * z;
+        let m01 = 2 * (x * y - w * z);
+        let m10 = 2 * (x * y + w * z);
+        let m11 = w * w - x * x + y * y - z * z;
+        let den = self.norm2();
+        let (px, py) = (p.x as i128, p.y as i128);
+        Point {
+            x: rdiv_i128(m00 * px + m01 * py, den) as Nm,
+            y: rdiv_i128(m10 * px + m11 * py, den) as Nm,
         }
     }
 
-    /// Rotate a local offset about the origin by this orientation. Exact for all
-    /// four cardinal rotations (integer arithmetic, no trig).
-    pub fn rotate(self, p: Point) -> Point {
-        match self {
-            Orient::Deg0 => p,
-            Orient::Deg90 => Point { x: -p.y, y: p.x },
-            Orient::Deg180 => Point { x: -p.x, y: -p.y },
-            Orient::Deg270 => Point { x: p.y, y: -p.x },
-        }
+    /// Is the component flipped to the board bottom? True iff its local `+z` axis maps
+    /// below the board plane — the z-image's z-component `w²−x²−y²+z² < 0` (`den > 0`,
+    /// so only the sign matters).
+    pub fn is_bottom(self) -> bool {
+        let (w, x, y, z) = (
+            self.w as i128,
+            self.x as i128,
+            self.y as i128,
+            self.z as i128,
+        );
+        (w * w - x * x - y * y + z * z) < 0
+    }
+
+    /// The planar (about-z) rotation in whole degrees, **for display only** — never
+    /// authoritative (the quaternion is). Exact for cardinals; a rounded projection
+    /// otherwise.
+    pub fn to_deg(self) -> i32 {
+        let (w, x, y, z) = (self.w as f64, self.x as f64, self.y as f64, self.z as f64);
+        // about-z angle = atan2(2(wz+xy), w²+x²−y²−z²); for planar (x=y=0) this is the
+        // pure z-rotation, and for cardinals it lands exactly on 0/90/180/270.
+        let deg = (2.0 * (w * z + x * y))
+            .atan2(w * w + x * x - y * y - z * z)
+            .to_degrees()
+            .round() as i32;
+        deg.rem_euclid(360)
+    }
+}
+
+/// Round `num / den` to the nearest integer, half away from zero (`den > 0`). The
+/// deterministic rounding [`Orient::apply`] uses for non-exact rotations.
+fn rdiv_i128(num: i128, den: i128) -> i128 {
+    if num >= 0 {
+        (num + den / 2) / den
+    } else {
+        -((-num + den / 2) / den)
     }
 }
 

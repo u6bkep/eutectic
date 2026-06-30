@@ -45,8 +45,8 @@ pub struct PadCopper {
 /// one; a compound pad has several); `drill` is the optional hole. Unlike the old
 /// render-only `Pad`, this is the *real* geometry — render uses it now, and DRC /
 /// the router consume it once migrated (it is the honest copper extent, no longer a
-/// point). World coordinates come from the component's position + cardinal
-/// orientation, applied with [`Shape2D::map_points`].
+/// point). World coordinates come from the component's position + orientation
+/// (an [`Orient`](crate::doc::Orient) quaternion), applied with [`Shape2D::map_points`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PadGeo {
     pub copper: Vec<PadCopper>,
@@ -215,21 +215,24 @@ impl PartDef {
 }
 
 /// Absolute (world) position of a pin on a placed component instance:
-/// `component position + rotate(local pin offset, component orientation)`.
-/// Exact for the four cardinal rotations. Returns `None` if the pin is unknown.
+/// `component position + orient.apply(local pin offset)`. Exact for the
+/// lattice-symmetry orientations (cardinals + flips), correctly-rounded otherwise
+/// (see [`Orient::apply`](crate::doc::Orient::apply)). Returns `None` if the pin is
+/// unknown.
 pub fn pin_world(comp: &Component, def: &PartDef, pin: &str) -> Option<Point> {
     let off = def.pin_offset(pin)?;
-    let r = comp.orient.rotate(off);
+    let r = comp.orient.apply(off);
     Some(Point {
         x: comp.pos.value.x + r.x,
         y: comp.pos.value.y + r.y,
     })
 }
 
-/// Lift a component-local point into world space on a placed component: rotate by
-/// the cardinal orientation, translate to the component position. Exact (integer).
+/// Lift a component-local point into world space on a placed component: apply the
+/// orientation, translate to the component position. Exact for cardinals/flips,
+/// correctly-rounded otherwise.
 pub fn to_world(comp: &Component, p: Point) -> Point {
-    let r = comp.orient.rotate(p);
+    let r = comp.orient.apply(p);
     Point {
         x: comp.pos.value.x + r.x,
         y: comp.pos.value.y + r.y,
@@ -530,28 +533,28 @@ mod tests {
         let at = Point::mm(10, 5);
         let cases = [
             (
-                Orient::Deg0,
+                Orient::from_deg(0).unwrap(),
                 Point {
                     x: 12 * MM,
                     y: 5 * MM,
                 },
             ), // (+2, 0)
             (
-                Orient::Deg90,
+                Orient::from_deg(90).unwrap(),
                 Point {
                     x: 10 * MM,
                     y: 7 * MM,
                 },
             ), // (0, +2)
             (
-                Orient::Deg180,
+                Orient::from_deg(180).unwrap(),
                 Point {
                     x: 8 * MM,
                     y: 5 * MM,
                 },
             ), // (-2, 0)
             (
-                Orient::Deg270,
+                Orient::from_deg(270).unwrap(),
                 Point {
                     x: 10 * MM,
                     y: 3 * MM,
@@ -572,12 +575,68 @@ mod tests {
     #[test]
     fn rotate_is_exact_and_reversible() {
         let p = Point { x: 3 * MM, y: MM };
-        assert_eq!(Orient::Deg0.rotate(p), p);
+        assert_eq!(Orient::from_deg(0).unwrap().apply(p), p);
         // Two 180s (or four 90s) return to the original — exact, no drift.
-        assert_eq!(Orient::Deg180.rotate(Orient::Deg180.rotate(p)), p);
-        let q = Orient::Deg90
-            .rotate(Orient::Deg90.rotate(Orient::Deg90.rotate(Orient::Deg90.rotate(p))));
+        assert_eq!(
+            Orient::from_deg(180)
+                .unwrap()
+                .apply(Orient::from_deg(180).unwrap().apply(p)),
+            p
+        );
+        let q = Orient::from_deg(90).unwrap().apply(
+            Orient::from_deg(90).unwrap().apply(
+                Orient::from_deg(90)
+                    .unwrap()
+                    .apply(Orient::from_deg(90).unwrap().apply(p)),
+            ),
+        );
         assert_eq!(q, p);
+    }
+
+    #[test]
+    fn quaternion_cardinals_match_legacy_rotation_exactly() {
+        let p = Point { x: 3 * MM, y: MM };
+        assert_eq!(Orient::from_deg(0).unwrap().apply(p), p);
+        assert_eq!(
+            Orient::from_deg(90).unwrap().apply(p),
+            Point { x: -p.y, y: p.x }
+        );
+        assert_eq!(
+            Orient::from_deg(180).unwrap().apply(p),
+            Point { x: -p.x, y: -p.y }
+        );
+        assert_eq!(
+            Orient::from_deg(270).unwrap().apply(p),
+            Point { x: p.y, y: -p.x }
+        );
+        // Default is identity, not the all-zero (invalid) quaternion.
+        assert_eq!(Orient::default(), Orient::IDENTITY);
+        assert_eq!(Orient::IDENTITY.apply(p), p);
+    }
+
+    #[test]
+    fn flip_to_bottom_is_a_rotation_not_a_mirror_flag() {
+        // 180° about the x-axis = flip-to-bottom: a pure rotation, no bool needed.
+        let flip = Orient {
+            w: 0,
+            x: 1,
+            y: 0,
+            z: 0,
+        };
+        assert!(flip.is_bottom(), "local +z now points down ⇒ bottom side");
+        assert!(
+            !Orient::from_deg(90).unwrap().is_bottom(),
+            "an about-z turn stays top side"
+        );
+        // Applied to a planar point it flips y and stays in-plane (exact).
+        assert_eq!(flip.apply(Point { x: 5, y: 3 }), Point { x: 5, y: -3 });
+    }
+
+    #[test]
+    fn to_deg_projects_cardinals_exactly() {
+        for d in [0, 90, 180, 270] {
+            assert_eq!(Orient::from_deg(d).unwrap().to_deg(), d);
+        }
     }
 
     use crate::geom::{self, Extent, Role, Shape2D, Stackup};
@@ -611,7 +670,7 @@ mod tests {
             offset: Point { x: MM, y: 0 },
             pad: Some(surface_pad(pad_shape.clone())),
         };
-        let c = comp("P", Point { x: 0, y: 0 }, Orient::Deg0);
+        let c = comp("P", Point { x: 0, y: 0 }, Orient::from_deg(0).unwrap());
         let feats = pin.pad_features(&c, &stackup);
         assert_eq!(feats.len(), 1, "one copper region, no drill");
         assert_eq!(feats[0].role, Role::Conductor);
@@ -641,7 +700,7 @@ mod tests {
                 drill: Some(Drill::Round { d: MM / 2 }),
             }),
         };
-        let c = comp("P", Point { x: 0, y: 0 }, Orient::Deg0);
+        let c = comp("P", Point { x: 0, y: 0 }, Orient::from_deg(0).unwrap());
         let feats = pin.pad_features(&c, &stackup);
         let n_cu = stackup.copper_slabs().len();
         assert_eq!(n_cu, 2, "default 2-layer stackup has two copper slabs");
@@ -696,7 +755,11 @@ mod tests {
             }),
         };
         // Rotated + translated so a raw (un-mapped) slot would land in the wrong place.
-        let c = comp("P", Point { x: 5 * MM, y: 0 }, Orient::Deg90);
+        let c = comp(
+            "P",
+            Point { x: 5 * MM, y: 0 },
+            Orient::from_deg(90).unwrap(),
+        );
         let feats = pin.pad_features(&c, &stackup);
         let voids: Vec<_> = feats.iter().filter(|f| f.role == Role::Void).collect();
         assert_eq!(voids.len(), 1, "one drill void");
@@ -720,7 +783,7 @@ mod tests {
             offset: Point { x: 2 * MM, y: 0 },
             pad: Some(surface_pad(pad_shape)),
         };
-        let c = comp("P", Point { x: 0, y: 0 }, Orient::Deg90);
+        let c = comp("P", Point { x: 0, y: 0 }, Orient::from_deg(90).unwrap());
         let feats = pin.pad_features(&c, &stackup);
         assert_eq!(feats.len(), 1);
         let (shape, _) = prism_shape_z(&feats[0]);
@@ -738,15 +801,15 @@ mod tests {
     fn pad_features_no_pad_is_empty() {
         let stackup = Stackup::default_2layer();
         let pin = pin("VIN", PinRole::PowerIn, Point { x: 0, y: 0 });
-        let c = comp("P", Point { x: 0, y: 0 }, Orient::Deg0);
+        let c = comp("P", Point { x: 0, y: 0 }, Orient::from_deg(0).unwrap());
         assert!(pin.pad_features(&c, &stackup).is_empty());
     }
 
     #[test]
     fn orient_from_deg_normalises_and_rejects_off_axis() {
-        assert_eq!(Orient::from_deg(-90), Some(Orient::Deg270));
-        assert_eq!(Orient::from_deg(450), Some(Orient::Deg90));
-        assert_eq!(Orient::from_deg(360), Some(Orient::Deg0));
+        assert_eq!(Orient::from_deg(-90), Some(Orient::from_deg(270).unwrap()));
+        assert_eq!(Orient::from_deg(450), Some(Orient::from_deg(90).unwrap()));
+        assert_eq!(Orient::from_deg(360), Some(Orient::from_deg(0).unwrap()));
         assert_eq!(Orient::from_deg(45), None);
     }
 }
