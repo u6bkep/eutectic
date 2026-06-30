@@ -20,7 +20,8 @@ pub fn render(doc: &Doc) -> String {
         let rot = if c.orient == Orient::IDENTITY {
             String::new()
         } else {
-            format!(" rot={}", c.orient.to_deg())
+            let side = if c.orient.is_bottom() { " bottom" } else { "" };
+            format!(" rot={}{side}", c.orient.to_deg())
         };
         out.push_str(&format!(
             "  {id}: {part} @ ({x},{y}){rot} [{prov}]\n",

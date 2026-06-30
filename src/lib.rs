@@ -886,6 +886,7 @@ mod tests {
             GenDirective::Rotate {
                 path: "u1".into(),
                 deg: 90,
+                bottom: false,
             },
         ]);
         use super::doc::Orient;
@@ -917,6 +918,7 @@ mod tests {
                 GenDirective::Rotate {
                     path: "u1".into(),
                     deg: 45,
+                    bottom: false,
                 },
             ])),
             &lib,
@@ -948,6 +950,7 @@ mod tests {
             GenDirective::Rotate {
                 path: "reg".into(),
                 deg: 90,
+                bottom: false,
             },
             GenDirective::NearPin {
                 a: "dec".into(),

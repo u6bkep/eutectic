@@ -269,17 +269,24 @@ impl PinDef {
         let Some(pad) = &self.pad else {
             return Vec::new();
         };
+        // A flipped (bottom-side) component swaps its outer-layer copper: a `Top` pad
+        // lands on the board bottom and vice-versa. Derived from the orientation — no
+        // side flag. (The copper *shape* is already flipped by `pad_copper_world`'s
+        // `apply`; only the layer assignment needs swapping. `Through` is unaffected.)
+        let flipped = comp.orient.is_bottom();
         let mut features = Vec::new();
         for cu in &pad.copper {
             let world = pad_copper_world(comp, cu);
             match cu.layers {
-                PadLayers::Top => {
-                    if let Some(z) = stackup.top_copper() {
-                        features.push(geom::Feature::prism(geom::Role::Conductor, world, z));
-                    }
-                }
-                PadLayers::Bottom => {
-                    if let Some(z) = stackup.bottom_copper() {
+                PadLayers::Top | PadLayers::Bottom => {
+                    let is_top_local = matches!(cu.layers, PadLayers::Top);
+                    // XOR with the flip: a Top pad on a flipped part is on the bottom.
+                    let z = if is_top_local != flipped {
+                        stackup.top_copper()
+                    } else {
+                        stackup.bottom_copper()
+                    };
+                    if let Some(z) = z {
                         features.push(geom::Feature::prism(geom::Role::Conductor, world, z));
                     }
                 }
@@ -637,6 +644,35 @@ mod tests {
         for d in [0, 90, 180, 270] {
             assert_eq!(Orient::from_deg(d).unwrap().to_deg(), d);
         }
+    }
+
+    #[test]
+    fn bottom_side_pad_swaps_to_the_bottom_copper_layer() {
+        let su = Stackup::default_2layer();
+        let pin = PinDef {
+            name: "1".into(),
+            number: "1".into(),
+            role: PinRole::Passive,
+            offset: Point { x: 0, y: 0 },
+            pad: Some(surface_pad(Shape2D::disc(Point { x: 0, y: 0 }, MM))), // a Top pad
+        };
+        let top = comp("P", Point { x: 0, y: 0 }, Orient::default());
+        let bot = comp("P", Point { x: 0, y: 0 }, Orient::default().flipped());
+        assert!(bot.orient.is_bottom() && !top.orient.is_bottom());
+        let tf = pin.pad_features(&top, &su);
+        let bf = pin.pad_features(&bot, &su);
+        let (_, z_top) = prism_shape_z(&tf[0]);
+        let (_, z_bot) = prism_shape_z(&bf[0]);
+        assert_eq!(
+            z_top,
+            su.top_copper().unwrap(),
+            "top-side Top pad → top copper"
+        );
+        assert_eq!(
+            z_bot,
+            su.bottom_copper().unwrap(),
+            "flipped Top pad → bottom copper (derived from orientation, no flag)"
+        );
     }
 
     use crate::geom::{self, Extent, Role, Shape2D, Stackup};

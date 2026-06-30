@@ -158,7 +158,12 @@ fn render_directive(d: &GenDirective) -> String {
             }
             s
         }
-        GenDirective::Rotate { path, deg } => format!("rotate {path} {deg}"),
+        GenDirective::Rotate { path, deg, bottom } => {
+            format!(
+                "rotate {path} {deg}{}",
+                if *bottom { " bottom" } else { "" }
+            )
+        }
         GenDirective::NearPin {
             a,
             b_comp,
@@ -439,11 +444,16 @@ fn parse_line(line: &str) -> Result<Item, String> {
             nodes: node_list(rest, "aligny")?,
         }),
         "rotate" => {
-            let (path, deg) = two_tokens(rest, "rotate <path> <deg>")?;
-            let deg: i32 = deg
+            let toks: Vec<&str> = rest.split_whitespace().collect();
+            let (path, deg_s, bottom) = match toks.as_slice() {
+                [p, d] => (p.to_string(), *d, false),
+                [p, d, "bottom"] => (p.to_string(), *d, true),
+                _ => return Err("rotate <path> <deg> [bottom]".into()),
+            };
+            let deg: i32 = deg_s
                 .parse()
-                .map_err(|_| format!("`{deg}` is not an integer degree count"))?;
-            Item::Directive(GenDirective::Rotate { path, deg })
+                .map_err(|_| format!("`{deg_s}` is not an integer degree count"))?;
+            Item::Directive(GenDirective::Rotate { path, deg, bottom })
         }
         "nearpin" => {
             let (a, bpin, len) = two_tokens_and_len(rest, "nearpin <a> <bComp>.<bPin> <len>")?;
@@ -916,6 +926,7 @@ mod tests {
             GenDirective::Rotate {
                 path: "psu.reg".into(),
                 deg: 90,
+                bottom: false,
             },
             GenDirective::NearPin {
                 a: "psu.dec[0]".into(),
@@ -1334,6 +1345,7 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
             GenDirective::Rotate {
                 path: "reg".into(),
                 deg: 90,
+                bottom: false,
             },
             GenDirective::NearPin {
                 a: "dec".into(),
@@ -1354,7 +1366,8 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
             src[0],
             GenDirective::Rotate {
                 path: "u1".into(),
-                deg: -90
+                deg: -90,
+                bottom: false,
             }
         );
         assert_eq!(
@@ -1369,6 +1382,30 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
         // Off-axis rotation is rejected at elaboration, not parse.
         assert!(parse("rotate u1 45").is_ok());
         assert!(parse("rotate u1 notnum").is_err());
+    }
+
+    #[test]
+    fn rotate_bottom_authoring_round_trips() {
+        let (src, _) = parse("rotate u1 90 bottom").unwrap();
+        assert_eq!(
+            src[0],
+            GenDirective::Rotate {
+                path: "u1".into(),
+                deg: 90,
+                bottom: true,
+            }
+        );
+        // Canonical serialization carries the `bottom` flag and re-parses identically.
+        assert_eq!(render_directive(&src[0]), "rotate u1 90 bottom");
+        assert_eq!(parse("rotate u1 90").unwrap().0[0], {
+            GenDirective::Rotate {
+                path: "u1".into(),
+                deg: 90,
+                bottom: false,
+            }
+        });
+        // A stray third token that isn't `bottom` is an error.
+        assert!(parse("rotate u1 90 sideways").is_err());
     }
 
     // ---- LoadText command (text -> tier-1 in one atomic transaction) -----

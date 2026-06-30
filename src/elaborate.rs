@@ -105,11 +105,13 @@ pub enum GenDirective {
     NoConnect {
         pins: Vec<(String, String)>,
     },
-    /// Set a component's planar orientation (cardinal degrees: 0/90/180/270). A
-    /// settable attribute, not a solver DOF.
+    /// Set a component's orientation: a planar rotation (cardinal degrees 0/90/180/270;
+    /// arbitrary angles arrive in Stage 2) optionally flipped to the board **bottom**
+    /// (`bottom`). A settable attribute, not a solver DOF.
     Rotate {
         path: String,
         deg: i32,
+        bottom: bool,
     },
     /// Like `Near`, but the target is a specific *pin* (`b_comp`.`b_pin`) rather
     /// than a component centroid. The pin's world position tracks its component's
@@ -226,7 +228,7 @@ pub fn elaborate(
     // Pass 2a: orientation (a settable attribute, resolved before constraints so a
     // NearPin target's pin offset can be rotated correctly).
     for d in source {
-        if let GenDirective::Rotate { path, deg } = d {
+        if let GenDirective::Rotate { path, deg, bottom } = d {
             let id = EntityId::new(path.clone());
             if note_missing(
                 &id,
@@ -239,6 +241,7 @@ pub fn elaborate(
             }
             match Orient::from_deg(*deg) {
                 Some(o) => {
+                    let o = if *bottom { o.flipped() } else { o };
                     components
                         .get_mut(&id)
                         .expect("note_missing confirmed presence")

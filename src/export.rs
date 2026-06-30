@@ -72,15 +72,16 @@ pub fn netlist(doc: &Doc) -> String {
 /// work if names ever gain commas).
 pub fn placement_csv(doc: &Doc) -> String {
     let mut out = String::new();
-    out.push_str("ref,part,x_mm,y_mm,rotation_deg\n");
+    out.push_str("ref,part,x_mm,y_mm,rotation_deg,side\n");
     for c in doc.components.values() {
         out.push_str(&format!(
-            "{},{},{},{},{}\n",
+            "{},{},{},{},{},{}\n",
             c.id,
             c.part,
             fmt_mm(c.pos.value.x),
             fmt_mm(c.pos.value.y),
             c.orient.to_deg(),
+            if c.orient.is_bottom() { "B" } else { "T" },
         ));
     }
     out
@@ -1011,10 +1012,10 @@ VBUS: psu.dec[0].p1 psu.dec[1].p1 psu.reg.VOUT
         let (doc, _) = doc_psu(2);
         let csv = placement_csv(&doc);
         let expected = "\
-ref,part,x_mm,y_mm,rotation_deg
-psu.dec[0],Cap,10.000000,0.000000,0
-psu.dec[1],Cap,20.000000,0.000000,0
-psu.reg,LDO,0.000000,0.000000,0
+ref,part,x_mm,y_mm,rotation_deg,side
+psu.dec[0],Cap,10.000000,0.000000,0,T
+psu.dec[1],Cap,20.000000,0.000000,0,T
+psu.reg,LDO,0.000000,0.000000,0,T
 ";
         assert_eq!(csv, expected);
         // Header + one row per component, nothing extra.
@@ -1036,6 +1037,7 @@ psu.reg,LDO,0.000000,0.000000,0
                 G::Rotate {
                     path: "u1".into(),
                     deg: 90,
+                    bottom: false,
                 },
             ])),
             &lib,
@@ -1043,7 +1045,38 @@ psu.reg,LDO,0.000000,0.000000,0
         )
         .unwrap();
         let csv = placement_csv(h.doc());
-        assert!(csv.contains("u1,MCU,0.000000,0.000000,90\n"), "got:\n{csv}");
+        assert!(
+            csv.contains("u1,MCU,0.000000,0.000000,90,T\n"),
+            "got:\n{csv}"
+        );
+    }
+
+    #[test]
+    fn placement_csv_marks_bottom_side() {
+        use crate::elaborate::GenDirective as G;
+        let lib = part_library();
+        let mut h = History::new(Default::default());
+        h.commit(
+            Transaction::one(Command::SetSource(vec![
+                G::Instance {
+                    path: "u1".into(),
+                    part: "MCU".into(),
+                },
+                G::Rotate {
+                    path: "u1".into(),
+                    deg: 0,
+                    bottom: true,
+                },
+            ])),
+            &lib,
+            "flip",
+        )
+        .unwrap();
+        let csv = placement_csv(h.doc());
+        assert!(
+            csv.contains(",0,B\n"),
+            "bottom-side component marked B:\n{csv}"
+        );
     }
 
     #[test]

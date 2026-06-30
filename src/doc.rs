@@ -126,6 +126,19 @@ impl Orient {
         }
     }
 
+    /// Flip the (already-rotated) part to the **board bottom**: compose a 180° rotation
+    /// about the in-plane x-axis on top of this orientation. This is a *rotation* (you
+    /// turn the part over), not a reflection — there is no mirror flag. Closed form of
+    /// `FLIP_x · q` where `FLIP_x = (0,1,0,0)`. Applying it twice returns to the start.
+    pub fn flipped(self) -> Orient {
+        Orient {
+            w: -self.x,
+            x: self.w,
+            y: -self.z,
+            z: self.y,
+        }
+    }
+
     /// Is the component flipped to the board bottom? True iff its local `+z` axis maps
     /// below the board plane — the z-image's z-component `w²−x²−y²+z² < 0` (`den > 0`,
     /// so only the sign matters).
