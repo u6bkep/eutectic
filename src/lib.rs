@@ -885,8 +885,7 @@ mod tests {
             },
             GenDirective::Rotate {
                 path: "u1".into(),
-                deg: 90,
-                bottom: false,
+                orient: Orient::from_deg(90).unwrap(),
             },
         ]);
         use super::doc::Orient;
@@ -906,7 +905,10 @@ mod tests {
     }
 
     #[test]
-    fn rotate_off_axis_is_rejected() {
+    fn rotate_off_axis_is_accepted_as_a_quaternion() {
+        // Stage 2: an arbitrary planar angle is now valid — lowered to an integer
+        // quaternion at authoring time, no longer rejected as "off-axis".
+        use super::doc::Orient;
         let lib = part_library();
         let mut h = History::new(Default::default());
         let r = h.commit(
@@ -917,14 +919,16 @@ mod tests {
                 },
                 GenDirective::Rotate {
                     path: "u1".into(),
-                    deg: 45,
-                    bottom: false,
+                    orient: Orient::from_angle_deg(45.0),
                 },
             ])),
             &lib,
-            "bad-rot",
+            "off-axis",
         );
-        assert!(r.is_err(), "off-axis rotation must abort the transaction");
+        assert!(r.is_ok(), "an off-axis rotation is valid: {r:?}");
+        let o = h.doc().components[&EntityId::new("u1")].orient;
+        assert_eq!(o.to_deg(), 45, "≈ 45° about z");
+        assert!(!o.is_bottom());
     }
 
     /// Near-to-pin pulls a component onto a *pin's* world position, accounting for
@@ -933,6 +937,7 @@ mod tests {
     /// `nearpin reg.VOUT 0` is dragged there.
     #[test]
     fn near_to_pin_pulls_component_onto_rotated_pin() {
+        use super::doc::Orient;
         use super::part::pin_world;
         let d = placed(vec![
             GenDirective::Instance {
@@ -949,8 +954,7 @@ mod tests {
             },
             GenDirective::Rotate {
                 path: "reg".into(),
-                deg: 90,
-                bottom: false,
+                orient: Orient::from_deg(90).unwrap(),
             },
             GenDirective::NearPin {
                 a: "dec".into(),

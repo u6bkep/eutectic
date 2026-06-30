@@ -9,12 +9,14 @@ Gerber, and the autorouter all gate on `Feature::clears`, and the parallel
 → `0c124f8` (review fixes). Decisions 1, 2, 4, 5, 11, 12 are realized in code.
 **Bézier curve primitive** done (`Seg::Quadratic`/`Cubic`, integer de Casteljau,
 SVG/Gerber export, text grammar — commits `…`→`9e98a26`), unblocking outline fonts +
-SVG import + curved traces. **Placement transform Stages 1 + 1b** done (`3ec4fa6`,
-`3f60b5d`, `92d6e2a`): `doc::Orient` is now an **integer quaternion** (Decision 6,
-refined — no mirror flag, bottom-side is a rotation, side derived), and **bottom-side
-placement** works end-to-end (flip authoring + derived pad-layer swap).
-**Still open** (see §7): placement transform **Stage 2** (arbitrary planar-angle
-authoring + ring-of-N), text (Decision 9), courtyard→polygon (Decision 10), the
+SVG import + curved traces. **Placement transform (Decisions 6–8) complete**:
+`doc::Orient` is an **integer quaternion** (Decision 6, refined — no mirror flag,
+bottom-side is a rotation, side derived); Stages 1+1b (`3ec4fa6`/`3f60b5d`/`92d6e2a`)
+gave the representation + **bottom-side placement**; **Stage 2** gives **arbitrary
+planar-angle authoring** (`rotate <p> <any-deg>` lowers to a quaternion at parse;
+non-cardinals serialise as `quat=(…)`) + a **ring-of-N** generative helper (the
+side-firing-LED case). Off-axis rotation is no longer rejected.
+**Still open** (see §7): text (Decision 9), courtyard→polygon (Decision 10), the
 `GenDirective::Stackup` authoring grammar, the SVG render-uses-points rider, and the
 importers (0016/0017 + SVG import). This record is still meant to be folded into
 `architecture.md` §8.

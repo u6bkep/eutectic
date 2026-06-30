@@ -177,7 +177,48 @@ impl Orient {
             .round() as i32;
         deg.rem_euclid(360)
     }
+
+    /// Lower an **arbitrary planar angle** (degrees, about z) to its integer
+    /// quaternion `(w, 0, 0, z) = round(S·cos(θ/2), S·sin(θ/2))`. The `cos`/`sin` runs
+    /// **once at authoring/parse time** (never re-derived at elaboration — the quaternion
+    /// is what's stored and diffed), so it stays off the deterministic geometry path
+    /// (`apply` is pure-integer). The fixed scale `S` ([`ORIENT_ANGLE_SCALE`]) bounds the
+    /// angular error to ≈ `1/S` rad (sub-µm placement at board radius). For the four
+    /// cardinals prefer [`from_deg`](Orient::from_deg) (it yields the tiny exact form).
+    pub fn from_angle_deg(deg: f64) -> Orient {
+        let half = deg.to_radians() / 2.0;
+        let s = ORIENT_ANGLE_SCALE as f64;
+        let w = (s * half.cos()).round() as i64;
+        let z = (s * half.sin()).round() as i64;
+        Orient { w, x: 0, y: 0, z }
+    }
+
+    /// The antipodal quaternion `−q`. As a *rotation* `−q ≡ self` (every method here is
+    /// quadratic in the components), but it is a distinct value under the derived `Eq` —
+    /// used by [`same_rotation`](Orient::same_rotation) and quaternion composition.
+    pub fn negated(self) -> Orient {
+        Orient {
+            w: -self.w,
+            x: -self.x,
+            y: -self.y,
+            z: -self.z,
+        }
+    }
+
+    /// Do two quaternions represent the **same rotation**? True iff equal or antipodal
+    /// (`q` and `−q` are the same rotation). The rotation-aware comparison the derived
+    /// `Eq` is not.
+    pub fn same_rotation(self, o: Orient) -> bool {
+        self == o || self == o.negated()
+    }
 }
+
+/// Fixed scale for [`Orient::from_angle_deg`]: the magnitude the unit half-angle
+/// `(cos, sin)` is multiplied by before rounding to an integer quaternion. `1e6` bounds
+/// the angular error to ≈ `1e-6` rad (≈ 0.1 µm at a 100 mm placement radius) — far below
+/// fab tolerance — while keeping `apply`'s i128 products tiny (~`1e21`, vs the ~`1e38`
+/// ceiling).
+pub const ORIENT_ANGLE_SCALE: i64 = 1_000_000;
 
 /// Round `num / den` to the nearest integer, half away from zero (`den > 0`). The
 /// deterministic rounding [`Orient::apply`] uses for non-exact rotations.

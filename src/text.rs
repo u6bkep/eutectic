@@ -69,7 +69,7 @@
 //! ```
 
 use crate::diagnostic::{Diagnostic, Location};
-use crate::doc::{Doc, MM, Nm, Override, Point, Strength};
+use crate::doc::{Doc, MM, Nm, Orient, Override, Point, Strength};
 use crate::elaborate::{GenDirective, RegionDecl, Source, board_rect};
 use crate::geom::{KeepoutKind, Path, Role, Seg, Shape2D};
 use crate::id::EntityId;
@@ -158,11 +158,32 @@ fn render_directive(d: &GenDirective) -> String {
             }
             s
         }
-        GenDirective::Rotate { path, deg, bottom } => {
-            format!(
-                "rotate {path} {deg}{}",
-                if *bottom { " bottom" } else { "" }
-            )
+        GenDirective::Rotate { path, orient } => {
+            // Readable `<deg> [bottom]` for the 8 board-plane orientations; the exact
+            // `quat=(w,x,y,z)` for any other (arbitrary-angle) rotation.
+            let cardinal = [
+                (0, false),
+                (90, false),
+                (180, false),
+                (270, false),
+                (0, true),
+                (90, true),
+                (180, true),
+                (270, true),
+            ]
+            .into_iter()
+            .find(|&(d, b)| {
+                let c = Orient::from_deg(d).unwrap();
+                let c = if b { c.flipped() } else { c };
+                orient.same_rotation(c)
+            });
+            match cardinal {
+                Some((d, b)) => format!("rotate {path} {d}{}", if b { " bottom" } else { "" }),
+                None => format!(
+                    "rotate {path} quat=({},{},{},{})",
+                    orient.w, orient.x, orient.y, orient.z
+                ),
+            }
         }
         GenDirective::NearPin {
             a,
@@ -444,16 +465,64 @@ fn parse_line(line: &str) -> Result<Item, String> {
             nodes: node_list(rest, "aligny")?,
         }),
         "rotate" => {
+            // `rotate <path> <angle> [bottom]`  |  `rotate <path> quat=(w,x,y,z)`
             let toks: Vec<&str> = rest.split_whitespace().collect();
-            let (path, deg_s, bottom) = match toks.as_slice() {
-                [p, d] => (p.to_string(), *d, false),
-                [p, d, "bottom"] => (p.to_string(), *d, true),
-                _ => return Err("rotate <path> <deg> [bottom]".into()),
+            let (path, spec, bottom) = match toks.as_slice() {
+                [p, s] => (p.to_string(), *s, false),
+                [p, s, "bottom"] => (p.to_string(), *s, true),
+                _ => {
+                    return Err(
+                        "rotate <path> <deg> [bottom]  |  rotate <path> quat=(w,x,y,z)".into(),
+                    );
+                }
             };
-            let deg: i32 = deg_s
-                .parse()
-                .map_err(|_| format!("`{deg_s}` is not an integer degree count"))?;
-            Item::Directive(GenDirective::Rotate { path, deg, bottom })
+            let orient = if let Some(q) = spec.strip_prefix("quat=") {
+                if bottom {
+                    return Err(
+                        "`bottom` is invalid with quat= (the flip is part of the quaternion)"
+                            .into(),
+                    );
+                }
+                let inner = q
+                    .strip_prefix('(')
+                    .and_then(|s| s.strip_suffix(')'))
+                    .ok_or("quat must be written quat=(w,x,y,z)")?;
+                let n: Vec<&str> = inner.split(',').collect();
+                if n.len() != 4 {
+                    return Err("quat needs four integer components: quat=(w,x,y,z)".into());
+                }
+                let pi = |t: &str| {
+                    t.trim()
+                        .parse::<i64>()
+                        .map_err(|_| format!("`{}` is not an integer", t.trim()))
+                };
+                let o = Orient {
+                    w: pi(n[0])?,
+                    x: pi(n[1])?,
+                    y: pi(n[2])?,
+                    z: pi(n[3])?,
+                };
+                if (o.w, o.x, o.y, o.z) == (0, 0, 0, 0) {
+                    return Err("quat=(0,0,0,0) is not a rotation".into());
+                }
+                o
+            } else {
+                // An integer cardinal uses the tiny exact quaternion; any other angle is
+                // lowered (once, at parse) to a scaled integer quaternion.
+                let mut o = if let Ok(d) = spec.parse::<i32>() {
+                    Orient::from_deg(d).unwrap_or_else(|| Orient::from_angle_deg(d as f64))
+                } else {
+                    let deg: f64 = spec
+                        .parse()
+                        .map_err(|_| format!("`{spec}` is not a number of degrees"))?;
+                    Orient::from_angle_deg(deg)
+                };
+                if bottom {
+                    o = o.flipped();
+                }
+                o
+            };
+            Item::Directive(GenDirective::Rotate { path, orient })
         }
         "nearpin" => {
             let (a, bpin, len) = two_tokens_and_len(rest, "nearpin <a> <bComp>.<bPin> <len>")?;
@@ -925,8 +994,7 @@ mod tests {
             },
             GenDirective::Rotate {
                 path: "psu.reg".into(),
-                deg: 90,
-                bottom: false,
+                orient: Orient::from_deg(90).unwrap(),
             },
             GenDirective::NearPin {
                 a: "psu.dec[0]".into(),
@@ -1344,8 +1412,7 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
             },
             GenDirective::Rotate {
                 path: "reg".into(),
-                deg: 90,
-                bottom: false,
+                orient: Orient::from_deg(90).unwrap(),
             },
             GenDirective::NearPin {
                 a: "dec".into(),
@@ -1366,8 +1433,7 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
             src[0],
             GenDirective::Rotate {
                 path: "u1".into(),
-                deg: -90,
-                bottom: false,
+                orient: Orient::from_deg(-90).unwrap(),
             }
         );
         assert_eq!(
@@ -1379,9 +1445,34 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
                 within: 1_500_000,
             }
         );
-        // Off-axis rotation is rejected at elaboration, not parse.
+        // Off-axis angles are valid now (Stage 2) — lowered to a quaternion, not rejected.
         assert!(parse("rotate u1 45").is_ok());
+        assert!(parse("rotate u1 30.5").is_ok());
         assert!(parse("rotate u1 notnum").is_err());
+    }
+
+    #[test]
+    fn arbitrary_angle_round_trips_as_a_quaternion() {
+        // A non-cardinal angle lowers to a quaternion and serialises as `quat=(…)`
+        // (the angle isn't exactly representable; the quaternion is the canonical form).
+        let (src, _) = parse("rotate u1 30").unwrap();
+        let GenDirective::Rotate { orient, .. } = &src[0] else {
+            panic!("expected a rotate, got {:?}", src[0]);
+        };
+        assert_eq!(*orient, Orient::from_angle_deg(30.0));
+        assert_eq!(orient.to_deg(), 30, "≈ 30° about z");
+        // Canonical form is the exact quaternion, and re-parses identically.
+        let canon = render_directive(&src[0]);
+        assert!(
+            canon.starts_with("rotate u1 quat=("),
+            "non-cardinal serialises as quat: {canon}"
+        );
+        assert_eq!(parse(&canon).unwrap().0, src);
+        // A cardinal still serialises readably (and `bottom` survives).
+        assert_eq!(
+            render_directive(&parse("rotate u1 90 bottom").unwrap().0[0]),
+            "rotate u1 90 bottom"
+        );
     }
 
     #[test]
@@ -1391,8 +1482,7 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
             src[0],
             GenDirective::Rotate {
                 path: "u1".into(),
-                deg: 90,
-                bottom: true,
+                orient: Orient::from_deg(90).unwrap().flipped(),
             }
         );
         // Canonical serialization carries the `bottom` flag and re-parses identically.
@@ -1400,8 +1490,7 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
         assert_eq!(parse("rotate u1 90").unwrap().0[0], {
             GenDirective::Rotate {
                 path: "u1".into(),
-                deg: 90,
-                bottom: false,
+                orient: Orient::from_deg(90).unwrap(),
             }
         });
         // A stray third token that isn't `bottom` is an error.

@@ -969,6 +969,7 @@ mod tests {
     use super::*;
     use crate::command::{Command, Transaction};
     use crate::doc::Doc;
+    use crate::doc::Orient;
     use crate::elaborate::{board_rect, psu_module};
     use crate::history::History;
     use crate::part::part_library;
@@ -1036,8 +1037,7 @@ psu.reg,LDO,0.000000,0.000000,0,T
                 },
                 G::Rotate {
                     path: "u1".into(),
-                    deg: 90,
-                    bottom: false,
+                    orient: Orient::from_deg(90).unwrap(),
                 },
             ])),
             &lib,
@@ -1064,8 +1064,7 @@ psu.reg,LDO,0.000000,0.000000,0,T
                 },
                 G::Rotate {
                     path: "u1".into(),
-                    deg: 0,
-                    bottom: true,
+                    orient: Orient::from_deg(0).unwrap().flipped(),
                 },
             ])),
             &lib,

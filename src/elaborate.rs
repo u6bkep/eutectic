@@ -105,13 +105,13 @@ pub enum GenDirective {
     NoConnect {
         pins: Vec<(String, String)>,
     },
-    /// Set a component's orientation: a planar rotation (cardinal degrees 0/90/180/270;
-    /// arbitrary angles arrive in Stage 2) optionally flipped to the board **bottom**
-    /// (`bottom`). A settable attribute, not a solver DOF.
+    /// Set a component's orientation to a quaternion [`Orient`] (planar rotation,
+    /// optionally flipped to the board bottom — both baked into the quaternion at
+    /// authoring time). A settable attribute, not a solver DOF. The text front-end
+    /// lowers a `<deg> [bottom]` (any angle) or `quat=(w,x,y,z)` into this.
     Rotate {
         path: String,
-        deg: i32,
-        bottom: bool,
+        orient: Orient,
     },
     /// Like `Near`, but the target is a specific *pin* (`b_comp`.`b_pin`) rather
     /// than a component centroid. The pin's world position tracks its component's
@@ -228,7 +228,7 @@ pub fn elaborate(
     // Pass 2a: orientation (a settable attribute, resolved before constraints so a
     // NearPin target's pin offset can be rotated correctly).
     for d in source {
-        if let GenDirective::Rotate { path, deg, bottom } = d {
+        if let GenDirective::Rotate { path, orient } = d {
             let id = EntityId::new(path.clone());
             if note_missing(
                 &id,
@@ -239,20 +239,12 @@ pub fn elaborate(
             ) {
                 continue;
             }
-            match Orient::from_deg(*deg) {
-                Some(o) => {
-                    let o = if *bottom { o.flipped() } else { o };
-                    components
-                        .get_mut(&id)
-                        .expect("note_missing confirmed presence")
-                        .orient = o
-                }
-                None => errors.push(Diagnostic::error(
-                    "E_BAD_ROTATION",
-                    format!("rotate `{path}` by {deg}deg: only 0/90/180/270 supported"),
-                    Location::Entity(id),
-                )),
-            }
+            // The quaternion is already valid by construction (the text front-end lowers
+            // any angle, so there is no off-axis rejection anymore) — just assign it.
+            components
+                .get_mut(&id)
+                .expect("note_missing confirmed presence")
+                .orient = *orient;
         }
     }
 
@@ -1060,6 +1052,40 @@ pub fn psu_module(n: usize) -> Source {
     s
 }
 
+/// Generate a **ring** of `count` instances of `part`, evenly spaced on a circle of
+/// `radius` about `center`, each rotated to **face outward** (local +x points away
+/// from the centre). Per instance `i` (path `{prefix}[i]`) it emits an `Instance`, a
+/// `Place` at the ring position, and a `Rotate` to the outward orientation — all
+/// concrete: the `cos`/`sin` runs **once here, at generation**, producing exact
+/// integer positions + quaternions that elaboration never re-derives. The motivating
+/// case: side-firing LEDs around a round board (the arbitrary-angle placement that
+/// the cardinal-only `Orient` could not express).
+pub fn ring(prefix: &str, part: &str, center: Point, radius: Nm, count: usize) -> Source {
+    let mut s = Vec::new();
+    for i in 0..count {
+        let path = format!("{prefix}[{i}]");
+        let deg = 360.0 * i as f64 / count as f64;
+        let rad = deg.to_radians();
+        let pos = Point {
+            x: center.x + (radius as f64 * rad.cos()).round() as Nm,
+            y: center.y + (radius as f64 * rad.sin()).round() as Nm,
+        };
+        s.push(GenDirective::Instance {
+            path: path.clone(),
+            part: part.to_string(),
+        });
+        s.push(GenDirective::Place {
+            path: path.clone(),
+            pos,
+        });
+        s.push(GenDirective::Rotate {
+            path,
+            orient: Orient::from_angle_deg(deg),
+        });
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1067,6 +1093,38 @@ mod tests {
 
     fn pt(x: Nm, y: Nm) -> Point {
         Point { x, y }
+    }
+
+    #[test]
+    fn ring_places_instances_around_a_circle_facing_outward() {
+        // 12 side-firing LEDs on a 10 mm-radius ring — the arbitrary-angle case.
+        let s = ring("led", "LED", pt(0, 0), 10_000_000, 12);
+        assert_eq!(s.len(), 36, "12 × (Instance, Place, Rotate)");
+        // Pull the (Place, Rotate) for a given index.
+        let place_of = |i: usize| {
+            s.iter().find_map(|d| match d {
+                GenDirective::Place { path, pos } if path == &format!("led[{i}]") => Some(*pos),
+                _ => None,
+            })
+        };
+        let rot_of = |i: usize| {
+            s.iter().find_map(|d| match d {
+                GenDirective::Rotate { path, orient } if path == &format!("led[{i}]") => {
+                    Some(*orient)
+                }
+                _ => None,
+            })
+        };
+        // led[0] at angle 0 → east point, 0°. led[3] at 90° → north, ≈90°. led[6] →
+        // west, ≈180°. All exactly on the ring (positions rounded to nm).
+        assert_eq!(place_of(0).unwrap(), pt(10_000_000, 0));
+        assert_eq!(rot_of(0).unwrap().to_deg(), 0);
+        assert_eq!(place_of(3).unwrap(), pt(0, 10_000_000));
+        assert_eq!(rot_of(3).unwrap().to_deg(), 90);
+        assert_eq!(rot_of(6).unwrap().to_deg(), 180);
+        // 30° (= 360/12) is off-axis: led[1] is a real quaternion, not a cardinal.
+        assert_eq!(rot_of(1).unwrap().to_deg(), 30);
+        assert!(!rot_of(1).unwrap().is_bottom());
     }
 
     /// Board + cutout + a Top conductor region lower to exactly one Substrate, one
