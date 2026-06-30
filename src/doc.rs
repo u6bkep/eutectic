@@ -124,6 +124,9 @@ impl Orient {
         let m10 = 2 * (x * y + w * z);
         let m11 = w * w - x * x + y * y - z * z;
         let den = self.norm2();
+        if den == 0 {
+            return p; // a degenerate (zero) quaternion isn't a rotation — never divide by 0
+        }
         let (px, py) = (p.x as i128, p.y as i128);
         Point {
             x: rdiv_i128(m00 * px + m01 * py, den) as Nm,

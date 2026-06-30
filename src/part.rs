@@ -647,6 +647,31 @@ mod tests {
     }
 
     #[test]
+    fn degenerate_quaternion_apply_is_a_safe_no_op() {
+        // A zero quaternion isn't a rotation; `apply` must not divide by zero (defence
+        // in depth — the parser also rejects it). It falls back to leaving the point put.
+        let zero = Orient {
+            w: 0,
+            x: 0,
+            y: 0,
+            z: 0,
+        };
+        assert_eq!(zero.apply(Point { x: 5, y: 3 }), Point { x: 5, y: 3 });
+    }
+
+    #[test]
+    fn arbitrary_angle_rotates_correctly() {
+        // 30° about z: apply to (1mm, 0) ≈ (cos30, sin30)·1mm = (866025, 500000) nm.
+        let o = Orient::from_angle_deg(30.0);
+        let r = o.apply(Point { x: MM, y: 0 });
+        assert!(
+            (r.x - 866_025).abs() < 50 && (r.y - 500_000).abs() < 50,
+            "got {r:?}"
+        );
+        assert_eq!(o.to_deg(), 30);
+    }
+
+    #[test]
     fn bottom_side_pad_swaps_to_the_bottom_copper_layer() {
         let su = Stackup::default_2layer();
         let pin = PinDef {

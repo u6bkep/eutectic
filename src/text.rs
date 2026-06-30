@@ -465,25 +465,17 @@ fn parse_line(line: &str) -> Result<Item, String> {
             nodes: node_list(rest, "aligny")?,
         }),
         "rotate" => {
-            // `rotate <path> <angle> [bottom]`  |  `rotate <path> quat=(w,x,y,z)`
-            let toks: Vec<&str> = rest.split_whitespace().collect();
-            let (path, spec, bottom) = match toks.as_slice() {
-                [p, s] => (p.to_string(), *s, false),
-                [p, s, "bottom"] => (p.to_string(), *s, true),
-                _ => {
-                    return Err(
-                        "rotate <path> <deg> [bottom]  |  rotate <path> quat=(w,x,y,z)".into(),
-                    );
-                }
-            };
+            // `rotate <path> <angle> [bottom]`  |  `rotate <path> quat=(w,x,y,z)`.
+            // Split the path off first so a `quat=(...)` with internal whitespace
+            // (`quat=(1, 0, 0, 1)`) survives.
+            let rest = rest.trim();
+            let (path, spec) = rest
+                .split_once(char::is_whitespace)
+                .map(|(p, s)| (p.to_string(), s.trim()))
+                .ok_or("rotate <path> <deg> [bottom]  |  rotate <path> quat=(w,x,y,z)")?;
             let orient = if let Some(q) = spec.strip_prefix("quat=") {
-                if bottom {
-                    return Err(
-                        "`bottom` is invalid with quat= (the flip is part of the quaternion)"
-                            .into(),
-                    );
-                }
                 let inner = q
+                    .trim()
                     .strip_prefix('(')
                     .and_then(|s| s.strip_suffix(')'))
                     .ok_or("quat must be written quat=(w,x,y,z)")?;
@@ -507,14 +499,23 @@ fn parse_line(line: &str) -> Result<Item, String> {
                 }
                 o
             } else {
-                // An integer cardinal uses the tiny exact quaternion; any other angle is
-                // lowered (once, at parse) to a scaled integer quaternion.
-                let mut o = if let Ok(d) = spec.parse::<i32>() {
+                // `<angle> [bottom]` — an integer cardinal uses the tiny exact quaternion;
+                // any other (finite) angle lowers once, at parse, to a scaled quaternion.
+                let toks: Vec<&str> = spec.split_whitespace().collect();
+                let (angle_s, bottom) = match toks.as_slice() {
+                    [a] => (*a, false),
+                    [a, "bottom"] => (*a, true),
+                    _ => return Err("rotate <path> <deg> [bottom]".into()),
+                };
+                let mut o = if let Ok(d) = angle_s.parse::<i32>() {
                     Orient::from_deg(d).unwrap_or_else(|| Orient::from_angle_deg(d as f64))
                 } else {
-                    let deg: f64 = spec
+                    let deg: f64 = angle_s
                         .parse()
-                        .map_err(|_| format!("`{spec}` is not a number of degrees"))?;
+                        .map_err(|_| format!("`{angle_s}` is not a number of degrees"))?;
+                    if !deg.is_finite() {
+                        return Err(format!("rotation angle `{angle_s}` must be finite"));
+                    }
                     Orient::from_angle_deg(deg)
                 };
                 if bottom {
@@ -1473,6 +1474,20 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
             render_directive(&parse("rotate u1 90 bottom").unwrap().0[0]),
             "rotate u1 90 bottom"
         );
+    }
+
+    #[test]
+    fn rotate_rejects_non_finite_and_tolerates_quat_whitespace() {
+        // Non-finite angles must be a clean error, never a degenerate (0,0,0,0) orient.
+        assert!(parse("rotate u1 nan").is_err());
+        assert!(parse("rotate u1 inf").is_err());
+        assert!(parse("rotate u1 -inf").is_err());
+        assert!(parse("rotate u1 1e309").is_err()); // overflows f64 to +inf
+        // `quat=` tolerates whitespace after commas (same as the no-space canonical form).
+        let spaced = parse("rotate u1 quat=(1, 0, 0, 1)").unwrap().0;
+        let tight = parse("rotate u1 quat=(1,0,0,1)").unwrap().0;
+        assert_eq!(spaced, tight);
+        assert!(parse("rotate u1 quat=(0,0,0,0)").is_err());
     }
 
     #[test]
