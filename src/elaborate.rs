@@ -13,7 +13,7 @@
 
 use crate::diagnostic::{Diagnostic, Location};
 use crate::doc::*;
-use crate::geom::{BoardShape, Role, Shape2D};
+use crate::geom::{BoardShape, Role, Shape2D, Stackup};
 use crate::id::{EntityId, NetId};
 use crate::part::{Dir, PartDef, PartLib, courtyard_half_extents};
 use crate::route::Layer;
@@ -817,6 +817,19 @@ pub fn regions(source: &Source) -> Vec<RegionDecl> {
             _ => None,
         })
         .collect()
+}
+
+/// The board [`Stackup`] for a source — the single shared reader that every consumer
+/// lowering an abstract layer to a real `ZRange` must go through (sibling to
+/// [`board_shape`] / [`regions`]).
+///
+/// Today this is always [`Stackup::default_2layer`]; authored-stackup storage (a
+/// `GenDirective::Stackup` variant + its text grammar) lands with the text-authoring
+/// owner in the convergence's Phase 1. Routing every caller through this reader now
+/// makes that a one-place change and gives the Phase-1 feature-derivations
+/// (`PadGeo::features`, region lowering) a stable API to thread.
+pub fn stackup(_source: &Source) -> Stackup {
+    Stackup::default_2layer()
 }
 
 /// Build a rectangular [`Board`](GenDirective::Board) directive from opposite corners

@@ -31,6 +31,7 @@
 //! pairs to check) lives in DRC; this module is the pure geometry + data model.
 
 use crate::doc::{Nm, Point};
+use crate::id::NetId;
 
 /// Default board thickness: 1.6 mm, in nm.
 pub const BOARD_THICKNESS: Nm = 1_600_000;
@@ -777,6 +778,34 @@ impl Feature {
     }
 }
 
+/// A physical [`Feature`] paired with the electrical **net** it carries, if any.
+/// This is the converged form of the live `route::CopperPiece`: the net is an
+/// *annotation alongside* the geometry, **never a field on [`Feature`]** —
+/// connectivity is authoritative and lives separately (see
+/// docs/geometry-model-convergence.md, Decision 12). `net == None` means no
+/// electrical identity: board substrate, a silk marking, a void, or a floating pad.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetFeature {
+    pub net: Option<NetId>,
+    pub feature: Feature,
+}
+
+impl NetFeature {
+    pub fn new(net: Option<NetId>, feature: Feature) -> NetFeature {
+        NetFeature { net, feature }
+    }
+    /// A feature with no electrical identity (substrate, silk, void).
+    pub fn netless(feature: Feature) -> NetFeature {
+        NetFeature { net: None, feature }
+    }
+    /// Do two features belong to the **same** net? Two unnetted pieces are *not* the
+    /// same net — an unnetted piece shares identity with nothing. (The different-net
+    /// clearance *policy* stays in the caller; this is just net identity.)
+    pub fn same_net(&self, other: &NetFeature) -> bool {
+        matches!((&self.net, &other.net), (Some(a), Some(b)) if a == b)
+    }
+}
+
 /// A copper/dielectric/etc. slab: a named z-range with a default role + material.
 /// A "layer" in the familiar sense is one of these.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -827,6 +856,46 @@ impl Stackup {
     /// The z-range of a named slab (the bridge a 2.5D "place this on F.Cu" uses).
     pub fn slab_z(&self, name: &str) -> Option<ZRange> {
         self.slabs.iter().find(|s| s.name == name).map(|s| s.z)
+    }
+
+    /// The conductor slabs, ordered **top-most first** (descending z). This is the
+    /// bridge from an abstract copper layer to its real z: the top outer copper is
+    /// index `0`, the bottom outer copper is the last entry, and inner copper layers
+    /// fall in between in physical stack order — matching
+    /// [`route::Layer::depth`](crate::route::Layer::depth) (`Top` = 0, `Inner(n)` =
+    /// `1+n`, `Bottom` = last).
+    pub fn copper_slabs(&self) -> Vec<&Slab> {
+        let mut cu: Vec<&Slab> = self
+            .slabs
+            .iter()
+            .filter(|s| s.role == Role::Conductor)
+            .collect();
+        cu.sort_by_key(|s| std::cmp::Reverse(s.z.hi));
+        cu
+    }
+
+    /// The z-range of the `i`-th copper layer counting from the top (0 = top outer).
+    /// `None` if the stackup has fewer than `i+1` copper layers.
+    pub fn nth_copper_from_top(&self, i: usize) -> Option<ZRange> {
+        self.copper_slabs().get(i).map(|s| s.z)
+    }
+
+    /// The top outer copper z-range (highest-z conductor slab).
+    pub fn top_copper(&self) -> Option<ZRange> {
+        self.copper_slabs().first().map(|s| s.z)
+    }
+
+    /// The bottom outer copper z-range (lowest-z conductor slab).
+    pub fn bottom_copper(&self) -> Option<ZRange> {
+        self.copper_slabs().last().map(|s| s.z)
+    }
+
+    /// The full board vertical extent — lowest slab face to highest. The z a board
+    /// substrate prism or a through-hole/plated barrel spans.
+    pub fn board_z(&self) -> Option<ZRange> {
+        let lo = self.slabs.iter().map(|s| s.z.lo).min()?;
+        let hi = self.slabs.iter().map(|s| s.z.hi).max()?;
+        Some(ZRange::new(lo, hi))
     }
 }
 
@@ -988,6 +1057,44 @@ mod tests {
         assert!(
             a_top.clears(&b_bot, MM),
             "different layers do not clash geometrically"
+        );
+    }
+
+    #[test]
+    fn stackup_copper_accessors_are_ordered_top_down() {
+        let su = Stackup::default_2layer();
+        let cu = su.copper_slabs();
+        assert_eq!(cu.len(), 2, "default 2-layer has two copper slabs");
+        assert_eq!(cu[0].name, "F.Cu", "top-most copper is index 0");
+        assert_eq!(cu[1].name, "B.Cu", "bottom copper is last");
+        assert_eq!(su.top_copper(), su.slab_z("F.Cu"));
+        assert_eq!(su.bottom_copper(), su.slab_z("B.Cu"));
+        assert_eq!(su.nth_copper_from_top(0), su.slab_z("F.Cu"));
+        assert_eq!(su.nth_copper_from_top(1), su.slab_z("B.Cu"));
+        assert_eq!(su.nth_copper_from_top(2), None, "no third copper layer");
+        let bz = su.board_z().unwrap();
+        assert_eq!(
+            (bz.lo, bz.hi),
+            (0, BOARD_THICKNESS),
+            "board_z spans the whole stack"
+        );
+    }
+
+    #[test]
+    fn netfeature_same_net_is_identity_not_presence() {
+        use crate::id::NetId;
+        let s = Shape2D::disc(pt(0, 0), MM);
+        let z = Stackup::default_2layer().top_copper().unwrap();
+        let f = Feature::prism(Role::Conductor, s, z);
+        let gnd1 = NetFeature::new(Some(NetId::new("GND")), f.clone());
+        let gnd2 = NetFeature::new(Some(NetId::new("GND")), f.clone());
+        let vcc = NetFeature::new(Some(NetId::new("VCC")), f.clone());
+        let floating = NetFeature::netless(f);
+        assert!(gnd1.same_net(&gnd2), "equal net ids are the same net");
+        assert!(!gnd1.same_net(&vcc), "different net ids are not");
+        assert!(
+            !floating.same_net(&floating),
+            "an unnetted piece shares net identity with nothing"
         );
     }
 
