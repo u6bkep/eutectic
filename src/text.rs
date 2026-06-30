@@ -71,7 +71,7 @@
 use crate::diagnostic::{Diagnostic, Location};
 use crate::doc::{Doc, MM, Nm, Orient, Override, Point, Strength};
 use crate::elaborate::{GenDirective, RegionDecl, Source, board_rect};
-use crate::geom::{KeepoutKind, Path, Role, Seg, Shape2D};
+use crate::geom::{KeepoutKind, Material, Path, Role, Seg, Shape2D, Slab, ZRange};
 use crate::id::EntityId;
 use crate::route::Layer;
 use std::collections::BTreeMap;
@@ -136,6 +136,23 @@ fn render_directive(d: &GenDirective) -> String {
             s.push(' ');
             s.push_str(&fmt_path(r.shape.path()));
             s
+        }
+        GenDirective::Slab(s) => {
+            // `slab <name> <z_lo> <z_hi> <role> [material]`. Role uses the same total
+            // `role_token` as `region` (so Substrate etc. serialise fine); material is an
+            // optional bare name.
+            let mut out = format!(
+                "slab {} {} {} {}",
+                s.name,
+                fmt_len(s.z.lo),
+                fmt_len(s.z.hi),
+                role_token(&s.role)
+            );
+            if let Some(m) = &s.material {
+                out.push(' ');
+                out.push_str(&m.name);
+            }
+            out
         }
         GenDirective::Near { a, b, within } => format!("near {a} {b} {}", fmt_len(*within)),
         GenDirective::MinSep { a, b, gap } => format!("minsep {a} {b} {}", fmt_len(*gap)),
@@ -448,6 +465,29 @@ fn parse_line(line: &str) -> Result<Item, String> {
                 role,
                 net,
                 layer,
+            }))
+        }
+        "slab" => {
+            // `slab <name> <z_lo> <z_hi> <role> [material]`. z's are lengths (mm/nm via
+            // `parse_len`); role uses `parse_role` (plus `substrate`, which a real
+            // copper/dielectric/copper stackup needs — `region` keeps its narrower
+            // vocabulary, this only widens the slab path); material is an optional bare
+            // name lowered to `Material::named`.
+            let toks: Vec<&str> = rest.split_whitespace().collect();
+            if toks.len() < 4 || toks.len() > 5 {
+                return Err("slab <name> <z_lo> <z_hi> <role> [material]".into());
+            }
+            let z = ZRange::new(parse_len(toks[1])?, parse_len(toks[2])?);
+            let role = match toks[3] {
+                "substrate" => Role::Substrate,
+                other => parse_role(other)?,
+            };
+            let material = toks.get(4).map(|m| Material::named(m));
+            Item::Directive(GenDirective::Slab(Slab {
+                name: toks[0].to_string(),
+                z,
+                role,
+                material,
             }))
         }
         "near" => {
@@ -977,6 +1017,26 @@ mod tests {
                 net: None,
                 layer: Layer::Top,
             }),
+            // An authored 3-slab stackup: conductor / substrate / conductor, exercising
+            // the substrate role and both material-present and material-absent slabs.
+            GenDirective::Slab(Slab {
+                name: "B.Cu".into(),
+                z: ZRange::new(0, 35_000),
+                role: Role::Conductor,
+                material: Some(Material::named("copper")),
+            }),
+            GenDirective::Slab(Slab {
+                name: "core".into(),
+                z: ZRange::new(35_000, 1_565_000),
+                role: Role::Substrate,
+                material: None,
+            }),
+            GenDirective::Slab(Slab {
+                name: "F.Cu".into(),
+                z: ZRange::new(1_565_000, 1_600_000),
+                role: Role::Conductor,
+                material: Some(Material::named("copper")),
+            }),
             GenDirective::Near {
                 a: "psu.dec[0]".into(),
                 b: "psu.reg".into(),
@@ -1074,6 +1134,44 @@ mod tests {
         let (src, ovr) = parse(&text).expect("parse");
         assert_eq!(src, doc.source, "source must round-trip");
         assert_eq!(ovr, doc.overrides, "overrides must round-trip");
+    }
+
+    /// A `slab` directive parses to the expected `Slab` (name, z's, role, optional
+    /// material) and round-trips through `serialize`. Covers material-present,
+    /// material-absent, and the `substrate` role (which `region` does not accept).
+    #[test]
+    fn slab_directive_parses_and_round_trips() {
+        let text = "\
+slab B.Cu 0mm 0.035mm conductor copper
+slab core 0.035mm 1.565mm substrate
+slab F.Cu 1.565mm 1.6mm conductor copper";
+        let (src, _) = parse(text).expect("parse");
+        assert_eq!(
+            src,
+            vec![
+                GenDirective::Slab(Slab {
+                    name: "B.Cu".into(),
+                    z: ZRange::new(0, 35_000),
+                    role: Role::Conductor,
+                    material: Some(Material::named("copper")),
+                }),
+                GenDirective::Slab(Slab {
+                    name: "core".into(),
+                    z: ZRange::new(35_000, 1_565_000),
+                    role: Role::Substrate,
+                    material: None,
+                }),
+                GenDirective::Slab(Slab {
+                    name: "F.Cu".into(),
+                    z: ZRange::new(1_565_000, 1_600_000),
+                    role: Role::Conductor,
+                    material: Some(Material::named("copper")),
+                }),
+            ]
+        );
+        // Canonical serialization re-parses to the same source.
+        let doc = doc_of(src.clone(), BTreeMap::new());
+        assert_eq!(parse(&serialize(&doc)).unwrap().0, src);
     }
 
     /// A region directive parses to the expected `RegionDecl` (role, net, layer, and
