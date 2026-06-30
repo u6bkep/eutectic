@@ -1,11 +1,20 @@
 # Geometry-model convergence — decision record
 
-Status: **agreed in discussion, not yet implemented.** This record captures the
-foundation decisions for the next work cycle. It is meant to be folded into
-`architecture.md` §8 once the convergence is built. It supersedes nothing in the
-design of record — it *realigns the implementation* with what §8 already states and
-sharpens three points (the single primitive, the placement transform, and how far
-"volume" goes now).
+Status: **Phases 0–2 implemented and merged to `main` (2026-06-30).** The single
+`Feature` primitive is now the live clearance currency end-to-end — DRC, pours,
+Gerber, and the autorouter all gate on `Feature::clears`, and the parallel
+`route::Layer` copper-piece model (`CopperPiece`/`PieceLayers`/`net_copper`/
+`copper_layers_present`) has been deleted. Commits `45d3df6` (Phase 0) →
+`53f344a`/`f1a59e3` (Phase 1 lowerings) → `b2aa6d9`/`5d5d517`/`812a203` (Phase 2a–d)
+→ `0c124f8` (review fixes). Decisions 1, 2, 4, 5, 11, 12 are realized in code.
+**Still open** (post-convergence, see §7): placement transform (Decisions 6–8), text
+(Decision 9), courtyard→polygon (Decision 10), the `GenDirective::Stackup` authoring
+grammar, the SVG render-uses-points rider, and the importers (0016/0017). This record
+is still meant to be folded into `architecture.md` §8.
+
+This record captures the foundation decisions; it *realigned the implementation* with
+what §8 already stated and sharpened three points (the single primitive, the placement
+transform, and how far "volume" goes now).
 
 The trigger was scoping footprint-graphics / board-outline import (issues 0016/0017).
 Pulling that thread surfaced that the *design* already wants one uniform geometry

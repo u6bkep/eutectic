@@ -452,6 +452,18 @@ the base set, not a new kind.
 
 ### Status / plan
 
+> **Update (2026-06-30) — geometry-model convergence, Phases 0–2 done.** `Feature`
+> (role + material + `Shape2D`×`ZRange`) is now the **single live clearance model**:
+> DRC, copper pours, Gerber pad flashing, and the autorouter all reduce copper to
+> `Feature`s and gate on `Feature::clears` (z-overlap ∧ distance). The parallel
+> `route::Layer` copper-piece model (`CopperPiece`/`PieceLayers`/`net_copper`) has been
+> deleted; `route::Layer` survives only as the trace/via routing tier + violation
+> granularity. Board outline / cutouts / regions / pads lower to `Feature`s via
+> `elaborate::features` and `PinDef::pad_features`, threaded through a stored `Stackup`.
+> See `docs/geometry-model-convergence.md` for the full decision record (this section
+> will be folded into it). The "Stages 1–3" prose below predates the convergence and
+> describes the now-retired `route::Layer`/`PadGeo`-direct clearance path.
+
 Design of record (this section). **Stages 1–3 implemented.** (1) the `geom` core;
 (2) pads are real `PadGeo` copper + drill geometry, imported from KiCad
 (circle/rect/roundrect/oval exactly, custom→bounding-box, with pad
