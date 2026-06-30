@@ -13,7 +13,7 @@
 
 use crate::diagnostic::{Diagnostic, Location};
 use crate::doc::*;
-use crate::geom::{BoardShape, Feature, NetFeature, Role, Shape2D, Stackup, ZRange};
+use crate::geom::{BoardShape, Feature, NetFeature, Role, Shape2D, Slab, Stackup, ZRange};
 use crate::id::{EntityId, NetId};
 use crate::part::{Dir, PartDef, PartLib, courtyard_half_extents};
 use crate::route::Layer;
@@ -69,6 +69,12 @@ pub enum GenDirective {
     /// An authored filled region — a copper pour, keep-out, or filled void. See
     /// [`RegionDecl`]. Read by [`regions`]; the knockout fill is derived downstream.
     Region(RegionDecl),
+    /// One authored board-stackup [`Slab`] (a named z-slab with a role + optional
+    /// material). Accumulated by [`stackup`] into the board [`Stackup`], mirroring how
+    /// [`Region`](Self::Region) directives are collected by [`regions`]. This is *not* a
+    /// placement/connectivity directive — elaboration's passes ignore it; it is read
+    /// only by [`stackup`].
+    Slab(Slab),
     /// Relational placement constraint solved by the least-change solver.
     Near {
         a: String,
@@ -820,13 +826,30 @@ pub fn regions(source: &Source) -> Vec<RegionDecl> {
 /// lowering an abstract layer to a real `ZRange` must go through (sibling to
 /// [`board_shape`] / [`regions`]).
 ///
-/// Today this is always [`Stackup::default_2layer`]; authored-stackup storage (a
-/// `GenDirective::Stackup` variant + its text grammar) lands with the text-authoring
-/// owner in the convergence's Phase 1. Routing every caller through this reader now
-/// makes that a one-place change and gives the Phase-1 feature-derivations
-/// (`PadGeo::features`, region lowering) a stable API to thread.
-pub fn stackup(_source: &Source) -> Stackup {
-    Stackup::default_2layer()
+/// Collects every [`Slab`](GenDirective::Slab) directive, in **declaration order**, into
+/// `Stackup { slabs }` — exactly as [`regions`] collects [`RegionDecl`]s. Declaration
+/// order is preserved (not sorted): [`Stackup`]'s own accessors order by z where they
+/// need to ([`Stackup::copper_slabs`] sorts by z, [`Stackup::board_z`] takes min/max,
+/// [`Stackup::slab_z`] looks up by name), so order is functionally irrelevant — and
+/// preserving it keeps `parse(serialize(doc)) == doc` trivially. No overlap/gap
+/// validation is performed here (`ZRange::new` already normalises `lo ≤ hi`); a future
+/// validation pass can layer on top without changing this reader's contract.
+///
+/// If the source authors **no** slabs, falls back to [`Stackup::default_2layer`] — the
+/// unchanged familiar 2-layer default, so existing sources behave exactly as before.
+pub fn stackup(source: &Source) -> Stackup {
+    let slabs: Vec<Slab> = source
+        .iter()
+        .filter_map(|d| match d {
+            GenDirective::Slab(s) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+    if slabs.is_empty() {
+        Stackup::default_2layer()
+    } else {
+        Stackup { slabs }
+    }
 }
 
 /// Lower an abstract copper [`Layer`] to its absolute [`ZRange`] via the stackup:
@@ -1203,5 +1226,57 @@ mod tests {
         let Extent::Prism { shape, .. } = &subs[0].feature.extent;
         assert_eq!(*shape, last, "the LAST board outline becomes the substrate");
         assert_ne!(*shape, first, "the earlier board is dropped");
+    }
+
+    /// A source with `Slab` directives makes `stackup()` return *those* slabs, in
+    /// declaration order — not the 2-layer default.
+    #[test]
+    fn stackup_reads_authored_slabs() {
+        // A non-default 2 mm board (distinct z's from `default_2layer`), with the middle
+        // dielectric left material-less to also exercise the optional-material path.
+        let authored = vec![
+            Slab {
+                name: "B.Cu".into(),
+                z: ZRange::new(0, 35_000),
+                role: Role::Conductor,
+                material: Some(crate::geom::Material::named("copper")),
+            },
+            Slab {
+                name: "core".into(),
+                z: ZRange::new(35_000, 1_965_000),
+                role: Role::Substrate,
+                material: None,
+            },
+            Slab {
+                name: "F.Cu".into(),
+                z: ZRange::new(1_965_000, 2_000_000),
+                role: Role::Conductor,
+                material: Some(crate::geom::Material::named("copper")),
+            },
+        ];
+        let src: Source = authored.iter().cloned().map(GenDirective::Slab).collect();
+        let su = stackup(&src);
+        assert_eq!(
+            su.slabs, authored,
+            "stackup() returns the authored slabs verbatim"
+        );
+        assert_ne!(
+            su,
+            Stackup::default_2layer(),
+            "authored slabs are not the default (distinct z's)"
+        );
+    }
+
+    /// With no `Slab` directives, `stackup()` falls back to the unchanged 2-layer
+    /// default — even when the source has other (non-slab) directives.
+    #[test]
+    fn stackup_defaults_when_no_slabs() {
+        assert_eq!(stackup(&vec![]), Stackup::default_2layer());
+        let src = vec![board_rect(pt(0, 0), pt(10 * MM, 10 * MM))];
+        assert_eq!(
+            stackup(&src),
+            Stackup::default_2layer(),
+            "non-slab directives don't disturb the default"
+        );
     }
 }
