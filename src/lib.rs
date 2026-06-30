@@ -31,6 +31,7 @@ pub mod query;
 pub mod region;
 pub mod route;
 pub mod solve;
+pub mod svg_import;
 pub mod text;
 
 /// Build a root document from a generative source by elaborating it once.
