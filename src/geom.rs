@@ -36,45 +36,142 @@ use crate::doc::{Nm, Point};
 pub const BOARD_THICKNESS: Nm = 1_600_000;
 /// Default finished copper thickness: ~1 oz (35 µm), in nm.
 pub const COPPER_THICKNESS: Nm = 35_000;
+/// Default arc chord tolerance for tessellation: max sagitta (arc-to-chord deviation),
+/// in nm. 1 µm — finer than the 64-gon disc approximation at pad scale, coarse enough
+/// to keep segment counts modest for large-radius board-outline arcs.
+pub const DEFAULT_CHORD_TOL: Nm = 1_000;
 
 // ----------------------------------------------------------------------------
 // Shape2D — a skeleton ⊕ radius.
 // ----------------------------------------------------------------------------
 
+/// One edge of a skeleton [`Path`], implicitly starting at the previous point.
+///
+/// The enum is **deliberately open**: a `Cubic { c1, c2, end }` Bézier slots in later
+/// as purely (a) one [`Path::flatten`] arm and (b) export arms — with *no* change to
+/// the clearance/boolean kernel (which only ever sees the tessellated polyline this
+/// flattens to — "strategy A") or to any path-walking consumer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Seg {
+    /// A straight edge to `end`.
+    Line { end: Point },
+    /// A circular arc from the path's current point through `mid` to `end` — the
+    /// **3-point** form. All three are lattice points (no over-determination, no
+    /// degenerate-consistency failure mode), and the centre/radius derive as exact
+    /// rationals ([`circumcenter`]) only when export needs `G02`/`G03` I/J or an SVG
+    /// `A` arc. A collinear triple degenerates to a straight chord.
+    Arc { mid: Point, end: Point },
+}
+
+impl Seg {
+    /// Where this edge ends (the next path point).
+    pub fn end(&self) -> Point {
+        match self {
+            Seg::Line { end } | Seg::Arc { end, .. } => *end,
+        }
+    }
+    fn map(&self, f: &impl Fn(Point) -> Point) -> Seg {
+        match self {
+            Seg::Line { end } => Seg::Line { end: f(*end) },
+            Seg::Arc { mid, end } => Seg::Arc { mid: f(*mid), end: f(*end) },
+        }
+    }
+}
+
+/// A skeleton path: a `start` point followed by edges ([`Seg`]). For a [`Shape2D::Stroke`]
+/// it is an **open** polyline; for a [`Shape2D::Polygon`] it is a **closed** ring whose
+/// final edge back to `start` is an implicit straight [`Seg::Line`] (skipped when the
+/// last segment already ends at `start`, so an explicit arc *can* close the ring).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Path {
+    pub start: Point,
+    pub segs: Vec<Seg>,
+}
+
+impl Path {
+    /// A straight polyline through `points` (the all-`Line` path the legacy
+    /// constructors build). `points` must be non-empty.
+    pub fn polyline(points: Vec<Point>) -> Path {
+        let mut it = points.into_iter();
+        let start = it.next().expect("Path::polyline needs ≥1 point");
+        Path { start, segs: it.map(|end| Seg::Line { end }).collect() }
+    }
+
+    /// Corner vertices in order: `start`, then each segment's `end`. Arc `mid`s are
+    /// **not** corners (they are interior to the curve). For drawing/serialising the
+    /// straight skeleton; geometry that must respect arc curvature uses [`flatten`].
+    fn corners(&self) -> Vec<Point> {
+        let mut v = Vec::with_capacity(self.segs.len() + 1);
+        v.push(self.start);
+        v.extend(self.segs.iter().map(Seg::end));
+        v
+    }
+
+    /// Flatten to a polyline (`start`, then each edge flattened — arcs subdivided to
+    /// chord tolerance `tol`). Does **not** append a closing edge; callers that need a
+    /// closed ring wrap the result. This is the single seam through which arcs reach
+    /// the exact-integer kernel: everything downstream sees straight segments.
+    pub fn flatten(&self, tol: Nm) -> Vec<Point> {
+        let mut out = vec![self.start];
+        let mut cur = self.start;
+        for s in &self.segs {
+            match s {
+                Seg::Line { end } => out.push(*end),
+                Seg::Arc { mid, end } => flatten_arc(cur, *mid, *end, tol, &mut out),
+            }
+            cur = s.end();
+        }
+        out
+    }
+
+    fn map(&self, f: &impl Fn(Point) -> Point) -> Path {
+        Path { start: f(self.start), segs: self.segs.iter().map(|s| s.map(f)).collect() }
+    }
+}
+
 /// A 2D region: a skeleton inflated by `radius` (Minkowski ⊕ a disc of that radius).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Shape2D {
-    /// An open polyline (≥ 1 point) inflated by `radius`. One point ⇒ a disc; one
-    /// segment ⇒ a capsule/oval; many points ⇒ a trace of width `2*radius`.
-    Stroke { points: Vec<Point>, radius: Nm },
-    /// A filled simple polygon (CCW or CW; ≥ 3 points), with corners rounded by
-    /// `radius` (`0` ⇒ sharp; a rectangle with `radius` ⇒ a rounded rect).
-    Polygon { points: Vec<Point>, radius: Nm },
+    /// An open path (≥ 1 point) inflated by `radius`. A lone point ⇒ a disc; one
+    /// segment ⇒ a capsule/oval; many ⇒ a trace of width `2*radius` (now arc-capable).
+    Stroke { path: Path, radius: Nm },
+    /// A filled simple polygon (closed [`Path`]; ≥ 3 corners), with corners rounded by
+    /// `radius` (`0` ⇒ sharp; a rectangle with `radius` ⇒ a rounded rect). Edges may be
+    /// arcs (e.g. a D-shaped or slotted board outline).
+    Polygon { path: Path, radius: Nm },
 }
 
 impl Shape2D {
     /// A round pad / via annulus: a disc of `radius` centred at `c`.
     pub fn disc(c: Point, radius: Nm) -> Shape2D {
-        Shape2D::Stroke { points: vec![c], radius }
+        Shape2D::Stroke { path: Path { start: c, segs: vec![] }, radius }
     }
     /// A pill/oval: the `radius`-inflation of segment `a`–`b`.
     pub fn capsule(a: Point, b: Point, radius: Nm) -> Shape2D {
-        Shape2D::Stroke { points: vec![a, b], radius }
+        Shape2D::Stroke { path: Path::polyline(vec![a, b]), radius }
     }
     /// A trace: a polyline of copper `width` wide (inflation `width/2`).
     pub fn trace(points: Vec<Point>, width: Nm) -> Shape2D {
-        Shape2D::Stroke { points, radius: width / 2 }
+        Shape2D::Stroke { path: Path::polyline(points), radius: width / 2 }
+    }
+    /// An open arc stroke: `width`-wide copper following the circular arc through
+    /// `start`→`mid`→`end` (e.g. a curved trace). Sugar over the [`Path`]/[`Seg::Arc`] form.
+    pub fn arc(start: Point, mid: Point, end: Point, width: Nm) -> Shape2D {
+        Shape2D::Stroke {
+            path: Path { start, segs: vec![Seg::Arc { mid, end }] },
+            radius: width / 2,
+        }
     }
     /// An axis-aligned rectangle (sharp corners) of size `w`×`h` centred at `c`.
     pub fn rect(c: Point, w: Nm, h: Nm) -> Shape2D {
         let (hw, hh) = (w / 2, h / 2);
         Shape2D::Polygon {
-            points: vec![
+            path: Path::polyline(vec![
                 Point { x: c.x - hw, y: c.y - hh },
                 Point { x: c.x + hw, y: c.y - hh },
                 Point { x: c.x + hw, y: c.y + hh },
                 Point { x: c.x - hw, y: c.y + hh },
-            ],
+            ]),
             radius: 0,
         }
     }
@@ -85,21 +182,35 @@ impl Shape2D {
         let r = r.clamp(0, w.min(h) / 2);
         let (hw, hh) = (w / 2 - r, h / 2 - r);
         Shape2D::Polygon {
-            points: vec![
+            path: Path::polyline(vec![
                 Point { x: c.x - hw, y: c.y - hh },
                 Point { x: c.x + hw, y: c.y - hh },
                 Point { x: c.x + hw, y: c.y + hh },
                 Point { x: c.x - hw, y: c.y + hh },
-            ],
+            ]),
             radius: r,
         }
     }
     /// A filled polygon from explicit points (e.g. a rotated or custom pad).
     pub fn polygon(points: Vec<Point>) -> Shape2D {
-        Shape2D::Polygon { points, radius: 0 }
+        Shape2D::Polygon { path: Path::polyline(points), radius: 0 }
+    }
+    /// A filled polygon from an explicit [`Path`] (edges may be arcs) and corner
+    /// `radius`. The general constructor behind the sugar above.
+    pub fn polygon_path(path: Path, radius: Nm) -> Shape2D {
+        Shape2D::Polygon { path, radius }
     }
 
-    fn radius(&self) -> Nm {
+    /// This shape's skeleton path.
+    pub fn path(&self) -> &Path {
+        match self {
+            Shape2D::Stroke { path, .. } | Shape2D::Polygon { path, .. } => path,
+        }
+    }
+
+    /// The inflation radius (the Minkowski disc). Public so the offset kernel can
+    /// realise `skeleton ⊕ disc(radius)` as a filled region.
+    pub fn radius(&self) -> Nm {
         match self {
             Shape2D::Stroke { radius, .. } | Shape2D::Polygon { radius, .. } => *radius,
         }
@@ -111,36 +222,37 @@ impl Shape2D {
     /// a bespoke polygon-offset. `d` may be negative (deflate); the radius floors at 0.
     pub fn inflated(&self, d: Nm) -> Shape2D {
         match self {
-            Shape2D::Stroke { points, radius } => {
-                Shape2D::Stroke { points: points.clone(), radius: (radius + d).max(0) }
+            Shape2D::Stroke { path, radius } => {
+                Shape2D::Stroke { path: path.clone(), radius: (radius + d).max(0) }
             }
-            Shape2D::Polygon { points, radius } => {
-                Shape2D::Polygon { points: points.clone(), radius: (radius + d).max(0) }
+            Shape2D::Polygon { path, radius } => {
+                Shape2D::Polygon { path: path.clone(), radius: (radius + d).max(0) }
             }
         }
     }
 
     /// Apply a point map (e.g. a placement transform: cardinal rotation + offset) to
-    /// every vertex, preserving the inflation radius. Used to lift a footprint-local
+    /// every path point, preserving the inflation radius. Used to lift a footprint-local
     /// pad shape into world coordinates.
     pub fn map_points(&self, f: impl Fn(Point) -> Point) -> Shape2D {
         match self {
-            Shape2D::Stroke { points, radius } => {
-                Shape2D::Stroke { points: points.iter().copied().map(&f).collect(), radius: *radius }
+            Shape2D::Stroke { path, radius } => {
+                Shape2D::Stroke { path: path.map(&f), radius: *radius }
             }
-            Shape2D::Polygon { points, radius } => {
-                Shape2D::Polygon { points: points.iter().copied().map(&f).collect(), radius: *radius }
+            Shape2D::Polygon { path, radius } => {
+                Shape2D::Polygon { path: path.map(&f), radius: *radius }
             }
         }
     }
 
-    /// Axis-aligned bounding box `(min, max)`, inflated by the radius. Empty shapes
-    /// (no points) return `None`.
+    /// Axis-aligned bounding box `(min, max)`, inflated by the radius. The box covers
+    /// arc *bulge* (it is taken over the flattened skeleton, not just the corners), so
+    /// an arc bowing past its endpoints is enclosed. Empty shapes return `None`.
     pub fn bbox(&self) -> Option<(Point, Point)> {
-        let pts = self.vertices();
+        let pts = self.skeleton_points();
         let first = *pts.first()?;
         let (mut min, mut max) = (first, first);
-        for p in pts {
+        for p in &pts {
             min.x = min.x.min(p.x);
             min.y = min.y.min(p.y);
             max.x = max.x.max(p.x);
@@ -150,10 +262,12 @@ impl Shape2D {
         Some((Point { x: min.x - r, y: min.y - r }, Point { x: max.x + r, y: max.y + r }))
     }
 
-    /// This shape's vertices in order (a polygon's boundary, a stroke's polyline).
-    /// For drawing a board outline / cutout boundary.
-    pub fn points(&self) -> &[Point] {
-        self.vertices()
+    /// This shape's corner vertices in order (`start` + each segment's `end`). For
+    /// drawing/serialising the straight skeleton; **arc curvature is not reflected**
+    /// here — geometry that must respect arcs uses [`bbox`]/[`segments`], and arc-aware
+    /// export walks [`path`] directly.
+    pub fn points(&self) -> Vec<Point> {
+        self.path().corners()
     }
 
     /// Is `p` inside this shape's filled area? `Polygon` uses point-in-polygon
@@ -181,28 +295,31 @@ impl Shape2D {
         best
     }
 
-    /// The skeleton's segments (consecutive vertices; a polygon's boundary closes).
-    /// A lone point yields one degenerate segment `(p, p)`.
+    /// The skeleton's segments as straight edges, **flattening any arc to chord
+    /// tolerance** ([`DEFAULT_CHORD_TOL`]) — the single seam through which arcs reach
+    /// the exact-integer clearance/boolean kernel (strategy A). A polygon's boundary
+    /// closes; a lone-point stroke yields one degenerate segment `(p, p)`.
     fn segments(&self) -> Vec<(Point, Point)> {
+        let pts = self.skeleton_points();
         match self {
-            Shape2D::Stroke { points, .. } => {
-                if points.len() == 1 {
-                    vec![(points[0], points[0])]
+            Shape2D::Stroke { .. } => {
+                if pts.len() == 1 {
+                    vec![(pts[0], pts[0])]
                 } else {
-                    points.windows(2).map(|w| (w[0], w[1])).collect()
+                    pts.windows(2).map(|w| (w[0], w[1])).collect()
                 }
             }
-            Shape2D::Polygon { points, .. } => {
-                let n = points.len();
-                (0..n).map(|i| (points[i], points[(i + 1) % n])).collect()
+            Shape2D::Polygon { .. } => {
+                let n = pts.len();
+                (0..n).map(|i| (pts[i], pts[(i + 1) % n])).collect()
             }
         }
     }
 
-    fn vertices(&self) -> &[Point] {
-        match self {
-            Shape2D::Stroke { points, .. } | Shape2D::Polygon { points, .. } => points,
-        }
+    /// The flattened skeleton polyline (arcs subdivided). For a polygon this is the
+    /// boundary ring's points, not wrapped.
+    fn skeleton_points(&self) -> Vec<Point> {
+        self.path().flatten(DEFAULT_CHORD_TOL)
     }
 
     /// Does this shape's *filled area* contain point `p`? Strokes have no area
@@ -210,7 +327,7 @@ impl Shape2D {
     fn area_contains(&self, p: Point) -> bool {
         match self {
             Shape2D::Stroke { .. } => false,
-            Shape2D::Polygon { points, .. } => point_in_polygon(p, points),
+            Shape2D::Polygon { .. } => point_in_polygon(p, &self.skeleton_points()),
         }
     }
 }
@@ -253,8 +370,10 @@ pub fn clearance_violated(a: &Shape2D, b: &Shape2D, min_clr: Nm) -> bool {
 /// Do two skeletons touch — a boundary/segment intersection, or one skeleton's
 /// vertex inside the other's filled area? (⇒ the regions overlap, gap ≤ 0.)
 fn skeletons_overlap(a: &Shape2D, b: &Shape2D) -> bool {
-    if a.vertices().iter().any(|&p| b.area_contains(p))
-        || b.vertices().iter().any(|&p| a.area_contains(p))
+    // Flattened skeleton points (arcs included) — so a curved edge bowing fully inside
+    // the other shape, with no edge crossing, is still caught.
+    if a.skeleton_points().iter().any(|&p| b.area_contains(p))
+        || b.skeleton_points().iter().any(|&p| a.area_contains(p))
     {
         return true;
     }
@@ -301,6 +420,89 @@ fn closest_on_segment(p: Point, a: Point, b: Point) -> Point {
     }
     let t = (((p.x - a.x) as f64 * vx + (p.y - a.y) as f64 * vy) / len2).clamp(0.0, 1.0);
     Point { x: (a.x as f64 + t * vx).round() as Nm, y: (a.y as f64 + t * vy).round() as Nm }
+}
+
+// ----------------------------------------------------------------------------
+// Arc geometry: exact-rational centre (for export) + trig-free tessellation.
+// ----------------------------------------------------------------------------
+
+/// The circumcentre of three points as `(x_num, y_num, den)` with `cx = x_num/den`,
+/// `cy = y_num/den` — **exact** in `i128` (no rounding). `den == 0` iff the points are
+/// collinear (no finite centre). This is what `G02`/`G03` I/J and an SVG `A` radius
+/// derive from at export; stored arcs keep their three lattice points, so the centre is
+/// computed, never stored. (`den == 2·cross(a,b,c)`, so its sign also gives the turn
+/// direction of the arc.)
+pub fn circumcenter(a: Point, b: Point, c: Point) -> (i128, i128, i128) {
+    let (ax, ay) = (a.x as i128, a.y as i128);
+    let (bx, by) = (b.x as i128, b.y as i128);
+    let (cx, cy) = (c.x as i128, c.y as i128);
+    let den = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+    let a2 = ax * ax + ay * ay;
+    let b2 = bx * bx + by * by;
+    let c2 = cx * cx + cy * cy;
+    let ux = a2 * (by - cy) + b2 * (cy - ay) + c2 * (ay - by);
+    let uy = a2 * (cx - bx) + b2 * (ax - cx) + c2 * (bx - ax);
+    (ux, uy, den)
+}
+
+/// Append the flattening of the circular arc `start`→`mid`→`end` to `out` (excluding
+/// `start`, which the caller already pushed; including `end`). Subdivides recursively
+/// until each chord's sagitta ≤ `tol`. A collinear triple degenerates to the straight
+/// chord. Uses only IEEE `sqrt`/division (correctly-rounded ⇒ deterministic) — **no
+/// `sin`/`cos`, no `hypot`** (the latter isn't IEEE-mandated correctly-rounded) —
+/// mirroring the `closest_on_segment` / `region::segment_rect` precedent.
+fn flatten_arc(start: Point, mid: Point, end: Point, tol: Nm, out: &mut Vec<Point>) {
+    let (ux, uy, den) = circumcenter(start, mid, end);
+    if den == 0 {
+        out.push(end); // collinear: a straight chord
+        return;
+    }
+    let (cx, cy) = (ux as f64 / den as f64, uy as f64 / den as f64);
+    let (rx, ry) = (start.x as f64 - cx, start.y as f64 - cy);
+    let r = (rx * rx + ry * ry).sqrt().max(1.0);
+    let tol = tol.max(1) as f64;
+    // Turn direction of the arc (CCW > 0 / CW < 0). `den == 2·cross(start, mid, end)`,
+    // so its sign **is** that turn — and both half-arcs share it. The recursion uses it
+    // to pick the correct side of every chord, so a half-arc spanning ≥ 180° (a skewed
+    // `mid` on a major arc) still tessellates the intended side, not its complement.
+    let turn = den.signum() as i32;
+    subdivide_arc(start, mid, cx, cy, r, tol, turn, out);
+    subdivide_arc(mid, end, cx, cy, r, tol, turn, out);
+}
+
+/// Recursively flatten the sub-arc between `p` and `q` on the circle (centre `cx,cy`,
+/// radius `r`), on the side matching the parent arc's `turn`. Pushes intermediate points
+/// and `q`. Robust for sub-arcs of any span: the apex is the perpendicular-bisector ∩
+/// circle point whose turn matches, and the stop test is the true apex-to-chord sagitta.
+#[allow(clippy::too_many_arguments)]
+fn subdivide_arc(
+    p: Point, q: Point, cx: f64, cy: f64, r: f64, tol: f64, turn: i32, out: &mut Vec<Point>,
+) {
+    let (ex, ey) = (q.x as f64 - p.x as f64, q.y as f64 - p.y as f64);
+    let elen = (ex * ex + ey * ey).sqrt();
+    if elen == 0.0 {
+        out.push(q); // degenerate chord
+        return;
+    }
+    // Unit normal to the chord; the two circle points on the perpendicular bisector are
+    // centre ± r·n. Pick the side whose orientation (p → m → q) matches the arc's turn.
+    let (nx, ny) = (-ey / elen, ex / elen);
+    let o1 = (cx + r * nx - p.x as f64) * ey - (cy + r * ny - p.y as f64) * ex;
+    let s = if (o1 > 0.0) == (turn > 0) { 1.0 } else { -1.0 };
+    let (mfx, mfy) = (cx + s * r * nx, cy + s * r * ny);
+    // True sagitta = perpendicular distance from the apex to the chord.
+    let sag = ((mfx - p.x as f64) * ey - (mfy - p.y as f64) * ex).abs() / elen;
+    if sag <= tol {
+        out.push(q);
+        return;
+    }
+    let m = Point { x: mfx.round() as Nm, y: mfy.round() as Nm };
+    if m == p || m == q {
+        out.push(q); // apex rounds onto an endpoint: at grid resolution
+        return;
+    }
+    subdivide_arc(p, m, cx, cy, r, tol, turn, out);
+    subdivide_arc(m, q, cx, cy, r, tol, turn, out);
 }
 
 /// Is the squared distance from point `p` to segment `a`–`b` strictly `< thr2`?
@@ -678,6 +880,87 @@ mod tests {
         // gap = 2mm − 0.5 − 0.5 = 1mm.
         assert!(clearance_violated(&pill, &probe, MM + 1));
         assert!(!clearance_violated(&pill, &probe, MM));
+    }
+
+    #[test]
+    fn circumcenter_is_exact() {
+        // Three points on the circle centred (1mm, 0), radius 1mm.
+        let (ux, uy, den) = circumcenter(pt(0, 0), pt(MM, MM), pt(2 * MM, 0));
+        assert_ne!(den, 0);
+        assert_eq!(ux / den, MM as i128, "cx = 1mm");
+        assert_eq!(uy / den, 0, "cy = 0");
+        // Collinear ⇒ no finite centre.
+        let (_, _, d0) = circumcenter(pt(0, 0), pt(MM, 0), pt(2 * MM, 0));
+        assert_eq!(d0, 0, "collinear triple has den == 0");
+    }
+
+    #[test]
+    fn arc_tessellates_onto_its_circle() {
+        // Semicircle: (-10mm,0) → (0,10mm) → (10mm,0), centre (0,0), R = 10mm.
+        let r = 10 * MM;
+        let arc = Shape2D::arc(pt(-r, 0), pt(0, r), pt(r, 0), 0);
+        let pts = arc.path().flatten(DEFAULT_CHORD_TOL);
+        assert!(pts.len() > 16, "a 10mm semicircle subdivides into many chords");
+        assert_eq!(*pts.first().unwrap(), pt(-r, 0), "endpoints stay exact lattice pts");
+        assert_eq!(*pts.last().unwrap(), pt(r, 0));
+        assert!(pts.contains(&pt(0, r)), "the defining midpoint is on the polyline");
+        // Every vertex lies on the circle to within rounding (a few nm).
+        for p in &pts {
+            let d = (((p.x as f64).powi(2) + (p.y as f64).powi(2)).sqrt() - r as f64).abs();
+            assert!(d < 4.0, "tessellation point off-circle by {d} nm");
+        }
+    }
+
+    #[test]
+    fn arc_bbox_covers_the_bulge() {
+        // The same semicircle bows up to y = R between its two endpoints (both at
+        // y = 0). The bbox must reach the bulge, not just the corner vertices.
+        let r = 10 * MM;
+        let arc = Shape2D::arc(pt(-r, 0), pt(0, r), pt(r, 0), 0);
+        let (min, max) = arc.bbox().unwrap();
+        assert_eq!(min.y, 0, "endpoints sit on y = 0");
+        assert_eq!(max.y, r, "bbox reaches the arc's top (the bulge)");
+        assert_eq!((min.x, max.x), (-r, r));
+    }
+
+    #[test]
+    fn collinear_arc_degenerates_to_a_chord() {
+        // An arc whose three points are collinear is just the straight chord.
+        let arc = Shape2D::arc(pt(0, 0), pt(MM, 0), pt(2 * MM, 0), 0);
+        let pts = arc.path().flatten(DEFAULT_CHORD_TOL);
+        assert_eq!(pts, vec![pt(0, 0), pt(2 * MM, 0)], "collinear ⇒ a single chord");
+    }
+
+    #[test]
+    fn major_arc_with_skewed_midpoint_stays_on_the_intended_side() {
+        // A major arc (sweep > 180°) whose `mid` is skewed so one half-arc exceeds 180°.
+        // A chord-midpoint projection would flip that half onto the complementary
+        // (minor) side; the turn-aware bisection must keep every point on the true arc.
+        // Circle centre origin, R = 10mm. start 0°, mid 200°, end 210° (CCW through mid).
+        let r = 10 * MM;
+        let f = |deg: f64| {
+            let a = deg.to_radians();
+            pt((r as f64 * a.cos()).round() as Nm, (r as f64 * a.sin()).round() as Nm)
+        };
+        let (start, mid, end) = (f(0.0), f(200.0), f(210.0));
+        let pts = Shape2D::arc(start, mid, end, 0).path().flatten(DEFAULT_CHORD_TOL);
+        // All points lie on the circle…
+        for p in &pts {
+            let d = (((p.x as f64).powi(2) + (p.y as f64).powi(2)).sqrt() - r as f64).abs();
+            assert!(d < 4.0, "off-circle by {d} nm");
+        }
+        // …the 0°→200° half must sweep through ~100° (its interior)…
+        let saw_100 = pts.iter().any(|p| {
+            let ang = (p.y as f64).atan2(p.x as f64).to_degrees().rem_euclid(360.0);
+            (90.0..110.0).contains(&ang)
+        });
+        assert!(saw_100, "the 0°→200° half must pass through ~100°, not the minor side");
+        // …and no point may stray onto the complementary arc (215°..355°).
+        let on_minor = pts.iter().any(|p| {
+            let ang = (p.y as f64).atan2(p.x as f64).to_degrees().rem_euclid(360.0);
+            (215.0..355.0).contains(&ang)
+        });
+        assert!(!on_minor, "no point may stray onto the complementary arc");
     }
 
     #[test]

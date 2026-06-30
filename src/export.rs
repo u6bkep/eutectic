@@ -188,9 +188,9 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> String {
     };
     match &board {
         Some(b) => {
-            out.push_str(&svg_poly("outline-board", b.outline.points()));
+            out.push_str(&svg_poly("outline-board", &b.outline.points()));
             for c in &b.cutouts {
-                out.push_str(&svg_poly("outline-cutout", c.points()));
+                out.push_str(&svg_poly("outline-cutout", &c.points()));
             }
         }
         None => {
@@ -401,7 +401,7 @@ fn shape_flash(s: &Shape2D) -> Option<(Point, Aperture)> {
     let center = Point { x: (min.x + max.x) / 2, y: (min.y + max.y) / 2 };
     let (w, h) = (max.x - min.x, max.y - min.y);
     let ap = match s {
-        Shape2D::Stroke { points, radius } if points.len() == 1 => Aperture::Circle(2 * radius),
+        Shape2D::Stroke { path, radius } if path.segs.is_empty() => Aperture::Circle(2 * radius),
         Shape2D::Stroke { .. } => Aperture::Obround(w, h),
         Shape2D::Polygon { .. } => Aperture::Rect(w, h),
     };
@@ -591,9 +591,9 @@ pub fn gerber_edge_cuts(doc: &Doc, lib: &PartLib) -> String {
             out.push_str(&format!("X{}Y{}{}*\n", gbr_coord(p.x), gbr_coord(p.y), op));
         }
     };
-    contour(board.outline.points(), &mut out);
+    contour(&board.outline.points(), &mut out);
     for c in &board.cutouts {
-        contour(c.points(), &mut out);
+        contour(&c.points(), &mut out);
     }
     out.push_str("M02*\n");
     out

@@ -133,7 +133,7 @@ fn render_directive(d: &GenDirective) -> String {
             }
             s.push_str(&format!(" layer={}", layer_token(r.layer)));
             for p in r.shape.points() {
-                s.push_str(&format!(" {}", fmt_point(*p)));
+                s.push_str(&format!(" {}", fmt_point(p)));
             }
             s
         }

@@ -906,11 +906,12 @@ mod tests {
         let p1 = p.pins.iter().find(|x| x.name == "1").unwrap().pad.clone().unwrap();
         assert_eq!(p1.copper[0].layers, PadLayers::Through);
         assert_eq!(p1.drill, Some(Drill::Round { d: 800_000 }));
-        assert!(matches!(&p1.copper[0].shape, Shape2D::Stroke { points, .. } if points.len() == 1));
+        // A disc is a lone-point stroke: start, no segments.
+        assert!(matches!(&p1.copper[0].shape, Shape2D::Stroke { path, .. } if path.segs.is_empty()));
 
-        // Oval pad → a capsule (two-point stroke) on the top layer.
+        // Oval pad → a capsule (one-segment stroke) on the top layer.
         let p2 = p.pins.iter().find(|x| x.name == "2").unwrap().pad.clone().unwrap();
-        assert!(matches!(&p2.copper[0].shape, Shape2D::Stroke { points, .. } if points.len() == 2));
+        assert!(matches!(&p2.copper[0].shape, Shape2D::Stroke { path, .. } if path.segs.len() == 1));
         assert_eq!(p2.copper[0].layers, PadLayers::Top);
         assert_eq!(p2.drill, None);
 

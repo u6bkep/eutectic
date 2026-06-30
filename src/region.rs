@@ -724,41 +724,51 @@ fn segment_rect(a: Point, b: Point, r: Nm) -> Option<Ring> {
 /// this. The result is the dilation = union of the core area (polygons), one rectangle
 /// per skeleton edge, and one disc per skeleton vertex.
 pub fn shape_to_region(shape: &Shape2D, circle_segs: usize) -> Region {
+    let radius = shape.radius();
+    // Flatten the skeleton (arcs → chord polyline) up front: the dilation operates on
+    // straight edges + vertex discs, so an arc edge becomes a fan of fat segments —
+    // strategy A, the exact-integer boolean below never sees a curve.
+    let mut pts = shape.path().flatten(crate::geom::DEFAULT_CHORD_TOL);
     match shape {
-        Shape2D::Polygon { points, radius } => {
-            if points.len() < 3 {
+        Shape2D::Polygon { .. } => {
+            // Drop a trailing point coincident with the start (an arc that explicitly
+            // closes the ring), so the implicit closing edge isn't zero-length.
+            if pts.len() >= 2 && pts.first() == pts.last() {
+                pts.pop();
+            }
+            if pts.len() < 3 {
                 return Region::default();
             }
-            let core = ensure_ccw(points.clone());
-            if *radius <= 0 {
+            let core = ensure_ccw(pts.clone());
+            if radius <= 0 {
                 return Region::from_ring(core);
             }
             let mut pieces = vec![Region::from_ring(core)];
-            for (a, b) in ring_edges(points) {
-                if let Some(rect) = segment_rect(a, b, *radius) {
+            for (a, b) in ring_edges(&pts) {
+                if let Some(rect) = segment_rect(a, b, radius) {
                     pieces.push(Region::from_ring(rect));
                 }
             }
-            for &p in points {
-                pieces.push(Region::from_ring(disc_ring(p, *radius, circle_segs)));
+            for &p in &pts {
+                pieces.push(Region::from_ring(disc_ring(p, radius, circle_segs)));
             }
             union_all(pieces)
         }
-        Shape2D::Stroke { points, radius } => {
-            if *radius <= 0 || points.is_empty() {
+        Shape2D::Stroke { .. } => {
+            if radius <= 0 || pts.is_empty() {
                 return Region::default();
             }
-            if points.len() == 1 {
-                return Region::from_ring(disc_ring(points[0], *radius, circle_segs));
+            if pts.len() == 1 {
+                return Region::from_ring(disc_ring(pts[0], radius, circle_segs));
             }
             let mut pieces = Vec::new();
-            for w in points.windows(2) {
-                if let Some(rect) = segment_rect(w[0], w[1], *radius) {
+            for w in pts.windows(2) {
+                if let Some(rect) = segment_rect(w[0], w[1], radius) {
                     pieces.push(Region::from_ring(rect));
                 }
             }
-            for &p in points {
-                pieces.push(Region::from_ring(disc_ring(p, *radius, circle_segs)));
+            for &p in &pts {
+                pieces.push(Region::from_ring(disc_ring(p, radius, circle_segs)));
             }
             union_all(pieces)
         }
@@ -972,17 +982,17 @@ mod tests {
         // Polygon) via the union decomposition — the reflex vertex must not break the
         // union. Dilation area = core 3 + perimeter*r + π r^2; the L's perimeter
         // (2x2 minus a 1x1 notch) = 8mm.
-        let l = Shape2D::Polygon {
-            points: vec![
+        let l = Shape2D::polygon_path(
+            crate::geom::Path::polyline(vec![
                 pt(0, 0),
                 pt(2 * MM, 0),
                 pt(2 * MM, MM),
                 pt(MM, MM),
                 pt(MM, 2 * MM),
                 pt(0, 2 * MM),
-            ],
-            radius: MM / 4,
-        };
+            ]),
+            MM / 4,
+        );
         let region = shape_to_region(&l, DEFAULT_CIRCLE_SEGS);
         let a = area_abs(&region) as f64 / (MM as f64 * MM as f64);
         let expect = 3.0 + 8.0 * 0.25 + std::f64::consts::PI * 0.25 * 0.25;
