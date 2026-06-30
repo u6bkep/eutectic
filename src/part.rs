@@ -675,6 +675,39 @@ mod tests {
     }
 
     #[test]
+    fn pad_features_slot_drill_is_a_world_mapped_capsule() {
+        // Hardens the slot-drill frame the Phase-1 agent verified only by reasoning:
+        // the slot endpoints are world-mapped through the *same* `to_world` as copper
+        // (so a rotated/translated component moves them), and the void spans the board.
+        let stackup = Stackup::default_2layer();
+        let a = Point { x: -MM, y: 0 };
+        let b = Point { x: MM, y: 0 };
+        let pin = PinDef {
+            name: "1".into(),
+            number: "1".into(),
+            role: PinRole::Passive,
+            offset: Point { x: 0, y: 0 },
+            pad: Some(PadGeo {
+                copper: vec![PadCopper {
+                    shape: Shape2D::disc(Point { x: 0, y: 0 }, MM),
+                    layers: PadLayers::Through,
+                }],
+                drill: Some(Drill::Slot { a, b, d: MM / 2 }),
+            }),
+        };
+        // Rotated + translated so a raw (un-mapped) slot would land in the wrong place.
+        let c = comp("P", Point { x: 5 * MM, y: 0 }, Orient::Deg90);
+        let feats = pin.pad_features(&c, &stackup);
+        let voids: Vec<_> = feats.iter().filter(|f| f.role == Role::Void).collect();
+        assert_eq!(voids.len(), 1, "one drill void");
+        let (shape, vz) = prism_shape_z(voids[0]);
+        // Drill `d` is a diameter, so the capsule radius is `d / 2` (= MM / 4).
+        let expected = Shape2D::capsule(a, b, MM / 4).map_points(|p| to_world(&c, p));
+        assert_eq!(*shape, expected, "slot void is the world-mapped capsule");
+        assert_eq!(vz, stackup.board_z().unwrap(), "slot void spans the board");
+    }
+
+    #[test]
     fn pad_features_rotated_component_rotates_world_shape() {
         let stackup = Stackup::default_2layer();
         // Pad at (2mm, 0) in the footprint frame; a Deg90 component rotates it to

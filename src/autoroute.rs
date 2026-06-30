@@ -53,12 +53,11 @@
 
 use crate::command::Command;
 use crate::doc::{Doc, Nm, PinRef, Point, Provenance};
-use crate::geom::{Shape2D, clearance_violated};
+use crate::elaborate::stackup;
+use crate::geom::{Feature, NetFeature, Role, Shape2D};
 use crate::id::{NetId, TraceId, ViaId};
 use crate::part::{PartLib, PinRole, pin_world};
-use crate::route::{
-    CopperPiece, DesignRules, Layer, PieceLayers, Trace, Via, copper_layers_present, net_copper,
-};
+use crate::route::{DesignRules, Layer, Trace, Via, copper_layers_z, layer_z, net_features};
 use crate::solve::Rect;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
@@ -191,41 +190,48 @@ fn verify_and_prune(doc: &Doc, lib: &PartLib, rules: &DesignRules, result: &mut 
             )
         })
         .collect();
-    let existing = net_copper(doc, lib, &netlist);
+    let su = stackup(&doc.source);
+    let existing = net_features(doc, lib, &netlist, &su);
 
-    // This run's proposed copper.
-    let mut proposed: Vec<CopperPiece> = Vec::new();
+    // This run's proposed copper, lowered the same way `net_features` lowers the
+    // doc's: a trace is one Conductor prism on its layer; a via fans out to one prism
+    // per copper slab it spans (so every feature is single-slab).
+    let mut proposed: Vec<(Layer, NetFeature)> = Vec::new();
     for cmd in &result.commands {
         match cmd {
-            Command::AddTrace(_, t) => proposed.push(CopperPiece {
-                net: t.net.clone(),
-                shape: Shape2D::trace(t.path.clone(), t.width),
-                layers: PieceLayers::Trace(t.layer),
-            }),
-            Command::AddVia(_, v) => proposed.push(CopperPiece {
-                net: v.net.clone(),
-                shape: Shape2D::disc(v.at, v.pad / 2),
-                layers: PieceLayers::Via(v.from, v.to),
-            }),
+            Command::AddTrace(_, t) => {
+                if let Some(z) = layer_z(&su, t.layer) {
+                    let f =
+                        Feature::prism(Role::Conductor, Shape2D::trace(t.path.clone(), t.width), z);
+                    proposed.push((t.layer, NetFeature::new(Some(t.net.clone()), f)));
+                }
+            }
+            Command::AddVia(_, v) => {
+                for (layer, z) in copper_layers_z(&su) {
+                    if v.spans(layer) {
+                        let f = Feature::prism(Role::Conductor, Shape2D::disc(v.at, v.pad / 2), z);
+                        proposed.push((layer, NetFeature::new(Some(v.net.clone()), f)));
+                    }
+                }
+            }
             _ => {}
         }
     }
 
-    let layers = copper_layers_present(doc);
-    let shares =
-        |a: &CopperPiece, b: &CopperPiece| layers.iter().any(|&l| a.layers.on(l) && b.layers.on(l));
+    // A proposed net is unclean if any of its features clashes (z-overlap ∧ within
+    // clearance) with a *different*-net feature — existing or proposed. Each feature
+    // is single-slab, so `Feature::clears` subsumes the old same-layer + distance gate.
     let mut unclean: BTreeSet<NetId> = BTreeSet::new();
-    for p in &proposed {
-        if unclean.contains(&p.net) {
+    for (_, p) in &proposed {
+        let Some(pnet) = &p.net else { continue };
+        if unclean.contains(pnet) {
             continue;
         }
-        let clashes = existing.iter().chain(proposed.iter()).any(|o| {
-            o.net != p.net
-                && shares(p, o)
-                && clearance_violated(&p.shape, &o.shape, rules.min_clearance)
+        let clashes = existing.iter().chain(proposed.iter()).any(|(_, o)| {
+            o.net.as_ref() != Some(pnet) && !p.feature.clears(&o.feature, rules.min_clearance)
         });
         if clashes {
-            unclean.insert(p.net.clone());
+            unclean.insert(pnet.clone());
         }
     }
     if unclean.is_empty() {

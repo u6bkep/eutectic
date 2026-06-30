@@ -18,9 +18,9 @@ use crate::doc::{Doc, MM, Nm, PinRef, Point};
 use crate::elaborate::stackup;
 use crate::geom::{Extent, Feature, NetFeature, Role, Shape2D, Stackup, ZRange};
 use crate::id::{NetId, TraceId};
-use crate::part::{PadLayers, PartLib, PinRole, pad_copper_world, pin_world};
+use crate::part::{PartLib, PinRole, pin_world};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 /// A copper layer. `Top`/`Bottom` are the outer copper; `Inner(n)` keeps the model
 /// trivially extensible to multilayer boards (n = 0-based inner-layer index). The
@@ -215,10 +215,10 @@ pub fn check_drc(
     }
 
     // --- 2. Clearance: copper of *different* nets must be >= min_clearance. ---
-    // All copper — traces, vias, AND pads — reduces to a world-frame `geom::Shape2D`
-    // tagged with the layer(s) it occupies (the uniform "copper has extent" model;
-    // pads are no longer points). A different-net pair sharing a layer is checked
-    // edge-to-edge by `geom::clearance_violated`.
+    // All copper — traces, vias, AND pads — reduces to converged `geom::Feature`
+    // prisms (a world-frame `Shape2D` over a stackup `ZRange`), each tagged with its
+    // single copper layer. A different-net pair is checked by `Feature::clears`, which
+    // fuses the z-overlap (same/adjacent slab) and edge-to-edge distance tests.
     let su = stackup(&doc.source);
     let feats = net_features(doc, lib, netlist, &su);
     for i in 0..feats.len() {
@@ -315,93 +315,10 @@ fn clearance(a: &NetId, b: &NetId, layer: Layer) -> Violation {
     }
 }
 
-/// A piece of world-frame copper for clearance: its net, 2D shape, and the layer(s)
-/// it occupies. Traces, vias, and pads all reduce to this uniform form. Exposed to
-/// the autorouter so it can verify its own proposed copper with the same machinery.
-pub(crate) struct CopperPiece {
-    pub(crate) net: NetId,
-    pub(crate) shape: Shape2D,
-    pub(crate) layers: PieceLayers,
-}
-
-/// How a copper piece occupies layers (for the same-layer clearance gate).
-pub(crate) enum PieceLayers {
-    Trace(Layer),
-    Via(Layer, Layer),
-    Pad(PadLayers),
-}
-
-impl PieceLayers {
-    pub(crate) fn on(&self, l: Layer) -> bool {
-        match self {
-            PieceLayers::Trace(tl) => *tl == l,
-            PieceLayers::Via(a, b) => {
-                let (lo, hi) = (a.depth().min(b.depth()), a.depth().max(b.depth()));
-                lo <= l.depth() && l.depth() <= hi
-            }
-            PieceLayers::Pad(PadLayers::Top) => l == Layer::Top,
-            PieceLayers::Pad(PadLayers::Bottom) => l == Layer::Bottom,
-            // A through-hole pad's annulus is on every copper layer.
-            PieceLayers::Pad(PadLayers::Through) => true,
-        }
-    }
-}
-
-/// Every world-frame copper piece: each trace (polyline ⊕ width/2), each via (a disc
-/// of its pad), and each netted pad's copper regions (its real `geom` shape, no
-/// longer a point). Pads are attributed to their net via the resolved netlist; a pad
-/// on no net (floating) is omitted here — it is surfaced by the `Floating` query.
-pub(crate) fn net_copper(
-    doc: &Doc,
-    lib: &PartLib,
-    netlist: &BTreeMap<NetId, Vec<(PinRef, PinRole)>>,
-) -> Vec<CopperPiece> {
-    let mut pin_net: BTreeMap<PinRef, NetId> = BTreeMap::new();
-    for (nid, pins) in netlist {
-        for (pr, _) in pins {
-            pin_net.insert(pr.clone(), nid.clone());
-        }
-    }
-    let mut pieces = Vec::new();
-    for t in doc.traces.values() {
-        pieces.push(CopperPiece {
-            net: t.net.clone(),
-            shape: Shape2D::trace(t.path.clone(), t.width),
-            layers: PieceLayers::Trace(t.layer),
-        });
-    }
-    for v in doc.vias.values() {
-        pieces.push(CopperPiece {
-            net: v.net.clone(),
-            shape: Shape2D::disc(v.at, v.pad / 2),
-            layers: PieceLayers::Via(v.from, v.to),
-        });
-    }
-    for c in doc.components.values() {
-        let Some(def) = lib.get(&c.part) else {
-            continue;
-        };
-        for pin in &def.pins {
-            let Some(pad) = &pin.pad else { continue };
-            let Some(net) = pin_net.get(&PinRef::new(&c.id, &pin.number)) else {
-                continue;
-            };
-            for cu in &pad.copper {
-                pieces.push(CopperPiece {
-                    net: net.clone(),
-                    shape: pad_copper_world(c, cu),
-                    layers: PieceLayers::Pad(cu.layers),
-                });
-            }
-        }
-    }
-    pieces
-}
-
 /// The copper layers of a stackup with their slab z, top-down, as `(Layer, ZRange)`.
 /// `Top` is the highest-z copper, `Bottom` the lowest, `Inner(k)` those between —
 /// the inverse of [`layer_z`], and consistent with [`Layer::depth`].
-fn copper_layers_z(stackup: &Stackup) -> Vec<(Layer, ZRange)> {
+pub(crate) fn copper_layers_z(stackup: &Stackup) -> Vec<(Layer, ZRange)> {
     let slabs = stackup.copper_slabs();
     let n = slabs.len();
     slabs
@@ -505,23 +422,6 @@ pub(crate) fn net_features(
         }
     }
     out
-}
-
-/// The copper layers present in a design (outer layers always; plus any layer a
-/// trace sits on or a via terminates on), sorted — the candidate set for choosing a
-/// representative layer to report a clearance violation on.
-pub(crate) fn copper_layers_present(doc: &Doc) -> Vec<Layer> {
-    let mut set: BTreeSet<Layer> = BTreeSet::new();
-    set.insert(Layer::Top);
-    set.insert(Layer::Bottom);
-    for t in doc.traces.values() {
-        set.insert(t.layer);
-    }
-    for v in doc.vias.values() {
-        set.insert(v.from);
-        set.insert(v.to);
-    }
-    set.into_iter().collect()
 }
 
 // ----------------------------------------------------------------------------
