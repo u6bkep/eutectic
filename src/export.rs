@@ -1156,6 +1156,23 @@ psu.reg,LDO,0.000000,0.000000,0
     }
 
     #[test]
+    fn arc_board_authored_in_text_exports_as_g02_and_svg_arc() {
+        // End-to-end, closing stage 3's "dormant" gap: a half-disc board authored in
+        // the text front-end flows source → BoardShape → fab export as a true curve.
+        let lib = part_library();
+        let (src, _) = crate::text::parse("board (-2mm, 0mm) arc (0mm, 2mm) (2mm, 0mm)").unwrap();
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "arc board").unwrap();
+        let doc = h.doc().clone();
+        let g = gerber_edge_cuts(&doc, &lib);
+        assert!(g.contains("G75*"), "Edge.Cuts enables multi-quadrant:\n{g}");
+        assert!(g.contains("G02*") || g.contains("G03*"), "Edge.Cuts draws an arc:\n{g}");
+        let s = svg(&doc, &lib);
+        assert!(s.contains("<path class=\"outline-board\""), "outline is a path:\n{s}");
+        assert!(s.contains(" A "), "SVG outline carries an arc command:\n{s}");
+    }
+
+    #[test]
     fn gerber_set_names_and_layers() {
         let (doc, lib) = hand_routed_board();
         let set = gerber_set(&doc, &lib);

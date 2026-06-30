@@ -71,7 +71,7 @@
 use crate::diagnostic::{Diagnostic, Location};
 use crate::doc::{Doc, Nm, Override, Point, Strength, MM};
 use crate::elaborate::{board_rect, GenDirective, RegionDecl, Source};
-use crate::geom::{KeepoutKind, Role, Shape2D};
+use crate::geom::{KeepoutKind, Path, Role, Seg, Shape2D};
 use crate::route::Layer;
 use crate::id::EntityId;
 use std::collections::BTreeMap;
@@ -116,25 +116,25 @@ fn render_directive(d: &GenDirective) -> String {
         GenDirective::Place { path, pos } => format!("place {path} {}", fmt_point(*pos)),
         GenDirective::Fix { path, pos } => format!("fix {path} {}", fmt_point(*pos)),
         GenDirective::Board { outline } => {
-            // Serialized as an explicit polygon (`board <p> <p> ...`); the rect
-            // shorthand `boardrect <min> <max>` is parse-only sugar. Corner radius
-            // (rounded outlines) is not yet serialized — a noted follow-up.
-            format!("board {}", outline.points().iter().map(|p| fmt_point(*p)).collect::<Vec<_>>().join(" "))
+            // Serialized as a path (`board <p> [arc <mid> <end>] <p> ...`); an arc edge
+            // emits `arc <mid> <end>`. The rect shorthand `boardrect <min> <max>` is
+            // parse-only sugar. Corner radius (Minkowski-inflated outlines) is not yet
+            // serialized — a noted follow-up.
+            format!("board {}", fmt_path(outline.path()))
         }
         GenDirective::Cutout { shape } => {
-            format!("cutout {}", shape.points().iter().map(|p| fmt_point(*p)).collect::<Vec<_>>().join(" "))
+            format!("cutout {}", fmt_path(shape.path()))
         }
         GenDirective::Region(r) => {
-            // `region <role> [net=<n>] layer=<layer> <p> <p> ...`. Corner radius is
-            // not serialized (same noted follow-up as board/cutout).
+            // `region <role> [net=<n>] layer=<layer> <p> [arc <mid> <end>] <p> ...`.
+            // Corner radius is not serialized (same noted follow-up as board/cutout).
             let mut s = format!("region {}", role_token(&r.role));
             if let Some(n) = &r.net {
                 s.push_str(&format!(" net={n}"));
             }
             s.push_str(&format!(" layer={}", layer_token(r.layer)));
-            for p in r.shape.points() {
-                s.push_str(&format!(" {}", fmt_point(p)));
-            }
+            s.push(' ');
+            s.push_str(&fmt_path(r.shape.path()));
             s
         }
         GenDirective::Near { a, b, within } => format!("near {a} {b} {}", fmt_len(*within)),
@@ -167,6 +167,24 @@ fn render_directive(d: &GenDirective) -> String {
 
 fn fmt_point(p: Point) -> String {
     format!("({}, {})", fmt_len(p.x), fmt_len(p.y))
+}
+
+/// Render a skeleton [`Path`] as a coordinate list: `start`, then one coordinate per
+/// straight edge, and `arc <mid> <end>` per circular-arc edge. The inverse of
+/// [`extract_path`]. (The closing edge of a polygon is implicit, as in the geometry.)
+fn fmt_path(path: &Path) -> String {
+    let mut toks = vec![fmt_point(path.start)];
+    for seg in &path.segs {
+        match seg {
+            Seg::Line { end } => toks.push(fmt_point(*end)),
+            Seg::Arc { mid, end } => {
+                toks.push("arc".into());
+                toks.push(fmt_point(*mid));
+                toks.push(fmt_point(*end));
+            }
+        }
+    }
+    toks.join(" ")
 }
 
 /// Canonical length rendering: always millimetres. Whole-mm values print without a
@@ -320,11 +338,11 @@ fn parse_line(line: &str) -> Result<Item, String> {
             Item::Directive(GenDirective::Fix { path, pos })
         }
         "board" => {
-            let pts = extract_points(rest)?;
-            if pts.len() < 3 {
-                return Err("board needs ≥3 outline points: board (x,y) (x,y) (x,y) ...".into());
+            let path = extract_path(rest)?;
+            if !path_is_polygon(&path) {
+                return Err("board needs ≥3 outline points (or an arc edge): board (x,y) (x,y) (x,y) ...".into());
             }
-            Item::Directive(GenDirective::Board { outline: Shape2D::polygon(pts) })
+            Item::Directive(GenDirective::Board { outline: Shape2D::polygon_path(path, 0) })
         }
         "boardrect" => {
             let pts = extract_points(rest)?;
@@ -334,11 +352,11 @@ fn parse_line(line: &str) -> Result<Item, String> {
             Item::Directive(board_rect(pts[0], pts[1]))
         }
         "cutout" => {
-            let pts = extract_points(rest)?;
-            if pts.len() < 3 {
-                return Err("cutout needs ≥3 points: cutout (x,y) (x,y) (x,y) ...".into());
+            let path = extract_path(rest)?;
+            if !path_is_polygon(&path) {
+                return Err("cutout needs ≥3 points (or an arc edge): cutout (x,y) (x,y) (x,y) ...".into());
             }
-            Item::Directive(GenDirective::Cutout { shape: Shape2D::polygon(pts) })
+            Item::Directive(GenDirective::Cutout { shape: Shape2D::polygon_path(path, 0) })
         }
         "region" => {
             // `region <role> [net=<n>] [layer=<layer>] (x,y) (x,y) (x,y) ...`. Prefix
@@ -348,9 +366,9 @@ fn parse_line(line: &str) -> Result<Item, String> {
                 "region needs ≥3 points: region <role> [net=..] [layer=..] (x,y) (x,y) (x,y) ...",
             )?;
             let (prefix, ptspart) = rest.split_at(open);
-            let pts = extract_points(ptspart)?;
-            if pts.len() < 3 {
-                return Err("region needs ≥3 points: region <role> [net=..] [layer=..] (x,y) ...".into());
+            let path = extract_path(ptspart)?;
+            if !path_is_polygon(&path) {
+                return Err("region needs ≥3 points (or an arc edge): region <role> [net=..] [layer=..] (x,y) ...".into());
             }
             let mut role: Option<Role> = None;
             let mut net: Option<String> = None;
@@ -368,7 +386,7 @@ fn parse_line(line: &str) -> Result<Item, String> {
             }
             let role = role.ok_or("region needs a role: conductor | void | keepout[-kind]")?;
             Item::Directive(GenDirective::Region(RegionDecl {
-                shape: Shape2D::polygon(pts),
+                shape: Shape2D::polygon_path(path, 0),
                 role,
                 net,
                 layer,
@@ -485,6 +503,72 @@ fn split_last_dot(s: &str, what: &str) -> Result<(String, String), String> {
 }
 
 /// Pull out every `(x, y)` group from a string, in order.
+/// Parse a skeleton [`Path`] from a coordinate list with optional `arc` markers:
+/// `(x,y) [arc (mx,my) (ex,ey)] (x,y) ...`. A bare coordinate is a straight edge to
+/// that point; `arc <mid> <end>` is a circular arc through the previous point, `mid`,
+/// and `end`. The first token must be a coordinate (the start). The inverse of
+/// [`fmt_path`]; a list with no `arc` markers yields an all-`Line` path (backward
+/// compatible with the old point-only grammar).
+fn extract_path(s: &str) -> Result<Path, String> {
+    enum PTok {
+        Coord(Point),
+        Arc,
+    }
+    let mut toks = Vec::new();
+    let mut rest = s.trim_start();
+    while !rest.is_empty() {
+        if let Some(after) = rest.strip_prefix('(') {
+            let close = after.find(')').ok_or("unbalanced '(' in coordinate")?;
+            let (xs, ys) = after[..close].split_once(',').ok_or("coordinate must be `(x, y)`")?;
+            toks.push(PTok::Coord(Point { x: parse_len(xs.trim())?, y: parse_len(ys.trim())? }));
+            rest = after[close + 1..].trim_start();
+        } else {
+            let end = rest.find(|c: char| c.is_whitespace() || c == '(').unwrap_or(rest.len());
+            match &rest[..end] {
+                "arc" => toks.push(PTok::Arc),
+                other => {
+                    return Err(format!(
+                        "unexpected token `{other}` in path (expected a coordinate or `arc`)"
+                    ))
+                }
+            }
+            rest = rest[end..].trim_start();
+        }
+    }
+    let mut it = toks.into_iter();
+    let start = match it.next() {
+        Some(PTok::Coord(p)) => p,
+        Some(PTok::Arc) => return Err("a path must begin with a coordinate, not `arc`".into()),
+        None => return Err("expected a coordinate `(x, y)`".into()),
+    };
+    let mut segs = Vec::new();
+    while let Some(t) = it.next() {
+        match t {
+            PTok::Coord(p) => segs.push(Seg::Line { end: p }),
+            PTok::Arc => {
+                let mid = match it.next() {
+                    Some(PTok::Coord(p)) => p,
+                    _ => return Err("`arc` needs a midpoint coordinate: arc (mx,my) (ex,ey)".into()),
+                };
+                let end = match it.next() {
+                    Some(PTok::Coord(p)) => p,
+                    _ => return Err("`arc` needs an endpoint coordinate after the midpoint".into()),
+                };
+                segs.push(Seg::Arc { mid, end });
+            }
+        }
+    }
+    Ok(Path { start, segs })
+}
+
+/// Does the path enclose area as a polygon — ≥ 3 corners, or ≥ 1 corner closed by an
+/// arc edge (a half-disc is a valid 2-corner arc polygon)?
+fn path_is_polygon(path: &Path) -> bool {
+    let has_arc = path.segs.iter().any(|s| matches!(s, Seg::Arc { .. }));
+    let corners = 1 + path.segs.len();
+    corners >= 3 || (has_arc && corners >= 2)
+}
+
 fn extract_points(s: &str) -> Result<Vec<Point>, String> {
     let mut pts = Vec::new();
     let mut rest = s;
@@ -733,6 +817,54 @@ region keepout-drill layer=In2.Cu (1mm, 1mm) (2mm, 1mm) (2mm, 2mm)";
         // Canonical serialization re-parses to the same source.
         let doc = doc_of(src.clone(), BTreeMap::new());
         assert_eq!(parse(&serialize(&doc)).unwrap().0, src);
+    }
+
+    /// `arc <mid> <end>` edges parse into `Seg::Arc`, mixed freely with straight edges,
+    /// and survive a canonical round-trip. A half-disc board (2 corners closed by an
+    /// arc) is accepted despite having < 3 corners.
+    #[test]
+    fn arc_edges_parse_and_round_trip() {
+        let text = "\
+board (-2mm, 0mm) arc (0mm, 2mm) (2mm, 0mm)
+region conductor layer=F.Cu (0mm, 0mm) (4mm, 0mm) arc (5mm, 2mm) (4mm, 4mm) (0mm, 4mm)";
+        let (src, _) = parse(text).expect("parse");
+        // Board: a 2-corner arc polygon (half-disc).
+        assert_eq!(
+            src[0],
+            GenDirective::Board {
+                outline: Shape2D::polygon_path(
+                    Path {
+                        start: Point::mm(-2, 0),
+                        segs: vec![Seg::Arc { mid: Point::mm(0, 2), end: Point::mm(2, 0) }],
+                    },
+                    0,
+                )
+            }
+        );
+        // Region: straight edges with one arc edge among them.
+        match &src[1] {
+            GenDirective::Region(r) => assert_eq!(
+                r.shape.path().segs,
+                vec![
+                    Seg::Line { end: Point::mm(4, 0) },
+                    Seg::Arc { mid: Point::mm(5, 2), end: Point::mm(4, 4) },
+                    Seg::Line { end: Point::mm(0, 4) },
+                ],
+            ),
+            other => panic!("expected a region, got {other:?}"),
+        }
+        // Canonical serialization re-parses to the same source (arc markers survive).
+        let doc = doc_of(src.clone(), BTreeMap::new());
+        let canon = serialize(&doc);
+        assert!(canon.contains("arc ("), "serialized form carries `arc` markers:\n{canon}");
+        assert_eq!(parse(&canon).unwrap().0, src);
+    }
+
+    #[test]
+    fn arc_path_parse_errors_are_reported() {
+        assert!(parse("board (0mm,0mm) arc (1mm,1mm)").is_err(), "arc needs mid AND end");
+        assert!(parse("board arc (0mm,0mm) (1mm,1mm)").is_err(), "path must start with a coord");
+        assert!(parse("board (0mm,0mm) bogus (1mm,1mm)").is_err(), "unknown path token");
     }
 
     /// Regions are assembled by the shared reader and survive a real commit (they do
