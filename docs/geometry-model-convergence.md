@@ -16,10 +16,14 @@ gave the representation + **bottom-side placement**; **Stage 2** gives **arbitra
 planar-angle authoring** (`rotate <p> <any-deg>` lowers to a quaternion at parse;
 non-cardinals serialise as `quat=(…)`) + a **ring-of-N** generative helper (the
 side-firing-LED case). Off-axis rotation is no longer rejected.
-**Still open** (see §7): text (Decision 9), courtyard→polygon (Decision 10), the
-`GenDirective::Stackup` authoring grammar, the SVG render-uses-points rider, and the
-importers (0016/0017 + SVG import). This record is still meant to be folded into
-`architecture.md` §8.
+**Parallel batch (2026-06-30)** cleared four more: the **SVG render** now draws real pad
+copper (not a dot); the **`.kicad_pcb` Edge.Cuts importer** (`import_board_outline`,
+resolves 0017's core); the **`slab` stackup grammar** (authorable `Stackup`); and the
+**polygonal courtyard** geometry (`geom::convex_hull` + `part::courtyard_shape`,
+Decision 10 — the geometry; the solver still uses the AABB proxy, issue 0019).
+**Still open** (see §7): text (Decision 9), courtyard solver packing (0019), and the
+remaining importers (0016 footprint graphics + SVG import). This record is still meant
+to be folded into `architecture.md` §8.
 
 This record captures the foundation decisions; it *realigned the implementation* with
 what §8 already stated and sharpened three points (the single primitive, the placement
