@@ -780,6 +780,40 @@ fn point_in_polygon(p: Point, poly: &[Point]) -> bool {
     inside
 }
 
+/// The convex hull of `points` as a CCW ring of its extreme vertices (Andrew's
+/// monotone-chain algorithm). Built on the exact-integer [`orient`] predicate, so it
+/// is deterministic and free of floating-point error; collinear points lying on a
+/// hull edge are dropped and exact duplicate points are ignored. Fewer than three
+/// *distinct* points cannot form a polygon — the deduplicated input is returned
+/// unchanged (0, 1, or 2 points).
+pub fn convex_hull(points: &[Point]) -> Vec<Point> {
+    let mut pts = points.to_vec();
+    pts.sort_by(|a, b| a.x.cmp(&b.x).then(a.y.cmp(&b.y)));
+    pts.dedup();
+    if pts.len() < 3 {
+        return pts;
+    }
+    let mut hull: Vec<Point> = Vec::with_capacity(2 * pts.len());
+    // Lower hull (left → right), then upper hull (right → left). Each pops while the
+    // last turn is not a strict left turn (`orient <= 0`), which removes both right
+    // turns and collinear points, yielding a minimal CCW ring.
+    for &p in &pts {
+        while hull.len() >= 2 && orient(hull[hull.len() - 2], hull[hull.len() - 1], p) <= 0 {
+            hull.pop();
+        }
+        hull.push(p);
+    }
+    let lower = hull.len() + 1;
+    for &p in pts.iter().rev().skip(1) {
+        while hull.len() >= lower && orient(hull[hull.len() - 2], hull[hull.len() - 1], p) <= 0 {
+            hull.pop();
+        }
+        hull.push(p);
+    }
+    hull.pop(); // the closing point duplicates the start
+    hull
+}
+
 // ----------------------------------------------------------------------------
 // z-stackup, roles, materials, features.
 // ----------------------------------------------------------------------------
@@ -1454,6 +1488,60 @@ mod tests {
         // Sanity: a far probe well outside the arc clears a small rule.
         let far = Shape2D::disc(pt(0, 13 * MM), MM / 10);
         assert!(!clearance_violated(&trace, &far, MM / 2));
+    }
+
+    #[test]
+    fn convex_hull_of_a_square_is_its_four_corners() {
+        // The four corners plus an interior point and edge-midpoints; the hull keeps
+        // only the corners (interior + collinear points dropped). CCW order.
+        let pts = vec![
+            pt(0, 0),
+            pt(2 * MM, 0),
+            pt(2 * MM, 2 * MM),
+            pt(0, 2 * MM),
+            pt(MM, MM),     // interior
+            pt(MM, 0),      // collinear on bottom edge
+            pt(2 * MM, MM), // collinear on right edge
+            pt(MM, 2 * MM), // collinear on top edge
+            pt(0, MM),      // collinear on left edge
+        ];
+        let hull = convex_hull(&pts);
+        assert_eq!(hull.len(), 4, "only the four corners survive");
+        // It is a CCW ring (every consecutive turn is a left turn).
+        let n = hull.len();
+        for i in 0..n {
+            let a = hull[i];
+            let b = hull[(i + 1) % n];
+            let c = hull[(i + 2) % n];
+            assert_eq!(
+                orient(a, b, c),
+                1,
+                "hull winds CCW with no collinear corners"
+            );
+        }
+        // The corner set matches.
+        let mut got = hull.clone();
+        got.sort_by(|a, b| a.x.cmp(&b.x).then(a.y.cmp(&b.y)));
+        assert_eq!(
+            got,
+            vec![pt(0, 0), pt(0, 2 * MM), pt(2 * MM, 0), pt(2 * MM, 2 * MM)]
+        );
+    }
+
+    #[test]
+    fn convex_hull_handles_degenerate_inputs() {
+        assert_eq!(convex_hull(&[]), vec![]);
+        assert_eq!(convex_hull(&[pt(MM, MM)]), vec![pt(MM, MM)]);
+        // Duplicates collapse; two distinct points have no polygon hull.
+        assert_eq!(
+            convex_hull(&[pt(0, 0), pt(0, 0), pt(MM, 0), pt(MM, 0)]),
+            vec![pt(0, 0), pt(MM, 0)]
+        );
+        // Three collinear points: no area, reduces to the two extremes.
+        assert_eq!(
+            convex_hull(&[pt(0, 0), pt(MM, 0), pt(2 * MM, 0)]),
+            vec![pt(0, 0), pt(2 * MM, 0)]
+        );
     }
 
     #[test]

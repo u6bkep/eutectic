@@ -354,6 +354,50 @@ pub fn courtyard_half_extents(def: &PartDef) -> (Nm, Nm) {
     (mx + COURTYARD_MARGIN, my + COURTYARD_MARGIN)
 }
 
+/// A part's **courtyard** as a real polygon (Decision 10): the convex hull of every
+/// pad-copper skeleton vertex, inflated by [`COURTYARD_MARGIN`] (carried as the
+/// polygon's Minkowski radius). In **component-local** coordinates, the same frame as
+/// the pad copper.
+///
+/// This is the honest polygonal keep-out — available now for DRC / 3D / render. The
+/// placement solver still pushes the cheap axis-aligned [`courtyard_half_extents`]
+/// proxy: because this hull is always ⊆ that AABB, a *separate* polygon verify after a
+/// converged AABB push can never find an overlap the push left behind, so realising
+/// Decision 10's tighter-packing value requires the solver's push itself to consume
+/// this polygon — a deferred solver enhancement (issue 0019), not a verify bolt-on.
+///
+/// Footprint-less parts (the toy `part_library`, every `pad: None`) have no copper, so
+/// they return `None` and are exempt from overlap verification — exactly as they are
+/// exempt from the proxy push. A degenerate footprint whose copper vertices are
+/// collinear (no 2-D hull, e.g. a single round pad) also returns `None`.
+///
+/// The hull is taken over the skeleton corner vertices ([`Shape2D::points`]); the pad
+/// copper's own inflation radius is *not* added, so for round/oval pads the margin is
+/// measured from the pad centre-line rather than its copper edge. `COURTYARD_MARGIN`
+/// (~0.25 mm) dominates at typical pad scale; the axis-aligned proxy
+/// ([`courtyard_half_extents`], which *does* include the radius via `bbox`) stays the
+/// conservative pusher.
+pub fn courtyard_shape(def: &PartDef) -> Option<Shape2D> {
+    let mut pts = Vec::new();
+    for pin in &def.pins {
+        let Some(pad) = &pin.pad else { continue };
+        for cu in &pad.copper {
+            pts.extend(cu.shape.points());
+        }
+    }
+    if pts.is_empty() {
+        return None;
+    }
+    let hull = geom::convex_hull(&pts);
+    if hull.len() < 3 {
+        return None; // no 2-D hull (a lone pad / collinear pads): no polygon courtyard
+    }
+    Some(Shape2D::polygon_path(
+        geom::Path::polyline(hull),
+        COURTYARD_MARGIN,
+    ))
+}
+
 pub type PartLib = BTreeMap<String, PartDef>;
 
 fn uart() -> InterfaceDef {
@@ -856,6 +900,76 @@ mod tests {
         // And it matches the world-mapped copper directly.
         let world = pad_copper_world(&c, &pin.pad.as_ref().unwrap().copper[0]);
         assert_eq!(shape.bbox(), world.bbox());
+    }
+
+    #[test]
+    fn courtyard_shape_covers_the_pads_plus_margin() {
+        // Two 1mm square pads at (±2mm, 0). The hull of their corners spans
+        // x∈[-2.5,2.5]mm, y∈[-0.5,0.5]mm; the courtyard is that polygon inflated by
+        // COURTYARD_MARGIN.
+        let mk = |cx: Nm| PinDef {
+            name: "p".into(),
+            number: "p".into(),
+            role: PinRole::Passive,
+            offset: Point { x: cx, y: 0 },
+            pad: Some(surface_pad(Shape2D::rect(Point { x: cx, y: 0 }, MM, MM))),
+        };
+        let def = PartDef {
+            name: "R".into(),
+            pins: vec![mk(2 * MM), mk(-2 * MM)],
+            interfaces: BTreeMap::new(),
+        };
+        let court = courtyard_shape(&def).expect("a real pad part has a courtyard");
+        assert!(
+            matches!(court, Shape2D::Polygon { .. }),
+            "courtyard is a polygon"
+        );
+        assert_eq!(
+            court.radius(),
+            COURTYARD_MARGIN,
+            "radius carries the margin"
+        );
+        // The polygon skeleton is the pad hull; its bbox is the hull bbox + margin.
+        let (lo, hi) = court.bbox().unwrap();
+        assert_eq!(lo.x, -25 * MM / 10 - COURTYARD_MARGIN);
+        assert_eq!(hi.x, 25 * MM / 10 + COURTYARD_MARGIN);
+        assert_eq!(lo.y, -5 * MM / 10 - COURTYARD_MARGIN);
+        assert_eq!(hi.y, 5 * MM / 10 + COURTYARD_MARGIN);
+        // The hull encloses each pad centre.
+        assert!(court.contains_point(Point { x: 2 * MM, y: 0 }));
+        assert!(court.contains_point(Point { x: -2 * MM, y: 0 }));
+        // A disc sitting just outside the hull but within the margin overlaps it.
+        let probe = Shape2D::disc(
+            Point {
+                x: 26 * MM / 10,
+                y: 0,
+            },
+            1,
+        );
+        assert!(
+            geom::clearance_violated(&court, &probe, 0),
+            "a point within the margin band is inside the courtyard keep-out"
+        );
+    }
+
+    #[test]
+    fn courtyard_shape_is_none_without_a_footprint() {
+        // Toy library parts carry no pads → no physical courtyard.
+        let lib = part_library();
+        assert!(courtyard_shape(&lib["LDO"]).is_none());
+        // A single round pad has only one skeleton vertex: no 2-D hull → None.
+        let one = PartDef {
+            name: "dot".into(),
+            pins: vec![PinDef {
+                name: "1".into(),
+                number: "1".into(),
+                role: PinRole::Passive,
+                offset: Point { x: 0, y: 0 },
+                pad: Some(surface_pad(Shape2D::disc(Point { x: 0, y: 0 }, MM))),
+            }],
+            interfaces: BTreeMap::new(),
+        };
+        assert!(courtyard_shape(&one).is_none());
     }
 
     #[test]
