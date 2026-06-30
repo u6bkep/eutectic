@@ -21,9 +21,14 @@ copper (not a dot); the **`.kicad_pcb` Edge.Cuts importer** (`import_board_outli
 resolves 0017's core); the **`slab` stackup grammar** (authorable `Stackup`); and the
 **polygonal courtyard** geometry (`geom::convex_hull` + `part::courtyard_shape`,
 Decision 10 — the geometry; the solver still uses the AABB proxy, issue 0019).
-**Still open** (see §7): text (Decision 9), courtyard solver packing (0019), and the
-remaining importers (0016 footprint graphics + SVG import). This record is still meant
-to be folded into `architecture.md` §8.
+**Text/fonts first slice (Decision 9)** done: a built-in stroke font (`font.rs`,
+A–Z/0–9/punct), a board-level `text "…" (x,y) h= layer=` entity lowering to `Role::Marking`
+features, SVG silk render. **SVG board-outline import** done (`svg_import`, Béziers).
+**Still open** (see §7): footprint graphics + auto-text (0016, builds on text);
+real non-copper layers / silk at honest z (0020, surfaced by the text slice — silk is
+stopgapped at copper-z); courtyard solver packing (0019); text follow-ups
+(lowercase/TTF outline / footprint+refdes text / Gerber silk). This record is still
+meant to be folded into `architecture.md` §8.
 
 This record captures the foundation decisions; it *realigned the implementation* with
 what §8 already stated and sharpened three points (the single primitive, the placement
