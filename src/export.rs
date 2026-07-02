@@ -404,20 +404,30 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> Result<String, String> {
     Ok(out)
 }
 
-/// One silkscreen `Role::Marking` shape as a thin stroked centreline polyline (the
-/// silk-layer look). Shared by lowered board text and footprint graphics; the pen is
-/// the shape's inflation diameter (`radius * 2`).
+/// One silkscreen `Role::Marking` shape in the silk-layer look. Shared by lowered
+/// board text (always strokes) and footprint graphics. A [`Shape2D::Stroke`]
+/// (`fp_line`/`fp_arc`/text) draws as a thin stroked centreline polyline whose pen is
+/// the shape's inflation diameter (`radius * 2`); a [`Shape2D::Polygon`]
+/// (`fp_poly`/`fp_rect`) is a *filled* area, so it draws as a closed filled polygon —
+/// rendering it as a centreline polyline would emit `stroke-width = radius*2 = 0` and
+/// vanish.
 fn svg_silk(shape: &Shape2D, flip: &impl Fn(Nm) -> Nm) -> String {
-    let path: Vec<String> = shape
+    let coords: Vec<String> = shape
         .points()
         .iter()
         .map(|p| format!("{},{}", fmt_mm(p.x), fmt_mm(flip(p.y))))
         .collect();
-    format!(
-        "  <polyline class=\"silk\" points=\"{}\" fill=\"none\" stroke=\"#888888\" stroke-width=\"{}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n",
-        path.join(" "),
-        fmt_mm(shape.radius() * 2),
-    )
+    match shape {
+        Shape2D::Polygon { .. } => format!(
+            "  <polygon class=\"silk\" points=\"{}\" fill=\"#888888\" stroke=\"none\"/>\n",
+            coords.join(" "),
+        ),
+        Shape2D::Stroke { .. } => format!(
+            "  <polyline class=\"silk\" points=\"{}\" fill=\"none\" stroke=\"#888888\" stroke-width=\"{}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n",
+            coords.join(" "),
+            fmt_mm(shape.radius() * 2),
+        ),
+    }
 }
 
 /// SVG class suffix / stroke colour for a copper layer (Top warm, Bottom cool,
@@ -1333,6 +1343,45 @@ psu.reg,LDO,0.000000,0.000000,0,T
         assert!(
             s.matches("class=\"silk\"").count() >= 2,
             "two silk lines expected:\n{s}"
+        );
+    }
+
+    /// A silk `fp_poly` is a *filled* area (radius 0): it must render as a closed
+    /// filled `<polygon class="silk">`, not a `stroke-width="0"` (invisible) polyline.
+    #[test]
+    fn svg_renders_silk_polygon_as_filled_polygon() {
+        use crate::elaborate::GenDirective as G;
+        let mut lib = PartLib::new();
+        let part = crate::kicad::import_footprint(
+            r#"(footprint "TRI"
+                (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu"))
+                (fp_poly (pts (xy -1 -1) (xy 1 -1) (xy 0 1)) (width 0) (layer "F.SilkS")))"#,
+        )
+        .unwrap();
+        lib.insert("TRI".into(), part);
+        let mut h = History::new(Default::default());
+        h.commit(
+            Transaction::one(Command::SetSource(vec![G::Instance {
+                path: "u1".into(),
+                part: "TRI".into(),
+            }])),
+            &lib,
+            "tri",
+        )
+        .unwrap();
+        let s = svg(h.doc(), &lib).unwrap();
+        assert!(
+            s.contains("<polygon class=\"silk\""),
+            "silk fp_poly should render as a filled polygon:\n{s}"
+        );
+        assert!(
+            s.contains("<polygon class=\"silk\" points=\"") && s.contains("fill=\"#888888\""),
+            "silk polygon should be filled silk-colour:\n{s}"
+        );
+        // It must NOT be emitted as an invisible zero-width silk polyline.
+        assert!(
+            !s.contains("class=\"silk\" points=\"") || !s.contains("stroke-width=\"0\""),
+            "silk polygon must not be a stroke-width=0 polyline:\n{s}"
         );
     }
 
