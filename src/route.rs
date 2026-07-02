@@ -112,11 +112,6 @@ pub struct DesignRules {
     /// have distance 0; this small slop absorbs deliberate near-misses without
     /// fusing genuinely separate copper.
     pub touch_tol: Nm,
-    /// Solder-mask expansion: how much larger the mask opening is than the pad copper,
-    /// per side (the pad is inflated by this to get the opening). Defaults from
-    /// [`crate::geom::MASK_EXPANSION`], the single source of truth the model's
-    /// mask-opening `Void`s share; production reads it from the stack-up/process.
-    pub mask_expansion: Nm,
 }
 
 impl Default for DesignRules {
@@ -125,7 +120,6 @@ impl Default for DesignRules {
             min_clearance: 150_000,   // 0.15 mm
             min_trace_width: 150_000, // 0.15 mm
             touch_tol: MM / 100,      // 0.01 mm
-            mask_expansion: crate::geom::MASK_EXPANSION,
         }
     }
 }
@@ -357,16 +351,6 @@ pub(crate) fn layer_z(stackup: &Stackup, l: Layer) -> Option<ZRange> {
     }
 }
 
-/// Which copper [`Layer`] a slab `ZRange` is — the inverse of [`layer_z`], by exact
-/// slab match. Used to attribute a pad feature (built at a slab's z by
-/// [`PinDef::pad_features`](crate::part::PinDef::pad_features)) back to its layer.
-fn z_to_layer(stackup: &Stackup, z: ZRange) -> Option<Layer> {
-    copper_layers_z(stackup)
-        .into_iter()
-        .find(|(_, sz)| *sz == z)
-        .map(|(l, _)| l)
-}
-
 /// World-frame copper as converged [`NetFeature`]s — every trace, via, and netted pad
 /// reduced to a Feature prism, each paired with the single copper [`Layer`] it sits on.
 /// A trace is one `Conductor` prism on its layer's slab; a via **fans out** to one prism
@@ -410,7 +394,13 @@ pub(crate) fn net_features(
         }
     }
 
-    // Pads: reuse the Phase-1 lowering; attribute each Conductor feature to its layer.
+    // Pads: reuse the Phase-1 lowering. Attribute each Conductor feature to its copper
+    // layer by a **forward** per-slab query — a pad feature's z *is* one copper slab's z
+    // (a surface pad sits on one, a Through pad fans out to one feature per slab), so we
+    // scan the stackup's copper slabs and keep the one whose z it matches. Identity flows
+    // forward from the stackup; it is never reconstructed from the derived z (Decision 13
+    // rule 3 — no inverse projections).
+    let copper = copper_layers_z(stackup);
     for c in doc.components.values() {
         let Some(def) = lib.get(&c.part) else {
             continue;
@@ -421,11 +411,11 @@ pub(crate) fn net_features(
             };
             for f in pin.pad_features(c, stackup) {
                 if f.role != Role::Conductor {
-                    continue; // the Void drill is not copper-clearance geometry
+                    continue; // the drill / mask-opening Void is not copper geometry
                 }
                 let Extent::Prism { z, .. } = &f.extent;
-                if let Some(layer) = z_to_layer(stackup, *z) {
-                    out.push((layer, NetFeature::new(Some(net.clone()), f)));
+                if let Some((layer, _)) = copper.iter().find(|(_, lz)| lz == z) {
+                    out.push((*layer, NetFeature::new(Some(net.clone()), f)));
                 }
             }
         }
