@@ -254,11 +254,12 @@ impl PinDef {
     ///
     /// The mask opening deletes mask material where the pad is exposed (Decision 13 — an
     /// opening is a `Void` at mask z, not a negative layer): a surface pad opens its
-    /// resolved side's mask (`F.Mask`/`B.Mask`, respecting the `is_bottom` flip), a
-    /// through pad opens both. A custom stackup lacking the named mask slab opens
-    /// nothing there (a `Void` is a no-op where no mask exists). These `Void`s are not
-    /// copper, so the DRC copper producer / the Gerber copper path drop them exactly as
-    /// they drop the drill `Void`.
+    /// resolved side's mask, a through pad opens both. The mask slab is found by
+    /// **role and z-position** ([`Stackup::top_mask`]/[`Stackup::bottom_mask`] — the
+    /// `Role::Mask` slab immediately outboard of the outer copper), respecting the flip;
+    /// a custom-named mask slab is opened just the same, and a side with no mask slab
+    /// opens nothing. These `Void`s are not copper, so the DRC copper producer / the
+    /// Gerber copper path drop them exactly as they drop the drill `Void`.
     ///
     /// The component's position + cardinal [`Orient`](crate::doc::Orient) place the
     /// geometry — copper via [`pad_copper_world`] (the pad's local offset is already
@@ -289,20 +290,22 @@ impl PinDef {
             let world = pad_copper_world(comp, cu);
             // Solder-mask opening: the pad copper, expanded by the mask margin, deletes
             // mask material on the side(s) it is exposed (Decision 13 — an opening is a
-            // `Void` at mask z, not a negative layer). The mask slab is resolved by name
-            // (`F.Mask`/`B.Mask`) matching the pad's *resolved* side; a custom stackup
-            // that lacks the named mask slab opens nothing (a `Void` is a no-op where no
-            // mask exists), which is not an error.
+            // `Void` at mask z, not a negative layer). The mask slab is resolved by
+            // **role + z-position** (the `Role::Mask` slab immediately outboard of the
+            // outer copper on the pad's resolved side), *not* by a hardcoded name, so a
+            // custom-named mask slab is opened exactly like the default F.Mask/B.Mask —
+            // symmetric with the by-role mask solid in `elaborate::features`. A side with
+            // no mask slab opens nothing (a `Void` is a no-op where no mask exists).
             let opening = world.inflated(geom::MASK_EXPANSION);
-            let mask_sides: &[&str] = match cu.layers {
-                PadLayers::Through => &["F.Mask", "B.Mask"],
+            let mask_zs: [Option<geom::ZRange>; 2] = match cu.layers {
+                PadLayers::Through => [stackup.top_mask(), stackup.bottom_mask()],
                 PadLayers::Top | PadLayers::Bottom => {
                     // XOR with the flip: a Top pad on a flipped part is on the bottom,
-                    // so its exposed side (and thus its mask slab) is B.Mask.
+                    // so its exposed side (and thus its mask slab) is the bottom mask.
                     if matches!(cu.layers, PadLayers::Top) != flipped {
-                        &["F.Mask"]
+                        [stackup.top_mask(), None]
                     } else {
-                        &["B.Mask"]
+                        [stackup.bottom_mask(), None]
                     }
                 }
             };
@@ -330,10 +333,8 @@ impl PinDef {
                     }
                 }
             }
-            for name in mask_sides {
-                if let Some(z) = stackup.slab_z(name) {
-                    features.push(geom::Feature::prism(geom::Role::Void, opening.clone(), z));
-                }
+            for z in mask_zs.into_iter().flatten() {
+                features.push(geom::Feature::prism(geom::Role::Void, opening.clone(), z));
             }
         }
         if let Some(drill) = &pad.drill {
@@ -893,6 +894,46 @@ mod tests {
             feats.iter().filter(|f| f.role == Role::Conductor).count(),
             1,
             "copper still lowers"
+        );
+    }
+
+    /// The opening is resolved by role + z-position, not by a hardcoded slab name: a
+    /// custom stackup whose mask slab is named `TopMask` still gets a pad opening at
+    /// that slab's z. Guards the review's solid-by-role vs opening-by-name asymmetry —
+    /// `elaborate::features` masks this slab by role, so the opening must find it too.
+    #[test]
+    fn pad_features_opening_resolves_custom_named_mask_slab() {
+        let su = Stackup {
+            slabs: vec![
+                geom::Slab {
+                    name: "F.Cu".into(),
+                    z: geom::ZRange::new(0, 35_000),
+                    role: Role::Conductor,
+                    material: None,
+                },
+                geom::Slab {
+                    name: "TopMask".into(),
+                    z: geom::ZRange::new(35_000, 60_000),
+                    role: Role::Mask,
+                    material: Some(geom::Material::named("soldermask")),
+                },
+            ],
+        };
+        let pin = PinDef {
+            name: "1".into(),
+            number: "1".into(),
+            role: PinRole::Passive,
+            offset: Point { x: 0, y: 0 },
+            pad: Some(surface_pad(Shape2D::rect(Point { x: 0, y: 0 }, MM, MM))),
+        };
+        let c = comp("P", Point { x: 0, y: 0 }, Orient::default());
+        let feats = pin.pad_features(&c, &su);
+        let opens: Vec<_> = feats.iter().filter(|f| f.role == Role::Void).collect();
+        assert_eq!(opens.len(), 1, "the differently-named mask slab is opened");
+        assert_eq!(
+            prism_shape_z(opens[0]).1,
+            su.slab_z("TopMask").unwrap(),
+            "opening lands at the custom-named mask slab's z"
         );
     }
 

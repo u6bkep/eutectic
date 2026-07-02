@@ -1078,6 +1078,34 @@ impl Stackup {
         self.copper_slabs().last().map(|s| s.z)
     }
 
+    /// The solder-mask slab immediately **outboard** of the top outer copper — the
+    /// nearest `Role::Mask` slab sitting above (higher z than) the top copper, i.e. the
+    /// mask a top-side pad opens. Resolved by **role + z-position**, not by a hardcoded
+    /// slab name (Decision 13 — names are the authored-reference vocabulary, but a
+    /// derived lookup queries the stackup): a custom stackup whose mask slab is named
+    /// `TopMask` resolves just the same. `None` if there is no top copper or no mask
+    /// slab above it (that side simply has no mask to open).
+    pub fn top_mask(&self) -> Option<ZRange> {
+        let top = self.top_copper()?;
+        self.slabs
+            .iter()
+            .filter(|s| s.role == Role::Mask && s.z.lo >= top.hi)
+            .min_by_key(|s| s.z.lo)
+            .map(|s| s.z)
+    }
+
+    /// The solder-mask slab immediately **outboard** of the bottom outer copper — the
+    /// nearest `Role::Mask` slab below (lower z than) the bottom copper. The mirror of
+    /// [`top_mask`](Self::top_mask); same role + z-position query.
+    pub fn bottom_mask(&self) -> Option<ZRange> {
+        let bot = self.bottom_copper()?;
+        self.slabs
+            .iter()
+            .filter(|s| s.role == Role::Mask && s.z.hi <= bot.lo)
+            .max_by_key(|s| s.z.hi)
+            .map(|s| s.z)
+    }
+
     /// The physical **board body** vertical extent — the span of the conductor and
     /// substrate slabs (copper + dielectric), lowest face to highest. This is the z a
     /// board substrate prism or a through-hole/plated barrel spans; it deliberately
@@ -1292,6 +1320,42 @@ mod tests {
             (0, BOARD_THICKNESS),
             "board_z spans the copper+substrate body, not the surface mask/silk"
         );
+    }
+
+    #[test]
+    fn stackup_mask_accessors_resolve_by_role_and_position() {
+        // Default stackup: role+position resolution agrees with the named mask slabs.
+        let su = Stackup::default_2layer();
+        assert_eq!(su.top_mask(), su.slab_z("F.Mask"), "top mask is F.Mask");
+        assert_eq!(
+            su.bottom_mask(),
+            su.slab_z("B.Mask"),
+            "bottom mask is B.Mask"
+        );
+
+        // A custom stackup whose mask is named `TopMask` still resolves by role + z.
+        let custom = Stackup {
+            slabs: vec![
+                Slab {
+                    name: "F.Cu".into(),
+                    z: ZRange::new(0, 35_000),
+                    role: Role::Conductor,
+                    material: None,
+                },
+                Slab {
+                    name: "TopMask".into(),
+                    z: ZRange::new(35_000, 60_000),
+                    role: Role::Mask,
+                    material: None,
+                },
+            ],
+        };
+        assert_eq!(
+            custom.top_mask(),
+            custom.slab_z("TopMask"),
+            "the mask above top copper is found by role, whatever its name"
+        );
+        assert_eq!(custom.bottom_mask(), None, "no mask below the only copper");
     }
 
     #[test]
