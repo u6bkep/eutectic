@@ -73,7 +73,6 @@ use crate::doc::{Doc, MM, Nm, Orient, Override, Point, Strength};
 use crate::elaborate::{GenDirective, RegionDecl, Source, board_rect};
 use crate::geom::{KeepoutKind, Material, Path, Role, Seg, Shape2D, Slab, ZRange};
 use crate::id::EntityId;
-use crate::route::Layer;
 use std::collections::BTreeMap;
 
 /// The parsed tier-1 state: the generative program plus the ID-keyed override map.
@@ -126,13 +125,14 @@ fn render_directive(d: &GenDirective) -> String {
             format!("cutout {}", fmt_path(shape.path()))
         }
         GenDirective::Region(r) => {
-            // `region <role> [net=<n>] layer=<layer> <p> [arc <mid> <end>] <p> ...`.
-            // Corner radius is not serialized (same noted follow-up as board/cutout).
+            // `region <role> [net=<n>] layer=<slab> <p> [arc <mid> <end>] <p> ...`.
+            // `layer` is a slab name (Decision 13), emitted verbatim. Corner radius is
+            // not serialized (same noted follow-up as board/cutout).
             let mut s = format!("region {}", role_token(&r.role));
             if let Some(n) = &r.net {
                 s.push_str(&format!(" net={n}"));
             }
-            s.push_str(&format!(" layer={}", layer_token(r.layer)));
+            s.push_str(&format!(" layer={}", r.layer));
             s.push(' ');
             s.push_str(&fmt_path(r.shape.path()));
             s
@@ -217,16 +217,17 @@ fn render_directive(d: &GenDirective) -> String {
             layer,
             orient,
         } => {
-            // `text "<string>" (x,y) h=<len> layer=<silk> [rot=<deg> | rotq=(w,x,y,z)]`.
-            // The string is double-quoted (may contain spaces). Identity orientation is
-            // omitted; a cardinal about-z rotation serialises readably as `rot=<deg>`,
-            // any other rotation as the exact `rotq=(w,x,y,z)` (so it round-trips). The
+            // `text "<string>" (x,y) h=<len> layer=<slab> [rot=<deg> | rotq=(w,x,y,z)]`.
+            // `layer` is a slab name (Decision 13), emitted verbatim. The string is
+            // double-quoted (may contain spaces). Identity orientation is omitted; a
+            // cardinal about-z rotation serialises readably as `rot=<deg>`, any other
+            // rotation as the exact `rotq=(w,x,y,z)` (so it round-trips). The
             // double-quote/backslash escaping of arbitrary strings is a noted follow-up.
             let mut s = format!(
                 "text \"{string}\" {} h={} layer={}",
                 fmt_point(*at),
                 fmt_len(*height),
-                silk_layer_token(*layer),
+                layer,
             );
             if *orient != Orient::IDENTITY {
                 let cardinal = [0, 90, 180, 270]
@@ -242,29 +243,6 @@ fn render_directive(d: &GenDirective) -> String {
             }
             s
         }
-    }
-}
-
-/// Canonical silk-layer token for a board-text [`Layer`]: the outer copper sides map to
-/// the KiCad silkscreen names `F.SilkS` / `B.SilkS` (board text is a surface marking
-/// tied to the outer surface z); an inner layer — unusual for text — falls back to the
-/// copper token. The inverse of [`parse_silk_layer`].
-fn silk_layer_token(l: Layer) -> String {
-    match l {
-        Layer::Top => "F.SilkS".into(),
-        Layer::Bottom => "B.SilkS".into(),
-        Layer::Inner(_) => layer_token(l),
-    }
-}
-
-/// Parse a board-text layer token. Accepts the silkscreen names `F.SilkS` / `B.SilkS`
-/// (the canonical form), plus everything [`parse_layer`] accepts (`F.Cu`, `B.Cu`,
-/// `In<n>.Cu`, `top`, `bottom`) as aliases for the corresponding side.
-fn parse_silk_layer(t: &str) -> Result<Layer, String> {
-    match t {
-        "F.SilkS" => Ok(Layer::Top),
-        "B.SilkS" => Ok(Layer::Bottom),
-        _ => parse_layer(t),
     }
 }
 
@@ -334,7 +312,7 @@ fn role_token(role: &Role) -> String {
         // never lossy-by-panic (parse rejects these, so they never round-trip in).
         Role::Substrate => "substrate".into(),
         Role::Marking => "marking".into(),
-        Role::MaskOpening => "maskopening".into(),
+        Role::Mask => "mask".into(),
         Role::Datum => "datum".into(),
     }
 }
@@ -353,37 +331,6 @@ fn parse_role(tok: &str) -> Result<Role, String> {
             ));
         }
     })
-}
-
-/// Canonical copper-layer token (KiCad-style): `F.Cu` / `B.Cu` / `In<n>.Cu` (1-based
-/// inner index, matching the fab-file naming).
-fn layer_token(l: Layer) -> String {
-    match l {
-        Layer::Top => "F.Cu".into(),
-        Layer::Bottom => "B.Cu".into(),
-        Layer::Inner(n) => format!("In{}.Cu", n as u16 + 1),
-    }
-}
-
-fn parse_layer(t: &str) -> Result<Layer, String> {
-    match t {
-        "F.Cu" | "top" => Ok(Layer::Top),
-        "B.Cu" | "bottom" => Ok(Layer::Bottom),
-        _ => {
-            // In<n>.Cu, 1-based.
-            let inner = t
-                .strip_prefix("In")
-                .and_then(|s| s.strip_suffix(".Cu"))
-                .and_then(|n| n.parse::<u16>().ok())
-                .filter(|&n| (1..=256).contains(&n));
-            match inner {
-                Some(n) => Ok(Layer::Inner((n - 1) as u8)),
-                None => Err(format!(
-                    "region: unknown layer `{t}` (F.Cu | B.Cu | In<n>.Cu)"
-                )),
-            }
-        }
-    }
 }
 
 /// Parse a `rot=` degree value into an [`Orient`] (about z): an integer cardinal uses
@@ -549,9 +496,10 @@ fn parse_line(line: &str) -> Result<Item, String> {
             })
         }
         "region" => {
-            // `region <role> [net=<n>] [layer=<layer>] (x,y) (x,y) (x,y) ...`. Prefix
-            // tokens precede the first point; role is required, net/layer optional
-            // (layer defaults to F.Cu).
+            // `region <role> [net=<n>] [layer=<slab>] (x,y) (x,y) (x,y) ...`. Prefix
+            // tokens precede the first point; role is required, net/layer optional.
+            // `layer` is a slab name (Decision 13), stored verbatim and resolved
+            // against the stackup at elaboration; it defaults to `F.Cu`.
             let open = rest.find('(').ok_or(
                 "region needs ≥3 points: region <role> [net=..] [layer=..] (x,y) (x,y) (x,y) ...",
             )?;
@@ -562,12 +510,12 @@ fn parse_line(line: &str) -> Result<Item, String> {
             }
             let mut role: Option<Role> = None;
             let mut net: Option<String> = None;
-            let mut layer = Layer::Top;
+            let mut layer = "F.Cu".to_string();
             for tok in prefix.split_whitespace() {
                 if let Some(n) = tok.strip_prefix("net=") {
                     net = Some(n.to_string());
                 } else if let Some(l) = tok.strip_prefix("layer=") {
-                    layer = parse_layer(l)?;
+                    layer = l.to_string();
                 } else if role.is_none() {
                     role = Some(parse_role(tok)?);
                 } else {
@@ -584,10 +532,10 @@ fn parse_line(line: &str) -> Result<Item, String> {
         }
         "slab" => {
             // `slab <name> <z_lo> <z_hi> <role> [material]`. z's are lengths (mm/nm via
-            // `parse_len`); role uses `parse_role` (plus `substrate`, which a real
-            // copper/dielectric/copper stackup needs — `region` keeps its narrower
-            // vocabulary, this only widens the slab path); material is an optional bare
-            // name lowered to `Material::named`.
+            // `parse_len`); role uses `parse_role` widened with the slab-only roles a
+            // real stackup needs (`substrate`, `marking` for silk, `mask` for solder
+            // mask — `region` keeps its narrower vocabulary); material is an optional
+            // bare name lowered to `Material::named`.
             let toks: Vec<&str> = rest.split_whitespace().collect();
             if toks.len() < 4 || toks.len() > 5 {
                 return Err("slab <name> <z_lo> <z_hi> <role> [material]".into());
@@ -595,6 +543,8 @@ fn parse_line(line: &str) -> Result<Item, String> {
             let z = ZRange::new(parse_len(toks[1])?, parse_len(toks[2])?);
             let role = match toks[3] {
                 "substrate" => Role::Substrate,
+                "marking" => Role::Marking,
+                "mask" => Role::Mask,
                 other => parse_role(other)?,
             };
             let material = toks.get(4).map(|m| Material::named(m));
@@ -691,11 +641,12 @@ fn parse_line(line: &str) -> Result<Item, String> {
             })
         }
         "text" => {
-            // `text "<string>" (x,y) h=<len> layer=<silk> [rot=<deg> | rotq=(w,x,y,z)]`.
+            // `text "<string>" (x,y) h=<len> [layer=<slab>] [rot=<deg> | rotq=(w,x,y,z)]`.
             // Pull the double-quoted string off first (it may contain spaces), then the
-            // coordinate, then the remaining `key=value` tokens.
+            // coordinate, then the remaining `key=value` tokens. `layer` is a slab name
+            // (Decision 13), stored verbatim; it defaults to `F.SilkS`.
             const USAGE: &str =
-                "text \"<string>\" (x,y) h=<len> layer=<silk> [rot=<deg> | rotq=(w,x,y,z)]";
+                "text \"<string>\" (x,y) h=<len> [layer=<slab>] [rot=<deg> | rotq=(w,x,y,z)]";
             let q1 = rest.find('"').ok_or(USAGE)?;
             let q2 = rest[q1 + 1..]
                 .find('"')
@@ -714,15 +665,16 @@ fn parse_line(line: &str) -> Result<Item, String> {
                 return Err("text needs exactly one coordinate `(x, y)`".into());
             }
             let at = pts[0];
-            // Trailing key=value tokens: h= (required), layer= (required), rot=/rotq=.
+            // Trailing key=value tokens: h= (required), layer= (optional, default
+            // F.SilkS), rot=/rotq=.
             let mut height: Option<Nm> = None;
-            let mut layer: Option<Layer> = None;
+            let mut layer = "F.SilkS".to_string();
             let mut orient = Orient::IDENTITY;
             for tok in after[close + 1..].split_whitespace() {
                 if let Some(h) = tok.strip_prefix("h=") {
                     height = Some(parse_len(h)?);
                 } else if let Some(l) = tok.strip_prefix("layer=") {
-                    layer = Some(parse_silk_layer(l)?);
+                    layer = l.to_string();
                 } else if let Some(q) = tok.strip_prefix("rotq=") {
                     orient = parse_quat_tok(q)?;
                 } else if let Some(r) = tok.strip_prefix("rot=") {
@@ -735,7 +687,7 @@ fn parse_line(line: &str) -> Result<Item, String> {
                 string,
                 at,
                 height: height.ok_or("text needs h=<len>")?,
-                layer: layer.ok_or("text needs layer=<silk>")?,
+                layer,
                 orient,
             })
         }
@@ -1169,7 +1121,7 @@ mod tests {
                 ]),
                 role: Role::Conductor,
                 net: Some("GND".into()),
-                layer: Layer::Bottom,
+                layer: "B.Cu".into(),
             }),
             GenDirective::Region(RegionDecl {
                 shape: Shape2D::polygon(vec![
@@ -1179,7 +1131,7 @@ mod tests {
                 ]),
                 role: Role::Keepout(KeepoutKind::Component),
                 net: None,
-                layer: Layer::Top,
+                layer: "F.Cu".into(),
             }),
             // An authored 3-slab stackup: conductor / substrate / conductor, exercising
             // the substrate role and both material-present and material-absent slabs.
@@ -1232,14 +1184,14 @@ mod tests {
                 string: "REF 1".into(),
                 at: Point::mm(2, 40),
                 height: MM,
-                layer: Layer::Top,
+                layer: "F.SilkS".into(),
                 orient: Orient::IDENTITY,
             },
             GenDirective::Text {
                 string: "B1".into(),
                 at: Point::mm(10, 40),
                 height: 800_000,
-                layer: Layer::Bottom,
+                layer: "B.SilkS".into(),
                 orient: Orient::from_deg(90).unwrap(),
             },
             GenDirective::ConnectInterface {
@@ -1372,7 +1324,7 @@ region keepout-drill layer=In2.Cu (1mm, 1mm) (2mm, 1mm) (2mm, 2mm)";
                 ]),
                 role: Role::Conductor,
                 net: Some("GND".into()),
-                layer: Layer::Bottom,
+                layer: "B.Cu".into(),
             })
         );
         assert_eq!(
@@ -1381,7 +1333,7 @@ region keepout-drill layer=In2.Cu (1mm, 1mm) (2mm, 1mm) (2mm, 2mm)";
                 shape: Shape2D::polygon(vec![Point::mm(1, 1), Point::mm(2, 1), Point::mm(2, 2)]),
                 role: Role::Keepout(KeepoutKind::Drill),
                 net: None,
-                layer: Layer::Inner(1), // "In2.Cu" is 1-based ⇒ Inner(1).
+                layer: "In2.Cu".into(), // "In2.Cu" is 1-based ⇒ Inner(1).
             })
         );
         // Canonical serialization re-parses to the same source.
@@ -1403,7 +1355,7 @@ text \"VAL 3V3\" (2mm, 5mm) h=0.8mm layer=B.SilkS rot=90";
                 string: "R12".into(),
                 at: Point::mm(0, 0),
                 height: MM,
-                layer: Layer::Top,
+                layer: "F.SilkS".into(),
                 orient: Orient::IDENTITY,
             }
         );
@@ -1413,7 +1365,7 @@ text \"VAL 3V3\" (2mm, 5mm) h=0.8mm layer=B.SilkS rot=90";
                 string: "VAL 3V3".into(), // a quoted string with a space round-trips
                 at: Point::mm(2, 5),
                 height: 800_000,
-                layer: Layer::Bottom,
+                layer: "B.SilkS".into(),
                 orient: Orient::from_deg(90).unwrap(),
             }
         );
@@ -1443,6 +1395,58 @@ text \"VAL 3V3\" (2mm, 5mm) h=0.8mm layer=B.SilkS rot=90";
             parse(&canon).unwrap().0,
             src,
             "round-trips with the # intact"
+        );
+    }
+
+    /// A region/text `layer=` accepts an **arbitrary slab-name token** (Decision 13),
+    /// stored verbatim and round-tripping exactly — including non-default names that no
+    /// longer map to a copper ordinal. Also exercises the text `layer=` default
+    /// (`F.SilkS`) and the region default (`F.Cu`).
+    #[test]
+    fn arbitrary_slab_names_round_trip() {
+        let text = "\
+region keepout layer=F.Fab (0mm, 0mm) (10mm, 0mm) (10mm, 10mm)
+region conductor net=GND (0mm, 0mm) (5mm, 0mm) (5mm, 5mm)
+text \"HELLO\" (1mm, 1mm) h=1mm layer=My.Custom.Layer
+text \"WORLD\" (2mm, 2mm) h=1mm";
+        let (src, _) = parse(text).expect("parse");
+        // Verbatim storage of the authored names, and the two defaults.
+        let GenDirective::Region(r0) = &src[0] else {
+            panic!("region 0");
+        };
+        assert_eq!(
+            r0.layer, "F.Fab",
+            "arbitrary region slab name stored verbatim"
+        );
+        let GenDirective::Region(r1) = &src[1] else {
+            panic!("region 1");
+        };
+        assert_eq!(r1.layer, "F.Cu", "region layer defaults to F.Cu");
+        let GenDirective::Text { layer: l2, .. } = &src[2] else {
+            panic!("text 2");
+        };
+        assert_eq!(
+            l2, "My.Custom.Layer",
+            "arbitrary text slab name stored verbatim"
+        );
+        let GenDirective::Text { layer: l3, .. } = &src[3] else {
+            panic!("text 3");
+        };
+        assert_eq!(l3, "F.SilkS", "text layer defaults to F.SilkS");
+        // Canonical serialization re-parses identically.
+        let canon = serialize(&doc_of(src.clone(), BTreeMap::new()));
+        assert!(
+            canon.contains("layer=F.Fab"),
+            "arbitrary name serialized:\n{canon}"
+        );
+        assert!(
+            canon.contains("layer=My.Custom.Layer"),
+            "verbatim:\n{canon}"
+        );
+        assert_eq!(
+            parse(&canon).unwrap().0,
+            src,
+            "arbitrary slab names round-trip"
         );
     }
 
@@ -1585,7 +1589,7 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
                 shape: Shape2D::polygon(vec![Point::mm(0, 0), Point::mm(20, 0), Point::mm(20, 20)]),
                 role: Role::Conductor,
                 net: Some("GND".into()),
-                layer: Layer::Bottom,
+                layer: "B.Cu".into(),
             }),
         ];
         h.commit(Transaction::one(Command::SetSource(src)), &lib, "r")
@@ -1594,7 +1598,7 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
         assert_eq!(regions.len(), 1);
         assert_eq!(regions[0].role, Role::Conductor);
         assert_eq!(regions[0].net.as_deref(), Some("GND"));
-        assert_eq!(regions[0].layer, Layer::Bottom);
+        assert_eq!(regions[0].layer, "B.Cu");
     }
 
     /// `serialize(parse(serialize(doc))) == serialize(doc)` — canonical form is a

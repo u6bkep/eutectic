@@ -16,25 +16,27 @@ use crate::doc::*;
 use crate::geom::{BoardShape, Feature, NetFeature, Role, Shape2D, Slab, Stackup, ZRange};
 use crate::id::{EntityId, NetId};
 use crate::part::{Dir, PartDef, PartLib, courtyard_half_extents};
-use crate::route::Layer;
 use crate::solve::{Constraint, PLACE_TOL, Problem, dist, solve};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// An authored **filled region**: a `Shape2D` area carrying a [`Role`] — a copper
-/// pour (`Conductor`, with the `net` it belongs to and the copper `layer` it fills),
+/// pour (`Conductor`, with the `net` it belongs to and the `layer` slab it fills),
 /// a keep-out (`Keepout`), or a filled void (`Void`). This is the *authoritative
 /// declaration* (tier-1, in the generative `Source`); the actual knockout fill
 /// (`region − foreign_copper ⊕ clearance`) is **derived** later (0004 stage 3), so it
 /// is never stored and never goes stale. The shape is in absolute board coordinates
-/// (like the board outline), not a footprint-local transform. `layer` is carried for
-/// every role; for non-`Conductor` roles it is advisory until the fill stage gives it
-/// meaning.
+/// (like the board outline), not a footprint-local transform.
+///
+/// `layer` is a **slab name** (Decision 13) — an arbitrary token resolved against the
+/// [`Stackup`] at elaboration (`F.Cu`, `B.Cu`, `F.SilkS`, or any authored slab); an
+/// unknown name is a hard error, and a `Conductor` region whose slab is not copper is
+/// nonsense (rejected by [`features`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegionDecl {
     pub shape: Shape2D,
     pub role: Role,
     pub net: Option<String>,
-    pub layer: Layer,
+    pub layer: String,
 }
 
 /// A directive in the generative program.
@@ -140,7 +142,10 @@ pub enum GenDirective {
         string: String,
         at: Point,
         height: Nm,
-        layer: Layer,
+        /// The **slab name** the silk lands on (Decision 13) — resolved against the
+        /// [`Stackup`] at lowering; `F.SilkS` by default. An unknown name is a hard
+        /// error (silk now lands at the silk slab's honest z, not copper z).
+        layer: String,
         orient: Orient,
     },
 }
@@ -569,6 +574,49 @@ pub fn elaborate(
         }
     }
 
+    // Validate slab-name targets (Decision 13): every region / text `layer` must name a
+    // slab in the stackup, and a `Conductor` pour must target a copper slab. An unknown
+    // name — or a net-bound pour on a non-copper slab (silk) — is a hard fault here (no
+    // silent board-z/copper-z fallback), so a committed document always resolves cleanly
+    // to the `Feature` model. Collected, not aborting early.
+    let su = stackup(source);
+    let unknown_slab = |name: &str| -> Diagnostic {
+        let names: Vec<&str> = su.slabs.iter().map(|s| s.name.as_str()).collect();
+        Diagnostic::error(
+            "E_UNKNOWN_SLAB",
+            format!("layer `{name}` names no slab in the stackup"),
+            Location::None,
+        )
+        .with_help(format!("available slabs: {}", names.join(", ")))
+    };
+    for d in source {
+        match d {
+            GenDirective::Region(r) => match su.slabs.iter().find(|s| s.name == r.layer) {
+                None => errors.push(unknown_slab(&r.layer)),
+                Some(slab) if r.role == Role::Conductor && slab.role != Role::Conductor => {
+                    errors.push(
+                        Diagnostic::error(
+                            "E_POUR_NON_COPPER",
+                            format!(
+                                "copper pour on non-copper slab `{}` (its role is {:?})",
+                                r.layer, slab.role
+                            ),
+                            Location::None,
+                        )
+                        .with_help(
+                            "target a copper slab (e.g. F.Cu / B.Cu), or change the region role",
+                        ),
+                    );
+                }
+                _ => {}
+            },
+            GenDirective::Text { layer, .. } if su.slab_z(layer).is_none() => {
+                errors.push(unknown_slab(layer));
+            }
+            _ => {}
+        }
+    }
+
     // Collect-all gate: if the model could not be built cleanly, abort the whole
     // transaction with every fault found. The partial model above is discarded.
     if !errors.is_empty() {
@@ -867,21 +915,15 @@ pub fn stackup(source: &Source) -> Stackup {
     }
 }
 
-/// Lower an abstract copper [`Layer`] to its absolute [`ZRange`] via the stackup:
-/// `Top`→top outer copper, `Bottom`→bottom outer copper, `Inner(n)`→the `(1 + n)`-th
-/// copper layer counting from the top (matching [`Layer::depth`](crate::route::Layer)).
-///
-/// If the chosen copper layer is absent (e.g. `Inner` on the default 2-layer stackup,
-/// or any copper layer missing) we fall back to the full board extent (`board_z`), and
-/// if even that is `None` (an empty stackup) to `ZRange::new(0, 0)` — so a region
-/// always lowers to *some* prism rather than being silently dropped.
-fn layer_z(su: &Stackup, l: Layer) -> ZRange {
-    let chosen = match l {
-        Layer::Top => su.top_copper(),
-        Layer::Bottom => su.bottom_copper(),
-        Layer::Inner(n) => su.nth_copper_from_top(1 + n as usize),
-    };
-    chosen.or_else(|| su.board_z()).unwrap_or(ZRange::new(0, 0))
+/// Resolve a **slab name** to its absolute [`ZRange`] via the stackup (Decision 13).
+/// An unknown name is a **hard error** — no board-z / `ZRange(0,0)` fallback — naming
+/// the unknown slab and the available slab names, matching the crate's text-parse
+/// `Result<_, String>` error idiom.
+fn slab_z(su: &Stackup, name: &str) -> Result<ZRange, String> {
+    su.slab_z(name).ok_or_else(|| {
+        let names: Vec<&str> = su.slabs.iter().map(|s| s.name.as_str()).collect();
+        format!("unknown slab `{name}` (available: {})", names.join(", "))
+    })
 }
 
 /// Lower the authored board/region geometry of a `Source` into the converged
@@ -897,12 +939,17 @@ fn layer_z(su: &Stackup, l: Layer) -> ZRange {
 ///     preserving [`board_shape`]'s "last `Board` wins" single-outline semantics.
 ///     (Unioning several `Board` directives into one multi-substrate body is deferred.)
 ///   - every `Cutout` → a [`Role::Void`] netless feature (mirrors [`board_shape`]).
-///   - every `Region` → a feature carrying the authored role + net, on the region's
-///     copper layer z (mirrors [`regions`]).
-pub fn features(source: &Source) -> Vec<crate::geom::NetFeature> {
+///   - every `Region` → a feature carrying the authored role + net, at its slab's z
+///     (mirrors [`regions`]).
+///
+/// This is the single **materialization gate** that resolves slab names against the
+/// [`Stackup`] (Decision 13), so it is **fallible**: an unknown slab name — on a region
+/// or a text label — is a hard error, and a `Conductor` region whose slab is not a
+/// copper slab (a net-bound pour on silk) is likewise rejected here.
+pub fn features(source: &Source) -> Result<Vec<crate::geom::NetFeature>, String> {
     let su = stackup(source);
-    // The full board vertical extent (Substrate and Void span it). An empty stackup
-    // has no extent — fall back to a zero range so the feature is still emitted.
+    // The physical board body extent (Substrate and Void cutouts span it). An empty
+    // stackup has no extent — fall back to a zero range so the feature is still emitted.
     let board_z = su.board_z().unwrap_or(ZRange::new(0, 0));
 
     let mut out: Vec<NetFeature> = Vec::new();
@@ -931,7 +978,9 @@ pub fn features(source: &Source) -> Vec<crate::geom::NetFeature> {
         }
     }
 
-    // Regions: every one, carrying the authored role + net (mirrors `regions`).
+    // Regions: every one, carrying the authored role + net (mirrors `regions`). The
+    // slab name resolves to z; an unknown name is a hard error, and a `Conductor`
+    // region on a non-copper slab (a net-bound pour on silk) is nonsense.
     for d in source {
         if let GenDirective::Region(RegionDecl {
             shape,
@@ -940,10 +989,21 @@ pub fn features(source: &Source) -> Vec<crate::geom::NetFeature> {
             layer,
         }) = d
         {
+            let slab = su.slabs.iter().find(|s| &s.name == layer).ok_or_else(|| {
+                let names: Vec<&str> = su.slabs.iter().map(|s| s.name.as_str()).collect();
+                format!("unknown slab `{layer}` (available: {})", names.join(", "))
+            })?;
+            if *role == Role::Conductor && slab.role != Role::Conductor {
+                return Err(format!(
+                    "Conductor region on non-copper slab `{layer}` (its role is {:?}) \
+                     — a net-bound pour must target a copper slab",
+                    slab.role
+                ));
+            }
             let net_opt = net.as_ref().map(|n| NetId::new(n.clone()));
             out.push(NetFeature::new(
                 net_opt,
-                Feature::prism(role.clone(), shape.clone(), layer_z(&su, *layer)),
+                Feature::prism(role.clone(), shape.clone(), slab.z),
             ));
         }
     }
@@ -959,11 +1019,11 @@ pub fn features(source: &Source) -> Vec<crate::geom::NetFeature> {
             orient,
         } = d
         {
-            out.extend(text_features(string, *at, *height, *layer, *orient, &su));
+            out.extend(text_features(string, *at, *height, layer, *orient, &su)?);
         }
     }
 
-    out
+    Ok(out)
 }
 
 /// Lower one authored [`GenDirective::Text`] into stroke-font [`Role::Marking`]
@@ -971,17 +1031,18 @@ pub fn features(source: &Source) -> Vec<crate::geom::NetFeature> {
 /// [`crate::font`]) are scaled cell→world by `height / CELL_HEIGHT`, advanced in +x by
 /// `GLYPH_ADVANCE` font-units per character, rotated by `orient` about the text origin
 /// (exact for [`Orient::IDENTITY`]), then translated to `at`. Each stroke is traced at
-/// a pen width of `height / 8` on the layer's z (via the shared [`layer_z`]). The
-/// markings are **netless** — silk carries no electrical identity.
+/// a pen width of `height / 8` on the named slab's z (via the shared [`slab_z`] — an
+/// unknown name is a hard error). The markings are **netless** — silk carries no
+/// electrical identity.
 fn text_features(
     string: &str,
     at: Point,
     height: Nm,
-    layer: Layer,
+    layer: &str,
     orient: Orient,
     su: &Stackup,
-) -> Vec<NetFeature> {
-    let z = layer_z(su, layer);
+) -> Result<Vec<NetFeature>, String> {
+    let z = slab_z(su, layer)?;
     let pen = (height / 8).max(1); // a visible stroke width even for tiny heights
     let cell_h = crate::font::CELL_HEIGHT as Nm;
     let mut out = Vec::new();
@@ -1010,7 +1071,7 @@ fn text_features(
             )));
         }
     }
-    out
+    Ok(out)
 }
 
 /// Build a rectangular [`Board`](GenDirective::Board) directive from opposite corners
@@ -1242,11 +1303,11 @@ mod tests {
                 shape: Shape2D::rect(pt(2 * MM, 2 * MM), MM, MM),
                 role: Role::Conductor,
                 net: Some("GND".into()),
-                layer: Layer::Top,
+                layer: "F.Cu".into(),
             }),
         ];
 
-        let feats = features(&src);
+        let feats = features(&src).unwrap();
         assert_eq!(feats.len(), 3, "one substrate, one void, one conductor");
 
         let subs: Vec<&NetFeature> = feats
@@ -1276,7 +1337,11 @@ mod tests {
             "conductor carries its net annotation"
         );
         let Extent::Prism { z, .. } = conds[0].feature.extent;
-        assert_eq!(z, su.top_copper().unwrap(), "Top region sits on top copper");
+        assert_eq!(
+            z,
+            su.top_copper().unwrap(),
+            "F.Cu region sits on top copper"
+        );
     }
 
     /// Two `Board` directives: only the last outline becomes the substrate feature
@@ -1294,7 +1359,7 @@ mod tests {
             },
         ];
 
-        let feats = features(&src);
+        let feats = features(&src).unwrap();
         let subs: Vec<&NetFeature> = feats
             .iter()
             .filter(|f| f.feature.role == Role::Substrate)
@@ -1306,7 +1371,8 @@ mod tests {
     }
 
     /// A `text` directive lowers to several `Role::Marking` stroke features sitting on
-    /// the layer's z, advancing in +x across the string (Decision 9).
+    /// the named silk slab's **honest z** (not copper z — Decision 13), advancing in +x
+    /// across the string (Decision 9).
     #[test]
     fn features_lowers_text_to_marking_strokes() {
         let su = Stackup::default_2layer();
@@ -1314,11 +1380,11 @@ mod tests {
             string: "R12".into(),
             at: pt(0, 0),
             height: MM,
-            layer: Layer::Top,
+            layer: "F.SilkS".into(),
             orient: Orient::IDENTITY,
         }];
 
-        let feats = features(&src);
+        let feats = features(&src).unwrap();
         let marks: Vec<&NetFeature> = feats
             .iter()
             .filter(|f| f.feature.role == Role::Marking)
@@ -1331,11 +1397,17 @@ mod tests {
         );
         assert!(marks.iter().all(|f| f.net.is_none()), "silk is netless");
 
-        // All markings sit on the Top-copper z (silk side z, via the shared layer_z).
-        let top_z = su.top_copper().unwrap();
+        // All markings sit on the F.SilkS slab's honest z — above the top copper, not
+        // aliased onto it (the pre-Decision-13 stopgap).
+        let silk_z = su.slab_z("F.SilkS").unwrap();
+        assert_ne!(
+            silk_z,
+            su.top_copper().unwrap(),
+            "silk z is distinct from copper z"
+        );
         for m in &marks {
             let Extent::Prism { z, .. } = m.feature.extent;
-            assert_eq!(z, top_z, "marking on the Top z");
+            assert_eq!(z, silk_z, "marking on the F.SilkS z");
         }
 
         // The text advances in +x: the rightmost stroke point of the 3-char string
@@ -1349,6 +1421,54 @@ mod tests {
             .max()
             .unwrap();
         assert!(max_x > MM, "string advances past the first glyph in +x");
+    }
+
+    /// An unknown slab name is a hard elaboration error (no silent board-z fallback,
+    /// Decision 13); the message names the unknown slab and the available names.
+    #[test]
+    fn features_unknown_slab_name_is_hard_error() {
+        let src = vec![
+            board_rect(pt(0, 0), pt(10 * MM, 10 * MM)),
+            GenDirective::Region(RegionDecl {
+                shape: Shape2D::rect(pt(2 * MM, 2 * MM), MM, MM),
+                role: Role::Keepout(crate::geom::KeepoutKind::Copper),
+                net: None,
+                layer: "Q.Cu".into(),
+            }),
+        ];
+        let err = features(&src).unwrap_err();
+        assert!(err.contains("Q.Cu"), "names the unknown slab: {err}");
+        assert!(err.contains("F.Cu"), "lists available slabs: {err}");
+
+        // A text label on an unknown slab is likewise a hard error.
+        let src = vec![GenDirective::Text {
+            string: "X".into(),
+            at: pt(0, 0),
+            height: MM,
+            layer: "Nope".into(),
+            orient: Orient::IDENTITY,
+        }];
+        assert!(features(&src).unwrap_err().contains("Nope"));
+    }
+
+    /// A net-bound `Conductor` region on a non-copper slab (silk) is nonsense and is
+    /// rejected by the materialization gate (Decision 13).
+    #[test]
+    fn features_conductor_pour_on_non_copper_slab_errors() {
+        let src = vec![
+            board_rect(pt(0, 0), pt(10 * MM, 10 * MM)),
+            GenDirective::Region(RegionDecl {
+                shape: Shape2D::rect(pt(2 * MM, 2 * MM), MM, MM),
+                role: Role::Conductor,
+                net: Some("GND".into()),
+                layer: "F.SilkS".into(),
+            }),
+        ];
+        let err = features(&src).unwrap_err();
+        assert!(
+            err.contains("F.SilkS") && err.contains("non-copper"),
+            "rejects a pour on silk: {err}"
+        );
     }
 
     /// A source with `Slab` directives makes `stackup()` return *those* slabs, in

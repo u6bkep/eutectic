@@ -40,6 +40,10 @@ use crate::id::NetId;
 pub const BOARD_THICKNESS: Nm = 1_600_000;
 /// Default finished copper thickness: ~1 oz (35 µm), in nm.
 pub const COPPER_THICKNESS: Nm = 35_000;
+/// Default solder-mask thickness: 25 µm, in nm.
+pub const MASK_THICKNESS: Nm = 25_000;
+/// Default silkscreen (ink) thickness: 10 µm, in nm.
+pub const SILK_THICKNESS: Nm = 10_000;
 /// Default arc chord tolerance for tessellation: max sagitta (arc-to-chord deviation),
 /// in nm. 1 µm — finer than the 64-gon disc approximation at pad scale, coarse enough
 /// to keep segment counts modest for large-radius board-outline arcs.
@@ -854,8 +858,9 @@ pub enum Role {
     Keepout(KeepoutKind),
     /// Surface marking (silkscreen).
     Marking,
-    /// An opening in the solder mask.
-    MaskOpening,
+    /// Solder-mask material (positive). Openings are `Void` deletion volumes at mask
+    /// z, not a negative layer (Decision 13 — no negative layers).
+    Mask,
     /// A mechanical/reference datum (e.g. an MCAD fit point).
     Datum,
 }
@@ -970,13 +975,30 @@ pub struct Stackup {
 }
 
 impl Stackup {
-    /// The familiar default: 1.6 mm board, 1 oz copper top and bottom. Bottom copper
-    /// at `[0, C]`, top copper at `[T−C, T]`, core dielectric between.
+    /// The familiar default: 1.6 mm board, 1 oz copper top and bottom, with solder
+    /// mask and silkscreen at honest z on each side. Bottom copper at `[0, C]`, top
+    /// copper at `[T−C, T]`, core dielectric between; the mask/silk slabs extend
+    /// contiguously outward from the outer copper (Decision 13 — silk/mask are named
+    /// z-intervals, resolved away at elaboration).
     pub fn default_2layer() -> Stackup {
         let t = BOARD_THICKNESS;
         let c = COPPER_THICKNESS;
+        let mask = MASK_THICKNESS;
+        let silk = SILK_THICKNESS;
         Stackup {
             slabs: vec![
+                Slab {
+                    name: "B.SilkS".into(),
+                    z: ZRange::new(-mask - silk, -mask),
+                    role: Role::Marking,
+                    material: Some(Material::named("ink")),
+                },
+                Slab {
+                    name: "B.Mask".into(),
+                    z: ZRange::new(-mask, 0),
+                    role: Role::Mask,
+                    material: Some(Material::named("soldermask")),
+                },
                 Slab {
                     name: "B.Cu".into(),
                     z: ZRange::new(0, c),
@@ -994,6 +1016,18 @@ impl Stackup {
                     z: ZRange::new(t - c, t),
                     role: Role::Conductor,
                     material: Some(Material::named("copper")),
+                },
+                Slab {
+                    name: "F.Mask".into(),
+                    z: ZRange::new(t, t + mask),
+                    role: Role::Mask,
+                    material: Some(Material::named("soldermask")),
+                },
+                Slab {
+                    name: "F.SilkS".into(),
+                    z: ZRange::new(t + mask, t + mask + silk),
+                    role: Role::Marking,
+                    material: Some(Material::named("ink")),
                 },
             ],
         }
@@ -1036,11 +1070,26 @@ impl Stackup {
         self.copper_slabs().last().map(|s| s.z)
     }
 
-    /// The full board vertical extent — lowest slab face to highest. The z a board
-    /// substrate prism or a through-hole/plated barrel spans.
+    /// The physical **board body** vertical extent — the span of the conductor and
+    /// substrate slabs (copper + dielectric), lowest face to highest. This is the z a
+    /// board substrate prism or a through-hole/plated barrel spans; it deliberately
+    /// **excludes** the surface mask and silk slabs, which sit outside the board body
+    /// (a drill through the body is what matters, not the ink on top). Falls back to
+    /// the full slab span if the stackup has no conductor/substrate slabs at all.
     pub fn board_z(&self) -> Option<ZRange> {
-        let lo = self.slabs.iter().map(|s| s.z.lo).min()?;
-        let hi = self.slabs.iter().map(|s| s.z.hi).max()?;
+        let body: Vec<&Slab> = self
+            .slabs
+            .iter()
+            .filter(|s| matches!(s.role, Role::Conductor | Role::Substrate))
+            .collect();
+        // Fall back to all slabs only if there is no board body at all.
+        let slabs: Vec<&Slab> = if body.is_empty() {
+            self.slabs.iter().collect()
+        } else {
+            body
+        };
+        let lo = slabs.iter().map(|s| s.z.lo).min()?;
+        let hi = slabs.iter().map(|s| s.z.hi).max()?;
         Some(ZRange::new(lo, hi))
     }
 }
@@ -1222,7 +1271,7 @@ mod tests {
         assert_eq!(
             (bz.lo, bz.hi),
             (0, BOARD_THICKNESS),
-            "board_z spans the whole stack"
+            "board_z spans the copper+substrate body, not the surface mask/silk"
         );
     }
 

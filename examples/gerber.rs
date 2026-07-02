@@ -87,5 +87,5 @@ fn main() {
     }
 
     println!("\n==== board.svg ====");
-    print!("{}", svg(doc, &lib));
+    print!("{}", svg(doc, &lib).unwrap());
 }

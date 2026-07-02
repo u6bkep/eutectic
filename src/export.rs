@@ -118,7 +118,7 @@ fn xml_escape(s: &str) -> String {
 /// flipped within the content bounds to keep the sketch upright. All coordinates
 /// are six-decimal mm via [`fmt_mm`]; element order follows `EntityId` order. No
 /// timestamps or other ambient state — byte-stable and diffable.
-pub fn svg(doc: &Doc, lib: &PartLib) -> String {
+pub fn svg(doc: &Doc, lib: &PartLib) -> Result<String, String> {
     const MARGIN: Nm = 2 * MM;
 
     // The board outline carried by tier-1 source, if any (last `Board` wins, as in
@@ -151,7 +151,7 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> String {
         pts.push(v.at);
     }
     // Silk markings (lowered board text) must be in view so labels aren't clipped.
-    for nf in crate::elaborate::features(&doc.source) {
+    for nf in crate::elaborate::features(&doc.source)? {
         if nf.feature.role == Role::Marking {
             let Extent::Prism { shape, .. } = &nf.feature.extent;
             pts.extend(shape.points());
@@ -377,7 +377,7 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> String {
     // Silkscreen: lowered board text. Each derived stroke-font `Role::Marking` feature
     // (from the converged `features` view) is drawn as a thin stroked centreline
     // polyline, giving a silk-layer look. Source order ⇒ deterministic.
-    for nf in crate::elaborate::features(&doc.source) {
+    for nf in crate::elaborate::features(&doc.source)? {
         if nf.feature.role != Role::Marking {
             continue;
         }
@@ -395,7 +395,7 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> String {
     }
 
     out.push_str("</svg>\n");
-    out
+    Ok(out)
 }
 
 /// SVG class suffix / stroke colour for a copper layer (Top warm, Bottom cool,
@@ -1170,7 +1170,7 @@ psu.reg,LDO,0.000000,0.000000,0,T
         src.insert(0, board_rect(Point::mm(0, 0), Point::mm(60, 40)));
         h.commit(Transaction::one(Command::SetSource(src)), &lib, "board")
             .unwrap();
-        let s = svg(h.doc(), &lib);
+        let s = svg(h.doc(), &lib).unwrap();
 
         assert!(s.starts_with("<?xml"));
         assert!(s.contains("<svg "));
@@ -1188,7 +1188,7 @@ psu.reg,LDO,0.000000,0.000000,0,T
     #[test]
     fn svg_falls_back_to_bounding_box_without_board() {
         let (doc, lib) = doc_psu(2);
-        let s = svg(&doc, &lib);
+        let s = svg(&doc, &lib).unwrap();
         assert!(
             s.contains("class=\"outline-bbox\""),
             "implicit bbox outline expected"
@@ -1233,7 +1233,7 @@ psu.reg,LDO,0.000000,0.000000,0,T
             "pad",
         )
         .unwrap();
-        let s = svg(h.doc(), &lib);
+        let s = svg(h.doc(), &lib).unwrap();
 
         // The footprint's real copper is drawn as a filled pad polygon...
         assert!(
@@ -1260,7 +1260,7 @@ psu.reg,LDO,0.000000,0.000000,0,T
                     string: "R12".into(),
                     at: Point::mm(2, 10),
                     height: MM,
-                    layer: Layer::Top,
+                    layer: "F.SilkS".into(),
                     orient: Orient::IDENTITY,
                 },
             ])),
@@ -1268,7 +1268,7 @@ psu.reg,LDO,0.000000,0.000000,0,T
             "text",
         )
         .unwrap();
-        let s = svg(h.doc(), &lib);
+        let s = svg(h.doc(), &lib).unwrap();
         assert!(
             s.contains("class=\"silk\""),
             "lowered board text should render as silk strokes:\n{s}"
@@ -1579,7 +1579,7 @@ psu.reg,LDO,0.000000,0.000000,0,T
             g.contains("G02*") || g.contains("G03*"),
             "Edge.Cuts draws an arc:\n{g}"
         );
-        let s = svg(&doc, &lib);
+        let s = svg(&doc, &lib).unwrap();
         assert!(
             s.contains("<path class=\"outline-board\""),
             "outline is a path:\n{s}"
@@ -1611,7 +1611,7 @@ psu.reg,LDO,0.000000,0.000000,0,T
     #[test]
     fn svg_draws_traces_and_vias() {
         let (doc, lib) = hand_routed_board();
-        let s = svg(&doc, &lib);
+        let s = svg(&doc, &lib).unwrap();
         assert!(s.contains("class=\"trace trace-top\""), "got:\n{s}");
         assert!(s.contains("class=\"trace trace-bottom\""));
         assert!(s.contains("class=\"via\""));
@@ -1781,7 +1781,7 @@ psu.reg,LDO,0.000000,0.000000,0,T
                 shape: outline,
                 role: Role::Conductor,
                 net: Some("GND".into()),
-                layer: Layer::Top,
+                layer: "F.Cu".into(),
             }),
         ];
         let mut h = History::new(Default::default());
@@ -1816,7 +1816,7 @@ psu.reg,LDO,0.000000,0.000000,0,T
     #[test]
     fn svg_draws_pour_with_holes() {
         let (doc, lib) = poured_board();
-        let s = svg(&doc, &lib);
+        let s = svg(&doc, &lib).unwrap();
         assert!(
             s.contains("class=\"pour pour-top\""),
             "pour path present:\n{s}"

@@ -52,5 +52,5 @@ fn main() {
     print!("{}", placement_csv(doc));
 
     println!("\n==== SVG sketch ====");
-    print!("{}", svg(doc, &lib));
+    print!("{}", svg(doc, &lib).unwrap());
 }

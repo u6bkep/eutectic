@@ -448,15 +448,31 @@ pub struct PourFill {
     pub fill: crate::region::Region,
 }
 
+/// Resolve a region's **slab name** to the copper [`Layer`] it pours on (Decision 13):
+/// its slab z must match a copper slab exactly. `None` if the name is unknown or names
+/// a non-copper slab — such a `Conductor` region is nonsense (a net-bound pour on silk)
+/// and is rejected up front by [`crate::elaborate::features`], the materialization gate;
+/// here it simply contributes no copper pour.
+fn region_copper_layer(su: &Stackup, name: &str) -> Option<Layer> {
+    let z = su.slab_z(name)?;
+    copper_layers_z(su)
+        .into_iter()
+        .find(|(_, sz)| *sz == z)
+        .map(|(l, _)| l)
+}
+
 /// Compute every copper pour's fill: for each authored `Conductor` region, knock the
 /// clearance-expanded **foreign** copper (different net, same layer) out of the pour
 /// outline. Same-net copper is *not* knocked out — it is what the pour connects to
 /// (connectivity through the fill is checked in a later stage). Pure function of the
 /// authored regions, the current copper, and the design rules.
 ///
-/// Foreign copper is the netted copper from [`net_features`] on the pour's layer; each
-/// obstacle is inflated by `min_clearance` (a [`Shape2D::inflated`] radius bump — the
-/// exact Minkowski offset) and unioned, then subtracted from the outline by the region
+/// A region targets a copper [`Layer`] by resolving its slab name against the stackup
+/// (Decision 13); a `Conductor` region whose name is not a copper slab contributes no
+/// pour here (it is rejected as nonsense by [`crate::elaborate::features`]). Foreign
+/// copper is the netted copper from [`net_features`] on the pour's layer; each obstacle
+/// is inflated by `min_clearance` (a [`Shape2D::inflated`] radius bump — the exact
+/// Minkowski offset) and unioned, then subtracted from the outline by the region
 /// kernel. (Floating/unnetted pads are an ERC fault and are not yet knocked out — a
 /// noted limit.)
 pub fn pour_fills(
@@ -474,24 +490,23 @@ pub fn pour_fills(
             continue;
         }
         let Some(name) = &r.net else { continue };
+        let Some(layer) = region_copper_layer(&su, &r.layer) else {
+            continue;
+        };
         let net = NetId::new(name.clone());
         let outline = shape_to_region(&r.shape, DEFAULT_CIRCLE_SEGS);
         // Foreign copper on this pour's layer. Each feature is single-slab, so the
-        // `layer == r.layer` match reproduces the old `PieceLayers::on(r.layer)`.
+        // `layer == r.layer`-resolved match reproduces the old `PieceLayers::on(..)`.
         let obstacles: Vec<crate::region::Region> = feats
             .iter()
-            .filter(|(layer, nf)| *layer == r.layer && nf.net.as_ref() != Some(&net))
+            .filter(|(l, nf)| *l == layer && nf.net.as_ref() != Some(&net))
             .map(|(_, nf)| {
                 let Extent::Prism { shape, .. } = &nf.feature.extent;
                 shape_to_region(&shape.inflated(rules.min_clearance), DEFAULT_CIRCLE_SEGS)
             })
             .collect();
         let fill = difference(&outline, &union_all(obstacles));
-        out.push(PourFill {
-            net,
-            layer: r.layer,
-            fill,
-        });
+        out.push(PourFill { net, layer, fill });
     }
     out
 }
@@ -824,7 +839,7 @@ mod pour_tests {
                 shape: outline,
                 role: Role::Conductor,
                 net: Some("GND".into()),
-                layer: Layer::Top,
+                layer: "F.Cu".into(),
             }),
         ];
         let mut h = History::new(Default::default());
@@ -898,7 +913,7 @@ mod pour_tests {
                 shape: Shape2D::polygon(vec![Point::mm(0, 0), Point::mm(10, 0), Point::mm(10, 10)]),
                 role: Role::Conductor,
                 net: Some("GDN".into()), // typo
-                layer: Layer::Top,
+                layer: "F.Cu".into(),
             }),
         ];
         let mut h = History::new(Default::default());
@@ -920,7 +935,7 @@ mod pour_tests {
                 shape: Shape2D::polygon(vec![Point::mm(0, 0), Point::mm(10, 0), Point::mm(10, 10)]),
                 role: Role::Conductor,
                 net: None,
-                layer: Layer::Top,
+                layer: "F.Cu".into(),
             }),
         ];
         let mut h = History::new(Default::default());
@@ -930,6 +945,54 @@ mod pour_tests {
         assert!(
             err.iter().any(|d| d.code == "E_POUR_NO_NET"),
             "netless conductor pour rejected: {err:?}"
+        );
+    }
+
+    #[test]
+    fn conductor_pour_on_non_copper_slab_is_rejected() {
+        // A net-bound copper pour targeting the silk slab is nonsense (Decision 13): a
+        // hard commit fault, and `pour_fills` never sees it.
+        let lib = part_library();
+        let src = vec![
+            board_rect(Point::mm(0, 0), Point::mm(10, 10)),
+            G::Region(RegionDecl {
+                shape: Shape2D::polygon(vec![Point::mm(0, 0), Point::mm(10, 0), Point::mm(10, 10)]),
+                role: Role::Conductor,
+                net: Some("GND".into()),
+                layer: "F.SilkS".into(),
+            }),
+        ];
+        let mut h = History::new(Default::default());
+        // (The unconnected net also faults; collect-all surfaces both — we assert the
+        // slab fault is present.)
+        let err = h
+            .commit(Transaction::one(Command::SetSource(src)), &lib, "silkpour")
+            .unwrap_err();
+        assert!(
+            err.iter().any(|d| d.code == "E_POUR_NON_COPPER"),
+            "pour on silk rejected: {err:?}"
+        );
+    }
+
+    #[test]
+    fn region_on_unknown_slab_is_rejected() {
+        let lib = part_library();
+        let src = vec![
+            board_rect(Point::mm(0, 0), Point::mm(10, 10)),
+            G::Region(RegionDecl {
+                shape: Shape2D::polygon(vec![Point::mm(0, 0), Point::mm(10, 0), Point::mm(10, 10)]),
+                role: Role::Keepout(crate::geom::KeepoutKind::Copper),
+                net: None,
+                layer: "Z.Cu".into(),
+            }),
+        ];
+        let mut h = History::new(Default::default());
+        let err = h
+            .commit(Transaction::one(Command::SetSource(src)), &lib, "badslab")
+            .unwrap_err();
+        assert!(
+            err.iter().any(|d| d.code == "E_UNKNOWN_SLAB"),
+            "unknown slab rejected: {err:?}"
         );
     }
 
@@ -1003,7 +1066,7 @@ mod pour_tests {
             shape: outline,
             role: Role::Conductor,
             net: Some("GND".into()),
-            layer: Layer::Top,
+            layer: "F.Cu".into(),
         }));
         let mut h2 = History::new(Default::default());
         h2.commit(
@@ -1071,7 +1134,7 @@ mod pour_tests {
                 shape: outline,
                 role: Role::Conductor,
                 net: Some("GND".into()),
-                layer: Layer::Top,
+                layer: "F.Cu".into(),
             }),
         ];
         let mut h = History::new(Default::default());
@@ -1141,7 +1204,7 @@ mod pour_tests {
                 shape: left_pour,
                 role: Role::Conductor,
                 net: Some("GND".into()),
-                layer: Layer::Top,
+                layer: "F.Cu".into(),
             }),
         ];
         let mut h = History::new(Default::default());
@@ -1217,13 +1280,13 @@ mod pour_tests {
                 shape: a,
                 role: Role::Conductor,
                 net: Some("GND".into()),
-                layer: Layer::Top,
+                layer: "F.Cu".into(),
             }),
             G::Region(RegionDecl {
                 shape: b,
                 role: Role::Conductor,
                 net: Some("GND".into()),
-                layer: Layer::Top,
+                layer: "F.Cu".into(),
             }),
         ];
         let mut h = History::new(Default::default());
@@ -1286,13 +1349,13 @@ mod pour_tests {
                 shape: left,
                 role: Role::Conductor,
                 net: Some("GND".into()),
-                layer: Layer::Top,
+                layer: "F.Cu".into(),
             }),
             G::Region(RegionDecl {
                 shape: right,
                 role: Role::Conductor,
                 net: Some("PWR".into()),
-                layer: Layer::Top,
+                layer: "F.Cu".into(),
             }),
         ];
         let mut h = History::new(Default::default());

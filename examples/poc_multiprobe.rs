@@ -598,7 +598,7 @@ fn main() {
     };
     write("netlist.txt", &netlist(doc), &mut wrote);
     write("placement.csv", &placement_csv(doc), &mut wrote);
-    write("board.svg", &svg(doc, &lib), &mut wrote);
+    write("board.svg", &svg(doc, &lib).unwrap(), &mut wrote);
     // gerber_set already includes board.drl (== excellon_drill(doc)); call it
     // explicitly too only to assert the two agree.
     let gset = gerber_set(doc, &lib);
