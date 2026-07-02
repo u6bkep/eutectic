@@ -25,8 +25,9 @@ Decision 10 — the geometry; the solver still uses the AABB proxy, issue 0019).
 A–Z/0–9/punct), a board-level `text "…" (x,y) h= layer=` entity lowering to `Role::Marking`
 features, SVG silk render. **SVG board-outline import** done (`svg_import`, Béziers).
 **Still open** (see §7): footprint graphics + auto-text (0016, builds on text);
-real non-copper layers / silk at honest z (0020, surfaced by the text slice — silk is
-stopgapped at copper-z); courtyard solver packing (0019); text follow-ups
+real non-copper layers / silk at honest z (0020 — **Decision 13 recorded 2026-07-02**:
+layer identity = slab name, projections are queries, no negative layers; spine in
+progress); courtyard solver packing (0019); text follow-ups
 (lowercase/TTF outline / footprint+refdes text / Gerber silk). This record is still
 meant to be folded into `architecture.md` §8.
 
@@ -403,6 +404,60 @@ Survey cleanup riders (additive, ride along with the relevant phase): the SVG re
 draws a fixed `r=0.3` circle at `pin_world` instead of real pad copper, and pad `drill`
 is stored but never exported — both fixable as PadGeo is converted.
 
+### Decision 13 — layer identity is a slab *name*; projections are queries, never inputs (2026-07-02)
+
+The identity-side twin of this section's finding. Issue 0020 (silk stopgapped at
+copper-z) and the trace-ordinal question exposed a recurring drift pattern: the 2.5D
+layer view was designed as a *derived projection*, but in three places its **working
+vocabulary leaked out and became stored identity** — `RegionDecl.layer`/`Text.layer`
+store `route::Layer` (a copper-only positional ordinal), the pour bridge matches on it,
+and exports run the projection *backwards* (`z_to_layer`, reconstructing layer identity
+from derived z). Every convergence step that removed such a leak deleted code and
+dissolved bugs (the copper-piece model, the mirror flag); every pain point has been one.
+
+**What a slab is.** A `Slab` is a **named z-interval** — an entry in a lookup table,
+not a primitive, not a container, and it holds no geometry or material. `layer=F.Cu` in
+tier-1 means nothing more than "my prism's `ZRange` is `stackup.slab_z("F.Cu")`"; the
+slab is **resolved away at elaboration** and the 3D ground truth contains only
+`Feature`s. Sparse layers are the normal case (F.Cu with three traces is three skinny
+prisms sharing a z-interval — no container, no membership); layers with a big solid
+(substrate, default mask) are *generators emitting an ordinary solid Feature* whose z
+was looked up from the slab, same machinery. Features remain free to ignore slabs
+entirely (via barrels span many; component bodies rise above all of them). The *name*
+is privileged only as the way to **refer** to a z-interval — stable across stackup
+edits, unlike ordinals, unlike raw z; the slab is never privileged as a way to
+**represent** anything.
+
+**The rules:**
+
+1. **Projections are queries, never inputs.** No derived view stores state, and no
+   view's vocabulary appears in tier-1 source or in bridges between subsystems.
+2. **Slab names are the universal layer-identity vocabulary.** Ordinals (`route::Layer`),
+   router grids, and file splits are view-internal working forms, derived from the
+   stackup at a module's edge and confined behind it.
+3. **No inverse projections.** Identity flows forward — carry the name, or
+   forward-query per slab ("which features intersect this z-interval?" → that slab's
+   Gerber; a via barrel correctly appears on every copper layer it crosses).
+   `z_to_layer`-style reconstruction dies.
+
+**No negative layers.** Slabs carry no polarity semantics. Solder mask is a generated
+board-area solid `Feature` plus **deletion volumes** (`Role::Void` prisms, no-op where
+nothing is present — CSG subtraction, same as board cutouts today). `Role::MaskOpening`
+retires in favour of `Void` at mask z. Gerber's draw-the-openings convention is an
+**export-format detail** that never leaks inward.
+
+**Consequences:** `RegionDecl`/`Text` (and future footprint graphics) carry a slab
+*name*; elaboration resolves it via `Stackup::slab_z` and an unknown name is a **hard
+elaboration error** (the silent board-z/`ZRange(0,0)` fallbacks in `elaborate::layer_z`
+die). The default stackup gains silk + mask slabs at honest z per side (paste is
+derivable-by-default — a stencil artifact ≈ mask openings on SMD pads — authored only
+when overridden). Traces/vias keep `route::Layer` **for now** because routes are
+unserialized runtime state (issue 0011) and the router's adjacency math is genuinely
+positional — but the moment 0011 makes routes authoritative, they serialize slab names,
+and the ordinal survives only inside the router. Footprint-local layer references are
+**side-relative** (a footprint's silk is "silk on *my* side"; F↔B swaps on flip, exactly
+as `pad_features` already swaps pad copper via `is_bottom`) — the 0020↔0016 joint.
+
 ## 7. Convergence plan: sequential foundation → parallel fan-out → sequential spine
 
 > **Status: executed (2026-06-30).** Every phase and post-convergence step below has
@@ -444,9 +499,13 @@ Then the post-convergence steps proceed on the corrected foundation:
 
 - ~~Precision policy for the angle→quaternion lowering~~ — **resolved**:
   `ORIENT_ANGLE_SCALE = 1e6` (≈1e-6 rad; see `doc::Orient::from_angle_deg`).
-- **Real non-copper layers (0020)** — silk/mask have no layer; geometry-layer identity
-  should be a *named slab*, not the copper-only `route::Layer`. Surfaced by the text
-  slice (silk stopgapped at copper-z). Pairs with 0016.
+- **Real non-copper layers (0020)** — **decided (Decision 13, 2026-07-02)**:
+  geometry-layer identity is a slab *name*; projections are queries, never inputs;
+  no negative layers (mask = solid + `Void` deletion volumes). Implementation spine
+  in progress. Pairs with 0016 (footprint graphics are side-relative).
+- **Trace/via slab-name migration** rides with 0011 (route serialization): serialized
+  routes reference slab names; `route::Layer` ordinals become router-internal only
+  (Decision 13 rule 2).
 - Whether component bodies get a dedicated role/material or reuse `Keepout`.
 - Relation to issue 0004 (planes / multilayer): the volumetric convergence is the
   natural home for that work.
