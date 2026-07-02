@@ -24,12 +24,23 @@ Decision 10 — the geometry; the solver still uses the AABB proxy, issue 0019).
 **Text/fonts first slice (Decision 9)** done: a built-in stroke font (`font.rs`,
 A–Z/0–9/punct), a board-level `text "…" (x,y) h= layer=` entity lowering to `Role::Marking`
 features, SVG silk render. **SVG board-outline import** done (`svg_import`, Béziers).
-**Still open** (see §7): footprint graphics + auto-text (0016, builds on text);
-real non-copper layers / silk at honest z (0020 — **Decision 13 recorded 2026-07-02**:
-layer identity = slab name, projections are queries, no negative layers; spine in
-progress); courtyard solver packing (0019); text follow-ups
-(lowercase/TTF outline / footprint+refdes text / Gerber silk). This record is still
-meant to be folded into `architecture.md` §8.
+**Decision 13 implemented end-to-end (2026-07-02, `main` @ `869f458`, 258 lib tests):**
+the slab-name spine (`feat/slab-identity` — `RegionDecl`/`Text` carry slab names, hard
+`E_UNKNOWN_SLAB`/`E_POUR_NON_COPPER` commit diagnostics, 7-slab default stackup,
+`Role::MaskOpening`→`Mask`); the mask model (`feat/mask-model` — board-area `Mask`
+solids per mask slab, pad-opening `Void`s resolved by role+z-adjacency
+(`top_mask`/`bottom_mask`), `full_z()` through-cuts for drills/cutouts); KiCad footprint
+graphics = **0016 resolved** (`feat/fp-graphics` — `PartDef.graphics`+`courtyard`,
+side-relative `swap_side`, silk polygons render filled); and the export forward-query
+rework (`feat/export-slabs` — model-derived mask Gerbers incl. cutout openings, real
+per-Marking-slab silk Gerbers, `z_to_layer` + dead `DesignRules.mask_expansion`
+DELETED, side-aware SVG silk). **0020 resolved.** Every branch got an adversarial
+sub-agent review; findings (mask-side-by-name asymmetry, invisible silk polygons, a
+Gerber modal-state blocker, cutout-sourcing purity, mask filenames) all fixed pre-merge.
+**Still open**: auto-text (refdes/value + fp_text, builds on 0016's graphics home);
+courtyard solver packing (0019); text follow-ups (lowercase/TTF outline); paste/fab
+virtual-layer question; trace/via slab-name migration rides with 0011. This record is
+still meant to be folded into `architecture.md` §8.
 
 This record captures the foundation decisions; it *realigned the implementation* with
 what §8 already stated and sharpened three points (the single primitive, the placement
@@ -499,13 +510,17 @@ Then the post-convergence steps proceed on the corrected foundation:
 
 - ~~Precision policy for the angle→quaternion lowering~~ — **resolved**:
   `ORIENT_ANGLE_SCALE = 1e6` (≈1e-6 rad; see `doc::Orient::from_angle_deg`).
-- **Real non-copper layers (0020)** — **decided (Decision 13, 2026-07-02)**:
-  geometry-layer identity is a slab *name*; projections are queries, never inputs;
-  no negative layers (mask = solid + `Void` deletion volumes). Implementation spine
-  in progress. Pairs with 0016 (footprint graphics are side-relative).
+- ~~Real non-copper layers (0020)~~ — **resolved (Decision 13, implemented 2026-07-02)**:
+  slab-name identity, mask solids + `Void` openings, real silk/mask Gerbers,
+  `z_to_layer` deleted. 0016 (footprint graphics) resolved alongside (side-relative).
 - **Trace/via slab-name migration** rides with 0011 (route serialization): serialized
   routes reference slab names; `route::Layer` ordinals become router-internal only
   (Decision 13 rule 2).
+- **Auto-text** (refdes/value live text + KiCad `fp_text`) — next text slice; the
+  graphics home (`PartDef.graphics`) and side-relative lowering exist now.
+- **Paste/fab virtual layers** — paste is derivable-by-default (Decision 13); fab is
+  documentation-only with no honest z. Decide zero-thickness slabs vs skip when a
+  consumer appears.
 - Whether component bodies get a dedicated role/material or reuse `Keepout`.
 - Relation to issue 0004 (planes / multilayer): the volumetric convergence is the
   natural home for that work.
