@@ -44,6 +44,14 @@ pub const COPPER_THICKNESS: Nm = 35_000;
 pub const MASK_THICKNESS: Nm = 25_000;
 /// Default silkscreen (ink) thickness: 10 µm, in nm.
 pub const SILK_THICKNESS: Nm = 10_000;
+/// Solder-mask expansion: how much larger a mask opening is than the pad copper, per
+/// side (the pad copper is inflated by this to get the opening). The **single source
+/// of truth** for that margin — the model's mask-opening `Void`s
+/// ([`crate::part::PinDef::pad_features`]), the design-rule default
+/// ([`crate::route::DesignRules::default`]), and the Gerber mask path all read it, so
+/// there is one value to change. A generic process figure; production reads it from
+/// the stack-up/process.
+pub const MASK_EXPANSION: Nm = 50_000;
 /// Default arc chord tolerance for tessellation: max sagitta (arc-to-chord deviation),
 /// in nm. 1 µm — finer than the 64-gon disc approximation at pad scale, coarse enough
 /// to keep segment counts modest for large-radius board-outline arcs.
@@ -1090,6 +1098,17 @@ impl Stackup {
         };
         let lo = slabs.iter().map(|s| s.z.lo).min()?;
         let hi = slabs.iter().map(|s| s.z.hi).max()?;
+        Some(ZRange::new(lo, hi))
+    }
+
+    /// The **full** stackup vertical extent — the span of *every* slab, mask and silk
+    /// included. This is the z a through-cut spans: a milled board cutout or a drill
+    /// physically pierces the mask and silk as well as the board body, unlike
+    /// [`board_z`](Self::board_z) (the body-only extent a substrate prism or a plated
+    /// barrel occupies). `None` only for an empty stackup.
+    pub fn full_z(&self) -> Option<ZRange> {
+        let lo = self.slabs.iter().map(|s| s.z.lo).min()?;
+        let hi = self.slabs.iter().map(|s| s.z.hi).max()?;
         Some(ZRange::new(lo, hi))
     }
 }
