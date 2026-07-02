@@ -18,9 +18,12 @@
 //! status (Gerber/fab output)".
 
 use crate::doc::{Doc, MM, Nm, Point};
-use crate::geom::{BoardShape, DEFAULT_CHORD_TOL, Extent, Path, Role, Seg, Shape2D, circumcenter};
+use crate::geom::{
+    BoardShape, DEFAULT_CHORD_TOL, Extent, Path, Role, Seg, Shape2D, Slab, Stackup, ZRange,
+    circumcenter,
+};
 use crate::part::{PartDef, PartLib, pin_world};
-use crate::route::{DesignRules, Layer, Trace, Via};
+use crate::route::{Layer, Trace, Via};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Format a fixed-point nanometre coordinate as a millimetre decimal string with
@@ -342,8 +345,8 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> Result<String, String> {
                 if f.role != Role::Marking {
                     continue;
                 }
-                let Extent::Prism { shape, .. } = &f.extent;
-                out.push_str(&svg_silk(shape, &flip));
+                let Extent::Prism { shape, z } = &f.extent;
+                out.push_str(&svg_silk(shape, &flip, is_bottom_silk(&su, z)));
             }
         }
         let o = c.pos.value;
@@ -396,8 +399,8 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> Result<String, String> {
         if nf.feature.role != Role::Marking {
             continue;
         }
-        let Extent::Prism { shape, .. } = &nf.feature.extent;
-        out.push_str(&svg_silk(shape, &flip));
+        let Extent::Prism { shape, z } = &nf.feature.extent;
+        out.push_str(&svg_silk(shape, &flip, is_bottom_silk(&su, z)));
     }
 
     out.push_str("</svg>\n");
@@ -411,7 +414,16 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> Result<String, String> {
 /// (`fp_poly`/`fp_rect`) is a *filled* area, so it draws as a closed filled polygon —
 /// rendering it as a centreline polyline would emit `stroke-width = radius*2 = 0` and
 /// vanish.
-fn svg_silk(shape: &Shape2D, flip: &impl Fn(Nm) -> Nm) -> String {
+///
+/// `bottom` splits the two silk sides visually (following the copper `layer_class` /
+/// `layer_color` convention): top silk keeps class `silk` / a mid grey, bottom silk gets
+/// class `silk-bottom` / a lighter grey so a two-sided board reads apart in one top view.
+fn svg_silk(shape: &Shape2D, flip: &impl Fn(Nm) -> Nm, bottom: bool) -> String {
+    let (class, color) = if bottom {
+        ("silk-bottom", "#c8c8c8")
+    } else {
+        ("silk", "#888888")
+    };
     let coords: Vec<String> = shape
         .points()
         .iter()
@@ -419,15 +431,23 @@ fn svg_silk(shape: &Shape2D, flip: &impl Fn(Nm) -> Nm) -> String {
         .collect();
     match shape {
         Shape2D::Polygon { .. } => format!(
-            "  <polygon class=\"silk\" points=\"{}\" fill=\"#888888\" stroke=\"none\"/>\n",
+            "  <polygon class=\"{class}\" points=\"{}\" fill=\"{color}\" stroke=\"none\"/>\n",
             coords.join(" "),
         ),
         Shape2D::Stroke { .. } => format!(
-            "  <polyline class=\"silk\" points=\"{}\" fill=\"none\" stroke=\"#888888\" stroke-width=\"{}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n",
+            "  <polyline class=\"{class}\" points=\"{}\" fill=\"none\" stroke=\"{color}\" stroke-width=\"{}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n",
             coords.join(" "),
             fmt_mm(shape.radius() * 2),
         ),
     }
+}
+
+/// Is a marking feature at z-range `z` on the **bottom** silk side? A marking slab
+/// outboard of (at or below) the bottom copper is bottom silk; anything else is top.
+/// A forward query against the stackup — the side is derived from z, never stored
+/// (Decision 13). Falls back to top when there is no bottom copper to compare against.
+fn is_bottom_silk(su: &Stackup, z: &ZRange) -> bool {
+    su.bottom_copper().is_some_and(|bot| z.hi <= bot.lo)
 }
 
 /// SVG class suffix / stroke colour for a copper layer (Top warm, Bottom cool,
@@ -712,13 +732,14 @@ fn svg_path_d(shape: &Shape2D, flip: &impl Fn(Nm) -> Nm) -> String {
     d
 }
 
-/// Emit one closed contour of `shape` as Gerber draws into `out`, walking the skeleton
-/// so an arc edge becomes a `G02`/`G03` multi-quadrant draw. `mode` tracks the current
-/// interpolation code and `g75` whether multi-quadrant has been enabled, so a
-/// straight-only contour emits no spurious mode lines (byte-identical to the legacy
-/// output). A polygon closes with a straight edge back to `start`.
-fn gerber_contour<'a>(shape: &Shape2D, out: &mut String, mode: &mut &'a str, g75: &mut bool) {
-    let path = shape.path();
+/// Walk `path`'s skeleton emitting a `D02` move-to-start then a draw per segment
+/// (`G01` line, `G02`/`G03` multi-quadrant arc, or a flattened Bézier run) into `out`.
+/// `mode` tracks the current interpolation code and `g75` whether multi-quadrant has
+/// been enabled, so a straight-only path emits no spurious mode lines. When `close` and
+/// the path does not end where it started, a straight edge back to `start` closes it.
+/// Shared by the closed-contour emitter ([`gerber_contour`], `close = true`: edge cuts,
+/// region fills) and the open-stroke emitter ([`gerber_stroke`], `close = false`: silk).
+fn gerber_walk(path: &Path, out: &mut String, mode: &mut &str, g75: &mut bool, close: bool) {
     let start = path.start;
     out.push_str(&format!(
         "X{}Y{}D02*\n",
@@ -726,7 +747,7 @@ fn gerber_contour<'a>(shape: &Shape2D, out: &mut String, mode: &mut &'a str, g75
         gbr_coord(start.y)
     ));
     let mut cur = start;
-    let line_to = |p: Point, out: &mut String, mode: &mut &'a str| {
+    let line_to = |p: Point, out: &mut String, mode: &mut &str| {
         if *mode != "G01" {
             out.push_str("G01*\n");
             *mode = "G01";
@@ -774,9 +795,24 @@ fn gerber_contour<'a>(shape: &Shape2D, out: &mut String, mode: &mut &'a str, g75
         }
         cur = seg.end();
     }
-    if cur != start {
+    if close && cur != start {
         line_to(start, out, mode); // implicit straight closing edge
     }
+}
+
+/// Emit one **closed** contour of `shape` as Gerber draws — the boundary walk plus a
+/// straight closing edge. Used for the `Edge.Cuts` outline and for `G36`/`G37` region
+/// fills (a filled area's boundary is a closed contour).
+fn gerber_contour(shape: &Shape2D, out: &mut String, mode: &mut &str, g75: &mut bool) {
+    gerber_walk(shape.path(), out, mode, g75, true);
+}
+
+/// Emit an **open** stroke centreline of `shape` as Gerber draws (no closing edge). The
+/// caller selects the round aperture (the stroke's pen diameter) beforehand; this only
+/// walks the centreline, so silk `fp_line`/`fp_arc`/text strokes come out as real
+/// draws with true arcs.
+fn gerber_stroke(shape: &Shape2D, out: &mut String, mode: &mut &str, g75: &mut bool) {
+    gerber_walk(shape.path(), out, mode, g75, false);
 }
 
 /// The KiCad-style layer token used in fab filenames: `F_Cu` / `B_Cu` / `In<n>_Cu`.
@@ -810,16 +846,10 @@ fn copper_layers(doc: &Doc, lib: &PartLib) -> Vec<Layer> {
 
 /// Every component pad copper region that flashes on `layer`, as `(world centre,
 /// aperture)`, in `(EntityId, pin-declaration, copper-region)` order. Each pad's
-/// real geometry is transformed to world space, inflated by `inflate` (0 for copper;
-/// the mask expansion for a solder-mask opening), and reduced to a flashable aperture;
-/// a region flashes only on the layers it occupies. Toy-library pins (`pad: None`)
+/// real geometry is transformed to world space and reduced to a flashable aperture; a
+/// region flashes only on the layers it occupies. Toy-library pins (`pad: None`)
 /// contribute nothing.
-fn component_pad_flashes(
-    doc: &Doc,
-    lib: &PartLib,
-    layer: Layer,
-    inflate: Nm,
-) -> Vec<(Point, Aperture)> {
+fn component_pad_flashes(doc: &Doc, lib: &PartLib, layer: Layer) -> Vec<(Point, Aperture)> {
     // Derive each pad's converged copper features and flash those whose slab is this
     // Gerber `layer`. `pad_features` already world-maps + assigns z; we match the slab
     // z of `layer`, so a Through pad flashes on every copper layer and an SMD pad only
@@ -842,7 +872,7 @@ fn component_pad_flashes(
                 if *z != target_z {
                     continue;
                 }
-                if let Some((center, ap)) = shape_flash(&shape.inflated(inflate)) {
+                if let Some((center, ap)) = shape_flash(shape) {
                     out.push((center, ap));
                 }
             }
@@ -859,7 +889,7 @@ fn component_pad_flashes(
 pub fn gerber_layer(doc: &Doc, lib: &PartLib, layer: Layer) -> String {
     let traces: Vec<&Trace> = doc.traces.values().filter(|t| t.layer == layer).collect();
     let vias: Vec<&Via> = doc.vias.values().filter(|v| v.spans(layer)).collect();
-    let pads = component_pad_flashes(doc, lib, layer, 0);
+    let pads = component_pad_flashes(doc, lib, layer);
 
     // Aperture table: distinct apertures, codes from 10 in `Ord` order.
     let mut aps: BTreeSet<Aperture> = BTreeSet::new();
@@ -1004,16 +1034,64 @@ pub fn excellon_drill(doc: &Doc) -> String {
     out
 }
 
-/// The solder-mask Gerber for one outer side (`Top`→`F.Mask`, `Bottom`→`B.Mask`).
-/// The mask layer is emitted as the **openings**: every component pad on that side is
-/// flashed as its copper aperture **inflated by the mask expansion** (the fab inverts
-/// to the mask coverage). This is the dual of the pour — the same offset (a
-/// `Shape2D` radius bump), no knockout. Through-hole pads open on both sides; vias are
-/// tented (not opened) by default. Same deterministic aperture-table + flash layout
-/// as a copper layer, minus traces/regions.
+/// The solder-mask Gerber for one outer side (`Top`→`F.Mask`, `Bottom`→`B.Mask`),
+/// derived **forward** from the model — never recomputed from a parallel rule set
+/// (Decision 13). The mask slab for the side is resolved by z-position
+/// ([`Stackup::top_mask`]/[`Stackup::bottom_mask`]); the file draws the **openings**
+/// (the fab inverts to the mask coverage — a draw-the-openings convention that stays an
+/// export-format detail):
+///
+/// - Pad openings: the [`Role::Void`] features [`PinDef::pad_features`] emits at the
+///   mask slab's z (the pad copper already inflated by [`geom::MASK_EXPANSION`]) —
+///   flashed as their aperture, so on the default stackup this is byte-for-byte the old
+///   pad-opening output. A pad's **drill** `Void` is a through-cut at the *full* stackup
+///   z, not the mask z, so it is not one of these — and it must not be: it sits inside
+///   the pad opening (drawing it again would double the flash) and its home is the
+///   Excellon file. Through-hole pads open both sides because `pad_features` places an
+///   opening at each side's mask slab.
+/// - Board cutouts: milled through the whole stack, so they remove mask over their whole
+///   area — drawn as `G36`/`G37` region fills. This is new (the old parallel rule missed
+///   cutouts entirely); it is strictly additive.
+///
+/// A side with no mask slab in the stackup opens nothing (an empty mask layer). Object
+/// order is `(EntityId, pin, region)` then source cutouts — fully deterministic.
 pub fn gerber_mask(doc: &Doc, lib: &PartLib, side: Layer) -> String {
-    let expansion = DesignRules::default().mask_expansion;
-    let openings = component_pad_flashes(doc, lib, side, expansion);
+    let su = crate::elaborate::stackup(&doc.source);
+    let mask_z = match side {
+        Layer::Bottom => su.bottom_mask(),
+        _ => su.top_mask(),
+    };
+
+    // Pad openings: `Void`s whose z lies within this mask slab (pad_features places the
+    // inflated-copper opening there). A through-cut `Void` (a drill) extends past the
+    // slab and is excluded — subsumed by the opening, and belongs to the drill file.
+    let mut openings: Vec<(Point, Aperture)> = Vec::new();
+    if let Some(mask_z) = mask_z {
+        for c in doc.components.values() {
+            let Some(def) = lib.get(&c.part) else {
+                continue;
+            };
+            for pin in &def.pins {
+                for f in pin.pad_features(c, &su) {
+                    if f.role != Role::Void {
+                        continue;
+                    }
+                    let Extent::Prism { shape, z } = &f.extent;
+                    // A pad opening sits within the mask slab; a through-cut (drill) does
+                    // not and is skipped (it is subsumed by the opening).
+                    if z.lo < mask_z.lo || z.hi > mask_z.hi {
+                        continue;
+                    }
+                    if let Some(fa) = shape_flash(shape) {
+                        openings.push(fa);
+                    }
+                }
+            }
+        }
+    }
+    // Board cutouts remove mask over their whole area (a through-cut `Void`), on both
+    // sides — drawn as region fills below.
+    let cutouts: Vec<Shape2D> = source_board(doc).map(|b| b.cutouts).unwrap_or_default();
 
     let mut aps: BTreeSet<Aperture> = BTreeSet::new();
     for (_, a) in &openings {
@@ -1038,6 +1116,16 @@ pub fn gerber_mask(doc: &Doc, lib: &PartLib, side: Layer) -> String {
         out.push_str(&format!("D{code}*\n"));
         out.push_str(&format!("X{}Y{}D03*\n", gbr_coord(p.x), gbr_coord(p.y)));
     }
+    // Cutout openings as region fills (only when the side actually has a mask to remove).
+    if mask_z.is_some() {
+        let mut mode = "G01";
+        let mut g75 = false;
+        for cut in &cutouts {
+            out.push_str("G36*\n");
+            gerber_contour(cut, &mut out, &mut mode, &mut g75);
+            out.push_str("G37*\n");
+        }
+    }
     out.push_str("M02*\n");
     out
 }
@@ -1051,11 +1139,126 @@ fn mask_file(side: Layer) -> &'static str {
     }
 }
 
+/// The KiCad-style filename token for a named slab: the slab name with `.`→`_`
+/// (`F.SilkS`→`F_SilkS`), matching the `F_Cu`/`F_Mask` convention of [`layer_file`] /
+/// [`mask_file`]. Used to name a marking (silk) Gerber from its slab.
+fn slab_file(name: &str) -> String {
+    name.replace('.', "_")
+}
+
+/// Every world-frame [`Role::Marking`] feature of the board: lowered board text (from
+/// the converged [`crate::elaborate::features`] view) plus each placed component's
+/// footprint silk ([`crate::part::graphic_features`], side-swapped + placed). The single
+/// forward source of silk geometry the mask/silk exporters and the SVG render share.
+/// Fallible because the board-text lowering resolves slab names (an unknown one is a
+/// hard error, per Decision 13).
+fn marking_features(
+    doc: &Doc,
+    lib: &PartLib,
+    su: &Stackup,
+) -> Result<Vec<crate::geom::Feature>, String> {
+    let mut out: Vec<crate::geom::Feature> = Vec::new();
+    for nf in crate::elaborate::features(&doc.source)? {
+        if nf.feature.role == Role::Marking {
+            out.push(nf.feature);
+        }
+    }
+    for c in doc.components.values() {
+        let Some(def) = lib.get(&c.part) else {
+            continue;
+        };
+        for f in crate::part::graphic_features(def, c, su) {
+            if f.role == Role::Marking {
+                out.push(f);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// One silkscreen Gerber for a marking [`Slab`], drawing the [`Role::Marking`] features
+/// whose z intersects the slab (forward query per slab — Decision 13). A
+/// [`Shape2D::Stroke`] (`fp_line`/`fp_arc`/text) draws as its centreline with a round
+/// aperture of the stroke's pen diameter (`radius * 2`); a [`Shape2D::Polygon`]
+/// (`fp_poly`/`fp_rect`) is a filled area, drawn as a `G36`/`G37` region. Aperture codes
+/// run from 10 in `Ord` order; object order follows [`marking_features`] — deterministic.
+pub fn gerber_silk(doc: &Doc, lib: &PartLib, slab: &Slab) -> Result<String, String> {
+    let su = crate::elaborate::stackup(&doc.source);
+    let feats: Vec<Shape2D> = marking_features(doc, lib, &su)?
+        .into_iter()
+        .filter(|f| {
+            let Extent::Prism { z, .. } = &f.extent;
+            z.overlaps(&slab.z)
+        })
+        .map(|f| {
+            let Extent::Prism { shape, .. } = f.extent;
+            shape
+        })
+        .collect();
+
+    // Aperture table: one round aperture per distinct stroke pen diameter.
+    let mut aps: BTreeSet<Aperture> = BTreeSet::new();
+    for s in &feats {
+        if matches!(s, Shape2D::Stroke { .. }) {
+            aps.insert(Aperture::Circle(s.radius() * 2));
+        }
+    }
+    let codes: BTreeMap<Aperture, u32> = aps
+        .iter()
+        .enumerate()
+        .map(|(i, a)| (*a, 10 + i as u32))
+        .collect();
+
+    let mut out = String::new();
+    out.push_str(&format!("G04 {} *\n", slab_file(&slab.name)));
+    out.push_str("%FSLAX46Y46*%\n");
+    out.push_str("%MOMM*%\n");
+    for (a, code) in &codes {
+        out.push_str(&format!("%ADD{}{}*%\n", code, a.template()));
+    }
+    out.push_str("G01*\n");
+    let mut mode = "G01";
+    let mut g75 = false;
+    for s in &feats {
+        match s {
+            Shape2D::Stroke { .. } => {
+                let code = codes[&Aperture::Circle(s.radius() * 2)];
+                out.push_str(&format!("D{code}*\n"));
+                mode = "G01"; // a D-code selection resets the modal draw state
+                gerber_stroke(s, &mut out, &mut mode, &mut g75);
+            }
+            Shape2D::Polygon { .. } => {
+                out.push_str("G36*\n");
+                gerber_contour(s, &mut out, &mut mode, &mut g75);
+                out.push_str("G37*\n");
+            }
+        }
+    }
+    out.push_str("M02*\n");
+    Ok(out)
+}
+
+/// The marking (silk) slabs of the stackup, ordered **top-down** (highest z first) so a
+/// board's fileset lists `F.SilkS` before `B.SilkS`, mirroring `F_Cu`/`B_Cu` and
+/// `F_Mask`/`B_Mask` ordering.
+fn marking_slabs(su: &Stackup) -> Vec<Slab> {
+    let mut m: Vec<Slab> = su
+        .slabs
+        .iter()
+        .filter(|s| s.role == Role::Marking)
+        .cloned()
+        .collect();
+    m.sort_by_key(|s| std::cmp::Reverse(s.z.hi));
+    m
+}
+
 /// The full deterministic fab fileset: one Gerber per copper layer (`board-F_Cu.gbr`
 /// …) in stack-up order, the two solder masks (`board-F_Mask.gbr` / `board-B_Mask.gbr`),
+/// one silk Gerber per marking slab (`board-F_SilkS.gbr` / `board-B_SilkS.gbr`, top-down),
 /// the `board-Edge_Cuts.gbr` outline, and the `board.drl` Excellon drill program.
-/// `(filename, content)` pairs; no timestamps, stable order.
-pub fn gerber_set(doc: &Doc, lib: &PartLib) -> Vec<(String, String)> {
+/// `(filename, content)` pairs; no timestamps, stable order. Fallible because the silk
+/// layers lower board text through the slab-name materialization gate (Decision 13).
+pub fn gerber_set(doc: &Doc, lib: &PartLib) -> Result<Vec<(String, String)>, String> {
     let mut out = Vec::new();
     for layer in copper_layers(doc, lib) {
         out.push((
@@ -1071,12 +1274,18 @@ pub fn gerber_set(doc: &Doc, lib: &PartLib) -> Vec<(String, String)> {
         "board-B_Mask.gbr".to_string(),
         gerber_mask(doc, lib, Layer::Bottom),
     ));
+    for slab in marking_slabs(&crate::elaborate::stackup(&doc.source)) {
+        out.push((
+            format!("board-{}.gbr", slab_file(&slab.name)),
+            gerber_silk(doc, lib, &slab)?,
+        ));
+    }
     out.push((
         "board-Edge_Cuts.gbr".to_string(),
         gerber_edge_cuts(doc, lib),
     ));
     out.push(("board.drl".to_string(), excellon_drill(doc)));
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1701,7 +1910,7 @@ psu.reg,LDO,0.000000,0.000000,0,T
     #[test]
     fn gerber_set_names_and_layers() {
         let (doc, lib) = hand_routed_board();
-        let set = gerber_set(&doc, &lib);
+        let set = gerber_set(&doc, &lib).unwrap();
         let names: Vec<&str> = set.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(
             names,
@@ -1710,6 +1919,8 @@ psu.reg,LDO,0.000000,0.000000,0,T
                 "board-B_Cu.gbr",
                 "board-F_Mask.gbr",
                 "board-B_Mask.gbr",
+                "board-F_SilkS.gbr",
+                "board-B_SilkS.gbr",
                 "board-Edge_Cuts.gbr",
                 "board.drl",
             ]
@@ -1989,7 +2200,9 @@ psu.reg,LDO,0.000000,0.000000,0,T
         )
         .unwrap();
         let doc = h.doc();
-        // A through-hole pad is exposed on both faces, so it opens on both masks.
+        // A through-hole pad is exposed on both faces, so it opens on both masks. Its
+        // drill `Void` is a through-cut (full-stack z), not a mask-slab opening, so it is
+        // NOT an extra flash — the count stays one opening per side.
         assert_eq!(
             gerber_mask(doc, &lib, Layer::Top).matches("D03*").count(),
             1
@@ -1999,6 +2212,156 @@ psu.reg,LDO,0.000000,0.000000,0,T
                 .matches("D03*")
                 .count(),
             1
+        );
+    }
+
+    /// New capability (Decision 13): a board cutout removes solder mask over its whole
+    /// area, so it appears on the mask as a `G36`/`G37` region fill. The old parallel
+    /// rule (pad-copper + expansion only) missed cutouts entirely.
+    #[test]
+    fn mask_gerber_includes_board_cutout() {
+        let lib = part_library();
+        let cutout = Shape2D::polygon(vec![
+            Point::mm(8, 8),
+            Point::mm(12, 8),
+            Point::mm(12, 12),
+            Point::mm(8, 12),
+        ]);
+        let mut h = History::new(Default::default());
+        h.commit(
+            Transaction::one(Command::SetSource(vec![
+                board_rect(Point::mm(0, 0), Point::mm(20, 20)),
+                G::Cutout { shape: cutout },
+            ])),
+            &lib,
+            "cut",
+        )
+        .unwrap();
+        let f = gerber_mask(h.doc(), &lib, Layer::Top);
+        assert!(f.contains("G36*"), "cutout opens a mask region:\n{f}");
+        assert!(f.contains("G37*"), "region closes:\n{f}");
+        // The cutout corner (12mm) is drawn in the region contour (nm coordinates).
+        assert!(f.contains("X12000000Y12000000"), "cutout boundary:\n{f}");
+        // Both faces lose mask over a through cutout.
+        assert!(gerber_mask(h.doc(), &lib, Layer::Bottom).contains("G36*"));
+    }
+
+    // --- silk Gerbers (Decision 13, stage 2b) -----------------------------
+
+    /// The default fileset carries an F and B silk Gerber, and board text on F.SilkS
+    /// comes out on the F silk layer as centreline draws with a round pen aperture.
+    #[test]
+    fn silk_gerber_draws_text_strokes_with_aperture() {
+        use crate::doc::Orient;
+        let lib = part_library();
+        let mut h = History::new(Default::default());
+        h.commit(
+            Transaction::one(Command::SetSource(vec![
+                board_rect(Point::mm(0, 0), Point::mm(20, 20)),
+                G::Text {
+                    string: "R1".into(),
+                    at: Point::mm(2, 10),
+                    height: MM,
+                    layer: "F.SilkS".into(),
+                    orient: Orient::IDENTITY,
+                },
+            ])),
+            &lib,
+            "silk-text",
+        )
+        .unwrap();
+        let doc = h.doc();
+        // The fileset exposes both silk layers.
+        let set = gerber_set(doc, &lib).unwrap();
+        let names: Vec<&str> = set.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"board-F_SilkS.gbr"),
+            "F silk file: {names:?}"
+        );
+        assert!(
+            names.contains(&"board-B_SilkS.gbr"),
+            "B silk file: {names:?}"
+        );
+
+        let su = crate::elaborate::stackup(&doc.source);
+        let fsilk = su.slabs.iter().find(|s| s.name == "F.SilkS").unwrap();
+        let g = gerber_silk(doc, &lib, fsilk).unwrap();
+        // A round pen aperture (the text stroke width = height/8 = 0.125mm) and real draws.
+        assert!(g.contains("C,0.125000*%"), "round silk pen aperture:\n{g}");
+        assert!(g.matches("D01*").count() > 2, "text strokes draw:\n{g}");
+        // The empty B silk layer carries no draws.
+        let bsilk = su.slabs.iter().find(|s| s.name == "B.SilkS").unwrap();
+        assert_eq!(
+            gerber_silk(doc, &lib, bsilk)
+                .unwrap()
+                .matches("D01*")
+                .count(),
+            0
+        );
+    }
+
+    /// A footprint `fp_poly` on silk is a filled area, so it comes out as a `G36`/`G37`
+    /// region (not a zero-width stroke).
+    #[test]
+    fn silk_gerber_fp_poly_is_a_region() {
+        let mut lib = PartLib::new();
+        let part = crate::kicad::import_footprint(
+            r#"(footprint "TRI"
+                (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu"))
+                (fp_poly (pts (xy -1 -1) (xy 1 -1) (xy 0 1)) (width 0) (layer "F.SilkS")))"#,
+        )
+        .unwrap();
+        lib.insert("TRI".into(), part);
+        let mut h = History::new(Default::default());
+        h.commit(
+            Transaction::one(Command::SetSource(vec![G::Instance {
+                path: "u1".into(),
+                part: "TRI".into(),
+            }])),
+            &lib,
+            "tri",
+        )
+        .unwrap();
+        let doc = h.doc();
+        let su = crate::elaborate::stackup(&doc.source);
+        let fsilk = su.slabs.iter().find(|s| s.name == "F.SilkS").unwrap();
+        let g = gerber_silk(doc, &lib, fsilk).unwrap();
+        assert!(
+            g.contains("G36*") && g.contains("G37*"),
+            "fp_poly is a region:\n{g}"
+        );
+    }
+
+    /// SVG splits silk by side: a bottom-side marking gets `class="silk-bottom"`, while
+    /// top-side silk keeps `class="silk"` (existing single-side fixtures unchanged).
+    #[test]
+    fn svg_bottom_silk_gets_bottom_class() {
+        use crate::doc::Orient;
+        let lib = part_library();
+        let mut h = History::new(Default::default());
+        h.commit(
+            Transaction::one(Command::SetSource(vec![
+                board_rect(Point::mm(0, 0), Point::mm(20, 20)),
+                G::Text {
+                    string: "B1".into(),
+                    at: Point::mm(2, 10),
+                    height: MM,
+                    layer: "B.SilkS".into(),
+                    orient: Orient::IDENTITY,
+                },
+            ])),
+            &lib,
+            "b-silk",
+        )
+        .unwrap();
+        let s = svg(h.doc(), &lib).unwrap();
+        assert!(
+            s.contains("class=\"silk-bottom\""),
+            "bottom silk gets its own class:\n{s}"
+        );
+        assert!(
+            !s.contains("class=\"silk\" "),
+            "no top-silk class for a bottom-only board:\n{s}"
         );
     }
 }

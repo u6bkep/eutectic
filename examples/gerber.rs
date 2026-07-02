@@ -81,7 +81,7 @@ fn main() {
     let doc = h.doc();
 
     // Dump the whole fab fileset (filename + content), then the SVG.
-    for (name, content) in gerber_set(doc, &lib) {
+    for (name, content) in gerber_set(doc, &lib).unwrap() {
         println!("\n==== {name} ====");
         print!("{content}");
     }

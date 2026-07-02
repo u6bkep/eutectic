@@ -601,7 +601,7 @@ fn main() {
     write("board.svg", &svg(doc, &lib).unwrap(), &mut wrote);
     // gerber_set already includes board.drl (== excellon_drill(doc)); call it
     // explicitly too only to assert the two agree.
-    let gset = gerber_set(doc, &lib);
+    let gset = gerber_set(doc, &lib).unwrap();
     assert_eq!(
         gset.iter()
             .find(|(n, _)| n == "board.drl")
