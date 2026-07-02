@@ -814,6 +814,8 @@ mod tests {
                 name: "PAD".into(),
                 pins: vec![pin],
                 interfaces: BTreeMap::new(),
+                graphics: Vec::new(),
+                courtyard: None,
             },
         );
         // Net B's pad sits at the origin; net A is a separate net.

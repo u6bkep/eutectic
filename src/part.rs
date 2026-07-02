@@ -53,6 +53,23 @@ pub struct PadGeo {
     pub drill: Option<Drill>,
 }
 
+/// A footprint **graphic** element — silkscreen or courtyard outline lifted from a
+/// `.kicad_mod`, in **component-local** coordinates (the same frame as [`PinDef::offset`]
+/// / [`PadCopper`]). The stroke width is realised the way all copper/text geometry in
+/// this crate is: baked into the [`Shape2D`]'s Minkowski inflation radius (an `fp_line`
+/// of width `w` is a `radius = w/2` capsule, exactly as [`Shape2D::trace`] lowers board
+/// text), so there is no separate width field — the shape is the single source of truth.
+///
+/// `layer` is a **side-relative** slab name held with the footprint's authored spelling
+/// (a top-authored footprint's silk is `F.SilkS` = "silk on *my* side"). A bottom-side
+/// component swaps the leading `F.`↔`B.` at lowering ([`swap_side`]) — the same side
+/// derivation [`PinDef::pad_features`] applies to pad copper via `is_bottom`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FpGraphic {
+    pub shape: Shape2D,
+    pub layer: String,
+}
+
 /// Signal/pin electrical direction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dir {
@@ -139,6 +156,16 @@ pub struct PartDef {
     pub name: String,
     pub pins: Vec<PinDef>,
     pub interfaces: BTreeMap<String, InterfaceDef>,
+    /// Footprint silkscreen/marking graphics ([`FpGraphic`]), lowered to
+    /// [`Role::Marking`](geom::Role) features by [`graphic_features`]. Empty for the
+    /// toy `part_library` and symbol-only parts.
+    pub graphics: Vec<FpGraphic>,
+    /// An imported **courtyard** outline in component-local coordinates, if the
+    /// footprint declared one (a `F.CrtYd`/`B.CrtYd` polygon). Per Decision 10 an
+    /// imported courtyard IS the authoritative keep-out, so [`courtyard_shape`] and
+    /// [`courtyard_half_extents`] prefer it over the derived pad-hull. `None` ⇒ derive
+    /// from pad copper as before.
+    pub courtyard: Option<Shape2D>,
 }
 
 impl PartDef {
@@ -355,6 +382,57 @@ impl PinDef {
     }
 }
 
+/// Swap a slab name's leading side prefix `F.`↔`B.` — the side-relative resolution a
+/// footprint's own layer references need (its geometry is authored in its top-side
+/// frame; a bottom-side placement mirrors every layer to the other side). Names with
+/// no `F.`/`B.` prefix (`core`, `In1.Cu`) pass through unchanged. This is the graphic
+/// twin of the copper-side XOR in [`PinDef::pad_features`], factored so both stay in
+/// step.
+pub fn swap_side(layer: &str) -> String {
+    if let Some(rest) = layer.strip_prefix("F.") {
+        format!("B.{rest}")
+    } else if let Some(rest) = layer.strip_prefix("B.") {
+        format!("F.{rest}")
+    } else {
+        layer.to_string()
+    }
+}
+
+/// World-frame physical features for a placed component's footprint [`graphics`]:
+/// each [`FpGraphic`] as a [`Role::Marking`](geom::Role) prism on its side-resolved
+/// slab z. The `graphic_features` sibling to [`PinDef::pad_features`] — the geometry
+/// takes the *same* placement path (mapped through [`to_world`], so it rotates/flips
+/// with the component), and a bottom-side component swaps each graphic's leading
+/// `F.`↔`B.` slab prefix ([`swap_side`], derived from `orient.is_bottom()` exactly as
+/// `pad_features` derives the copper side — no side flag).
+///
+/// A graphic whose (resolved) slab name is absent from the stackup is **skipped**,
+/// matching how `pad_features` drops a pad whose copper slab the stackup lacks
+/// (`top_copper()`/`bottom_copper()` returning `None`). The default stackup always
+/// carries `F/B.SilkS`, so this only bites a custom stackup that omits a silk slab.
+/// Markings are netless — silk carries no electrical identity.
+pub fn graphic_features(
+    def: &PartDef,
+    comp: &Component,
+    stackup: &geom::Stackup,
+) -> Vec<geom::Feature> {
+    let flipped = comp.orient.is_bottom();
+    let mut features = Vec::new();
+    for g in &def.graphics {
+        let layer = if flipped {
+            swap_side(&g.layer)
+        } else {
+            g.layer.clone()
+        };
+        let Some(z) = stackup.slab_z(&layer) else {
+            continue;
+        };
+        let world = g.shape.map_points(|p| to_world(comp, p));
+        features.push(geom::Feature::prism(geom::Role::Marking, world, z));
+    }
+    features
+}
+
 /// Default extra clearance added around a part's copper extent to form its
 /// courtyard keep-out, in nm (~0.25 mm, the KiCad-ish default).
 pub const COURTYARD_MARGIN: Nm = 250_000;
@@ -372,6 +450,14 @@ pub const COURTYARD_MARGIN: Nm = 250_000;
 /// real footprints are centred on their origin, so this is tight in practice and
 /// conservative otherwise.
 pub fn courtyard_half_extents(def: &PartDef) -> (Nm, Nm) {
+    // An imported courtyard (Decision 10) is authoritative — proxy its bbox directly so
+    // the solver's overlap-avoidance respects the real outline, not the pad hull. The
+    // imported outline already carries its own clearance, so no COURTYARD_MARGIN is added.
+    if let Some((lo, hi)) = def.courtyard.as_ref().and_then(Shape2D::bbox) {
+        let mx = lo.x.abs().max(hi.x.abs());
+        let my = lo.y.abs().max(hi.y.abs());
+        return (mx, my);
+    }
     let (mut mx, mut my) = (0, 0); // max |coordinate| on each axis
     let mut any = false;
     for pin in &def.pins {
@@ -414,6 +500,11 @@ pub fn courtyard_half_extents(def: &PartDef) -> (Nm, Nm) {
 /// ([`courtyard_half_extents`], which *does* include the radius via `bbox`) stays the
 /// conservative pusher.
 pub fn courtyard_shape(def: &PartDef) -> Option<Shape2D> {
+    // Decision 10: an imported courtyard polygon IS the authoritative courtyard — it
+    // wins over the derived pad-hull below.
+    if let Some(court) = &def.courtyard {
+        return Some(court.clone());
+    }
     let mut pts = Vec::new();
     for pin in &def.pins {
         let Some(pad) = &pin.pad else { continue };
@@ -479,6 +570,8 @@ pub fn part_library() -> PartLib {
                 pin("GND", Passive, Point { x: 0, y: -2 * MM }),
             ],
             interfaces: BTreeMap::new(),
+            graphics: Vec::new(),
+            courtyard: None,
         },
     );
     lib.insert(
@@ -490,6 +583,8 @@ pub fn part_library() -> PartLib {
                 pin("p2", Passive, Point { x: MM, y: 0 }),
             ],
             interfaces: BTreeMap::new(),
+            graphics: Vec::new(),
+            courtyard: None,
         },
     );
     lib.insert(
@@ -515,6 +610,8 @@ pub fn part_library() -> PartLib {
                 ),
             ],
             interfaces: BTreeMap::from([("uart".into(), uart())]),
+            graphics: Vec::new(),
+            courtyard: None,
         },
     );
     lib.insert(
@@ -540,6 +637,8 @@ pub fn part_library() -> PartLib {
                 ),
             ],
             interfaces: BTreeMap::from([("uart".into(), uart())]),
+            graphics: Vec::new(),
+            courtyard: None,
         },
     );
     lib
@@ -595,6 +694,8 @@ mod tests {
                 mk("GND", "4", Passive),
             ],
             interfaces: BTreeMap::new(),
+            graphics: Vec::new(),
+            courtyard: None,
         };
         // A functional name fans out to *every* matching pad number.
         assert_eq!(
@@ -1105,6 +1206,8 @@ mod tests {
             name: "R".into(),
             pins: vec![mk(2 * MM), mk(-2 * MM)],
             interfaces: BTreeMap::new(),
+            graphics: Vec::new(),
+            courtyard: None,
         };
         let court = courtyard_shape(&def).expect("a real pad part has a courtyard");
         assert!(
@@ -1155,8 +1258,103 @@ mod tests {
                 pad: Some(surface_pad(Shape2D::disc(Point { x: 0, y: 0 }, MM))),
             }],
             interfaces: BTreeMap::new(),
+            graphics: Vec::new(),
+            courtyard: None,
         };
         assert!(courtyard_shape(&one).is_none());
+    }
+
+    #[test]
+    fn swap_side_flips_f_and_b_prefixes_only() {
+        assert_eq!(swap_side("F.SilkS"), "B.SilkS");
+        assert_eq!(swap_side("B.CrtYd"), "F.CrtYd");
+        assert_eq!(swap_side("core"), "core"); // no side prefix ⇒ unchanged
+        assert_eq!(swap_side("In1.Cu"), "In1.Cu");
+    }
+
+    /// Footprint silk lowers to a `Role::Marking` feature on the F.SilkS slab z when
+    /// placed top-side, and swaps to B.SilkS z when the component is flipped — the same
+    /// side derivation pad copper uses, verified end-to-end.
+    #[test]
+    fn graphic_features_place_silk_and_swap_side_on_flip() {
+        let su = Stackup::default_2layer();
+        let def = PartDef {
+            name: "G".into(),
+            pins: vec![],
+            interfaces: BTreeMap::new(),
+            graphics: vec![FpGraphic {
+                shape: Shape2D::capsule(Point { x: -MM, y: 0 }, Point { x: MM, y: 0 }, 60_000),
+                layer: "F.SilkS".into(),
+            }],
+            courtyard: None,
+        };
+        let top = comp("G", Point { x: 0, y: 0 }, Orient::default());
+        let bot = comp("G", Point { x: 0, y: 0 }, Orient::default().flipped());
+        let tf = graphic_features(&def, &top, &su);
+        let bf = graphic_features(&def, &bot, &su);
+        assert_eq!(tf.len(), 1);
+        assert_eq!(tf[0].role, Role::Marking);
+        let (_, z_top) = prism_shape_z(&tf[0]);
+        let (_, z_bot) = prism_shape_z(&bf[0]);
+        assert_eq!(
+            z_top,
+            su.slab_z("F.SilkS").unwrap(),
+            "top-side silk → F.SilkS z"
+        );
+        assert_eq!(
+            z_bot,
+            su.slab_z("B.SilkS").unwrap(),
+            "flipped silk → B.SilkS z (side swap, no flag)"
+        );
+    }
+
+    /// A graphic whose (resolved) slab is absent from the stackup is skipped — matching
+    /// how `pad_features` drops a pad on a missing copper slab.
+    #[test]
+    fn graphic_features_skips_a_missing_slab() {
+        let su = Stackup::default_2layer();
+        let def = PartDef {
+            name: "G".into(),
+            pins: vec![],
+            interfaces: BTreeMap::new(),
+            graphics: vec![FpGraphic {
+                shape: Shape2D::capsule(Point { x: 0, y: 0 }, Point { x: MM, y: 0 }, 1),
+                layer: "F.Fab".into(), // not a slab in the default stackup
+            }],
+            courtyard: None,
+        };
+        let c = comp("G", Point { x: 0, y: 0 }, Orient::default());
+        assert!(graphic_features(&def, &c, &su).is_empty());
+    }
+
+    /// An imported courtyard overrides both the polygon `courtyard_shape` and the AABB
+    /// `courtyard_half_extents` proxy the solver pushes (Decision 10).
+    #[test]
+    fn imported_courtyard_overrides_derived_hull() {
+        let def = PartDef {
+            name: "C".into(),
+            // A lone tiny pad — its derived hull would be None / near-zero extents.
+            pins: vec![PinDef {
+                name: "1".into(),
+                number: "1".into(),
+                role: PinRole::Passive,
+                offset: Point { x: 0, y: 0 },
+                pad: Some(surface_pad(Shape2D::disc(Point { x: 0, y: 0 }, MM))),
+            }],
+            interfaces: BTreeMap::new(),
+            graphics: Vec::new(),
+            courtyard: Some(Shape2D::rect(Point { x: 0, y: 0 }, 8 * MM, 4 * MM)),
+        };
+        // Half-extents come from the imported outline (4mm × 2mm), not the pad hull.
+        assert_eq!(courtyard_half_extents(&def), (4 * MM, 2 * MM));
+        let court = courtyard_shape(&def).expect("imported courtyard");
+        assert_eq!(
+            court.bbox().unwrap().1,
+            Point {
+                x: 4 * MM,
+                y: 2 * MM
+            }
+        );
     }
 
     #[test]

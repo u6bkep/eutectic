@@ -226,6 +226,8 @@ mod tests {
                     mk("GND", "2", PinRole::Passive),
                 ],
                 interfaces: BTreeMap::new(),
+                graphics: Vec::new(),
+                courtyard: None,
             },
         );
         lib
@@ -390,6 +392,8 @@ mod tests {
                 name: "PAD".into(),
                 pins: vec![pin],
                 interfaces: BTreeMap::new(),
+                graphics: Vec::new(),
+                courtyard: None,
             },
         );
         lib

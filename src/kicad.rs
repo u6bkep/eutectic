@@ -13,7 +13,20 @@
 //! typed [`InterfaceDef`]s, so `PartDef.interfaces` is always empty here.
 //!
 //! What we *do* import is the pad-to-pin geometry: one [`PinDef`] per pad, named
-//! by the pad's number/name, positioned at the pad's `(at x y)` converted mm→nm.
+//! by the pad's number/name, positioned at the pad's `(at x y)` converted mm→nm —
+//! plus the footprint's non-copper **graphics** (issue 0016):
+//! - `fp_line`/`fp_arc`/`fp_circle`/`fp_poly`/`fp_rect` on `F.SilkS`/`B.SilkS` →
+//!   [`PartDef::graphics`] (lowered to [`Role::Marking`](geom::Role) by
+//!   [`part::graphic_features`](crate::part::graphic_features)).
+//! - A courtyard polygon (`fp_poly`/`fp_rect` on `F.CrtYd`/`B.CrtYd`) →
+//!   [`PartDef::courtyard`], the authoritative courtyard (Decision 10). Loose
+//!   `fp_line`/`fp_arc` courtyard *segments* are not yet stitched into a loop.
+//!
+//! Still **skipped**: `fp_text`/reference-designator auto-text (a separate branch),
+//! and graphics on `F.Fab`/`F.Paste`/`*.Fab`/… (they await a virtual-layer decision).
+//! Layer references are **side-relative**: a footprint is authored top-side, so its
+//! `F.*` graphics swap to `B.*` when the component is placed bottom-side (see
+//! [`part::swap_side`](crate::part::swap_side)).
 //!
 //! ## Mapping decisions (documented contract)
 //! - **Shared pad ids** (e.g. two `MP` mounting pads, or a split thermal pad that
@@ -34,7 +47,7 @@
 use crate::doc::{Nm, Point};
 use crate::geom;
 use crate::geom::{Seg, Shape2D};
-use crate::part::{Drill, PadCopper, PadGeo, PadLayers, PartDef, PinDef, PinRole};
+use crate::part::{Drill, FpGraphic, PadCopper, PadGeo, PadLayers, PartDef, PinDef, PinRole};
 use std::collections::BTreeMap;
 
 /// A parsed S-expression node: either a leaf atom or a parenthesised list.
@@ -294,11 +307,118 @@ pub fn import_footprint(text: &str) -> Result<PartDef, String> {
         });
     }
 
+    // Footprint graphics: silkscreen → `graphics` (lowered to `Role::Marking`), and a
+    // courtyard outline → the authoritative `courtyard` (Decision 10). Everything else
+    // (`F.Fab`, `F.Paste`, `fp_text`, …) is deliberately skipped — see the module doc.
+    let mut graphics: Vec<FpGraphic> = Vec::new();
+    let mut courtyard: Option<Shape2D> = None;
+    for item in items {
+        let Some((shape, layer)) = parse_fp_graphic(item)? else {
+            continue;
+        };
+        match layer.as_str() {
+            "F.SilkS" | "B.SilkS" => graphics.push(FpGraphic { shape, layer }),
+            // A courtyard is a single closed outline. We take a `fp_poly`/`fp_rect`
+            // (a `Shape2D::Polygon`); loose `fp_line`/`fp_arc` courtyard segments are
+            // not stitched into a loop yet, so they are ignored (noted). Last one wins.
+            "F.CrtYd" | "B.CrtYd" if matches!(shape, Shape2D::Polygon { .. }) => {
+                courtyard = Some(shape);
+            }
+            _ => {}
+        }
+    }
+
     Ok(PartDef {
         name,
         pins,
         interfaces: BTreeMap::new(),
+        graphics,
+        courtyard,
     })
+}
+
+/// Parse one footprint graphic (`fp_line`/`fp_arc`/`fp_circle`/`fp_poly`/`fp_rect`)
+/// into its component-local [`Shape2D`] + slab layer name. Coordinates are already in
+/// the footprint frame (no pad-centre offset), so this reuses the `gr_*` point readers
+/// with a zero centre. Stroke width comes from `(stroke (width w))` (modern) or a bare
+/// `(width w)` (legacy) and, per this crate's convention, is baked into the shape's
+/// Minkowski radius — `fp_line`→capsule, `fp_arc`→arc stroke (both `width/2`); a
+/// zero-width stroke carries no ink ⇒ `Ok(None)`. `fp_rect`/`fp_poly` build the filled
+/// polygon; `fp_circle` builds a filled disc (an outline-only circle is approximated as
+/// filled — the same simplification the custom-pad `gr_circle` path makes). `Ok(None)`
+/// for any other head or a graphic with no `(layer …)`.
+fn parse_fp_graphic(item: &Sexp) -> Result<Option<(Shape2D, String)>, String> {
+    let Some(list) = item.as_list() else {
+        return Ok(None);
+    };
+    let head = list.first().and_then(Sexp::as_atom).unwrap_or("");
+    let origin = Point { x: 0, y: 0 };
+    let width = graphic_width(list);
+    let shape = match head {
+        "fp_line" => {
+            let s = prim_xy(list, "start")?.ok_or("fp_line missing (start …)")?;
+            let e = prim_xy(list, "end")?.ok_or("fp_line missing (end …)")?;
+            (width > 0).then(|| Shape2D::capsule(s, e, width / 2))
+        }
+        "fp_arc" => {
+            if width <= 0 {
+                None
+            } else {
+                let (start, mid, end) = gr_arc_points(list, origin)?;
+                Some(Shape2D::arc(start, mid, end, width))
+            }
+        }
+        "fp_circle" => {
+            let c = prim_xy(list, "center")?.ok_or("fp_circle missing (center …)")?;
+            let e = prim_xy(list, "end")?.ok_or("fp_circle missing (end …)")?;
+            let r = dist_nm(c, e);
+            (r > 0).then(|| Shape2D::disc(c, r))
+        }
+        "fp_rect" => {
+            let s = prim_xy(list, "start")?.ok_or("fp_rect missing (start …)")?;
+            let e = prim_xy(list, "end")?.ok_or("fp_rect missing (end …)")?;
+            Some(Shape2D::polygon(vec![
+                s,
+                Point { x: e.x, y: s.y },
+                e,
+                Point { x: s.x, y: e.y },
+            ]))
+        }
+        "fp_poly" => {
+            let pts = prim_pts(list)?;
+            (pts.len() >= 3).then(|| Shape2D::polygon(pts))
+        }
+        _ => return Ok(None),
+    };
+    let (Some(shape), Some(layer)) = (shape, layer_name(list)) else {
+        return Ok(None);
+    };
+    Ok(Some((shape, layer)))
+}
+
+/// A footprint graphic's stroke width in nm: modern `(stroke (width w) …)` or the
+/// legacy bare `(width w)`. `0` (⇒ a filled, unstroked shape) if neither is present.
+fn graphic_width(list: &[Sexp]) -> Nm {
+    if let Some(w) = list
+        .iter()
+        .find_map(|s| s.list_headed("stroke"))
+        .and_then(|st| st.iter().find_map(|s| s.list_headed("width")))
+        .and_then(|l| l.get(1))
+        .and_then(Sexp::as_atom)
+        .and_then(|a| mm_to_nm(a).ok())
+    {
+        return w;
+    }
+    prim_width(list)
+}
+
+/// A graphic item's `(layer "X")` name (quoted or bare), if present.
+fn layer_name(list: &[Sexp]) -> Option<String> {
+    list.iter()
+        .find_map(|s| s.list_headed("layer"))
+        .and_then(|l| l.get(1))
+        .and_then(Sexp::as_atom)
+        .map(str::to_string)
 }
 
 /// Lift a pad's real copper + drill geometry out of a
@@ -1209,6 +1329,9 @@ pub fn join_symbol_footprint(symbol: &Symbol, footprint: &PartDef) -> JoinReport
         name: footprint.name.clone(),
         pins,
         interfaces: BTreeMap::new(),
+        // Silk/courtyard geometry is the footprint's, carried through the join.
+        graphics: footprint.graphics.clone(),
+        courtyard: footprint.courtyard.clone(),
     };
     JoinReport {
         part,
@@ -1582,6 +1705,63 @@ mod tests {
         assert!(
             (end.x).abs() < 10 && (end.y - 500_000).abs() < 10,
             "swept end ≈ (0, 0.5mm): {end:?}"
+        );
+    }
+
+    /// Footprint graphics (issue 0016): silk `fp_line`s + an `fp_arc` land in
+    /// `graphics` with width baked into the shape radius; a courtyard `fp_poly` becomes
+    /// the authoritative `courtyard`; an `fp_line` on `F.Fab` is skipped.
+    #[test]
+    fn imports_footprint_graphics_silk_and_courtyard() {
+        let src = r#"
+(footprint "GFX"
+  (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu"))
+  (fp_line (start -1 -1) (end 1 -1) (stroke (width 0.12) (type solid)) (layer "F.SilkS"))
+  (fp_line (start 1 -1) (end 1 1) (stroke (width 0.12) (type solid)) (layer "F.SilkS"))
+  (fp_arc (start 0 0) (mid 0.1 0.2) (end 0.2 0) (stroke (width 0.15)) (layer "F.SilkS"))
+  (fp_line (start 0 0) (end 1 0) (width 0.1) (layer "F.Fab"))
+  (fp_poly (pts (xy -2 -2) (xy 2 -2) (xy 2 2) (xy -2 2)) (width 0.05) (layer "F.CrtYd"))
+)"#;
+        let p = import_footprint(src).unwrap();
+        // Two silk lines + one silk arc; the F.Fab line is skipped.
+        assert_eq!(
+            p.graphics.len(),
+            3,
+            "2 silk lines + 1 silk arc, F.Fab skipped"
+        );
+        assert!(p.graphics.iter().all(|g| g.layer == "F.SilkS"));
+        // A 0.12mm line → capsule with radius width/2 = 60_000 nm.
+        let line = p
+            .graphics
+            .iter()
+            .find(|g| {
+                matches!(&g.shape, Shape2D::Stroke { path, .. }
+                if path.segs.iter().all(|s| matches!(s, Seg::Line { .. })))
+            })
+            .expect("a silk line");
+        assert_eq!(line.shape.radius(), 60_000, "0.12mm width baked as radius");
+        // The arc: a Stroke carrying a Seg::Arc, half-width 0.15/2 = 75_000 nm.
+        let arc = p
+            .graphics
+            .iter()
+            .find(|g| {
+                g.shape
+                    .path()
+                    .segs
+                    .iter()
+                    .any(|s| matches!(s, Seg::Arc { .. }))
+            })
+            .expect("a silk arc");
+        assert_eq!(arc.shape.radius(), 75_000);
+        // The courtyard polygon overrides the pad-hull (Decision 10): the imported 4×4mm
+        // square, not the ~1mm pad hull.
+        let court = crate::part::courtyard_shape(&p).expect("imported courtyard");
+        assert!(matches!(court, Shape2D::Polygon { .. }));
+        let (lo, hi) = court.bbox().unwrap();
+        assert_eq!(
+            (lo.x, lo.y, hi.x, hi.y),
+            (-2_000_000, -2_000_000, 2_000_000, 2_000_000),
+            "courtyard is the imported 4×4mm outline, not the pad hull"
         );
     }
 
