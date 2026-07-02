@@ -113,8 +113,9 @@ pub struct DesignRules {
     /// fusing genuinely separate copper.
     pub touch_tol: Nm,
     /// Solder-mask expansion: how much larger the mask opening is than the pad copper,
-    /// per side (the pad is inflated by this to get the opening). A generic value;
-    /// production reads it from the stack-up/process.
+    /// per side (the pad is inflated by this to get the opening). Defaults from
+    /// [`crate::geom::MASK_EXPANSION`], the single source of truth the model's
+    /// mask-opening `Void`s share; production reads it from the stack-up/process.
     pub mask_expansion: Nm,
 }
 
@@ -124,7 +125,7 @@ impl Default for DesignRules {
             min_clearance: 150_000,   // 0.15 mm
             min_trace_width: 150_000, // 0.15 mm
             touch_tol: MM / 100,      // 0.01 mm
-            mask_expansion: 50_000,   // 0.05 mm
+            mask_expansion: crate::geom::MASK_EXPANSION,
         }
     }
 }
@@ -1299,6 +1300,44 @@ mod pour_tests {
             )),
             "overlapping same-net pours are one island connecting both pads: {:?}",
             drc(h.doc(), &lib)
+        );
+    }
+
+    /// Mask generation must not perturb DRC. The mask-opening `Void`s that
+    /// `pad_features` now emits (and the mask solids `elaborate::features` emits) are
+    /// non-conductor geometry; the DRC copper producer (`net_features`) filters to
+    /// `Role::Conductor`, so none of it reaches clearance or connectivity, and the
+    /// violation set is exactly the copper-only result. This guards that invariant.
+    #[test]
+    fn mask_generation_does_not_perturb_drc() {
+        let (doc, lib) = board_pour_scene("B.Cu");
+        let nl = netlist_of(&doc);
+        let su = stackup(&doc.source);
+
+        // Sanity: the scene's pads DO generate mask-opening `Void`s, so the exclusion
+        // below is a real guard rather than vacuous.
+        let produces_openings = doc.components.values().any(|c| {
+            lib.get(&c.part).is_some_and(|def| {
+                def.pins
+                    .iter()
+                    .flat_map(|p| p.pad_features(c, &su))
+                    .any(|f| f.role == crate::geom::Role::Void)
+            })
+        });
+        assert!(produces_openings, "scene pads produce mask-opening Voids");
+
+        // The DRC copper producer is copper-only: no mask/void feature reaches it, so
+        // the violation set is unchanged by the presence of mask geometry.
+        let feats = net_features(&doc, &lib, &nl, &su);
+        assert!(
+            feats
+                .iter()
+                .all(|(_, nf)| nf.feature.role == crate::geom::Role::Conductor),
+            "net_features carries only copper — mask/void never enters DRC"
+        );
+        assert!(
+            !feats.is_empty(),
+            "the scene has copper features (the check is non-trivial)"
         );
     }
 

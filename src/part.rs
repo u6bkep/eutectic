@@ -246,9 +246,19 @@ pub fn pad_copper_world(comp: &Component, c: &PadCopper) -> Shape2D {
 
 impl PinDef {
     /// World-frame physical features for this pin's pad: each copper region as a
-    /// [`Role::Conductor`](geom::Role) prism on its layer's z, plus the drill (if
-    /// any) as a [`Role::Void`](geom::Role) prism spanning the board. Empty if the
-    /// pin has no pad.
+    /// [`Role::Conductor`](geom::Role) prism on its layer's z; a solder-mask opening
+    /// per copper region as a [`Role::Void`](geom::Role) prism (the copper expanded by
+    /// [`geom::MASK_EXPANSION`]) at its side's mask slab z; plus the drill (if any) as a
+    /// [`Role::Void`](geom::Role) prism spanning the *full* stackup. Empty if the pin
+    /// has no pad.
+    ///
+    /// The mask opening deletes mask material where the pad is exposed (Decision 13 — an
+    /// opening is a `Void` at mask z, not a negative layer): a surface pad opens its
+    /// resolved side's mask (`F.Mask`/`B.Mask`, respecting the `is_bottom` flip), a
+    /// through pad opens both. A custom stackup lacking the named mask slab opens
+    /// nothing there (a `Void` is a no-op where no mask exists). These `Void`s are not
+    /// copper, so the DRC copper producer / the Gerber copper path drop them exactly as
+    /// they drop the drill `Void`.
     ///
     /// The component's position + cardinal [`Orient`](crate::doc::Orient) place the
     /// geometry — copper via [`pad_copper_world`] (the pad's local offset is already
@@ -277,6 +287,25 @@ impl PinDef {
         let mut features = Vec::new();
         for cu in &pad.copper {
             let world = pad_copper_world(comp, cu);
+            // Solder-mask opening: the pad copper, expanded by the mask margin, deletes
+            // mask material on the side(s) it is exposed (Decision 13 — an opening is a
+            // `Void` at mask z, not a negative layer). The mask slab is resolved by name
+            // (`F.Mask`/`B.Mask`) matching the pad's *resolved* side; a custom stackup
+            // that lacks the named mask slab opens nothing (a `Void` is a no-op where no
+            // mask exists), which is not an error.
+            let opening = world.inflated(geom::MASK_EXPANSION);
+            let mask_sides: &[&str] = match cu.layers {
+                PadLayers::Through => &["F.Mask", "B.Mask"],
+                PadLayers::Top | PadLayers::Bottom => {
+                    // XOR with the flip: a Top pad on a flipped part is on the bottom,
+                    // so its exposed side (and thus its mask slab) is B.Mask.
+                    if matches!(cu.layers, PadLayers::Top) != flipped {
+                        &["F.Mask"]
+                    } else {
+                        &["B.Mask"]
+                    }
+                }
+            };
             match cu.layers {
                 PadLayers::Top | PadLayers::Bottom => {
                     let is_top_local = matches!(cu.layers, PadLayers::Top);
@@ -301,17 +330,23 @@ impl PinDef {
                     }
                 }
             }
+            for name in mask_sides {
+                if let Some(z) = stackup.slab_z(name) {
+                    features.push(geom::Feature::prism(geom::Role::Void, opening.clone(), z));
+                }
+            }
         }
         if let Some(drill) = &pad.drill {
-            // The drill is a Void spanning the whole board, centred on the pad centre.
-            // A round drill carries no centre, so it sits at the pin offset; a slot's
-            // endpoints are already stored in the pin's local frame.
+            // The drill is a Void that pierces the whole stackup (mask + silk included),
+            // centred on the pad centre. A round drill carries no centre, so it sits at
+            // the pin offset; a slot's endpoints are already stored in the pin's local
+            // frame.
             let local = match *drill {
                 Drill::Round { d } => Shape2D::disc(self.offset, d / 2),
                 Drill::Slot { a, b, d } => Shape2D::capsule(a, b, d / 2),
             };
             let world = local.map_points(|p| to_world(comp, p));
-            if let Some(z) = stackup.board_z() {
+            if let Some(z) = stackup.full_z() {
                 features.push(geom::Feature::prism(geom::Role::Void, world, z));
             }
         }
@@ -777,15 +812,88 @@ mod tests {
         };
         let c = comp("P", Point { x: 0, y: 0 }, Orient::from_deg(0).unwrap());
         let feats = pin.pad_features(&c, &stackup);
-        assert_eq!(feats.len(), 1, "one copper region, no drill");
-        assert_eq!(feats[0].role, Role::Conductor);
-        let (shape, z) = prism_shape_z(&feats[0]);
+        let conductors: Vec<_> = feats.iter().filter(|f| f.role == Role::Conductor).collect();
+        assert_eq!(conductors.len(), 1, "one copper region, no drill");
+        let (shape, z) = prism_shape_z(conductors[0]);
         assert_eq!(z, stackup.top_copper().unwrap(), "Top → top copper z");
         // At the origin with Deg0, the world shape == the local shape; bbox matches the
         // world-mapped copper bbox.
         let world = pad_copper_world(&c, &pin.pad.as_ref().unwrap().copper[0]);
         assert_eq!(shape.bbox(), world.bbox());
         assert_eq!(shape.bbox(), pad_shape.bbox());
+    }
+
+    /// A surface pad emits one mask-opening `Void` on its resolved side's mask slab:
+    /// F.Mask for a top-placed pad, B.Mask for a flipped (bottom) one, and the opening
+    /// is the pad copper inflated by [`geom::MASK_EXPANSION`] (Decision 13).
+    #[test]
+    fn pad_features_surface_pad_opens_its_side_mask() {
+        let su = Stackup::default_2layer();
+        let pad_shape = Shape2D::rect(Point { x: MM, y: 0 }, MM, MM);
+        let pin = PinDef {
+            name: "1".into(),
+            number: "1".into(),
+            role: PinRole::Passive,
+            offset: Point { x: MM, y: 0 },
+            pad: Some(surface_pad(pad_shape)),
+        };
+
+        // Top-placed: opens F.Mask, at the F.Mask z, expanded by the margin.
+        let top = comp("P", Point { x: 0, y: 0 }, Orient::default());
+        let tf = pin.pad_features(&top, &su);
+        let opens: Vec<_> = tf.iter().filter(|f| f.role == Role::Void).collect();
+        assert_eq!(opens.len(), 1, "one mask opening for a surface pad");
+        let (shape, z) = prism_shape_z(opens[0]);
+        assert_eq!(z, su.slab_z("F.Mask").unwrap(), "top pad opens F.Mask");
+        let world = pad_copper_world(&top, &pin.pad.as_ref().unwrap().copper[0]);
+        assert_eq!(
+            *shape,
+            world.inflated(geom::MASK_EXPANSION),
+            "opening is the copper expanded by the mask margin"
+        );
+
+        // Flipped (bottom): opens B.Mask instead (derived from orientation, no flag).
+        let bot = comp("P", Point { x: 0, y: 0 }, Orient::default().flipped());
+        let bf = pin.pad_features(&bot, &su);
+        let opens: Vec<_> = bf.iter().filter(|f| f.role == Role::Void).collect();
+        assert_eq!(opens.len(), 1, "one mask opening for a flipped surface pad");
+        assert_eq!(
+            prism_shape_z(opens[0]).1,
+            su.slab_z("B.Mask").unwrap(),
+            "flipped pad opens B.Mask"
+        );
+    }
+
+    /// A custom stackup with no mask slab opens nothing (a `Void` is a no-op where no
+    /// mask exists — not an error). The copper still lowers as usual.
+    #[test]
+    fn pad_features_no_mask_slab_opens_nothing() {
+        let su = Stackup {
+            slabs: vec![geom::Slab {
+                name: "F.Cu".into(),
+                z: geom::ZRange::new(0, 35_000),
+                role: Role::Conductor,
+                material: None,
+            }],
+        };
+        let pin = PinDef {
+            name: "1".into(),
+            number: "1".into(),
+            role: PinRole::Passive,
+            offset: Point { x: 0, y: 0 },
+            pad: Some(surface_pad(Shape2D::rect(Point { x: 0, y: 0 }, MM, MM))),
+        };
+        let c = comp("P", Point { x: 0, y: 0 }, Orient::default());
+        let feats = pin.pad_features(&c, &su);
+        assert!(
+            !feats.iter().any(|f| f.role == Role::Void),
+            "no mask slab ⇒ no opening"
+        );
+        assert_eq!(
+            feats.iter().filter(|f| f.role == Role::Conductor).count(),
+            1,
+            "copper still lowers"
+        );
     }
 
     #[test]
@@ -812,7 +920,31 @@ mod tests {
         let conductors: Vec<_> = feats.iter().filter(|f| f.role == Role::Conductor).collect();
         let voids: Vec<_> = feats.iter().filter(|f| f.role == Role::Void).collect();
         assert_eq!(conductors.len(), n_cu, "one conductor per copper slab");
-        assert_eq!(voids.len(), 1, "one drill void");
+        // Voids: the drill (spanning the full stackup) + the two mask openings (a
+        // through pad opens both F.Mask and B.Mask).
+        let drill_void: Vec<_> = voids
+            .iter()
+            .filter(|f| prism_shape_z(f).1 == stackup.full_z().unwrap())
+            .collect();
+        assert_eq!(drill_void.len(), 1, "one drill void");
+        assert_eq!(
+            voids.len(),
+            3,
+            "drill void + two mask openings (both sides)"
+        );
+        // The two mask openings are on F.Mask and B.Mask (a through pad opens both).
+        let mut mask_zs: Vec<_> = voids
+            .iter()
+            .map(|f| prism_shape_z(f).1)
+            .filter(|z| *z != stackup.full_z().unwrap())
+            .collect();
+        mask_zs.sort_by_key(|z| z.lo);
+        let mut want = vec![
+            stackup.slab_z("F.Mask").unwrap(),
+            stackup.slab_z("B.Mask").unwrap(),
+        ];
+        want.sort_by_key(|z| z.lo);
+        assert_eq!(mask_zs, want, "through pad opens both F.Mask and B.Mask");
         // All conductor features share the same world shape, one per slab z.
         let world = pad_copper_world(&c, &pin.pad.as_ref().unwrap().copper[0]);
         let mut zs: Vec<_> = conductors
@@ -833,9 +965,13 @@ mod tests {
             v
         };
         assert_eq!(zs, slab_zs, "fan-out covers every copper slab z");
-        // The void spans the whole board.
-        let (_, vz) = prism_shape_z(voids[0]);
-        assert_eq!(vz, stackup.board_z().unwrap(), "drill void spans the board");
+        // The drill void spans the full stackup (pierces mask + silk, not just the body).
+        let (_, vz) = prism_shape_z(drill_void[0]);
+        assert_eq!(
+            vz,
+            stackup.full_z().unwrap(),
+            "drill void pierces the full stackup"
+        );
     }
 
     #[test]
@@ -866,13 +1002,22 @@ mod tests {
             Orient::from_deg(90).unwrap(),
         );
         let feats = pin.pad_features(&c, &stackup);
-        let voids: Vec<_> = feats.iter().filter(|f| f.role == Role::Void).collect();
-        assert_eq!(voids.len(), 1, "one drill void");
-        let (shape, vz) = prism_shape_z(voids[0]);
+        // The drill void is the one spanning the full stackup; the others are mask
+        // openings (a through pad opens both sides).
+        let drill_void: Vec<_> = feats
+            .iter()
+            .filter(|f| f.role == Role::Void && prism_shape_z(f).1 == stackup.full_z().unwrap())
+            .collect();
+        assert_eq!(drill_void.len(), 1, "one drill void");
+        let (shape, vz) = prism_shape_z(drill_void[0]);
         // Drill `d` is a diameter, so the capsule radius is `d / 2` (= MM / 4).
         let expected = Shape2D::capsule(a, b, MM / 4).map_points(|p| to_world(&c, p));
         assert_eq!(*shape, expected, "slot void is the world-mapped capsule");
-        assert_eq!(vz, stackup.board_z().unwrap(), "slot void spans the board");
+        assert_eq!(
+            vz,
+            stackup.full_z().unwrap(),
+            "slot void pierces the full stackup"
+        );
     }
 
     #[test]
@@ -890,8 +1035,9 @@ mod tests {
         };
         let c = comp("P", Point { x: 0, y: 0 }, Orient::from_deg(90).unwrap());
         let feats = pin.pad_features(&c, &stackup);
-        assert_eq!(feats.len(), 1);
-        let (shape, _) = prism_shape_z(&feats[0]);
+        let conductors: Vec<_> = feats.iter().filter(|f| f.role == Role::Conductor).collect();
+        assert_eq!(conductors.len(), 1);
+        let (shape, _) = prism_shape_z(conductors[0]);
         let (lo, hi) = shape.bbox().unwrap();
         // The pad centre moved from (2mm,0) to (0,2mm); its bbox is now centred there.
         let cx = (lo.x + hi.x) / 2;
