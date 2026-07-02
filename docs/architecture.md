@@ -418,14 +418,15 @@ Extent  = Prism { shape: Shape2D, z: ZRange }   // the 2.5D common case
 
 ### Roles stay few and physical
 
-`Conductor | Substrate | Void | Keepout(kind) | Marking | MaskOpening | Datum`. Richness comes from
+`Conductor | Substrate | Void | Keepout(kind) | Marking | Mask | Datum`. Richness comes from
 **geometry + composition (footprints)**, not from proliferating roles — the rule that keeps this from
 sprawling:
 
 - *drill / board cutout / milled pocket* → `Void` (a drill is not special; it is one void among many)
 - *board outline* → the boundary of a `Substrate` prism (an arbitrary CAD-imported polygon)
 - *courtyard / mechanical clearance* → `Keepout` (3D extent, for interference detection)
-- *fiducial* → a footprint with `Marking` + `MaskOpening` features (no new role)
+- *fiducial* → a footprint with `Conductor` + a `Void` mask opening (no new role; mask is
+  positive `Mask` material, openings are ordinary deletion volumes — Decision 13)
 - *mouse-bite* → a footprint with `Void` perforations and **no** `Conductor`
 - *thermal relief* → a `Conductor` pad whose `Shape2D` *is* the spoke-and-gap geometry
 
