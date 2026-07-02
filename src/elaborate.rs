@@ -948,32 +948,49 @@ fn slab_z(su: &Stackup, name: &str) -> Result<ZRange, String> {
 /// copper slab (a net-bound pour on silk) is likewise rejected here.
 pub fn features(source: &Source) -> Result<Vec<crate::geom::NetFeature>, String> {
     let su = stackup(source);
-    // The physical board body extent (Substrate and Void cutouts span it). An empty
-    // stackup has no extent — fall back to a zero range so the feature is still emitted.
+    // The physical board *body* extent (the Substrate solid spans it). An empty stackup
+    // has no extent — fall back to a zero range so the feature is still emitted.
     let board_z = su.board_z().unwrap_or(ZRange::new(0, 0));
+    // The *full* stackup extent — what a through-cut (a board cutout) pierces: the body
+    // plus mask and silk, so a milled cutout removes the ink and mask over it too.
+    let full_z = su.full_z().unwrap_or(ZRange::new(0, 0));
 
     let mut out: Vec<NetFeature> = Vec::new();
 
     // Board: only the LAST `Board` becomes the substrate (reverse-find mirrors
-    // `board_shape`'s "last `Board` wins").
-    if let Some(outline) = source.iter().rev().find_map(|d| match d {
+    // `board_shape`'s "last `Board` wins"). The same outline generates the mask solids.
+    let board_outline = source.iter().rev().find_map(|d| match d {
         GenDirective::Board { outline } => Some(outline),
         _ => None,
-    }) {
+    });
+    if let Some(outline) = board_outline {
         out.push(NetFeature::netless(Feature::prism(
             Role::Substrate,
             outline.clone(),
             board_z,
         )));
+
+        // Solder mask: one board-area solid per `Role::Mask` slab in the stackup, at the
+        // slab's honest z, carrying the slab's material (Decision 13 — mask is a positive
+        // generated solid, and its openings are `Void` deletion volumes; there are no
+        // negative layers). A stackup with no mask slab generates nothing; three generate
+        // three. No special cases. The board area is the substrate outline, so a custom
+        // outline (rounded / imported) masks to its true shape.
+        for slab in su.slabs.iter().filter(|s| s.role == Role::Mask) {
+            let mut mask = Feature::prism(Role::Mask, outline.clone(), slab.z);
+            mask.material = slab.material.clone();
+            out.push(NetFeature::netless(mask));
+        }
     }
 
-    // Cutouts: every one (mirrors `board_shape`).
+    // Cutouts: every one (mirrors `board_shape`), each a through-cut spanning the full
+    // stackup so it pierces mask and silk as well as the body.
     for d in source {
         if let GenDirective::Cutout { shape } = d {
             out.push(NetFeature::netless(Feature::prism(
                 Role::Void,
                 shape.clone(),
-                board_z,
+                full_z,
             )));
         }
     }
@@ -1308,7 +1325,9 @@ mod tests {
         ];
 
         let feats = features(&src).unwrap();
-        assert_eq!(feats.len(), 3, "one substrate, one void, one conductor");
+        // one substrate, two mask solids (F/B.Mask in the default stackup), one void,
+        // one conductor.
+        assert_eq!(feats.len(), 5, "substrate + 2 masks + void + conductor");
 
         let subs: Vec<&NetFeature> = feats
             .iter()
@@ -1317,7 +1336,7 @@ mod tests {
         assert_eq!(subs.len(), 1, "exactly one substrate feature");
         assert!(subs[0].net.is_none(), "substrate is netless");
         let Extent::Prism { z, .. } = subs[0].feature.extent;
-        assert_eq!(z, su.board_z().unwrap(), "substrate spans the whole board");
+        assert_eq!(z, su.board_z().unwrap(), "substrate spans the board body");
 
         let voids: Vec<&NetFeature> = feats
             .iter()
@@ -1325,6 +1344,12 @@ mod tests {
             .collect();
         assert_eq!(voids.len(), 1, "exactly one void feature");
         assert!(voids[0].net.is_none(), "void is netless");
+        let Extent::Prism { z, .. } = voids[0].feature.extent;
+        assert_eq!(
+            z,
+            su.full_z().unwrap(),
+            "a board cutout pierces the full stackup (mask + silk too)"
+        );
 
         let conds: Vec<&NetFeature> = feats
             .iter()
@@ -1341,6 +1366,75 @@ mod tests {
             z,
             su.top_copper().unwrap(),
             "F.Cu region sits on top copper"
+        );
+    }
+
+    /// Every `Role::Mask` slab in the stackup yields exactly one solid mask `Feature`
+    /// with the board-outline shape at that slab's z, carrying the slab's material
+    /// (Decision 13 — mask is a generated positive solid, not a negative layer). The
+    /// default stackup has two mask slabs (F/B.Mask), so a board generates two solids;
+    /// a boardless source generates none (no board area to cover).
+    #[test]
+    fn features_generates_one_mask_solid_per_mask_slab() {
+        let su = Stackup::default_2layer();
+        let outline = Shape2D::rect(pt(0, 0), 8 * MM, 6 * MM);
+        let src = vec![GenDirective::Board {
+            outline: outline.clone(),
+        }];
+
+        let feats = features(&src).unwrap();
+        let masks: Vec<&NetFeature> = feats
+            .iter()
+            .filter(|f| f.feature.role == Role::Mask)
+            .collect();
+
+        let mask_slabs: Vec<&Slab> = su.slabs.iter().filter(|s| s.role == Role::Mask).collect();
+        assert_eq!(mask_slabs.len(), 2, "default stackup has F.Mask + B.Mask");
+        assert_eq!(masks.len(), 2, "one mask solid per mask slab");
+        assert!(masks.iter().all(|f| f.net.is_none()), "mask is netless");
+
+        // Each solid has the board outline at its slab's z and the slab's material.
+        for slab in &mask_slabs {
+            let m = masks
+                .iter()
+                .find(|f| matches!(f.feature.extent, Extent::Prism { z, .. } if z == slab.z))
+                .unwrap_or_else(|| panic!("a mask solid at {:?}", slab.z));
+            let Extent::Prism { shape, .. } = &m.feature.extent;
+            assert_eq!(*shape, outline, "mask solid uses the board outline");
+            assert_eq!(
+                m.feature.material, slab.material,
+                "carries the slab material"
+            );
+        }
+
+        // No `Board` ⇒ no board area ⇒ no mask solids.
+        let boardless = features(&vec![]).unwrap();
+        assert!(
+            !boardless.iter().any(|f| f.feature.role == Role::Mask),
+            "a boardless source generates no mask"
+        );
+    }
+
+    /// A custom stackup with no `Role::Mask` slab generates no mask solids (no special
+    /// cases — the generator simply finds nothing to emit).
+    #[test]
+    fn features_no_mask_slab_generates_no_mask() {
+        // A minimal 1-copper-slab stackup: no mask, no silk.
+        let src: Source = vec![GenDirective::Slab(Slab {
+            name: "F.Cu".into(),
+            z: ZRange::new(0, 35_000),
+            role: Role::Conductor,
+            material: Some(crate::geom::Material::named("copper")),
+        })]
+        .into_iter()
+        .chain(std::iter::once(GenDirective::Board {
+            outline: Shape2D::rect(pt(0, 0), 4 * MM, 4 * MM),
+        }))
+        .collect();
+        let feats = features(&src).unwrap();
+        assert!(
+            !feats.iter().any(|f| f.feature.role == Role::Mask),
+            "no mask slab ⇒ no mask solid"
         );
     }
 
