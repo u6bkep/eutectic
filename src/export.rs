@@ -1054,18 +1054,22 @@ pub fn excellon_drill(doc: &Doc) -> String {
 ///   cutouts entirely); it is strictly additive.
 ///
 /// A side with no mask slab in the stackup opens nothing (an empty mask layer). Object
-/// order is `(EntityId, pin, region)` then source cutouts — fully deterministic.
-pub fn gerber_mask(doc: &Doc, lib: &PartLib, side: Layer) -> String {
+/// order is `(EntityId, pin, region)` then cutouts — fully deterministic. Fallible
+/// because the cutout query runs the slab-name materialization gate (Decision 13).
+pub fn gerber_mask(doc: &Doc, lib: &PartLib, side: Layer) -> Result<String, String> {
     let su = crate::elaborate::stackup(&doc.source);
-    let mask_z = match side {
-        Layer::Bottom => su.bottom_mask(),
-        _ => su.top_mask(),
-    };
+    let mask_slab = mask_slab_of(&su, side);
+    let mask_z = mask_slab.map(|s| s.z);
 
     // Pad openings: `Void`s whose z lies within this mask slab (pad_features places the
     // inflated-copper opening there). A through-cut `Void` (a drill) extends past the
     // slab and is excluded — subsumed by the opening, and belongs to the drill file.
     let mut openings: Vec<(Point, Aperture)> = Vec::new();
+    // Board cutouts remove mask over their whole area — a netless `Role::Void` feature
+    // whose z intersects this mask slab. This is a pure forward query over the single
+    // materialization gate ([`crate::elaborate::features`], whose only `Void`s are board
+    // cutouts — pad drills live in `pad_features`, never here), no parallel re-derivation.
+    let mut cutouts: Vec<Shape2D> = Vec::new();
     if let Some(mask_z) = mask_z {
         for c in doc.components.values() {
             let Some(def) = lib.get(&c.part) else {
@@ -1088,10 +1092,16 @@ pub fn gerber_mask(doc: &Doc, lib: &PartLib, side: Layer) -> String {
                 }
             }
         }
+        for nf in crate::elaborate::features(&doc.source)? {
+            if nf.feature.role != Role::Void {
+                continue;
+            }
+            let Extent::Prism { shape, z } = nf.feature.extent;
+            if z.overlaps(&mask_z) {
+                cutouts.push(shape);
+            }
+        }
     }
-    // Board cutouts remove mask over their whole area (a through-cut `Void`), on both
-    // sides — drawn as region fills below.
-    let cutouts: Vec<Shape2D> = source_board(doc).map(|b| b.cutouts).unwrap_or_default();
 
     let mut aps: BTreeSet<Aperture> = BTreeSet::new();
     for (_, a) in &openings {
@@ -1104,7 +1114,7 @@ pub fn gerber_mask(doc: &Doc, lib: &PartLib, side: Layer) -> String {
         .collect();
 
     let mut out = String::new();
-    out.push_str(&format!("G04 {} *\n", mask_file(side)));
+    out.push_str(&format!("G04 {} *\n", mask_name(&su, side)));
     out.push_str("%FSLAX46Y46*%\n");
     out.push_str("%MOMM*%\n");
     for (a, code) in &codes {
@@ -1116,32 +1126,45 @@ pub fn gerber_mask(doc: &Doc, lib: &PartLib, side: Layer) -> String {
         out.push_str(&format!("D{code}*\n"));
         out.push_str(&format!("X{}Y{}D03*\n", gbr_coord(p.x), gbr_coord(p.y)));
     }
-    // Cutout openings as region fills (only when the side actually has a mask to remove).
-    if mask_z.is_some() {
-        let mut mode = "G01";
-        let mut g75 = false;
-        for cut in &cutouts {
-            out.push_str("G36*\n");
-            gerber_contour(cut, &mut out, &mut mode, &mut g75);
-            out.push_str("G37*\n");
-        }
+    // Cutout openings as region fills.
+    let mut mode = "G01";
+    let mut g75 = false;
+    for cut in &cutouts {
+        out.push_str("G36*\n");
+        gerber_contour(cut, &mut out, &mut mode, &mut g75);
+        out.push_str("G37*\n");
     }
     out.push_str("M02*\n");
-    out
+    Ok(out)
 }
 
-/// The KiCad-style mask-layer filename token: `F_Mask` / `B_Mask`. Defined only for
-/// the outer sides (mask is an outer-surface layer).
-fn mask_file(side: Layer) -> &'static str {
-    match side {
-        Layer::Bottom => "B_Mask",
-        _ => "F_Mask",
+/// The resolved solder-mask [`Slab`] for a side — the `Role::Mask` slab immediately
+/// outboard of the outer copper (by z-position; [`Stackup::top_mask`]/[`bottom_mask`]),
+/// so a custom-named mask slab resolves like the default `F.Mask`/`B.Mask`. `None` if
+/// that side has no mask.
+fn mask_slab_of(su: &Stackup, side: Layer) -> Option<&Slab> {
+    let z = match side {
+        Layer::Bottom => su.bottom_mask(),
+        _ => su.top_mask(),
+    }?;
+    su.slabs.iter().find(|s| s.role == Role::Mask && s.z == z)
+}
+
+/// The mask filename token for a side: the resolved mask slab's name (`.`→`_`, so a
+/// custom `TopMask` keeps its name), else the conventional `F_Mask`/`B_Mask` fallback
+/// when the side carries no mask slab. The default stackup's `F.Mask`/`B.Mask` yield the
+/// unchanged `F_Mask`/`B_Mask`.
+fn mask_name(su: &Stackup, side: Layer) -> String {
+    match mask_slab_of(su, side) {
+        Some(s) => slab_file(&s.name),
+        None if side == Layer::Bottom => "B_Mask".to_string(),
+        None => "F_Mask".to_string(),
     }
 }
 
 /// The KiCad-style filename token for a named slab: the slab name with `.`→`_`
-/// (`F.SilkS`→`F_SilkS`), matching the `F_Cu`/`F_Mask` convention of [`layer_file`] /
-/// [`mask_file`]. Used to name a marking (silk) Gerber from its slab.
+/// (`F.SilkS`→`F_SilkS`), matching the `F_Cu` convention of [`layer_file`]. Names the
+/// marking (silk) and solder-mask Gerbers from their resolved slab (see [`mask_name`]).
 fn slab_file(name: &str) -> String {
     name.replace('.', "_")
 }
@@ -1224,7 +1247,11 @@ pub fn gerber_silk(doc: &Doc, lib: &PartLib, slab: &Slab) -> Result<String, Stri
             Shape2D::Stroke { .. } => {
                 let code = codes[&Aperture::Circle(s.radius() * 2)];
                 out.push_str(&format!("D{code}*\n"));
-                mode = "G01"; // a D-code selection resets the modal draw state
+                // No modal reset here: aperture (D-code) selection does not change the
+                // G01/G02/G03 interpolation mode. `gerber_walk`'s own line/arc transitions
+                // emit the needed mode line, so a straight stroke after an arc still gets
+                // its `G01*` (a manual reset would suppress it, drawing the line in arc
+                // mode as a degenerate I0J0 arc).
                 gerber_stroke(s, &mut out, &mut mode, &mut g75);
             }
             Shape2D::Polygon { .. } => {
@@ -1266,15 +1293,14 @@ pub fn gerber_set(doc: &Doc, lib: &PartLib) -> Result<Vec<(String, String)>, Str
             gerber_layer(doc, lib, layer),
         ));
     }
-    out.push((
-        "board-F_Mask.gbr".to_string(),
-        gerber_mask(doc, lib, Layer::Top),
-    ));
-    out.push((
-        "board-B_Mask.gbr".to_string(),
-        gerber_mask(doc, lib, Layer::Bottom),
-    ));
-    for slab in marking_slabs(&crate::elaborate::stackup(&doc.source)) {
+    let su = crate::elaborate::stackup(&doc.source);
+    for side in [Layer::Top, Layer::Bottom] {
+        out.push((
+            format!("board-{}.gbr", mask_name(&su, side)),
+            gerber_mask(doc, lib, side)?,
+        ));
+    }
+    for slab in marking_slabs(&su) {
         out.push((
             format!("board-{}.gbr", slab_file(&slab.name)),
             gerber_silk(doc, lib, &slab)?,
@@ -2158,7 +2184,7 @@ psu.reg,LDO,0.000000,0.000000,0,T
         // padded_board has an F.Cu rect pad 0.6x1.2 and a circle pad 0.8. The mask
         // opening inflates each by 0.05mm per side: rect → 0.7x1.3, circle → 0.9.
         let (doc, lib) = padded_board();
-        let f = gerber_mask(&doc, &lib, Layer::Top);
+        let f = gerber_mask(&doc, &lib, Layer::Top).unwrap();
         assert!(f.contains("F_Mask"));
         assert!(
             f.contains("R,0.700000X1.300000*%"),
@@ -2169,6 +2195,7 @@ psu.reg,LDO,0.000000,0.000000,0,T
         // No bottom-side pads ⇒ no openings on B_Mask.
         assert_eq!(
             gerber_mask(&doc, &lib, Layer::Bottom)
+                .unwrap()
                 .matches("D03*")
                 .count(),
             0
@@ -2204,11 +2231,15 @@ psu.reg,LDO,0.000000,0.000000,0,T
         // drill `Void` is a through-cut (full-stack z), not a mask-slab opening, so it is
         // NOT an extra flash — the count stays one opening per side.
         assert_eq!(
-            gerber_mask(doc, &lib, Layer::Top).matches("D03*").count(),
+            gerber_mask(doc, &lib, Layer::Top)
+                .unwrap()
+                .matches("D03*")
+                .count(),
             1
         );
         assert_eq!(
             gerber_mask(doc, &lib, Layer::Bottom)
+                .unwrap()
                 .matches("D03*")
                 .count(),
             1
@@ -2237,13 +2268,17 @@ psu.reg,LDO,0.000000,0.000000,0,T
             "cut",
         )
         .unwrap();
-        let f = gerber_mask(h.doc(), &lib, Layer::Top);
+        let f = gerber_mask(h.doc(), &lib, Layer::Top).unwrap();
         assert!(f.contains("G36*"), "cutout opens a mask region:\n{f}");
         assert!(f.contains("G37*"), "region closes:\n{f}");
         // The cutout corner (12mm) is drawn in the region contour (nm coordinates).
         assert!(f.contains("X12000000Y12000000"), "cutout boundary:\n{f}");
         // Both faces lose mask over a through cutout.
-        assert!(gerber_mask(h.doc(), &lib, Layer::Bottom).contains("G36*"));
+        assert!(
+            gerber_mask(h.doc(), &lib, Layer::Bottom)
+                .unwrap()
+                .contains("G36*")
+        );
     }
 
     // --- silk Gerbers (Decision 13, stage 2b) -----------------------------
@@ -2329,6 +2364,56 @@ psu.reg,LDO,0.000000,0.000000,0,T
         assert!(
             g.contains("G36*") && g.contains("G37*"),
             "fp_poly is a region:\n{g}"
+        );
+    }
+
+    /// Regression: a straight silk stroke following an arc-bearing one must switch the
+    /// interpolation mode back to `G01` before its line draw. Aperture (D-code) selection
+    /// does not reset the modal G01/G02/G03 state, so without the transition the line
+    /// would be emitted while still in arc mode (a malformed draw).
+    #[test]
+    fn silk_gerber_line_after_arc_returns_to_g01() {
+        let mut lib = PartLib::new();
+        // An fp_arc (emits G02/G03) declared before an fp_line (a straight draw), same
+        // pen width so they share one aperture — exactly the order that tripped the bug.
+        let part = crate::kicad::import_footprint(
+            r#"(footprint "ARCLINE"
+                (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu"))
+                (fp_arc (start -2 0) (mid 0 2) (end 2 0) (stroke (width 0.2)) (layer "F.SilkS"))
+                (fp_line (start 3 0) (end 5 0) (stroke (width 0.2)) (layer "F.SilkS")))"#,
+        )
+        .unwrap();
+        lib.insert("ARCLINE".into(), part);
+        let mut h = History::new(Default::default());
+        h.commit(
+            Transaction::one(Command::SetSource(vec![G::Instance {
+                path: "u1".into(),
+                part: "ARCLINE".into(),
+            }])),
+            &lib,
+            "arcline",
+        )
+        .unwrap();
+        let doc = h.doc();
+        let su = crate::elaborate::stackup(&doc.source);
+        let fsilk = su.slabs.iter().find(|s| s.name == "F.SilkS").unwrap();
+        let g = gerber_silk(doc, &lib, fsilk).unwrap();
+
+        // An arc really was emitted...
+        let arc_pos = g
+            .find("G03*")
+            .or_else(|| g.find("G02*"))
+            .expect("fp_arc emits a G02/G03 draw");
+        // ...and a G01* returns before the fp_line is drawn.
+        assert!(
+            g[arc_pos..].contains("G01*"),
+            "a straight stroke after an arc must switch back to G01:\n{g}"
+        );
+        // The fp_line reaches its endpoint (5mm) as a plain line draw, never a degenerate
+        // arc (an arc draw carries I/J offsets; a stuck-in-arc-mode line would not).
+        assert!(
+            g.contains("X5000000Y0D01*"),
+            "fp_line drawn as a straight D01:\n{g}"
         );
     }
 
