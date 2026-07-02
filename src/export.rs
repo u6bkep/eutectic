@@ -137,6 +137,10 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> Result<String, String> {
                     pts.push(w);
                 }
             }
+            // Footprint silk can extend past the pads — keep its extent in view.
+            for g in &def.graphics {
+                pts.extend(g.shape.map_points(|p| crate::part::to_world(c, p)).points());
+            }
         }
     }
     if let Some((min, max)) = board.as_ref().and_then(BoardShape::bbox) {
@@ -331,6 +335,17 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> Result<String, String> {
                 }
             }
         }
+        // Footprint silkscreen: each derived `Role::Marking` graphic (side-swapped +
+        // placed by `graphic_features`) drawn as a silk stroke, same look as board text.
+        if let Some(def) = lib.get(&c.part) {
+            for f in crate::part::graphic_features(def, c, &su) {
+                if f.role != Role::Marking {
+                    continue;
+                }
+                let Extent::Prism { shape, .. } = &f.extent;
+                out.push_str(&svg_silk(shape, &flip));
+            }
+        }
         let o = c.pos.value;
         out.push_str(&format!(
             "    <circle class=\"origin\" cx=\"{}\" cy=\"{}\" r=\"0.5\" fill=\"red\"/>\n",
@@ -382,20 +397,27 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> Result<String, String> {
             continue;
         }
         let Extent::Prism { shape, .. } = &nf.feature.extent;
-        let path: Vec<String> = shape
-            .points()
-            .iter()
-            .map(|p| format!("{},{}", fmt_mm(p.x), fmt_mm(flip(p.y))))
-            .collect();
-        out.push_str(&format!(
-            "  <polyline class=\"silk\" points=\"{}\" fill=\"none\" stroke=\"#888888\" stroke-width=\"{}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n",
-            path.join(" "),
-            fmt_mm(shape.radius() * 2),
-        ));
+        out.push_str(&svg_silk(shape, &flip));
     }
 
     out.push_str("</svg>\n");
     Ok(out)
+}
+
+/// One silkscreen `Role::Marking` shape as a thin stroked centreline polyline (the
+/// silk-layer look). Shared by lowered board text and footprint graphics; the pen is
+/// the shape's inflation diameter (`radius * 2`).
+fn svg_silk(shape: &Shape2D, flip: &impl Fn(Nm) -> Nm) -> String {
+    let path: Vec<String> = shape
+        .points()
+        .iter()
+        .map(|p| format!("{},{}", fmt_mm(p.x), fmt_mm(flip(p.y))))
+        .collect();
+    format!(
+        "  <polyline class=\"silk\" points=\"{}\" fill=\"none\" stroke=\"#888888\" stroke-width=\"{}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n",
+        path.join(" "),
+        fmt_mm(shape.radius() * 2),
+    )
 }
 
 /// SVG class suffix / stroke colour for a copper layer (Top warm, Bottom cool,
@@ -1221,6 +1243,8 @@ psu.reg,LDO,0.000000,0.000000,0,T
                     }),
                 }],
                 interfaces: BTreeMap::new(),
+                graphics: Vec::new(),
+                courtyard: None,
             },
         );
         let mut h = History::new(Default::default());
@@ -1275,6 +1299,41 @@ psu.reg,LDO,0.000000,0.000000,0,T
         );
         // Several glyph strokes ⇒ more than one silk polyline.
         assert!(s.matches("class=\"silk\"").count() >= 3, "got:\n{s}");
+    }
+
+    /// Imported footprint silk renders through the `Role::Marking` silk path (issue
+    /// 0016): a placed component's `fp_line`s appear as `class="silk"` polylines.
+    #[test]
+    fn svg_renders_footprint_silk_as_silk_strokes() {
+        use crate::elaborate::GenDirective as G;
+        let mut lib = PartLib::new();
+        let part = crate::kicad::import_footprint(
+            r#"(footprint "GFX"
+                (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu"))
+                (fp_line (start -1 -1) (end 1 -1) (stroke (width 0.12)) (layer "F.SilkS"))
+                (fp_line (start 1 -1) (end 1 1) (stroke (width 0.12)) (layer "F.SilkS")))"#,
+        )
+        .unwrap();
+        lib.insert("GFX".into(), part);
+        let mut h = History::new(Default::default());
+        h.commit(
+            Transaction::one(Command::SetSource(vec![G::Instance {
+                path: "u1".into(),
+                part: "GFX".into(),
+            }])),
+            &lib,
+            "gfx",
+        )
+        .unwrap();
+        let s = svg(h.doc(), &lib).unwrap();
+        assert!(
+            s.contains("class=\"silk\""),
+            "footprint silk should render as silk strokes:\n{s}"
+        );
+        assert!(
+            s.matches("class=\"silk\"").count() >= 2,
+            "two silk lines expected:\n{s}"
+        );
     }
 
     #[test]
