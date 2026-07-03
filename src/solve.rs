@@ -361,16 +361,14 @@ fn world_poly(local: &[Point], pos: (f64, f64)) -> Vec<Point> {
 /// axis; the penetration axis is chosen by strict `<`, so the first minimiser wins.
 fn poly_push(a: &[Point], ar: Nm, b: &[Point], br: Nm) -> Option<(f64, f64, f64)> {
     // Coordinate-magnitude bound. The exact overlap test squares a scaled projection
-    // gap in i128; that stays in range while vertex coordinates satisfy |x|,|y| ≲ 1.28e9
-    // nm (≈ 1.28 m — far beyond any real board). Beyond that the i128 products can
-    // overflow. Mirroring `Orient::apply`, the invariant is documented and asserted in
-    // debug rather than range-checked here; the global coordinate-ceiling story with real
-    // diagnostics is issue 0018's remit (feat/checked-coords), not this push's.
+    // gap in i128; that stays in range while vertex coordinates stay within
+    // [`geom::MAX_COORD`] (±1 m). Beyond that the i128 products can overflow. Mirroring
+    // `Orient::apply`, the invariant is asserted in debug rather than range-checked
+    // here; the guarantee in release is the ingest-boundary `E_COORD_RANGE` validation
+    // that now enforces `MAX_COORD` crate-wide (issue 0018, resolved).
     debug_assert!(
-        a.iter()
-            .chain(b)
-            .all(|p| p.x.unsigned_abs() <= 1 << 30 && p.y.unsigned_abs() <= 1 << 30),
-        "poly_push vertex magnitude exceeds the i128-safe bound (see issue 0018)"
+        a.iter().chain(b).all(|&p| crate::geom::point_ok(p)),
+        "poly_push vertex magnitude exceeds MAX_COORD (issue 0018)"
     );
     let r = (ar + br) as i128; // combined disc radius (nm); the rounded margin
     let r2 = r * r;

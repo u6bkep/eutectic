@@ -184,6 +184,29 @@ pub enum GenDirective {
 /// The generative program (tier 1 authoritative).
 pub type Source = Vec<GenDirective>;
 
+/// Every coordinate/length (nm) a directive contributes — the values an ingest
+/// boundary range-checks against [`crate::geom::MAX_COORD`] (issue 0018). Points
+/// contribute both components; scalar spans (widths/gaps/heights, slab z-faces) their
+/// signed magnitude. Directives with no geometry (connectivity, alignment) contribute
+/// nothing. `Rotate`'s quaternion is angle-scaled, not a coordinate, so it is
+/// deliberately excluded. Shared by the text-parse and command-ingress validators so
+/// both bound the same fields.
+pub fn directive_coords(d: &GenDirective) -> Vec<Nm> {
+    let shape_coords = |s: &Shape2D| s.coords().into_iter().flat_map(|p| [p.x, p.y]).collect();
+    match d {
+        GenDirective::Place { pos, .. } | GenDirective::Fix { pos, .. } => vec![pos.x, pos.y],
+        GenDirective::Board { outline } => shape_coords(outline),
+        GenDirective::Cutout { shape } | GenDirective::Region(RegionDecl { shape, .. }) => {
+            shape_coords(shape)
+        }
+        GenDirective::Text { at, height, .. } => vec![at.x, at.y, *height],
+        GenDirective::Near { within, .. } | GenDirective::NearPin { within, .. } => vec![*within],
+        GenDirective::MinSep { gap, .. } => vec![*gap],
+        GenDirective::Slab(s) => vec![s.z.lo, s.z.hi],
+        _ => vec![],
+    }
+}
+
 /// Result of elaboration before it is folded into a Doc.
 pub struct Elaborated {
     pub components: BTreeMap<EntityId, Component>,

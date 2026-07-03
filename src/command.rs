@@ -12,7 +12,7 @@
 
 use crate::diagnostic::{Diagnostic, Location};
 use crate::doc::*;
-use crate::elaborate::{Source, elaborate};
+use crate::elaborate::{Source, directive_coords, elaborate};
 use crate::id::{EntityId, TraceId, ViaId};
 use crate::part::PartLib;
 use crate::route::{Trace, Via};
@@ -90,6 +90,28 @@ impl Transaction {
     }
 }
 
+/// Range-check ingress coordinates against [`crate::geom::MAX_COORD`] (issue 0018),
+/// rejecting on the first out-of-range value with an `E_COORD_RANGE` error at `loc`.
+/// Commands abort atomically on the first fault, mirroring the other ingress guards.
+fn check_coord_range(
+    coords: impl IntoIterator<Item = Nm>,
+    loc: Location,
+) -> Result<(), Vec<Diagnostic>> {
+    for n in coords {
+        if !crate::geom::coord_ok(n) {
+            return Err(vec![Diagnostic::error(
+                "E_COORD_RANGE",
+                format!(
+                    "coordinate {n} nm exceeds the ±{} nm (±1 m) range",
+                    crate::geom::MAX_COORD
+                ),
+                loc,
+            )]);
+        }
+    }
+    Ok(())
+}
+
 /// Apply a transaction to a document. `tick` is the monotonic global revision
 /// used to stamp whichever inputs changed. Returns the new doc, or an error
 /// (leaving the caller's original untouched — atomicity).
@@ -104,8 +126,12 @@ pub fn apply(
 
     for cmd in &txn.0 {
         match cmd {
-            Command::SetSource(s) => next.source = s.clone(),
+            Command::SetSource(s) => {
+                check_coord_range(s.iter().flat_map(directive_coords), Location::None)?;
+                next.source = s.clone();
+            }
             Command::Nudge(id, p) => {
+                check_coord_range([p.x, p.y], Location::Entity(id.clone()))?;
                 next.overrides.insert(
                     id.clone(),
                     Override {
@@ -115,6 +141,7 @@ pub fn apply(
                 );
             }
             Command::Pin(id, p) => {
+                check_coord_range([p.x, p.y], Location::Entity(id.clone()))?;
                 next.overrides.insert(
                     id.clone(),
                     Override {
@@ -164,6 +191,14 @@ pub fn apply(
                         Location::Net(trace.net.clone()),
                     )]);
                 }
+                check_coord_range(
+                    trace
+                        .path
+                        .iter()
+                        .flat_map(|p| [p.x, p.y])
+                        .chain([trace.width]),
+                    Location::Trace(*id),
+                )?;
                 next.traces.insert(*id, trace.clone());
             }
             Command::RemoveTrace(id) => {
@@ -197,6 +232,7 @@ pub fn apply(
                         Location::Net(via.net.clone()),
                     )]);
                 }
+                check_coord_range([via.at.x, via.at.y, via.drill, via.pad], Location::Via(*id))?;
                 next.vias.insert(*id, via.clone());
             }
             Command::RemoveVia(id) => {
@@ -308,6 +344,18 @@ fn apply_resolution(next: &mut Doc, id: &EntityId, res: &Resolution) -> Result<(
                 return Err(Diagnostic::error(
                     "E_NOT_CONFLICT",
                     format!("Resolve RePin: `{id}` is not a pin conflict"),
+                    Location::Entity(id.clone()),
+                ));
+            }
+            if !crate::geom::point_ok(*p) {
+                return Err(Diagnostic::error(
+                    "E_COORD_RANGE",
+                    format!(
+                        "Resolve RePin `{id}`: ({}, {}) exceeds the ±{} nm (±1 m) range",
+                        p.x,
+                        p.y,
+                        crate::geom::MAX_COORD
+                    ),
                     Location::Entity(id.clone()),
                 ));
             }

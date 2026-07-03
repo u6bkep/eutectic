@@ -252,7 +252,18 @@ fn mm_to_nm(s: &str) -> Result<Nm, String> {
     if round_up {
         nm += 1;
     }
-    Ok(if neg { -nm } else { nm })
+    let nm = if neg { -nm } else { nm };
+    // Enforce the crate-wide coordinate ceiling at the import boundary (issue 0018): an
+    // out-of-range imported coordinate is a clean error here, never a silent i128 wrap
+    // in the geometry kernel downstream. Every kicad length/coordinate funnels through
+    // this converter, so one check covers pads, graphics, drills, and outlines.
+    if !crate::geom::coord_ok(nm) {
+        return Err(format!(
+            "coordinate {nm} nm exceeds the ±{} nm (±1 m) range (issue 0018)",
+            crate::geom::MAX_COORD
+        ));
+    }
+    Ok(nm)
 }
 
 // --- footprint → PartDef -----------------------------------------------------
@@ -2075,6 +2086,22 @@ mod tests {
         let src = r#"(footprint "R" (pad "1" smd rect (at 0.0000005 -0.0000004) (size 1 1)))"#;
         let p = import_footprint(src).unwrap();
         assert_eq!(p.pin_offset("1"), Some(Point { x: 1, y: 0 }));
+    }
+
+    /// A pad coordinate beyond ±MAX_COORD (1 m = 1e9 nm) is a clean import error, not
+    /// a silent i128 wrap in the geometry kernel (issue 0018). 2 m ⇒ 2e9 nm.
+    #[test]
+    fn import_rejects_out_of_range_coordinate() {
+        let src = r#"(footprint "R" (pad "1" smd rect (at 2000 0) (size 1 1)))"#;
+        let e = import_footprint(src).unwrap_err();
+        assert!(e.contains("range"), "expected a range error, got: {e}");
+    }
+
+    /// A coordinate exactly at the bound (1 m) imports fine — the ceiling is inclusive.
+    #[test]
+    fn import_accepts_coordinate_at_the_bound() {
+        let src = r#"(footprint "R" (pad "1" smd rect (at 1000 0) (size 1 1)))"#;
+        assert!(import_footprint(src).is_ok());
     }
 
     #[test]

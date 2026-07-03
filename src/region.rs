@@ -131,6 +131,11 @@ fn round_div(num: i128, den: i128) -> i128 {
 /// `dist² = num/den`, `den > 0` (exact i128). Mirrors the geom kernel; kept local so
 /// `region` stays self-contained.
 fn pt_seg_d2(p: Point, a: Point, b: Point) -> (i128, i128) {
+    // Worst i128 chain (`|w|²·den ≤ 64·C⁴`) — the bound behind `geom::MAX_COORD`.
+    debug_assert!(
+        crate::geom::point_ok(p) && crate::geom::point_ok(a) && crate::geom::point_ok(b),
+        "region::pt_seg_d2 coordinate exceeds MAX_COORD; i128 product may overflow (issue 0018)"
+    );
     let (vx, vy) = ((b.x - a.x) as i128, (b.y - a.y) as i128);
     let (wx, wy) = ((p.x - a.x) as i128, (p.y - a.y) as i128);
     let den = vx * vx + vy * vy;
@@ -368,6 +373,11 @@ impl Region {
 ///     it lands strictly interior to it (these are exact lattice points, so the
 ///     `point_on_seg` test is exact here).
 fn crossings(a1: Point, a2: Point, b1: Point, b2: Point) -> Vec<(Point, bool, bool)> {
+    // Intersection numerator is ~`C³` (`tn·dax`, `tn ≤ 8C²`), safe under `MAX_COORD`.
+    debug_assert!(
+        [a1, a2, b1, b2].iter().all(|&p| crate::geom::point_ok(p)),
+        "region::crossings coordinate exceeds MAX_COORD (issue 0018)"
+    );
     let (dax, day) = ((a2.x - a1.x) as i128, (a2.y - a1.y) as i128);
     let (dbx, dby) = ((b2.x - b1.x) as i128, (b2.y - b1.y) as i128);
     let den = cross_vec(dax, day, dbx, dby);

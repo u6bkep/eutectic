@@ -74,8 +74,8 @@
 use crate::annotate::ClassEntry;
 use crate::diagnostic::{Diagnostic, Location};
 use crate::doc::{Doc, MM, Nm, Orient, Override, Point, Strength};
-use crate::elaborate::{GenDirective, RegionDecl, Source, board_rect};
-use crate::geom::{KeepoutKind, Material, Path, Role, Seg, Shape2D, Slab, ZRange};
+use crate::elaborate::{GenDirective, RegionDecl, Source, board_rect, directive_coords};
+use crate::geom::{KeepoutKind, Material, Path, Role, Seg, Shape2D, Slab, ZRange, coord_ok};
 use crate::id::EntityId;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -484,8 +484,13 @@ pub fn parse(text: &str) -> Result<Parsed, Vec<Diagnostic>> {
             continue;
         }
         match parse_line(line) {
-            Ok(Item::Directive(d)) => source.push(d),
+            Ok(Item::Directive(d)) => {
+                check_coord_range(directive_coords(&d), lineno, &mut errors);
+                source.push(d);
+            }
             Ok(Item::Override(id, ov)) => {
+                let coords = ov.pos.map_or(vec![], |p| vec![p.x, p.y]);
+                check_coord_range(coords, lineno, &mut errors);
                 overrides.insert(id, ov);
             }
             Ok(Item::RefdesPin(id, refdes)) => {
@@ -509,6 +514,28 @@ pub fn parse(text: &str) -> Result<Parsed, Vec<Diagnostic>> {
         })
     } else {
         Err(errors)
+    }
+}
+
+/// Push an `E_COORD_RANGE` error for each coordinate/length exceeding
+/// [`crate::geom::MAX_COORD`] (issue 0018), located at `lineno`. A single line can
+/// carry several out-of-range values; each is reported (collect-all), and the parse
+/// aborts atomically like any other hard fault.
+fn check_coord_range(coords: Vec<Nm>, lineno: u32, errors: &mut Vec<Diagnostic>) {
+    for n in coords {
+        if !coord_ok(n) {
+            errors.push(Diagnostic::error(
+                "E_COORD_RANGE",
+                format!(
+                    "coordinate {n} nm exceeds the ±{} nm (±1 m) range",
+                    crate::geom::MAX_COORD
+                ),
+                Location::Span {
+                    line: lineno,
+                    col: 1,
+                },
+            ));
+        }
     }
 }
 
@@ -2339,6 +2366,60 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
         assert!(
             text.contains("1:1") && text.contains("3:1"),
             "located by line: {text}"
+        );
+    }
+
+    // ---- coordinate-range ceiling (issue 0018) ---------------------------
+
+    /// A point beyond ±MAX_COORD (1 m) is a hard `E_COORD_RANGE` error at the text
+    /// boundary — never a silent i128 wrap in the geometry kernel downstream.
+    #[test]
+    fn parse_rejects_out_of_range_point() {
+        let diags = parse("place foo (2000mm, 0)").unwrap_err();
+        assert!(
+            diags.iter().any(|d| d.code == "E_COORD_RANGE"),
+            "expected E_COORD_RANGE: {diags:?}"
+        );
+    }
+
+    /// An oversized length (a text height here) is caught too — the walker bounds
+    /// every nm a directive contributes, not only point coordinates.
+    #[test]
+    fn parse_rejects_out_of_range_height() {
+        let diags = parse(r#"text "A" (0mm, 0mm) h=2000mm layer=F.SilkS"#).unwrap_err();
+        assert!(
+            diags.iter().any(|d| d.code == "E_COORD_RANGE"),
+            "expected E_COORD_RANGE: {diags:?}"
+        );
+    }
+
+    /// A coordinate exactly at the bound (1 m = MAX_COORD) is accepted; the ceiling
+    /// is inclusive, so real board-scale geometry is never rejected.
+    #[test]
+    fn parse_accepts_coordinate_at_the_bound() {
+        assert!(
+            parse("place foo (1000mm, 0)").is_ok(),
+            "1 m = MAX_COORD must be accepted"
+        );
+    }
+
+    /// The command surface enforces the same ceiling as the text parser: an
+    /// out-of-range `Pin` position is rejected with `E_COORD_RANGE`, so the geometry
+    /// kernel never sees a coordinate that could overflow i128 (issue 0018).
+    #[test]
+    fn command_ingress_rejects_out_of_range_pin() {
+        let lib = part_library();
+        let doc = Doc::default();
+        let err = crate::command::apply(
+            &doc,
+            &Transaction::one(Command::Pin(EntityId::new("x"), Point::mm(2000, 0))),
+            &lib,
+            1,
+        )
+        .unwrap_err();
+        assert!(
+            err.iter().any(|d| d.code == "E_COORD_RANGE"),
+            "expected E_COORD_RANGE: {err:?}"
         );
     }
 

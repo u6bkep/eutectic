@@ -63,6 +63,37 @@ pub const MASK_EXPANSION: Nm = 50_000;
 /// would circumscribe instead — deferred; not worth the complexity at this tolerance.)
 pub const DEFAULT_CHORD_TOL: Nm = 1_000;
 
+/// The enforced ceiling on any coordinate magnitude, in nm: **1 m** (`±1e9 nm`).
+///
+/// The exact-integer kernel keeps its squared-distance math in `i128`, and the
+/// worst chain is the perpendicular case of [`pt_seg_d2`]: `|w|²·den` where each of
+/// `|w|²` and `den` is a sum of two squared coordinate *differences*. A difference of
+/// two coordinates each in `[−C, C]` has magnitude ≤ `2C`, so `|w|², den ≤ 2·(2C)² =
+/// 8C²` and the product is ≤ `64·C⁴`. Requiring `64·C⁴ ≤ i128::MAX ≈ 1.70e38` gives
+/// `C ≤ (2^127 / 64)^(1/4) ≈ 1.28e9` nm. We round that **down** to a memorable
+/// `1e9 nm = 1 m`, which leaves `64·(1e9)⁴ ≈ 6.4e37` — a ~2.7× margin under the
+/// `i128` ceiling. Every other integer predicate is lower-order in `C` (the
+/// [`circumcenter`]/[`region::crossings`] numerators are ~`C³`, [`orient`] ~`C²`), so
+/// this quartic bound is the binding one and protects them all.
+///
+/// This is the crate-wide operating range — far beyond any real board (a 1 m panel).
+/// It is *enforced* at every ingest boundary (text parse, KiCad/SVG import, command
+/// ingress) as a hard `E_COORD_RANGE` diagnostic, and *asserted* in the hot kernel
+/// predicates in debug builds; release builds trust the boundary guarantee and stay
+/// unchecked. This resolves issue 0018 (the former silent-wrap-above-~1.28e9 hazard).
+pub const MAX_COORD: Nm = 1_000_000_000;
+
+/// Is a single coordinate within the enforced [`MAX_COORD`] range?
+pub fn coord_ok(n: Nm) -> bool {
+    n.unsigned_abs() <= MAX_COORD as u64
+}
+
+/// Are both components of a point within [`MAX_COORD`]? The ingest-boundary and
+/// debug-assert predicate the kernel's `i128` bound relies on.
+pub fn point_ok(p: Point) -> bool {
+    coord_ok(p.x) && coord_ok(p.y)
+}
+
 // ----------------------------------------------------------------------------
 // Shape2D — a skeleton ⊕ radius.
 // ----------------------------------------------------------------------------
@@ -153,6 +184,24 @@ impl Path {
         let mut v = Vec::with_capacity(self.segs.len() + 1);
         v.push(self.start);
         v.extend(self.segs.iter().map(Seg::end));
+        v
+    }
+
+    /// Every lattice point this path is *defined by*: `start`, then each segment's
+    /// control/mid point(s) and end. Unlike [`corners`], this includes arc mids and
+    /// Bézier control points — the off-corner lattice points the kernel also consumes
+    /// (a wild control point overflows the flatten's `i128` product even when the
+    /// corners are in range), so coordinate-range validation walks these.
+    fn defining_points(&self) -> Vec<Point> {
+        let mut v = vec![self.start];
+        for s in &self.segs {
+            match s {
+                Seg::Line { end } => v.push(*end),
+                Seg::Arc { mid, end } => v.extend([*mid, *end]),
+                Seg::Quadratic { ctrl, end } => v.extend([*ctrl, *end]),
+                Seg::Cubic { c1, c2, end } => v.extend([*c1, *c2, *end]),
+            }
+        }
         v
     }
 
@@ -455,6 +504,18 @@ impl Shape2D {
         }
     }
 
+    /// Every lattice point this shape is *defined by* (path defining points including
+    /// arc mids / Bézier controls, or an [`Area`](Shape2D::Area)'s ring vertices) — the
+    /// exhaustive set for coordinate-range validation at ingest boundaries (issue 0018,
+    /// [`MAX_COORD`]). Distinct from [`points`](Shape2D::points), which returns only the
+    /// straight-skeleton corners.
+    pub fn coords(&self) -> Vec<Point> {
+        match self {
+            Shape2D::Area { region } => region.rings.iter().flatten().copied().collect(),
+            _ => self.path().defining_points(),
+        }
+    }
+
     /// Is `p` inside this shape's filled area? `Polygon` uses point-in-polygon
     /// (boundary counts as inside); a `Stroke` has no area, so `false`. Used for
     /// board containment (the outline is a polygon).
@@ -588,6 +649,12 @@ fn skeletons_overlap(a: &Shape2D, b: &Shape2D) -> bool {
 /// Exact squared distance from point `p` to segment `a`–`b`, as `(num, den)` with
 /// `dist² = num/den` and `den > 0`.
 fn pt_seg_d2(p: Point, a: Point, b: Point) -> (i128, i128) {
+    // The worst i128 chain in the kernel (`|w|²·den ≤ 64·C⁴`); [`MAX_COORD`] is derived
+    // from it. Boundary validation guarantees the bound in release; debug fails loud.
+    debug_assert!(
+        point_ok(p) && point_ok(a) && point_ok(b),
+        "pt_seg_d2 coordinate exceeds MAX_COORD; the i128 product may overflow (issue 0018)"
+    );
     let (vx, vy) = ((b.x - a.x) as i128, (b.y - a.y) as i128);
     let (wx, wy) = ((p.x - a.x) as i128, (p.y - a.y) as i128);
     let den = vx * vx + vy * vy;
@@ -634,6 +701,12 @@ fn closest_on_segment(p: Point, a: Point, b: Point) -> Point {
 /// computed, never stored. (`den == 2·cross(a,b,c)`, so its sign also gives the turn
 /// direction of the arc.)
 pub fn circumcenter(a: Point, b: Point, c: Point) -> (i128, i128, i128) {
+    // Numerators are ~`C³` (e.g. `a2·(by−cy)`), lower-order than [`pt_seg_d2`]'s
+    // quartic, so [`MAX_COORD`] keeps them well within i128. Assert in debug.
+    debug_assert!(
+        point_ok(a) && point_ok(b) && point_ok(c),
+        "circumcenter coordinate exceeds MAX_COORD (issue 0018)"
+    );
     let (ax, ay) = (a.x as i128, a.y as i128);
     let (bx, by) = (b.x as i128, b.y as i128);
     let (cx, cy) = (c.x as i128, c.y as i128);
@@ -725,8 +798,8 @@ const MAX_BEZIER_DEPTH: u32 = 24;
 /// convex-hull property every generated point stays within the input control hull, so
 /// the i64 sum `a.x + b.x` is never the binding limit. The real ceiling for the whole
 /// flatten is the flatness test's i128 product in [`pt_seg_d2`] (≈`64·C⁴`), which is
-/// safe at board scale (`|coord| ≤ ~1e9` nm, ~2.7× margin) — the crate-wide
-/// coordinate-range assumption, not specific to Béziers (see issue 0018).
+/// safe because every coordinate is bounded by [`MAX_COORD`] (`±1e9` nm, ~2.7× margin)
+/// — the crate-wide coordinate-range ceiling, not specific to Béziers.
 fn midpoint(a: Point, b: Point) -> Point {
     Point {
         x: (a.x + b.x) / 2,
@@ -1232,6 +1305,26 @@ mod tests {
     const MM: Nm = 1_000_000;
     fn pt(x: Nm, y: Nm) -> Point {
         Point { x, y }
+    }
+
+    #[test]
+    fn coord_ok_bound_is_inclusive() {
+        assert!(coord_ok(MAX_COORD));
+        assert!(coord_ok(-MAX_COORD));
+        assert!(!coord_ok(MAX_COORD + 1));
+        assert!(!coord_ok(-MAX_COORD - 1));
+    }
+
+    /// In debug builds the hot kernel predicate asserts its inputs are within
+    /// `MAX_COORD` — the loud backstop behind the release-time boundary validation
+    /// (issue 0018). Release builds trust the boundary and skip the check, so this is
+    /// debug-only.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "MAX_COORD")]
+    fn circumcenter_debug_asserts_coordinate_bound() {
+        let big = MAX_COORD + 1;
+        let _ = circumcenter(pt(big, 0), pt(0, big), pt(1, 1));
     }
 
     #[test]

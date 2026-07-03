@@ -80,7 +80,25 @@ pub fn import_board_outline(svg_text: &str) -> Result<(Shape2D, Vec<Shape2D>), S
     closed.sort_by_key(|x| std::cmp::Reverse(x.0));
     let mut it = closed.into_iter().map(|(_, s)| s);
     let outline = it.next().expect("non-empty checked above");
-    Ok((outline, it.collect()))
+    let cutouts: Vec<Shape2D> = it.collect();
+    // Enforce the crate-wide coordinate ceiling at the import boundary (issue 0018):
+    // `to_nm` is infallible, so range-check the produced shapes here. An out-of-range
+    // SVG coordinate becomes a clean error, never a silent i128 wrap in the geometry
+    // kernel. (Only the retained closed subpaths matter — dropped open paths never
+    // reach the kernel.)
+    for shape in std::iter::once(&outline).chain(&cutouts) {
+        for p in shape.coords() {
+            if !crate::geom::point_ok(p) {
+                return Err(format!(
+                    "coordinate ({}, {}) nm exceeds the ±{} nm (±1 m) range (issue 0018)",
+                    p.x,
+                    p.y,
+                    crate::geom::MAX_COORD
+                ));
+            }
+        }
+    }
+    Ok((outline, cutouts))
 }
 
 /// A subpath under construction: its `start` and edges in *model* (nm, y-flipped) space,
