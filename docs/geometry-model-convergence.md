@@ -51,9 +51,18 @@ branch adversarially reviewed pre-merge; all findings fixed.
 **Bottom-flip convention fixed (2026-07-03, `feat/flip-axis`)**: `Orient::flipped()`
 is Ry(180) (x-negates — KiCad/fab board-turn convention; bottom silk reads upright);
 placement CSV reports the authored angle for bottom parts (KiCad `.pos` style, `0,B`).
-**Still open**: courtyard solver packing (0019); TTF outline
-fonts; trace/via slab-name migration rides with 0011. This record is
-still meant to be folded into `architecture.md` §8.
+**Decisions 16+17 recorded (2026-07-03, not yet implemented)**: a geometry-currency
+audit found four bypasses (pours' `PourFill` side-channel, via drills as scalars,
+`excellon_drill` missing pad drills — issue 0022, and two parallel `Feature` producers
+leaving keepouts unenforced — issue 0023). Decision 16: `Shape2D::Area(Region)`
+(hole-capable shape), the hole/void rule (`Area` holes = routed contours; `Void`s =
+enumerable drills, PTH/NPTH), one unified `features()` producer consumed by both DRC
+and export, `BoardShape` superseded, and the prismatic-matter assumption named with
+its escape hatches. Decision 17: TTF outline text rides `Area` (`ttf-parser` accepted
+as the first dependency).
+**Still open**: Decision 16/17 implementation; courtyard solver packing (0019);
+trace/via slab-name migration rides with 0011 (stage 3 of Decision 16). This record
+is still meant to be folded into `architecture.md` §8.
 
 This record captures the foundation decisions; it *realigned the implementation* with
 what §8 already stated and sharpened three points (the single primitive, the placement
@@ -567,6 +576,140 @@ The "virtual layer" question dissolves under Decision 13 — no new machinery:
   role silently drops that silk from every output (the name is a reference, the
   role is the meaning; Decision 13).
 
+### Decision 16 — one hole-capable currency: `Shape2D::Area`, a single feature producer, the hole/void rule (2026-07-03)
+
+Scoping TTF outline fonts surfaced the question "how does a filled glyph with counters
+(holes) enter the geometry currency?" — and auditing that question found the currency
+is not single. A systematic survey (2026-07-03) of everything that carries geometry
+found four genuine bypasses and two vocabulary shadows:
+
+- **Copper pours** flow as `route::PourFill { layer, fill: region::Region }` — their own
+  clearance predicate (`regions_within`), their own ratsnest incidence, their own Gerber
+  path. The known violation.
+- **Via drills are scalars, never geometry.** `Via.drill: Nm` fans into copper discs for
+  DRC but never emits a `Role::Void` drill prism — unlike pad drills, which do.
+- **`excellon_drill` reads `doc.vias` directly and only vias** — plated through-hole
+  *pad* drills are missing from `board.drl` even though the pad `Void` features that
+  describe them already exist and correctly reach the mask Gerbers (issue 0022).
+- **Two parallel `Feature` producers that never meet**: `elaborate::features()`
+  (substrate, mask, voids, keepouts, text) is consumed *only by export*; DRC and the
+  autorouter re-derive copper independently via `route::net_features`. Consequence:
+  keepout features are produced but no DRC rule consumes them — keepouts are
+  unenforced (issue 0023).
+- Vocabulary shadows: `route::Layer{Top,Inner,Bottom}` ordinals (the known 0011
+  migration; regions and text already carry slab names — copper is the last holdout),
+  and mask export re-entering through `gerber_mask(side: Layer)` instead of iterating
+  `Role::Mask` slabs the way silk already does.
+- **`geom::BoardShape` is the same smell with a Decision-1 blessing**: a bespoke
+  outline+cutouts struct exists *because* `Shape2D` could not say "filled area with
+  holes". Edge.Cuts export and placement containment consume it instead of the
+  Substrate features carrying the same truth.
+
+All of it reduces to two root causes, and Decision 16 is the fix for both:
+
+**16a — `Shape2D` grows an `Area(region::Region)` variant.** A filled area with holes
+becomes a first-class shape, so a `Feature` can carry it like any disc or capsule.
+`radius()` is 0; `inflated()` delegates to the region kernel's exact offset;
+`bbox`/`contains_point`/`points`/`closest_boundary_point` delegate to `Region` (rings
+are polylines). Exporters gain one arm each: SVG emits an even-odd `<path>`, Gerber
+emits G36/G37 per ring — the code the pour output already has, relocated to the shape
+level. `clears()` generalizes (z-overlap unchanged; edge distance over rings plus
+containment).
+
+**16b — the hole/void rule.** Two mechanisms for negative space, deliberately not
+interchangeable:
+
+> A hole in an `Area` shape is *what the entity is*; a `Void` feature is *what one
+> entity does to the rest of the board*. Holes when the negative is intrinsic to one
+> entity's own cross-section, in-plane, and full-z for that feature (board cutouts,
+> glyph counters, pour knockouts — knockouts are computed from other nets, but the
+> result is the pour's own fill). `Void` features when the negative is contributed
+> across entities, must stay individually enumerable, or spans a partial z (drills,
+> mask openings, blind/buried cuts).
+
+This maps exactly onto fab conventions, and the representation *is* the manufacturing
+intent:
+
+- **`Void` → drill data.** A `Void` preserves what Excellon needs — exact center +
+  diameter (disc) or a capsule (G85 slot). Voids gain a **plated/non-plated bit**
+  (pad/via voids plated; standalone authored voids default non-plated) driving the
+  PTH/NPTH file split. A mounting hole is an authored NPTH `Void`, not a board cutout.
+- **`Area` holes → routed contours (Edge.Cuts).** By the time a cutout is a hole in
+  the substrate `Area` it is a polygonized ring (the region kernel flattens circles at
+  construction — the diameter is *gone*). Extracting drills from `Area` holes is
+  therefore banned permanently: it would be heuristic circle-recognition, an inverse
+  projection (Decision 13). A hole in the `Area` declares "route this" the same way a
+  `Void` disc declares "drill this". A user who authors a round cutout where an NPTH
+  drill was better intent gets manufacturable output; at most a lint later, never a
+  silent promotion.
+- Consequences: vias lower to a conductor prism **plus** a `Void` drill prism
+  (Decision 5's "cylinder + drill void", finally realized); `excellon_drill` becomes a
+  forward query over through-cut/plated `Void` features (fixes 0022 structurally).
+
+**16c — one producer of world-frame features.** A single `features()`-style query emits
+*everything* — substrate, copper (pads, traces, vias, pours), voids, mask, keepouts,
+graphics, text — and DRC and every exporter become filters over that one stream by
+role/net/slab. `route::net_features` dissolves into it; pours become ordinary
+`NetFeature`s with `Area` shapes (deleting `PourFill` and its bespoke DRC/ratsnest/
+Gerber branches — ratsnest keeps its union-find, gated on the same features); keepout
+enforcement turns on (fixes 0023). This also *supersedes Decision 1's `BoardShape`
+representation while keeping its principle*: the outline stays authored input and the
+board stays a derived query, but the query's result is now the `Role::Substrate`
+feature itself carrying `Area(outline ∖ cutouts)` — one feature, no reassembly, plus a
+`board_region()` convenience accessor. The `BoardShape` struct is deleted; solver
+containment, autoroute bbox, Edge.Cuts, and SVG consume the substrate feature.
+
+**16d — the prismatic-matter assumption, named.** `Feature` says all matter is a prism
+(an extrusion along the board normal), and the evaluation model is **two-level 2.5D
+CSG: union of solid prisms, minus void prisms, done** — no solids nested inside voids,
+no re-additions, no curved z. This is a deliberate 2.5D commitment inside a 3D-first
+model, justified by: (1) the manufacturing process only makes prisms — etching,
+lamination, plating, drilling are extrusions along one axis, and Gerber/Excellon
+cannot express anything else, so prisms are *exact* for everything a fab can build;
+(2) exact integer booleans are achievable in 2D (the region kernel) and are a research
+problem in 3D — a 3D-matter model would cost the zero-dependency exactness the DRC's
+honesty is built on. The *spatial* vocabulary stays fully 3D: poses are quaternions
+(Decision 6), z is authoritative `Nm` (Decision 2), slabs are z-intervals — data
+accumulated under this decision remains valid in a true-3D future. Named escape
+hatches, so lifting the ceiling is additive rather than a migration: rigid-flex /
+folded boards become an *assembly* level above features (rigid sections, each locally
+prismatic, posed in 3D by the existing quaternion machinery); tilted component bodies
+become a separate posed body-volume feature kind (visualization/interference, never in
+the exact-DRC path). Anything fancier must argue its way in as a new decision.
+
+Expected behavior changes when implemented (deliberate, not regressions): pad drills
+appear in `board.drl` (0022); keepout DRC may surface new violations on existing
+boards (0023).
+
+Staging: (1) `Area` + exporter arms, with the `BoardShape` supersession as the proof
+case (the substrate is the simplest Area — one island, few holes, no nets); (2) the
+unified producer — pours→`NetFeature`, via conductor+`Void` lowering, the Excellon
+rewrite, keepout enforcement; (3) the trace/via slab-name migration rides here
+naturally (`net_features`' `(Layer, NetFeature)` keying dissolves into the stream) —
+0011's serialization design still wants its own discussion; (4) trailing: mask export
+iterates `Role::Mask` slabs by name (dropping `side: Layer`).
+
+### Decision 17 — TTF outline text rides `Area` (2026-07-03)
+
+The continuation of Decision 9 (authoritative string + font, strokes derived) —
+outline fonts change the derivation, never the authority:
+
+- Glyph contours (TrueType quadratics) flatten to integer polygons and land in the
+  region kernel — outer ∖ counters, exactly what the boolean kernel does — producing
+  one `Area`-shaped `Feature` per glyph (or per run). Text lowers like every other
+  graphic; silk export needs zero new paths. `font::text_regions(str, height, justify,
+  &font)` sits beside `text_strokes`.
+- **`ttf-parser` is accepted as the crate's first dependency** (no-std, zero-dep
+  itself, well-fuzzed; a minimal own glyf/loca/cmap/hmtx reader is feasible but the
+  composite-glyph + cmap zoo isn't worth owning).
+- **Fonts are user-supplied paths; the built-in stroke font stays the default.** No
+  embedded blob, no license questions, zero behavior change for existing docs. The
+  text front-end grows a font directive when this lands.
+- **Metrics match the stroke font's conventions**: scale so cap height = the authored
+  height (not em-square, which renders ~30% smaller); ink-bbox Center for footprint
+  text (swapping fonts must not shift existing labels); baseline/advance from `hmtx`
+  for left-justified runs. Lowercase stops case-folding when a real font is active.
+
 ## 7. Convergence plan: sequential foundation → parallel fan-out → sequential spine
 
 > **Status: executed (2026-06-30).** Every phase and post-convergence step below has
@@ -613,7 +756,13 @@ Then the post-convergence steps proceed on the corrected foundation:
   `z_to_layer` deleted. 0016 (footprint graphics) resolved alongside (side-relative).
 - **Trace/via slab-name migration** rides with 0011 (route serialization): serialized
   routes reference slab names; `route::Layer` ordinals become router-internal only
-  (Decision 13 rule 2).
+  (Decision 13 rule 2). Now stage 3 of Decision 16 — the unified producer dissolves
+  `net_features`' `(Layer, NetFeature)` keying; 0011's *serialization* design still
+  wants its own discussion.
+- **Decision 16/17 implementation** (recorded 2026-07-03, not built): `Shape2D::Area`,
+  unified producer, pours→`NetFeature`, via `Void` drills + Excellon rewrite (0022),
+  keepout enforcement (0023), `BoardShape` deletion, mask-export slab iteration, TTF
+  outline fonts (`ttf-parser`).
 - ~~Auto-text~~ — **resolved (Decision 14, implemented 2026-07-03)**: `FpText` anchors
   + class registry (params/label/refdes queries), KiCad `fp_text`/`property` import
   (branches feat/class-registry, feat/auto-text). Follow-ups: refdes pinning via
