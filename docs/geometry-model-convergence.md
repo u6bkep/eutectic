@@ -60,9 +60,13 @@ enumerable drills, PTH/NPTH), one unified `features()` producer consumed by both
 and export, `BoardShape` superseded, and the prismatic-matter assumption named with
 its escape hatches. Decision 17: TTF outline text rides `Area` (`ttf-parser` accepted
 as the first dependency).
-**Still open**: Decision 16/17 implementation; courtyard solver packing (0019);
-trace/via slab-name migration rides with 0011 (stage 3 of Decision 16). This record
-is still meant to be folded into `architecture.md` §8.
+**Decision 18 recorded (2026-07-03, not yet implemented)**: the autorouter is an
+*editing tool*, not a solver layer — all routes persist in the text file's state zone
+(`# routes`, slab names, `pinned`/`free` provenance); load never re-solves; the router
+is free to be stochastic; partial reroute = transactional rip-up of a selection.
+Resolves 0011's design.
+**Still open**: Decision 16/17/18 implementation; courtyard solver packing (0019).
+This record is still meant to be folded into `architecture.md` §8.
 
 This record captures the foundation decisions; it *realigned the implementation* with
 what §8 already stated and sharpened three points (the single primitive, the placement
@@ -686,7 +690,7 @@ case (the substrate is the simplest Area — one island, few holes, no nets); (2
 unified producer — pours→`NetFeature`, via conductor+`Void` lowering, the Excellon
 rewrite, keepout enforcement; (3) the trace/via slab-name migration rides here
 naturally (`net_features`' `(Layer, NetFeature)` keying dissolves into the stream) —
-0011's serialization design still wants its own discussion; (4) trailing: mask export
+0011's serialization design is Decision 18; (4) trailing: mask export
 iterates `Role::Mask` slabs by name (dropping `side: Layer`).
 
 ### Decision 17 — TTF outline text rides `Area` (2026-07-03)
@@ -709,6 +713,66 @@ outline fonts change the derivation, never the authority:
   height (not em-square, which renders ~30% smaller); ink-bbox Center for footprint
   text (swapping fonts must not shift existing labels); baseline/advance from `hmtx`
   for left-justified runs. Lowercase stops case-folding when a real font is active.
+
+### Decision 18 — the autorouter is an editing tool; routes are persisted, non-derivable state (2026-07-03)
+
+Resolves 0011 (route serialization) — and repositions the router while doing it. The
+first design sketch treated routing as a derivation: hand routes as tier-1 `route`
+directives, autorouted (`Free`) traces *not* serialized, re-derived by re-running the
+router at load (mirroring placement). That assumption fails three independent ways:
+the future router is a research-grade problem that must be free to be **stochastic**
+(re-derivation would not reproduce the board the user reviewed); router speed must
+never gate **document open/interaction time**; and the real workflow wants **partial
+reroute** — select a few atrocious traces out of a mostly-good result and re-fire the
+router at just those, in milliseconds. All three point the same direction:
+
+**The autorouter is not a solver layer between source and output — it is a power tool
+a user aims at some nets and fires.** Its output, once accepted, is *document state*
+(closer to a GUI user drawing traces very fast than to elaboration). Consequences:
+
+- **All routes persist in the text file.** Load = parse, never re-solve. The file
+  remembers what the router did, so the algorithm may be stochastic, anytime-improving,
+  or replaced wholesale without touching a single existing doc. No determinism
+  requirement on the router, ever.
+- **Provenance is what makes partial reroute low-friction.** Persisted traces carry
+  it: hand-drawn/frozen = `pinned` (default in text), router-owned = `free` ("the
+  router may rip this up and replace it"). Partial reroute = transactional rip-up of a
+  selection (the `Transaction`/`Command::AddTrace` machinery the router already uses)
+  + reroute of just those nets, with `pinned` traces as immovable obstacles. "Freeze"
+  is flipping a tag on traces already in the file, not a snapshot operation.
+- **Staleness is handled by checking, not re-deriving.** A source edit (moved
+  component) may invalidate persisted routes; DRC and ratsnest gate on the real
+  geometry, so stale routes surface as violations/unroutedness — honestly.
+- **Serialization: routes join the state zone.** The text file already has two zones —
+  the generative program, then `# overrides` (non-derivable state, persisted). Routes
+  are a second state section, not generative directives; parse fills
+  `doc.traces`/`doc.vias` directly, so elaboration never owns routes and re-elaboration
+  cannot wipe them. The serializer contract is amended from "materialized state is
+  intentionally not emitted" to "**re-derivable** state is not emitted" — routes are
+  materialized but *not derivable* (expensive, stochastic, user-blessed), which is
+  exactly why they persist. Placement's contract stays as-is (the relaxation solver is
+  cheap and re-derives); if that ever stops being true it takes the same escape path.
+
+```
+# routes
+route gnd F.Cu w=0.15mm (1.2, 3.4) (5.6, 3.4) (5.6, 8.0)   # pinned (default)
+route gnd B.Cu w=0.15mm (2.0, 1.0) (2.0, 9.0) free          # router-owned
+via   gnd (5.6, 8.0) drill=0.3mm pad=0.6mm                  # full-span default
+```
+
+Details: **slab names, not layer ordinals** (this is Decision 13 rule 2 / Decision 16
+stage 3 landing — `Trace.layer`/`Via.from,to` migrate to slab-name storage;
+`route::Layer` ordinals retreat to router-internal grid state); unknown slab /
+non-copper slab / unknown net at parse → hard diagnostics (the `E_UNKNOWN_SLAB`
+family); **no trace IDs in the text** (`TraceId`s minted at parse/routing,
+session-local); via span defaults to full copper extent, explicit `F.Cu..In1.Cu` for
+blind/buried when multilayer arrives; polyline-only paths now, the grammar does not
+preclude arc segments later.
+
+Accepted consequence, stated as a decision: **autoroute output causes file churn** —
+running the router changes what serializes. That is the truth, not a bug: the file
+records what the router did, which is what makes rerolling it safe; diffs stay
+reviewable because `free` traces are labeled.
 
 ## 7. Convergence plan: sequential foundation → parallel fan-out → sequential spine
 
@@ -754,11 +818,11 @@ Then the post-convergence steps proceed on the corrected foundation:
 - ~~Real non-copper layers (0020)~~ — **resolved (Decision 13, implemented 2026-07-02)**:
   slab-name identity, mask solids + `Void` openings, real silk/mask Gerbers,
   `z_to_layer` deleted. 0016 (footprint graphics) resolved alongside (side-relative).
-- **Trace/via slab-name migration** rides with 0011 (route serialization): serialized
-  routes reference slab names; `route::Layer` ordinals become router-internal only
-  (Decision 13 rule 2). Now stage 3 of Decision 16 — the unified producer dissolves
-  `net_features`' `(Layer, NetFeature)` keying; 0011's *serialization* design still
-  wants its own discussion.
+- ~~Trace/via slab-name migration / route serialization (0011)~~ — **design resolved
+  (Decision 18, recorded 2026-07-03)**: routes persist in the text state zone with
+  slab names + provenance; the autorouter is an editing tool (stochastic-capable,
+  never load-gating); `route::Layer` ordinals become router-internal only. Rides
+  Decision 16 stage 3 for implementation.
 - **Decision 16/17 implementation** (recorded 2026-07-03, not built): `Shape2D::Area`,
   unified producer, pours→`NetFeature`, via `Void` drills + Excellon rewrite (0022),
   keepout enforcement (0023), `BoardShape` deletion, mask-export slab iteration, TTF
