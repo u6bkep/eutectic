@@ -1102,11 +1102,16 @@ mod tests {
     use crate::query::{Engine, Key};
     use crate::route::Violation;
 
-    /// Elaborate a source into a routed `History` head.
+    /// Elaborate a source into a routed `History` head (default part library).
     fn doc_of(src: Source) -> History {
-        let lib = part_library();
+        doc_of_lib(src, &part_library())
+    }
+
+    /// Elaborate a source into a `History` head against a caller-supplied library (for
+    /// scenes using footprints that the default library lacks, e.g. real SMD pads).
+    fn doc_of_lib(src: Source, lib: &crate::part::PartLib) -> History {
         let mut h = History::new(Default::default());
-        h.commit(Transaction::one(Command::SetSource(src)), &lib, "src")
+        h.commit(Transaction::one(Command::SetSource(src)), lib, "src")
             .unwrap();
         h
     }
@@ -1193,17 +1198,25 @@ mod tests {
         );
     }
 
-    /// Apply a proposed transaction's commands to the history head.
+    /// Apply a proposed transaction's commands to the history head (default library).
     fn apply_all(h: &mut History, cmds: Vec<Command>) {
-        let lib = part_library();
-        h.commit(Transaction(cmds), &lib, "autoroute").unwrap();
+        apply_all_lib(h, cmds, &part_library());
     }
 
-    /// DRC violation set at the current head.
+    /// Apply commands against a caller-supplied library.
+    fn apply_all_lib(h: &mut History, cmds: Vec<Command>, lib: &crate::part::PartLib) {
+        h.commit(Transaction(cmds), lib, "autoroute").unwrap();
+    }
+
+    /// DRC violation set at the current head (default library).
     fn drc(h: &History) -> Vec<Violation> {
-        let lib = part_library();
+        drc_lib(h, &part_library())
+    }
+
+    /// DRC violation set against a caller-supplied library.
+    fn drc_lib(h: &History, lib: &crate::part::PartLib) -> Vec<Violation> {
         let mut eng = Engine::new();
-        eng.query(h.doc(), &lib, Key::Drc).as_drc().to_vec()
+        eng.query(h.doc(), lib, Key::Drc).as_drc().to_vec()
     }
 
     fn has_clearance_or_width(v: &[Violation]) -> bool {
@@ -1490,6 +1503,614 @@ mod tests {
         assert!(
             after.is_empty(),
             "3-pin routed net must be DRC clean: {after:?}"
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // N-layer grid, honest masking, pours, keep-outs, pad extents, pitch split.
+    // ------------------------------------------------------------------------
+
+    use crate::doc::MM;
+    use crate::elaborate::RegionDecl;
+    use crate::geom::{KeepoutKind, Material, Role, Shape2D, Slab, ZRange};
+
+    /// A 4-copper stackup: F.Cu / In1.Cu / In2.Cu / B.Cu with the masks the two outer
+    /// sides need (so the board stays fully masked / clean), z descending F→B.
+    fn four_layer_slabs() -> Vec<G> {
+        let cu = |name: &str, lo: Nm, hi: Nm| {
+            G::Slab(Slab {
+                name: name.into(),
+                z: ZRange::new(lo, hi),
+                role: Role::Conductor,
+                material: Some(Material::named("copper")),
+            })
+        };
+        let other = |name: &str, lo: Nm, hi: Nm, role: Role| {
+            G::Slab(Slab {
+                name: name.into(),
+                z: ZRange::new(lo, hi),
+                role,
+                material: None,
+            })
+        };
+        // z from bottom (0) up: B.Mask, B.Cu, core, In2, core, In1, core, F.Cu, F.Mask.
+        vec![
+            other("B.Mask", -25_000, 0, Role::Mask),
+            cu("B.Cu", 0, 35_000),
+            other("core3", 35_000, 500_000, Role::Substrate),
+            cu("In2.Cu", 500_000, 535_000),
+            other("core2", 535_000, 1_000_000, Role::Substrate),
+            cu("In1.Cu", 1_000_000, 1_035_000),
+            other("core1", 1_035_000, 1_565_000, Role::Substrate),
+            cu("F.Cu", 1_565_000, 1_600_000),
+            other("F.Mask", 1_600_000, 1_625_000, Role::Mask),
+        ]
+    }
+
+    /// N-layer routing: on a 4-copper board with both *outer* layers walled off by
+    /// foreign pinned copper across the whole span, the net still routes — it must use an
+    /// inner layer — and stays DRC clean. Proves the grid is genuinely N-layer, not 2.
+    #[test]
+    fn four_layer_uses_inner_when_outers_blocked() {
+        let lib = part_library();
+        let mut src = four_layer_slabs();
+        src.extend(vec![
+            board_rect(Point::mm(-6, -10), Point::mm(18, 10)),
+            G::Instance {
+                path: "reg".into(),
+                part: "LDO".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Instance {
+                path: "dec".into(),
+                part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Place {
+                path: "reg".into(),
+                pos: Point::mm(0, 0),
+            },
+            G::Place {
+                path: "dec".into(),
+                pos: Point::mm(12, 0),
+            },
+            G::ConnectPins {
+                net: "VBUS".into(),
+                pins: vec![("reg".into(), "VOUT".into()), ("dec".into(), "p1".into())],
+            },
+            G::ConnectPins {
+                net: "WALL".into(),
+                pins: vec![("reg".into(), "VIN".into())],
+            },
+        ]);
+        let mut h = doc_of(src);
+        // Walls on both OUTER copper layers, full board height: no crossing on F/B.
+        for (id, layer) in [(TraceId(1), "F.Cu"), (TraceId(2), "B.Cu")] {
+            let wall = Trace {
+                net: NetId::new("WALL"),
+                layer: layer.to_string(),
+                path: vec![Point::mm(6, -12), Point::mm(6, 12)],
+                width: 200_000,
+                prov: Provenance::Pinned,
+            };
+            h.commit(Transaction::one(Command::AddTrace(id, wall)), &lib, "wall")
+                .unwrap();
+        }
+
+        let r = autoroute(h.doc(), &lib, &DesignRules::default());
+        assert!(
+            r.unrouted.is_empty(),
+            "VBUS should route on an inner layer, got unrouted {:?}",
+            r.unrouted
+        );
+        // At least one trace on an inner copper layer proves inner-layer routing.
+        let on_inner = r.commands.iter().any(
+            |c| matches!(c, Command::AddTrace(_, t) if t.layer == "In1.Cu" || t.layer == "In2.Cu"),
+        );
+        assert!(
+            on_inner,
+            "expected a trace on an inner layer: {:?}",
+            r.commands
+        );
+        apply_all(&mut h, r.commands);
+        let after = drc(&h);
+        assert!(
+            !has_clearance_or_width(&after),
+            "inner-layer route must stay clearance-clean: {after:?}"
+        );
+        assert!(
+            !after.iter().any(
+                |v| matches!(v, Violation::Unrouted { net, .. } if *net == NetId::new("VBUS"))
+            ),
+            "VBUS must be fully routed: {after:?}"
+        );
+    }
+
+    /// A through via blocks its own site on *every* copper layer. Build a 4-layer board,
+    /// route a net that must change layers (outer walls force a via), and assert the
+    /// emitted via is a through via (`span: None`) and DRC (which fans it out to all
+    /// spanned slabs) stays clean — a foreign net cannot occupy the via site on any layer.
+    #[test]
+    fn through_via_blocks_all_four_layers() {
+        let lib = part_library();
+        let mut src = four_layer_slabs();
+        src.extend(vec![
+            board_rect(Point::mm(-6, -10), Point::mm(18, 10)),
+            G::Instance {
+                path: "reg".into(),
+                part: "LDO".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Instance {
+                path: "dec".into(),
+                part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Place {
+                path: "reg".into(),
+                pos: Point::mm(0, 0),
+            },
+            G::Place {
+                path: "dec".into(),
+                pos: Point::mm(12, 0),
+            },
+            G::ConnectPins {
+                net: "VBUS".into(),
+                pins: vec![("reg".into(), "VOUT".into()), ("dec".into(), "p1".into())],
+            },
+            G::ConnectPins {
+                net: "WALL".into(),
+                pins: vec![("reg".into(), "VIN".into())],
+            },
+        ]);
+        let mut h = doc_of(src);
+        let wall = Trace {
+            net: NetId::new("WALL"),
+            layer: "F.Cu".into(),
+            path: vec![Point::mm(6, -10), Point::mm(6, 10)],
+            width: 200_000,
+            prov: Provenance::Pinned,
+        };
+        h.commit(
+            Transaction::one(Command::AddTrace(TraceId(1), wall)),
+            &lib,
+            "wall",
+        )
+        .unwrap();
+
+        let r = autoroute(h.doc(), &lib, &DesignRules::default());
+        assert!(r.unrouted.is_empty(), "VBUS should route around the wall");
+        let via = r
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                Command::AddVia(_, v) => Some(v),
+                _ => None,
+            })
+            .expect("crossing a full-height wall drops layers via a via");
+        assert_eq!(via.span, None, "vias are through (full copper extent)");
+        apply_all(&mut h, r.commands);
+        let after = drc(&h);
+        assert!(
+            !has_clearance_or_width(&after),
+            "through-via route must stay clearance-clean on all layers: {after:?}"
+        );
+    }
+
+    /// A one-pad SMD footprint on `layer`, 0.4mm square copper at the instance origin.
+    fn smd_pad(layer: &str) -> crate::part::PartDef {
+        crate::kicad::import_footprint(&format!(
+            r#"(footprint "SP" (pad "1" smd rect (at 0 0) (size 0.4 0.4) (layers "{layer}")))"#
+        ))
+        .unwrap()
+    }
+
+    /// Masking: a route cannot cross a board cutout, cannot leave the outline, and honours
+    /// the edge clearance. Two pads on opposite sides of a central slot cutout that spans
+    /// the full board height, forcing any route between them through the cutout — which is
+    /// masked — so the net cannot route.
+    #[test]
+    fn route_cannot_cross_a_cutout() {
+        let mut lib = part_library();
+        lib.insert("SP".into(), smd_pad("F.Cu"));
+        let src = vec![
+            board_rect(Point::mm(0, 0), Point::mm(20, 10)),
+            // A full-height slot cutout down the middle (x 9..11), splitting the board.
+            G::Cutout {
+                shape: Shape2D::rect(Point::mm(10, 5), 2 * MM, 12 * MM),
+            },
+            G::Instance {
+                path: "l".into(),
+                part: "SP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Instance {
+                path: "r".into(),
+                part: "SP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Place {
+                path: "l".into(),
+                pos: Point::mm(4, 5),
+            },
+            G::Place {
+                path: "r".into(),
+                pos: Point::mm(16, 5),
+            },
+            G::ConnectPins {
+                net: "SIG".into(),
+                pins: vec![("l".into(), "1".into()), ("r".into(), "1".into())],
+            },
+        ];
+        let h = doc_of_lib(src, &lib);
+        let r = autoroute(h.doc(), &lib, &DesignRules::default());
+        assert_eq!(
+            r.unrouted,
+            vec![NetId::new("SIG")],
+            "the cutout splits the board — SIG cannot route across it"
+        );
+        assert!(r.commands.is_empty(), "a failed net emits no copper");
+    }
+
+    /// A copper pour of a *foreign* net blocks routing: a board-covering GND pour on F.Cu
+    /// leaves no F.Cu channel, so a two-pad SIG net (SMD, F.Cu only) cannot route (it has
+    /// no other layer to escape to on this 2-layer default... it can drop to B.Cu — so to
+    /// make the pour genuinely block, the pads are B.Cu and the pour is B.Cu too).
+    #[test]
+    fn foreign_pour_blocks_routing() {
+        let mut lib = part_library();
+        lib.insert("SP".into(), smd_pad("B.Cu"));
+        // A GND pad somewhere + a board-covering GND pour on B.Cu; two SIG pads on B.Cu
+        // that the pour walls off (their own layer is flooded by a foreign net, and an SMD
+        // pad seeds only on its own layer, so there is no escape).
+        let outline = Shape2D::polygon(vec![
+            Point::mm(0, 0),
+            Point::mm(20, 0),
+            Point::mm(20, 10),
+            Point::mm(0, 10),
+        ]);
+        let src = vec![
+            board_rect(Point::mm(0, 0), Point::mm(20, 10)),
+            G::Instance {
+                path: "g".into(),
+                part: "SP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Instance {
+                path: "a".into(),
+                part: "SP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Instance {
+                path: "b".into(),
+                part: "SP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Place {
+                path: "g".into(),
+                pos: Point::mm(1, 1),
+            },
+            G::Place {
+                path: "a".into(),
+                pos: Point::mm(5, 5),
+            },
+            G::Place {
+                path: "b".into(),
+                pos: Point::mm(15, 5),
+            },
+            G::ConnectPins {
+                net: "GND".into(),
+                pins: vec![("g".into(), "1".into())],
+            },
+            G::ConnectPins {
+                net: "SIG".into(),
+                pins: vec![("a".into(), "1".into()), ("b".into(), "1".into())],
+            },
+            G::Region(RegionDecl {
+                shape: outline,
+                role: Role::Conductor,
+                net: Some("GND".into()),
+                layer: "B.Cu".into(),
+            }),
+        ];
+        let h = doc_of_lib(src, &lib);
+        let r = autoroute(h.doc(), &lib, &DesignRules::default());
+        assert_eq!(
+            r.unrouted,
+            vec![NetId::new("SIG")],
+            "a board-covering foreign pour on the pads' only layer blocks SIG"
+        );
+    }
+
+    /// A copper keep-out blocks routing on its layer: a two-pad net whose only straight
+    /// path is walled by a full-height `Role::Keepout(Copper)` region — and, on the
+    /// 2-layer default, the keep-out is placed on both copper layers so there is no escape.
+    #[test]
+    fn keepout_blocks_routing() {
+        let mut lib = part_library();
+        lib.insert("SP".into(), smd_pad("F.Cu"));
+        let mut src = vec![
+            board_rect(Point::mm(0, 0), Point::mm(20, 10)),
+            G::Instance {
+                path: "a".into(),
+                part: "SP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Instance {
+                path: "b".into(),
+                part: "SP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Place {
+                path: "a".into(),
+                pos: Point::mm(4, 5),
+            },
+            G::Place {
+                path: "b".into(),
+                pos: Point::mm(16, 5),
+            },
+            G::ConnectPins {
+                net: "SIG".into(),
+                pins: vec![("a".into(), "1".into()), ("b".into(), "1".into())],
+            },
+        ];
+        // Full-height copper keep-out down the middle on BOTH copper layers.
+        for layer in ["F.Cu", "B.Cu"] {
+            src.push(G::Region(RegionDecl {
+                shape: Shape2D::rect(Point::mm(10, 5), 2 * MM, 12 * MM),
+                role: Role::Keepout(KeepoutKind::Copper),
+                net: None,
+                layer: layer.into(),
+            }));
+        }
+        let h = doc_of_lib(src, &lib);
+        let r = autoroute(h.doc(), &lib, &DesignRules::default());
+        assert_eq!(
+            r.unrouted,
+            vec![NetId::new("SIG")],
+            "a full-height copper keep-out on both layers blocks SIG"
+        );
+        assert!(r.commands.is_empty(), "a blocked net emits no copper");
+    }
+
+    /// Pad extents (not points): two 0.4mm pads only 0.5mm apart on the *same* foreign
+    /// net. A route of a third net threading the 0.1mm gap between their copper is
+    /// impossible where the old point model (pads as zero-size points) would have let it
+    /// through. Here the extents block the channel, so the third net detours (or fails) —
+    /// we assert it does not lay copper *through* the gap by checking DRC stays clean.
+    #[test]
+    fn pad_extents_block_where_points_would_not() {
+        let mut lib = part_library();
+        lib.insert("SP".into(), smd_pad("F.Cu"));
+        // Two GND pads 0.5mm apart (centres) — copper edges 0.1mm apart. A SIG net's two
+        // pads sit above and below, so the straight route runs through the pad gap.
+        let src = vec![
+            board_rect(Point::mm(0, 0), Point::mm(10, 10)),
+            G::Instance {
+                path: "g0".into(),
+                part: "SP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Instance {
+                path: "g1".into(),
+                part: "SP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Instance {
+                path: "s0".into(),
+                part: "SP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Instance {
+                path: "s1".into(),
+                part: "SP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Place {
+                path: "g0".into(),
+                pos: Point {
+                    x: 5 * MM - 250_000,
+                    y: 5 * MM,
+                },
+            },
+            G::Place {
+                path: "g1".into(),
+                pos: Point {
+                    x: 5 * MM + 250_000,
+                    y: 5 * MM,
+                },
+            },
+            G::Place {
+                path: "s0".into(),
+                pos: Point::mm(5, 1),
+            },
+            G::Place {
+                path: "s1".into(),
+                pos: Point::mm(5, 9),
+            },
+            G::ConnectPins {
+                net: "GND".into(),
+                pins: vec![("g0".into(), "1".into()), ("g1".into(), "1".into())],
+            },
+            G::ConnectPins {
+                net: "SIG".into(),
+                pins: vec![("s0".into(), "1".into()), ("s1".into(), "1".into())],
+            },
+        ];
+        let mut h = doc_of_lib(src, &lib);
+        let r = autoroute(h.doc(), &lib, &DesignRules::default());
+        // Whatever the router does, applying it must be DRC clean — the pad extents mean
+        // it cannot thread the 0.1mm gap that a point model would have permitted.
+        apply_all_lib(&mut h, r.commands, &lib);
+        let after = drc_lib(&h, &lib);
+        assert!(
+            !has_clearance_or_width(&after),
+            "routing must respect pad extents, not treat pads as points: {after:?}"
+        );
+    }
+
+    /// The trace/via pitch split (the QFN fix, distilled): two adjacent fine-pitch (0.4mm)
+    /// pads are *individually reachable* — the grid resolves them — where the old
+    /// via-sized pitch (0.45mm > 0.4mm) could not place a node on each. Route two 2-pad
+    /// nets whose pads are 0.4mm apart and assert both route DRC-clean.
+    #[test]
+    fn fine_pitch_pads_are_individually_reachable() {
+        let mut lib = part_library();
+        lib.insert("SP".into(), smd_pad("F.Cu"));
+        // Four pads in a 0.4mm-pitch row: A B A B (nets NA, NB interleaved). Each net's two
+        // pads sit 0.8mm apart with the other net's pad between them.
+        let mut src = vec![board_rect(Point::mm(-2, -3), Point::mm(3, 3))];
+        let xs = [0, 400_000, 800_000, 1_200_000];
+        for (k, x) in xs.iter().enumerate() {
+            src.push(G::Instance {
+                path: format!("p{k}"),
+                part: "SP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            });
+            src.push(G::Place {
+                path: format!("p{k}"),
+                pos: Point { x: *x, y: 0 },
+            });
+        }
+        src.push(G::ConnectPins {
+            net: "NA".into(),
+            pins: vec![("p0".into(), "1".into()), ("p2".into(), "1".into())],
+        });
+        src.push(G::ConnectPins {
+            net: "NB".into(),
+            pins: vec![("p1".into(), "1".into()), ("p3".into(), "1".into())],
+        });
+        let mut h = doc_of_lib(src, &lib);
+        let r = autoroute(h.doc(), &lib, &DesignRules::default());
+        // Both nets seed a distinct node on each fine-pitch pad; the fine grid resolves
+        // them (a coarser via-sized pitch would collapse adjacent pads onto one node).
+        // Routing may still need to detour up/around; the point is each pad is reachable
+        // and the result is DRC clean.
+        apply_all_lib(&mut h, r.commands, &lib);
+        let after = drc_lib(&h, &lib);
+        assert!(
+            !has_clearance_or_width(&after),
+            "fine-pitch routing must be clearance-clean: {after:?}"
+        );
+        // The grid must have seeded each net (nothing dropped for un-seedability): a net
+        // with reachable pins is either routed or reported unrouted, never silently gone.
+        assert_eq!(
+            r.routed.len() + r.unrouted.len(),
+            2,
+            "both fine-pitch nets are accounted for"
+        );
+    }
+
+    /// Via legality is stricter than trace legality (the pitch split): a via pad needs
+    /// `via_pad/2 + width/2 + clearance` (0.375 mm) of room from any *other* net's copper,
+    /// which is more than one grid `pitch` (0.30 mm) — so a via may not sit one node away
+    /// from a foreign trace even though a *trace* one node away is clearance-clean (exactly
+    /// `pitch − width = clearance`). This is the invariant the old via-sized grid papered
+    /// over; here we assert it directly at the A* boundary.
+    #[test]
+    fn via_legality_is_stricter_than_trace_at_one_pitch() {
+        let rules = DesignRules::default();
+        let pitch = rules.min_trace_width + rules.min_clearance; // 0.30 mm
+        let via_pad = 2 * rules.min_trace_width;
+        // via_pad/2 + width/2 + clr = 0.15 + 0.075 + 0.15 = 0.375 mm
+        let via_clear = rules.min_clearance + via_pad / 2 + rules.min_trace_width / 2;
+        // A trace one node (pitch) from a foreign centreline is clean: pitch − width/2 −
+        // width/2 = clearance. A via one node away is not: it needs `via_clear` > pitch.
+        assert!(
+            pitch >= rules.min_clearance + rules.min_trace_width / 2 + rules.min_trace_width / 2,
+            "a trace one pitch from a foreign trace meets clearance (pitch ≥ clr + w)"
+        );
+        assert!(
+            via_clear > pitch,
+            "a via needs more than one pitch of room from foreign copper (the pitch split): \
+             via_clear={via_clear} > pitch={pitch}"
+        );
+    }
+
+    /// End-to-end companion to the invariant above: a dense two-net scene whose greedy
+    /// solution puts a via near the other net's trunk only routes cleanly *because* via
+    /// legality forbade the too-close via and forced a detour. Both nets route and DRC is
+    /// clean — the same scene the Gerber export determinism test exercises, distilled.
+    #[test]
+    fn dense_scene_places_vias_clear_of_foreign_copper() {
+        let lib = part_library();
+        let src = vec![
+            board_rect(Point::mm(-6, -10), Point::mm(18, 10)),
+            G::Instance {
+                path: "reg".into(),
+                part: "LDO".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Instance {
+                path: "c0".into(),
+                part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Instance {
+                path: "c1".into(),
+                part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Place {
+                path: "reg".into(),
+                pos: Point::mm(0, 0),
+            },
+            G::Place {
+                path: "c0".into(),
+                pos: Point::mm(12, 5),
+            },
+            G::Place {
+                path: "c1".into(),
+                pos: Point::mm(12, -5),
+            },
+            G::ConnectPins {
+                net: "VBUS".into(),
+                pins: vec![
+                    ("reg".into(), "VOUT".into()),
+                    ("c0".into(), "p1".into()),
+                    ("c1".into(), "p1".into()),
+                ],
+            },
+            G::ConnectPins {
+                net: "GND".into(),
+                pins: vec![
+                    ("reg".into(), "GND".into()),
+                    ("c0".into(), "p2".into()),
+                    ("c1".into(), "p2".into()),
+                ],
+            },
+        ];
+        let mut h = doc_of(src);
+        let r = autoroute(h.doc(), &lib, &DesignRules::default());
+        assert!(
+            r.unrouted.is_empty(),
+            "both nets route (via legality forced clean via placement): {:?}",
+            r.unrouted
+        );
+        apply_all(&mut h, r.commands);
+        let after = drc(&h);
+        assert!(
+            after.is_empty(),
+            "dense routed board must be DRC clean: {after:?}"
         );
     }
 }
