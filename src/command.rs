@@ -13,7 +13,7 @@
 use crate::diagnostic::{Diagnostic, Location};
 use crate::doc::*;
 use crate::elaborate::{Source, directive_coords, elaborate};
-use crate::id::{EntityId, TraceId, ViaId};
+use crate::id::{EntityId, NetId, TraceId, ViaId};
 use crate::part::PartLib;
 use crate::route::{Trace, Via};
 
@@ -43,18 +43,27 @@ pub enum Command {
     Resolve(EntityId, Resolution),
     /// Add a routed trace under a caller-supplied stable id. This is the
     /// hand-routing / agent-routing API: the `Trace` carries its own provenance
-    /// (`Pinned` for a hand/agent edit, `Free` for a future autorouter). Validated:
-    /// the trace's net must exist, the polyline must have >= 2 points, the width
-    /// must be positive, and the id must be free — any failure aborts the whole
-    /// transaction (atomicity), so a dangling trace can never commit.
+    /// (`Pinned` for a hand/agent edit, `Free` for a future autorouter). Per-command
+    /// checks: the id must be free, the polyline must have >= 2 points, and the width
+    /// must be positive. Net existence and slab resolution are checked *post-elaborate*
+    /// by [`apply`]'s `validate_routes` (so creating a net and routing it in one
+    /// transaction works); any failure aborts the whole transaction (atomicity), so a
+    /// dangling trace can never commit.
     AddTrace(TraceId, Trace),
     /// Remove a trace by id (errors if absent).
     RemoveTrace(TraceId),
     /// Add a via under a caller-supplied stable id. Same validation shape as
-    /// [`Command::AddTrace`]: known net, positive drill/pad, free id.
+    /// [`Command::AddTrace`]: free id + positive drill/pad per-command, net/span-slab
+    /// resolution post-elaborate.
     AddVia(ViaId, Via),
     /// Remove a via by id (errors if absent).
     RemoveVia(ViaId),
+    /// Freeze the routing (Decision 18's workflow payoff): flip the provenance of the
+    /// named nets' `Free` (router-owned) traces/vias to `Pinned`, so a subsequent
+    /// partial reroute treats them as immovable. An empty net set freezes **every**
+    /// net's routing. Only `Free` copper is promoted; `Pinned`/`Hint`/`Fixed` are left
+    /// as-is. Pure state edit — no geometry changes, so DRC/ratsnest are unaffected.
+    PromoteRoutes { nets: Vec<NetId> },
 }
 
 /// How to resolve a single [`ReconReport`] entry. Each variant lowers to an
@@ -158,6 +167,12 @@ pub fn apply(
                 next.source = parsed.source;
                 next.overrides = parsed.overrides;
                 next.refdes_pins = parsed.refdes_pins;
+                // Routes are materialized tier-2 state (Decision 18): the parser fills
+                // them directly, elaboration never owns them. Their net/slab names are
+                // validated below (post-elaborate, against the fresh doc), the same gate
+                // AddTrace/AddVia hit.
+                next.traces = parsed.traces;
+                next.vias = parsed.vias;
             }
             Command::Resolve(id, res) => {
                 apply_resolution(&mut next, id, res).map_err(|d| vec![d])?
@@ -184,13 +199,10 @@ pub fn apply(
                         Location::Trace(*id),
                     )]);
                 }
-                if !next.nets.contains_key(&trace.net) {
-                    return Err(vec![Diagnostic::error(
-                        "E_UNKNOWN_NET",
-                        format!("AddTrace `{id}`: unknown net `{}`", trace.net),
-                        Location::Net(trace.net.clone()),
-                    )]);
-                }
+                // Net existence (and slab resolution) is validated post-elaborate by
+                // `validate_routes` — the single authority. A per-command check here read
+                // the *pre*-elaborate net set, which false-rejected a same-transaction
+                // `[SetSource(creates net X), AddTrace(net X)]`; dropped so the two agree.
                 check_coord_range(
                     trace
                         .path
@@ -225,13 +237,8 @@ pub fn apply(
                         Location::Via(*id),
                     )]);
                 }
-                if !next.nets.contains_key(&via.net) {
-                    return Err(vec![Diagnostic::error(
-                        "E_UNKNOWN_NET",
-                        format!("AddVia `{id}`: unknown net `{}`", via.net),
-                        Location::Net(via.net.clone()),
-                    )]);
-                }
+                // Net existence (and span slab resolution) is validated post-elaborate by
+                // `validate_routes` — the single authority (see `AddTrace`).
                 check_coord_range([via.at.x, via.at.y, via.drill, via.pad], Location::Via(*id))?;
                 next.vias.insert(*id, via.clone());
             }
@@ -244,6 +251,20 @@ pub fn apply(
                     )]);
                 }
             }
+            Command::PromoteRoutes { nets } => {
+                // Empty selection freezes everything; otherwise scope to the named nets.
+                let scoped = |net: &NetId| nets.is_empty() || nets.contains(net);
+                for t in next.traces.values_mut() {
+                    if t.prov == Provenance::Free && scoped(&t.net) {
+                        t.prov = Provenance::Pinned;
+                    }
+                }
+                for v in next.vias.values_mut() {
+                    if v.prov == Provenance::Free && scoped(&v.net) {
+                        v.prov = Provenance::Pinned;
+                    }
+                }
+            }
         }
     }
 
@@ -253,6 +274,15 @@ pub fn apply(
     next.nets = elab.nets;
     next.no_connects = elab.no_connects;
     next.report = elab.report;
+
+    // Commit-time route validation (Decision 18 / 13). Traces/vias are tier-2 state, so
+    // the tier-1 elaborate gate above never sees them — but the fail-loud `expect()` in
+    // `check_drc`/`pours`/drill export relies on every committed route's slab NAME
+    // resolving to a copper slab and every route net EXISTING. This is that gate, for the
+    // whole route set at once (so LoadText, AddTrace, and AddVia are all covered — an
+    // AddTrace whose net is dropped by a same-transaction SetSource is caught here even
+    // though the per-command AddTrace check passed against the pre-elaborate net set).
+    validate_routes(&next)?;
 
     // Decay: garbage-collect hints that the reconciliation found ineffective.
     // Removing them does not change positions (they had no effect), so the
@@ -282,6 +312,71 @@ pub fn apply(
     next.route_rev = if routing_changed { tick } else { doc.route_rev };
 
     Ok(next)
+}
+
+/// Commit-time validation of the routing state zone against the freshly-elaborated doc
+/// (Decision 18 / 13 rule 2). Every trace/via must (1) carry a net that exists in the
+/// materialized `nets`, and (2) name copper slabs that resolve in the stackup — a trace's
+/// `layer` and a via's explicit `span` endpoints must each be a real **copper** slab
+/// (`E_UNKNOWN_SLAB` for a name absent from the stackup, `E_NON_COPPER_SLAB` for a name
+/// that resolves but is not copper). Collect-all: every offending route is reported in
+/// one pass. This is the contract `check_drc`/`pours`/drill export lean on — a committed
+/// doc's routes always resolve — so it must be airtight.
+fn validate_routes(doc: &Doc) -> Result<(), Vec<Diagnostic>> {
+    let su = crate::elaborate::stackup(&doc.source);
+    let is_copper = |name: &str| -> Option<bool> {
+        su.slab(name)
+            .map(|s| s.role == crate::geom::Role::Conductor)
+    };
+    let mut errors: Vec<Diagnostic> = Vec::new();
+
+    // A named slab used by a route must exist AND be copper.
+    let check_slab = |name: &str, loc: Location, errors: &mut Vec<Diagnostic>| match is_copper(name)
+    {
+        Some(true) => {}
+        Some(false) => errors.push(Diagnostic::error(
+            "E_NON_COPPER_SLAB",
+            format!("route references non-copper slab `{name}`"),
+            loc,
+        )),
+        None => errors.push(Diagnostic::error(
+            "E_UNKNOWN_SLAB",
+            format!("route references unknown slab `{name}`"),
+            loc,
+        )),
+    };
+
+    for (id, t) in &doc.traces {
+        if !doc.nets.contains_key(&t.net) {
+            errors.push(Diagnostic::error(
+                "E_UNKNOWN_NET",
+                format!("trace `{id}` is on unknown net `{}`", t.net),
+                Location::Trace(*id),
+            ));
+        }
+        check_slab(&t.layer, Location::Trace(*id), &mut errors);
+    }
+    for (id, v) in &doc.vias {
+        if !doc.nets.contains_key(&v.net) {
+            errors.push(Diagnostic::error(
+                "E_UNKNOWN_NET",
+                format!("via `{id}` is on unknown net `{}`", v.net),
+                Location::Via(*id),
+            ));
+        }
+        // A `None` span is the full copper extent (always resolvable); only an explicit
+        // blind/buried span names slabs to validate.
+        if let Some((from, to)) = &v.span {
+            check_slab(from, Location::Via(*id), &mut errors);
+            check_slab(to, Location::Via(*id), &mut errors);
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
 }
 
 /// Did the set of components or their part types change? (Affects resolved roles.)
@@ -431,4 +526,359 @@ pub fn suggested_resolutions(report: &ReconReport) -> Vec<Suggestion> {
         });
     }
     out
+}
+
+#[cfg(test)]
+mod route_commit_tests {
+    use super::*;
+    use crate::elaborate::{GenDirective as G, board_rect};
+    use crate::history::History;
+    use crate::route::{Trace, Via};
+
+    /// One single-pad footprint on F.Cu (pad copper at the instance origin).
+    fn one_pad() -> crate::part::PartDef {
+        crate::kicad::import_footprint(
+            r#"(footprint "P1" (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu")))"#,
+        )
+        .unwrap()
+    }
+
+    /// A 20x20 board with two GND pads at (5,5) and (15,5) — a net that exists so a
+    /// route may reference it.
+    fn scene() -> (History, PartLib) {
+        let mut lib = crate::part::part_library();
+        lib.insert("P".into(), one_pad());
+        let src = vec![
+            board_rect(Point::mm(0, 0), Point::mm(20, 20)),
+            G::Instance {
+                path: "a".into(),
+                part: "P".into(),
+                params: Default::default(),
+                label: None,
+            },
+            G::Instance {
+                path: "b".into(),
+                part: "P".into(),
+                params: Default::default(),
+                label: None,
+            },
+            G::Place {
+                path: "a".into(),
+                pos: Point::mm(5, 5),
+            },
+            G::Place {
+                path: "b".into(),
+                pos: Point::mm(15, 5),
+            },
+            G::ConnectPins {
+                net: "GND".into(),
+                pins: vec![("a".into(), "1".into()), ("b".into(), "1".into())],
+            },
+        ];
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "s")
+            .unwrap();
+        (h, lib)
+    }
+
+    fn tr(layer: &str, prov: Provenance) -> Trace {
+        Trace {
+            net: NetId::new("GND"),
+            layer: layer.into(),
+            path: vec![Point::mm(5, 5), Point::mm(15, 5)],
+            width: 150_000,
+            prov,
+        }
+    }
+
+    /// A re-elaboration (a fresh SetSource that keeps the net) must NOT wipe committed
+    /// routes — they are tier-2 state the parser/commands own, not GenDirectives
+    /// (Decision 18). A `Pinned` trace survives a subsequent source edit.
+    #[test]
+    fn reelaborate_preserves_pinned_route() {
+        let (mut h, lib) = scene();
+        h.commit(
+            Transaction::one(Command::AddTrace(
+                TraceId(1),
+                tr("F.Cu", Provenance::Pinned),
+            )),
+            &lib,
+            "t",
+        )
+        .unwrap();
+        assert_eq!(h.doc().traces.len(), 1);
+        // Re-issue the same source (a re-elaboration). The trace must persist.
+        let src = h.doc().source.clone();
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "reelab")
+            .unwrap();
+        assert_eq!(
+            h.doc().traces.len(),
+            1,
+            "re-elaboration must not wipe routes"
+        );
+        assert_eq!(h.doc().traces[&TraceId(1)].prov, Provenance::Pinned);
+    }
+
+    /// `LoadText` populates `doc.traces`/`doc.vias` directly (routes are materialized
+    /// state, Decision 18) and the loaded routes survive elaboration. Full text path:
+    /// serialize a routed doc, LoadText it back, confirm the routes committed.
+    #[test]
+    fn loadtext_populates_and_preserves_routes() {
+        let (mut h, lib) = scene();
+        h.commit(
+            Transaction::one(Command::AddTrace(TraceId(1), tr("F.Cu", Provenance::Free))),
+            &lib,
+            "t",
+        )
+        .unwrap();
+        let text = crate::text::serialize(h.doc());
+        // Load that text into a fresh history: the route must materialize on commit.
+        let mut h2 = History::new(Default::default());
+        h2.commit(Transaction::one(Command::LoadText(text)), &lib, "load")
+            .unwrap();
+        assert_eq!(h2.doc().traces.len(), 1, "LoadText materializes the route");
+        assert_eq!(
+            h2.doc().traces[&TraceId(1)].prov,
+            Provenance::Free,
+            "provenance round-trips"
+        );
+        assert_eq!(h2.doc().traces[&TraceId(1)].layer, "F.Cu");
+    }
+
+    /// Commit-time slab validation: a trace on a typo'd slab is a hard `E_UNKNOWN_SLAB`
+    /// fault at commit (the gate `check_drc`/`pours` lean on).
+    #[test]
+    fn trace_on_unknown_slab_rejected_at_commit() {
+        let (mut h, lib) = scene();
+        let err = h
+            .commit(
+                Transaction::one(Command::AddTrace(
+                    TraceId(1),
+                    tr("F.Cuu", Provenance::Pinned),
+                )),
+                &lib,
+                "bad",
+            )
+            .unwrap_err();
+        assert!(
+            err.iter().any(|d| d.code == "E_UNKNOWN_SLAB"),
+            "unknown slab rejected: {err:?}"
+        );
+    }
+
+    /// Commit-time slab validation: a trace on a real but non-copper slab (silk) is a
+    /// hard `E_NON_COPPER_SLAB` fault.
+    #[test]
+    fn trace_on_non_copper_slab_rejected_at_commit() {
+        let (mut h, lib) = scene();
+        let err = h
+            .commit(
+                Transaction::one(Command::AddTrace(
+                    TraceId(1),
+                    tr("F.SilkS", Provenance::Pinned),
+                )),
+                &lib,
+                "silk",
+            )
+            .unwrap_err();
+        assert!(
+            err.iter().any(|d| d.code == "E_NON_COPPER_SLAB"),
+            "non-copper slab rejected: {err:?}"
+        );
+    }
+
+    /// A route whose net is dropped by a same-transaction SetSource is caught by the
+    /// post-elaborate `validate_routes` gate (the single net-existence authority now that
+    /// the per-command net check is gone). This is the contract airtightness the fail-loud
+    /// DRC `expect()` depends on.
+    #[test]
+    fn route_orphaned_by_source_edit_rejected() {
+        let (mut h, lib) = scene();
+        h.commit(
+            Transaction::one(Command::AddTrace(
+                TraceId(1),
+                tr("F.Cu", Provenance::Pinned),
+            )),
+            &lib,
+            "t",
+        )
+        .unwrap();
+        // A new source with NO GND net; the committed GND trace is now orphaned.
+        let src = vec![board_rect(Point::mm(0, 0), Point::mm(20, 20))];
+        let err = h
+            .commit(Transaction::one(Command::SetSource(src)), &lib, "drop")
+            .unwrap_err();
+        assert!(
+            err.iter().any(|d| d.code == "E_UNKNOWN_NET"),
+            "orphaned route net rejected: {err:?}"
+        );
+    }
+
+    /// Creating a net and routing it in ONE transaction must succeed: the per-command net
+    /// check used to read the pre-elaborate net set and false-reject this; now
+    /// `validate_routes` runs post-elaborate, sees the fresh net, and passes. A pad on a
+    /// NEW net plus a trace on that net, committed together.
+    #[test]
+    fn create_and_route_in_one_transaction() {
+        let mut lib = crate::part::part_library();
+        lib.insert("P".into(), one_pad());
+        let src = vec![
+            board_rect(Point::mm(0, 0), Point::mm(20, 20)),
+            G::Instance {
+                path: "a".into(),
+                part: "P".into(),
+                params: Default::default(),
+                label: None,
+            },
+            G::Instance {
+                path: "b".into(),
+                part: "P".into(),
+                params: Default::default(),
+                label: None,
+            },
+            G::Place {
+                path: "a".into(),
+                pos: Point::mm(5, 5),
+            },
+            G::Place {
+                path: "b".into(),
+                pos: Point::mm(15, 5),
+            },
+            G::ConnectPins {
+                net: "NEW".into(),
+                pins: vec![("a".into(), "1".into()), ("b".into(), "1".into())],
+            },
+        ];
+        let trace = Trace {
+            net: NetId::new("NEW"),
+            layer: "F.Cu".into(),
+            path: vec![Point::mm(5, 5), Point::mm(15, 5)],
+            width: 150_000,
+            prov: Provenance::Pinned,
+        };
+        // One transaction: the SetSource creates net NEW, the AddTrace references it.
+        let mut h = History::new(Default::default());
+        h.commit(
+            Transaction(vec![
+                Command::SetSource(src),
+                Command::AddTrace(TraceId(1), trace),
+            ]),
+            &lib,
+            "create+route",
+        )
+        .expect("create-and-route in one txn must succeed");
+        assert_eq!(h.doc().traces.len(), 1, "the route committed");
+    }
+
+    /// A via whose explicit blind span names an unknown slab is rejected at commit.
+    #[test]
+    fn via_bad_span_rejected_at_commit() {
+        let (mut h, lib) = scene();
+        let v = Via {
+            net: NetId::new("GND"),
+            at: Point::mm(5, 5),
+            span: Some(("F.Cu".into(), "Nope.Cu".into())),
+            drill: 300_000,
+            pad: 600_000,
+            prov: Provenance::Pinned,
+        };
+        let err = h
+            .commit(Transaction::one(Command::AddVia(ViaId(1), v)), &lib, "via")
+            .unwrap_err();
+        assert!(
+            err.iter().any(|d| d.code == "E_UNKNOWN_SLAB"),
+            "bad via span rejected: {err:?}"
+        );
+    }
+
+    /// `PromoteRoutes` freezes router-owned copper: a `Free` trace becomes `Pinned`; a
+    /// `Pinned` one is untouched. Net-scoped selection only promotes the named nets.
+    #[test]
+    fn promote_routes_freezes_free_copper() {
+        let (mut h, lib) = scene();
+        h.commit(
+            Transaction::one(Command::AddTrace(TraceId(1), tr("F.Cu", Provenance::Free))),
+            &lib,
+            "free",
+        )
+        .unwrap();
+        h.commit(
+            Transaction::one(Command::AddTrace(
+                TraceId(2),
+                tr("B.Cu", Provenance::Pinned),
+            )),
+            &lib,
+            "pin",
+        )
+        .unwrap();
+        h.commit(
+            Transaction::one(Command::PromoteRoutes { nets: vec![] }),
+            &lib,
+            "freeze",
+        )
+        .unwrap();
+        assert_eq!(
+            h.doc().traces[&TraceId(1)].prov,
+            Provenance::Pinned,
+            "free → pinned"
+        );
+        assert_eq!(
+            h.doc().traces[&TraceId(2)].prov,
+            Provenance::Pinned,
+            "pinned unchanged"
+        );
+    }
+
+    /// Net-scoped `PromoteRoutes` only freezes the named nets' free copper.
+    #[test]
+    fn promote_routes_net_scoped() {
+        let (mut h, lib) = scene();
+        // A second net so we can scope.
+        let src = {
+            let mut s = h.doc().source.clone();
+            s.push(G::ConnectPins {
+                net: "SIG".into(),
+                pins: vec![("a".into(), "1".into())],
+            });
+            s
+        };
+        // (Can't reuse pad "1" on two nets in reality, but ConnectPins just needs the net
+        // to exist for the route validation; use a distinct pad selector is unnecessary —
+        // the test only checks provenance flips, not DRC.)
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "sig")
+            .unwrap();
+        h.commit(
+            Transaction::one(Command::AddTrace(TraceId(1), tr("F.Cu", Provenance::Free))),
+            &lib,
+            "g",
+        )
+        .unwrap();
+        let mut sig = tr("F.Cu", Provenance::Free);
+        sig.net = NetId::new("SIG");
+        sig.path = vec![Point::mm(5, 6), Point::mm(15, 6)];
+        h.commit(
+            Transaction::one(Command::AddTrace(TraceId(2), sig)),
+            &lib,
+            "s",
+        )
+        .unwrap();
+        h.commit(
+            Transaction::one(Command::PromoteRoutes {
+                nets: vec![NetId::new("GND")],
+            }),
+            &lib,
+            "freeze-gnd",
+        )
+        .unwrap();
+        assert_eq!(
+            h.doc().traces[&TraceId(1)].prov,
+            Provenance::Pinned,
+            "GND frozen"
+        );
+        assert_eq!(
+            h.doc().traces[&TraceId(2)].prov,
+            Provenance::Free,
+            "SIG untouched"
+        );
+    }
 }

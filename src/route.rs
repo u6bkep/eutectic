@@ -25,9 +25,15 @@ use crate::region::{DEFAULT_CIRCLE_SEGS, Region, difference, shape_to_region, un
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
-/// A copper layer. `Top`/`Bottom` are the outer copper; `Inner(n)` keeps the model
-/// trivially extensible to multilayer boards (n = 0-based inner-layer index). The
-/// ordering is the physical stack-up top→bottom, which is what via spans test.
+/// A copper layer *ordinal* — a router-internal working form, not stored identity.
+/// `Top`/`Bottom` are the outer copper; `Inner(n)` keeps the model trivially
+/// extensible to multilayer boards (n = 0-based inner-layer index). The ordering is
+/// the physical stack-up top→bottom, which is what via spans test.
+///
+/// Per Decision 13 rule 2 / Decision 18, layer *identity* is a slab **name**
+/// ([`Trace::layer`], [`Via::span`]); this ordinal survives only inside the
+/// autorouter's grid and the DRC/export forward-query at their own boundaries
+/// (`slab_layer` ↔ `copper_layers_z`), never as persisted state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Layer {
     Top,
@@ -60,42 +66,73 @@ impl Ord for Layer {
     }
 }
 
-/// A routed copper polyline on one layer, belonging to one net. `width` is the
-/// finished copper width (nm); `prov` is `Pinned` for hand/agent routing and
-/// `Free` for a future autorouter's output.
+/// A routed copper polyline on one copper slab, belonging to one net. `layer` is the
+/// slab **name** (Decision 13 rule 2 — identity is the name, never a positional
+/// ordinal); `width` is the finished copper width (nm); `prov` is `Pinned` for
+/// hand/agent routing and `Free` for a future autorouter's output.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Trace {
     pub net: NetId,
-    pub layer: Layer,
+    pub layer: String,
     /// Polyline centreline. Two or more points; consecutive points are segments.
     pub path: Vec<Point>,
     pub width: Nm,
     pub prov: crate::doc::Provenance,
 }
 
-/// A via: a plated point connecting copper across the layers it spans (`from`..`to`,
-/// inclusive). Modelled by its centre `at`, a `drill`, and a `pad` (annular copper
-/// diameter) — a disc of that diameter on every layer the via spans.
+/// A via: a plated point connecting copper across the copper slabs it spans. Modelled
+/// by its centre `at`, a `drill`, a `pad` (annular copper diameter) — a disc of that
+/// diameter on every copper slab it spans — and a `span`.
+///
+/// `span` is `None` for the common **through** via (the full copper extent, top-most
+/// to bottom-most copper slab — Decision 18's full-span default), or
+/// `Some((from, to))` naming the two copper slabs a blind/buried via terminates on
+/// (order-insensitive; the barrel spans every copper slab between them inclusive). The
+/// two-name form is parseable and stored even though multilayer stackups are rare
+/// today, so blind/buried vias round-trip when they arrive. Names, not ordinals
+/// (Decision 13 rule 2).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Via {
     pub net: NetId,
     pub at: Point,
-    pub from: Layer,
-    pub to: Layer,
+    pub span: Option<(String, String)>,
     pub drill: Nm,
     pub pad: Nm,
     pub prov: crate::doc::Provenance,
 }
 
 impl Via {
-    /// Does this via connect copper on `layer`? (Is `layer` within its span?)
-    pub fn spans(&self, layer: Layer) -> bool {
-        let (lo, hi) = (
-            self.from.depth().min(self.to.depth()),
-            self.from.depth().max(self.to.depth()),
-        );
-        let d = layer.depth();
-        lo <= d && d <= hi
+    /// Does this via connect copper on the slab with z-range `z`, given the stackup's
+    /// copper slabs top-down (`cu`, as [`Stackup::copper_slabs`] orders them)? A `None`
+    /// span is the full copper extent (every copper slab); a `Some((from, to))` span is
+    /// every copper slab whose depth lies between `from` and `to` inclusive. An
+    /// unresolvable named endpoint spans nothing (a committed via always resolves — the
+    /// commit-time slab gate).
+    pub fn spans_z(&self, cu: &[&crate::geom::Slab], z: &ZRange) -> bool {
+        let Some(idx) = cu.iter().position(|s| s.z == *z) else {
+            return false;
+        };
+        match &self.span {
+            None => true,
+            Some((from, to)) => {
+                let (Some(a), Some(b)) = (
+                    cu.iter().position(|s| s.name == *from),
+                    cu.iter().position(|s| s.name == *to),
+                ) else {
+                    return false;
+                };
+                a.min(b) <= idx && idx <= a.max(b)
+            }
+        }
+    }
+
+    /// The copper slabs (top-down, from `cu`) this via's barrel connects — used by the
+    /// connectivity check to know which trace/pour layers a via bridges.
+    pub fn spanned_slabs<'a>(&self, cu: &'a [&'a crate::geom::Slab]) -> Vec<&'a crate::geom::Slab> {
+        cu.iter()
+            .filter(|s| self.spans_z(cu, &s.z))
+            .copied()
+            .collect()
     }
 }
 
@@ -146,9 +183,9 @@ impl Default for DesignRules {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Violation {
     /// Copper of two different nets is closer than the clearance rule allows on a
-    /// layer. Net ids are stored sorted so a pair is reported once regardless of
-    /// which side was scanned first.
-    Clearance { a: NetId, b: NetId, layer: Layer },
+    /// copper slab (named — Decision 13). Net ids are stored sorted so a pair is
+    /// reported once regardless of which side was scanned first.
+    Clearance { a: NetId, b: NetId, layer: String },
     /// A trace narrower than the minimum width rule.
     MinWidth { trace: TraceId, width: Nm },
     /// A net whose pins are not all electrically joined by the routing (ratsnest):
@@ -172,7 +209,7 @@ impl crate::diagnostic::Diagnose for Violation {
         let d = match self {
             Violation::Clearance { a, b, layer } => Diagnostic::error(
                 "E_DRC_CLEARANCE",
-                format!("nets `{a}` and `{b}` are closer than clearance on {layer:?}"),
+                format!("nets `{a}` and `{b}` are closer than clearance on `{layer}`"),
                 Location::Net(a.clone()),
             ),
             Violation::MinWidth { trace, width } => Diagnostic::error(
@@ -258,17 +295,18 @@ pub fn check_drc(
     let world = world_features(doc, lib, netlist, rules, &su)
         .expect("world_features on a committed doc (slab gate enforced at commit)");
 
-    // Netted copper conductors, each paired with the copper [`Layer`] it sits on
-    // (forward-derived from its z) and whether it is a **pour** (`Shape2D::Area`) vs
-    // solid copper (a trace/via/pad). The layer is the clearance-report granularity.
-    let conductors: Vec<(Layer, bool, &Feature, &NetId)> = world
+    // Netted copper conductors, each paired with the copper slab **name** it sits on
+    // (forward-derived from its z — Decision 13 rule 3) and whether it is a **pour**
+    // (`Shape2D::Area`) vs solid copper (a trace/via/pad). The slab name is the
+    // clearance-report granularity.
+    let conductors: Vec<(String, bool, &Feature, &NetId)> = world
         .iter()
         .filter_map(|nf| {
             let net = nf.net.as_ref()?;
             if nf.feature.role != Role::Conductor {
                 return None;
             }
-            let layer = feature_layer(&su, &nf.feature)?;
+            let layer = feature_slab(&su, &nf.feature)?;
             let is_pour = matches!(&nf.feature.extent, Extent::Prism { shape, .. } if matches!(shape, Shape2D::Area { .. }));
             Some((layer, is_pour, &nf.feature, net))
         })
@@ -309,13 +347,13 @@ pub fn check_drc(
     // real short.
     for i in 0..conductors.len() {
         for j in (i + 1)..conductors.len() {
-            let (la, pa, fa, na) = conductors[i];
-            let (_lb, pb, fb, nb) = conductors[j];
+            let (la, pa, fa, na) = &conductors[i];
+            let (_lb, pb, fb, nb) = &conductors[j];
             // A pour is exactly the `Area`-shaped conductors; solid copper is never
             // `Area`. If this ever drifts, the `pa != pb` skip below would drop a real
             // pair — so pin it in debug builds.
             debug_assert_eq!(
-                pa,
+                *pa,
                 matches!(&fa.extent, Extent::Prism { shape, .. } if matches!(shape, Shape2D::Area { .. })),
                 "is_pour must track Shape2D::Area"
             );
@@ -323,7 +361,7 @@ pub fn check_drc(
                 continue;
             }
             if !fa.clears(fb, rules.min_clearance) {
-                out.push(clearance(na, nb, la));
+                out.push(clearance(na, nb, la.clone()));
             }
         }
     }
@@ -373,33 +411,40 @@ pub fn check_drc(
         }
         let net_traces: Vec<&Trace> = doc.traces.values().filter(|t| t.net == *nid).collect();
         let net_vias: Vec<&Via> = doc.vias.values().filter(|v| v.net == *nid).collect();
-        // This net's pour copper as `(layer, island)` pairs, sourced from the same
-        // unified stream. Same-net fills on a layer are unioned *before* islanding, so
-        // overlapping same-net pours merge into one island (no spurious split); the
-        // layer is kept so trace/via incidence can be gated by it (copper on a different
-        // layer reaches the pour only through a via). A pad/trace/via on an island joins
+        // This net's pour copper as `(slab name, island)` pairs, sourced from the same
+        // unified stream. Same-net fills on a slab are unioned *before* islanding, so
+        // overlapping same-net pours merge into one island (no spurious split); the slab
+        // name is kept so trace/via incidence can be gated by it (copper on a different
+        // slab reaches the pour only through a via). A pad/trace/via on an island joins
         // everything else on it, so a pour collapses the ratsnest; a pour fragmented by
         // its knockouts leaves pads on different islands disconnected (honest DRC).
-        let mut by_layer: BTreeMap<Layer, Vec<Region>> = BTreeMap::new();
+        let mut by_layer: BTreeMap<String, Vec<Region>> = BTreeMap::new();
         for (la, is_pour, f, net) in &conductors {
             if !is_pour || *net != nid {
                 continue;
             }
             let Extent::Prism { shape, .. } = &f.extent;
             if let Some(region) = shape.region() {
-                by_layer.entry(*la).or_default().push(region.clone());
+                by_layer.entry(la.clone()).or_default().push(region.clone());
             }
         }
-        let net_islands: Vec<(Layer, Region)> = by_layer
+        let net_islands: Vec<(String, Region)> = by_layer
             .into_iter()
             .flat_map(|(layer, fills)| {
                 union_all(fills)
                     .islands()
                     .into_iter()
-                    .map(move |i| (layer, i))
+                    .map(move |i| (layer.clone(), i))
             })
             .collect();
-        let islands = pin_islands(pts, &net_traces, &net_vias, &net_islands, rules.touch_tol);
+        let islands = pin_islands(
+            pts,
+            &net_traces,
+            &net_vias,
+            &net_islands,
+            &su,
+            rules.touch_tol,
+        );
         if islands > 1 {
             out.push(Violation::Unrouted {
                 net: nid.clone(),
@@ -413,21 +458,21 @@ pub fn check_drc(
     out
 }
 
-/// The copper [`Layer`] a single-slab copper [`Feature`] sits on, by matching its z to
-/// the stackup's copper slabs (a **forward** query — identity flows from the stackup,
+/// The copper slab **name** a single-slab copper [`Feature`] sits on, by matching its z
+/// to the stackup's copper slabs (a **forward** query — identity flows from the stackup,
 /// never reconstructed heuristically; Decision 13 rule 3). `None` if the feature's z is
-/// not a copper slab. The one place DRC turns a converged feature back into the
-/// discrete [`Layer`] its clearance report is keyed on.
-fn feature_layer(su: &Stackup, f: &Feature) -> Option<Layer> {
+/// not a copper slab. The one place DRC/export turns a converged feature back into the
+/// slab name its report/file is keyed on.
+fn feature_slab(su: &Stackup, f: &Feature) -> Option<String> {
     let Extent::Prism { z, .. } = &f.extent;
-    copper_layers_z(su)
-        .into_iter()
-        .find(|(_, lz)| lz == z)
-        .map(|(l, _)| l)
+    su.copper_slabs()
+        .iter()
+        .find(|s| s.z == *z)
+        .map(|s| s.name.clone())
 }
 
 /// Normalised clearance violation: net ids sorted so a pair reports once.
-fn clearance(a: &NetId, b: &NetId, layer: Layer) -> Violation {
+fn clearance(a: &NetId, b: &NetId, layer: String) -> Violation {
     let (lo, hi) = if a <= b {
         (a.clone(), b.clone())
     } else {
@@ -442,7 +487,9 @@ fn clearance(a: &NetId, b: &NetId, layer: Layer) -> Violation {
 
 /// The copper layers of a stackup with their slab z, top-down, as `(Layer, ZRange)`.
 /// `Top` is the highest-z copper, `Bottom` the lowest, `Inner(k)` those between —
-/// the inverse of [`layer_z`], and consistent with [`Layer::depth`].
+/// consistent with [`Layer::depth`]. A **router-internal** ordinal bridge (Decision 13
+/// rule 2): the autorouter's grid is positional, so it maps slab z ↔ ordinal here at its
+/// own boundary; nothing persisted uses it.
 pub(crate) fn copper_layers_z(stackup: &Stackup) -> Vec<(Layer, ZRange)> {
     let slabs = stackup.copper_slabs();
     let n = slabs.len();
@@ -462,23 +509,36 @@ pub(crate) fn copper_layers_z(stackup: &Stackup) -> Vec<(Layer, ZRange)> {
         .collect()
 }
 
-/// Lower an abstract copper [`Layer`] to its slab `ZRange` via the stackup
-/// (`Top`→top outer copper, `Bottom`→bottom outer, `Inner(n)`→the `1+n`-th from top).
-/// `None` if that copper layer is absent (e.g. `Inner` on a 2-layer stackup).
-pub(crate) fn layer_z(stackup: &Stackup, l: Layer) -> Option<ZRange> {
-    match l {
-        Layer::Top => stackup.top_copper(),
-        Layer::Bottom => stackup.bottom_copper(),
+/// The slab **name** of a router ordinal [`Layer`] (the outward half of the router's
+/// ordinal↔name bridge): `Top`→top copper slab, `Bottom`→bottom copper, `Inner(n)`→the
+/// `1+n`-th from top. `None` if that copper layer is absent. Router-internal
+/// (Decision 13 rule 2).
+pub(crate) fn layer_slab_name(stackup: &Stackup, l: Layer) -> Option<String> {
+    let cu = stackup.copper_slabs();
+    let idx = match l {
+        Layer::Top => 0,
+        Layer::Bottom => cu.len().checked_sub(1)?,
+        // Inner copper is strictly *between* the outer layers; guard against `Inner(n)`
+        // aliasing onto `Bottom` (or past it) on a stackup with too few inner layers.
         Layer::Inner(n) => {
-            // Inner copper is strictly *between* the outer layers; the last copper
-            // slab is `Bottom`. Guard against `Inner(n)` aliasing onto `Bottom` (or
-            // past it) on a stackup with too few inner layers — return `None`, matching
-            // `copper_layers_z`, which only labels indices `1..len-1` as `Inner`.
-            let cu = stackup.copper_slabs();
             let idx = 1 + n as usize;
-            (idx + 1 < cu.len()).then(|| cu[idx].z)
+            if idx + 1 >= cu.len() {
+                return None;
+            }
+            idx
         }
-    }
+    };
+    cu.get(idx).map(|s| s.name.clone())
+}
+
+/// The router ordinal [`Layer`] a copper slab **name** maps to (the inward half of the
+/// router's bridge): `None` for an unknown or non-copper name. Router-internal.
+pub(crate) fn slab_layer(stackup: &Stackup, name: &str) -> Option<Layer> {
+    copper_layers_z(stackup)
+        .into_iter()
+        .zip(stackup.copper_slabs())
+        .find(|((_, _), s)| s.name == name)
+        .map(|((l, _), _)| l)
 }
 
 /// World-frame copper as converged [`NetFeature`]s — every trace, via, and netted pad
@@ -496,41 +556,40 @@ pub(crate) fn net_features(
     lib: &PartLib,
     netlist: &BTreeMap<NetId, Vec<(PinRef, PinRole)>>,
     stackup: &Stackup,
-) -> Vec<(Layer, NetFeature)> {
+) -> Vec<(String, NetFeature)> {
     let mut pin_net: BTreeMap<PinRef, NetId> = BTreeMap::new();
     for (nid, pins) in netlist {
         for (pr, _) in pins {
             pin_net.insert(pr.clone(), nid.clone());
         }
     }
-    let mut out: Vec<(Layer, NetFeature)> = Vec::new();
+    let cu = stackup.copper_slabs();
+    let mut out: Vec<(String, NetFeature)> = Vec::new();
 
-    // Traces: one Conductor prism on the trace's layer.
+    // Traces: one Conductor prism on the trace's named copper slab. An unresolvable /
+    // non-copper name contributes nothing (a committed trace always resolves — the
+    // commit-time slab gate in `command::apply`).
     for t in doc.traces.values() {
-        if let Some(z) = layer_z(stackup, t.layer) {
+        if let Some(z) = cu.iter().find(|s| s.name == t.layer).map(|s| s.z) {
             let f = Feature::prism(Role::Conductor, Shape2D::trace(t.path.clone(), t.width), z);
-            out.push((t.layer, NetFeature::new(Some(t.net.clone()), f)));
+            out.push((t.layer.clone(), NetFeature::new(Some(t.net.clone()), f)));
         }
     }
 
-    // Vias: one Conductor prism per copper slab the via spans (single-slab fan-out,
-    // reproducing `PieceLayers::Via(from,to).on(l)` for every l in the span).
+    // Vias: one Conductor prism per copper slab the via spans (single-slab fan-out).
     for v in doc.vias.values() {
-        for (layer, z) in copper_layers_z(stackup) {
-            if v.spans(layer) {
-                let f = Feature::prism(Role::Conductor, Shape2D::disc(v.at, v.pad / 2), z);
-                out.push((layer, NetFeature::new(Some(v.net.clone()), f)));
-            }
+        for s in v.spanned_slabs(&cu) {
+            let f = Feature::prism(Role::Conductor, Shape2D::disc(v.at, v.pad / 2), s.z);
+            out.push((s.name.clone(), NetFeature::new(Some(v.net.clone()), f)));
         }
     }
 
     // Pads: reuse the Phase-1 lowering. Attribute each Conductor feature to its copper
-    // layer by a **forward** per-slab query — a pad feature's z *is* one copper slab's z
+    // slab by a **forward** per-slab query — a pad feature's z *is* one copper slab's z
     // (a surface pad sits on one, a Through pad fans out to one feature per slab), so we
     // scan the stackup's copper slabs and keep the one whose z it matches. Identity flows
     // forward from the stackup; it is never reconstructed from the derived z (Decision 13
     // rule 3 — no inverse projections).
-    let copper = copper_layers_z(stackup);
     for c in doc.components.values() {
         let Some(def) = lib.get(&c.part) else {
             continue;
@@ -544,8 +603,8 @@ pub(crate) fn net_features(
                     continue; // the drill / mask-opening Void is not copper geometry
                 }
                 let Extent::Prism { z, .. } = &f.extent;
-                if let Some((layer, _)) = copper.iter().find(|(_, lz)| lz == z) {
-                    out.push((*layer, NetFeature::new(Some(net.clone()), f)));
+                if let Some(s) = cu.iter().find(|s| s.z == *z) {
+                    out.push((s.name.clone(), NetFeature::new(Some(net.clone()), f)));
                 }
             }
         }
@@ -557,13 +616,15 @@ pub(crate) fn net_features(
 // The unified world-frame feature producer (Decision 16c).
 // ----------------------------------------------------------------------------
 
-/// Resolve a region's **slab name** to the copper [`Layer`] + its z (Decision 13): the
-/// slab z must match a copper slab exactly. `None` if the name is unknown or names a
-/// non-copper slab — a net-bound pour on silk is nonsense, rejected up front by
-/// [`crate::elaborate::features`], the materialization gate; here it contributes no pour.
-fn region_copper_layer(su: &Stackup, name: &str) -> Option<(Layer, ZRange)> {
-    let z = su.slab_z(name)?;
-    copper_layers_z(su).into_iter().find(|(_, sz)| *sz == z)
+/// Resolve a region's **slab name** to its copper z (Decision 13): the slab must be a
+/// copper slab. `None` if the name is unknown or names a non-copper slab — a net-bound
+/// pour on silk is nonsense, rejected up front by [`crate::elaborate::features`], the
+/// materialization gate; here it contributes no pour.
+fn region_copper_z(su: &Stackup, name: &str) -> Option<ZRange> {
+    su.copper_slabs()
+        .iter()
+        .find(|s| s.name == name)
+        .map(|s| s.z)
 }
 
 /// **The** single producer of world-frame [`Feature`]s (Decision 16c): one query that
@@ -644,7 +705,7 @@ pub fn world_features(
     }
 
     // Copper conductors into the stream (net annotation preserved; consumers re-derive
-    // the Layer pairing via `feature_layer`).
+    // the slab pairing via `feature_slab`).
     out.extend(copper.iter().map(|(_, nf)| nf.clone()));
 
     // Copper pours: each authored `Conductor` region lowers to a `NetFeature` whose
@@ -656,14 +717,14 @@ pub fn world_features(
             continue;
         }
         let Some(name) = &r.net else { continue };
-        let Some((layer, z)) = region_copper_layer(su, &r.layer) else {
+        let Some(z) = region_copper_z(su, &r.layer) else {
             continue;
         };
         let net = NetId::new(name.clone());
         let outline = shape_to_region(&r.shape, DEFAULT_CIRCLE_SEGS);
         let obstacles: Vec<Region> = copper
             .iter()
-            .filter(|(l, nf)| *l == layer && nf.net.as_ref() != Some(&net))
+            .filter(|(l, nf)| *l == r.layer && nf.net.as_ref() != Some(&net))
             .map(|(_, nf)| {
                 let Extent::Prism { shape, .. } = &nf.feature.extent;
                 shape_to_region(&shape.inflated(rules.min_clearance), DEFAULT_CIRCLE_SEGS)
@@ -678,13 +739,14 @@ pub fn world_features(
     Ok(out)
 }
 
-/// A copper pour materialised for export/DRC rendering: its `net`, the copper [`Layer`]
-/// it fills, and its knocked-out `fill` region. A thin view over the [`Shape2D::Area`]
-/// conductor features [`world_features`] emits, so pour geometry has exactly one source.
+/// A copper pour materialised for export/DRC rendering: its `net`, the copper slab
+/// **name** it fills (Decision 13), and its knocked-out `fill` region. A thin view over
+/// the [`Shape2D::Area`] conductor features [`world_features`] emits, so pour geometry
+/// has exactly one source.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pour {
     pub net: NetId,
-    pub layer: Layer,
+    pub layer: String,
     pub fill: Region,
 }
 
@@ -709,7 +771,7 @@ pub fn pours(
             if nf.feature.role != Role::Conductor {
                 return None;
             }
-            let layer = feature_layer(su, &nf.feature)?;
+            let layer = feature_slab(su, &nf.feature)?;
             let Extent::Prism { shape, .. } = nf.feature.extent;
             match shape {
                 Shape2D::Area { region } => Some(Pour {
@@ -764,9 +826,31 @@ fn pin_islands(
     pins: &[Point],
     traces: &[&Trace],
     vias: &[&Via],
-    pour_islands: &[(Layer, crate::region::Region)],
+    pour_islands: &[(String, crate::region::Region)],
+    su: &Stackup,
     tol: Nm,
 ) -> usize {
+    let cu = su.copper_slabs();
+    // A via's spanned copper-slab index range (from `cu`, top-down), for the span-overlap
+    // tests. An unresolvable named span occupies nothing.
+    let via_span = |v: &Via| -> Option<(usize, usize)> {
+        match &v.span {
+            None => (!cu.is_empty()).then(|| (0, cu.len() - 1)),
+            Some((from, to)) => {
+                let a = cu.iter().position(|s| s.name == *from)?;
+                let b = cu.iter().position(|s| s.name == *to)?;
+                Some((a.min(b), a.max(b)))
+            }
+        }
+    };
+    // Does a via span the copper slab named `name`?
+    let via_spans_name = |v: &Via, name: &str| -> bool {
+        let (Some((lo, hi)), Some(idx)) = (via_span(v), cu.iter().position(|s| s.name == name))
+        else {
+            return false;
+        };
+        lo <= idx && idx <= hi
+    };
     let (np, nt, nv) = (pins.len(), traces.len(), vias.len());
     let mut uf = UnionFind::new(np + nt + nv + pour_islands.len());
     let trace_node = |i: usize| np + i;
@@ -807,7 +891,7 @@ fn pin_islands(
     // trace ↔ via (via spans the trace's layer)
     for (ti, t) in traces.iter().enumerate() {
         for (vi, v) in vias.iter().enumerate() {
-            if v.spans(t.layer) && point_on_polyline(v.at, &t.path, tol) {
+            if via_spans_name(v, &t.layer) && point_on_polyline(v.at, &t.path, tol) {
                 uf.union(trace_node(ti), via_node(vi));
             }
         }
@@ -816,8 +900,10 @@ fn pin_islands(
     for i in 0..nv {
         for j in (i + 1)..nv {
             let (u, w) = (vias[i], vias[j]);
-            let overlap = u.from.depth().min(u.to.depth()) <= w.from.depth().max(w.to.depth())
-                && w.from.depth().min(w.to.depth()) <= u.from.depth().max(u.to.depth());
+            let overlap = match (via_span(u), via_span(w)) {
+                (Some((ulo, uhi)), Some((wlo, whi))) => ulo <= whi && wlo <= uhi,
+                _ => false,
+            };
             if overlap && seg_within(u.at, u.at, w.at, w.at, tol, false) {
                 uf.union(via_node(i), via_node(j));
             }
@@ -841,7 +927,7 @@ fn pin_islands(
             }
         }
         for (vi, v) in vias.iter().enumerate() {
-            if v.spans(*layer) && isl.contains_point(v.at) {
+            if via_spans_name(v, layer) && isl.contains_point(v.at) {
                 uf.union(via_node(vi), island_node(ii));
             }
         }
@@ -971,17 +1057,25 @@ mod pour_tests {
     use crate::history::History;
     use crate::part::part_library;
 
+    /// The router's ordinal↔name boundary (Decision 13 rule 2): `Top`/`Bottom` resolve
+    /// to the outer copper slab names and round-trip through `slab_layer`; `Inner(0)`
+    /// must NOT alias onto Bottom on a 2-layer stackup (there is no inner copper).
     #[test]
-    fn layer_z_inner_does_not_alias_bottom_on_two_layer() {
+    fn router_layer_name_boundary_round_trips() {
         let su = crate::geom::Stackup::default_2layer();
-        assert_eq!(layer_z(&su, Layer::Top), su.top_copper());
-        assert_eq!(layer_z(&su, Layer::Bottom), su.bottom_copper());
-        // `Inner(0)` must NOT alias onto Bottom's slab z — there is no inner copper.
+        assert_eq!(layer_slab_name(&su, Layer::Top).as_deref(), Some("F.Cu"));
+        assert_eq!(layer_slab_name(&su, Layer::Bottom).as_deref(), Some("B.Cu"));
         assert_eq!(
-            layer_z(&su, Layer::Inner(0)),
+            layer_slab_name(&su, Layer::Inner(0)),
             None,
             "a 2-layer stackup has no inner copper layer"
         );
+        // Names round-trip back to ordinals.
+        assert_eq!(slab_layer(&su, "F.Cu"), Some(Layer::Top));
+        assert_eq!(slab_layer(&su, "B.Cu"), Some(Layer::Bottom));
+        // A non-copper / unknown name resolves to no ordinal.
+        assert_eq!(slab_layer(&su, "F.SilkS"), None);
+        assert_eq!(slab_layer(&su, "Nope"), None);
     }
 
     /// Netlist (membership only; roles irrelevant to pours) from a doc's nets.
@@ -1153,7 +1247,7 @@ mod pour_tests {
         assert_eq!(fills.len(), 1, "one conductor pour");
         let f = &fills[0];
         assert_eq!(f.net, NetId::new("GND"));
-        assert_eq!(f.layer, Layer::Top);
+        assert_eq!(f.layer, "F.Cu");
         // Same-net pad stays inside the pour (it connects to it).
         assert!(
             f.fill.contains_point(Point::mm(5, 5)),
@@ -1458,7 +1552,7 @@ mod pour_tests {
         // A full-width SIG trace at y=10 cuts the GND pour into top/bottom islands.
         let cut = Trace {
             net: NetId::new("SIG"),
-            layer: Layer::Top,
+            layer: "F.Cu".into(),
             path: vec![Point::mm(0, 10), Point::mm(20, 10)],
             width: 150_000,
             prov: crate::doc::Provenance::Pinned,
@@ -1533,7 +1627,7 @@ mod pour_tests {
         // the pour), but on the bottom layer with no via.
         let t = Trace {
             net: NetId::new("GND"),
-            layer: Layer::Bottom,
+            layer: "B.Cu".into(),
             path: vec![Point::mm(25, 5), Point::mm(10, 5)],
             width: 150_000,
             prov: crate::doc::Provenance::Pinned,
@@ -1886,7 +1980,7 @@ mod pour_tests {
             // A Top trace running straight through the keep-out square's centre.
             let t = Trace {
                 net: NetId::new("SIG"),
-                layer: Layer::Top,
+                layer: "F.Cu".into(),
                 path: vec![Point::mm(6, 10), Point::mm(14, 10)],
                 width: 150_000,
                 prov: crate::doc::Provenance::Pinned,
@@ -1953,7 +2047,7 @@ mod pour_tests {
                 .unwrap();
             let t = Trace {
                 net: NetId::new("SIG"),
-                layer: Layer::Top,
+                layer: "F.Cu".into(),
                 path: vec![
                     Point {
                         x: x_mm * MM / 10,
@@ -2032,7 +2126,7 @@ mod pour_tests {
                 .unwrap();
             let t = Trace {
                 net: NetId::new("SIG"),
-                layer: Layer::Top,
+                layer: "F.Cu".into(),
                 path: vec![Point::mm(6, 10), Point::mm(14, 10)],
                 width: 150_000,
                 prov: crate::doc::Provenance::Pinned,
@@ -2102,7 +2196,7 @@ mod pour_tests {
         // of the keep-out edge, so its right copper edge lands exactly on x = 8mm.
         let t = Trace {
             net: NetId::new("SIG"),
-            layer: Layer::Top,
+            layer: "F.Cu".into(),
             path: vec![
                 Point {
                     x: 8 * MM - 75_000,
@@ -2163,7 +2257,7 @@ mod pour_tests {
                 .unwrap();
             let t = Trace {
                 net: NetId::new("SIG"),
-                layer: Layer::Top,
+                layer: "F.Cu".into(),
                 path: vec![Point::mm(12, 2), Point::mm(12, 8)],
                 width: 150_000,
                 prov: crate::doc::Provenance::Pinned,
@@ -2212,7 +2306,7 @@ mod pour_tests {
             // A short trace inside the [8,12]² cutout.
             let t = Trace {
                 net: NetId::new("SIG"),
-                layer: Layer::Top,
+                layer: "F.Cu".into(),
                 path: vec![Point::mm(9, 10), Point::mm(11, 10)],
                 width: 150_000,
                 prov: crate::doc::Provenance::Pinned,

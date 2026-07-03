@@ -54,10 +54,10 @@
 use crate::command::Command;
 use crate::doc::{Doc, Nm, PinRef, Point, Provenance};
 use crate::elaborate::stackup;
-use crate::geom::{Feature, NetFeature, Role, Shape2D};
+use crate::geom::{Feature, NetFeature, Role, Shape2D, Stackup};
 use crate::id::{NetId, TraceId, ViaId};
 use crate::part::{PartLib, PinRole, pin_world};
-use crate::route::{DesignRules, Layer, Trace, Via, copper_layers_z, layer_z, net_features};
+use crate::route::{DesignRules, Layer, Trace, Via, layer_slab_name, net_features, slab_layer};
 use crate::solve::Rect;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
@@ -115,6 +115,17 @@ pub fn autoroute(doc: &Doc, lib: &PartLib, rules: &DesignRules) -> AutorouteResu
         return AutorouteResult::default();
     }
 
+    // The router's grid is positional (Top/Bottom ordinals); it converts to/from slab
+    // *names* here at its boundary (Decision 13 rule 2). The two outer-copper names are
+    // resolved once; a stackup with no copper cannot be routed.
+    let su = stackup(&doc.source);
+    let (Some(top_name), Some(bot_name)) = (
+        layer_slab_name(&su, Layer::Top),
+        layer_slab_name(&su, Layer::Bottom),
+    ) else {
+        return AutorouteResult::default();
+    };
+
     // Ownership of each (node, layer) by a net (its routed copper passes through).
     // -1 = free. Distinct nets never share a node ⇒ clearance falls out of `pitch`.
     let mut owner = vec![[-1i32; 2]; grid.cols * grid.rows];
@@ -135,7 +146,7 @@ pub fn autoroute(doc: &Doc, lib: &PartLib, rules: &DesignRules) -> AutorouteResu
 
         // Per-net obstacle map: every *other* net's pads, and all pre-existing
         // traces/vias whose net differs (Pinned hand routes are fixed obstacles).
-        let obstacles = collect_obstacles(doc, &net_pads, nid);
+        let obstacles = collect_obstacles(doc, &net_pads, nid, &su);
         let block = BlockMap::build(&grid, &obstacles, rules, width, via_pad);
 
         match route_net(
@@ -148,6 +159,8 @@ pub fn autoroute(doc: &Doc, lib: &PartLib, rules: &DesignRules) -> AutorouteResu
             width,
             via_pad,
             via_drill,
+            &top_name,
+            &bot_name,
             &mut next_tid,
             &mut next_vid,
         ) {
@@ -196,27 +209,26 @@ fn verify_and_prune(doc: &Doc, lib: &PartLib, rules: &DesignRules, result: &mut 
         })
         .collect();
     let su = stackup(&doc.source);
+    let cu = su.copper_slabs();
     let existing = net_features(doc, lib, &netlist, &su);
 
     // This run's proposed copper, lowered the same way `net_features` lowers the
-    // doc's: a trace is one Conductor prism on its layer; a via fans out to one prism
-    // per copper slab it spans (so every feature is single-slab).
-    let mut proposed: Vec<(Layer, NetFeature)> = Vec::new();
+    // doc's: a trace is one Conductor prism on its named slab; a via fans out to one
+    // prism per copper slab it spans (so every feature is single-slab).
+    let mut proposed: Vec<NetFeature> = Vec::new();
     for cmd in &result.commands {
         match cmd {
             Command::AddTrace(_, t) => {
-                if let Some(z) = layer_z(&su, t.layer) {
+                if let Some(z) = cu.iter().find(|s| s.name == t.layer).map(|s| s.z) {
                     let f =
                         Feature::prism(Role::Conductor, Shape2D::trace(t.path.clone(), t.width), z);
-                    proposed.push((t.layer, NetFeature::new(Some(t.net.clone()), f)));
+                    proposed.push(NetFeature::new(Some(t.net.clone()), f));
                 }
             }
             Command::AddVia(_, v) => {
-                for (layer, z) in copper_layers_z(&su) {
-                    if v.spans(layer) {
-                        let f = Feature::prism(Role::Conductor, Shape2D::disc(v.at, v.pad / 2), z);
-                        proposed.push((layer, NetFeature::new(Some(v.net.clone()), f)));
-                    }
+                for s in v.spanned_slabs(&cu) {
+                    let f = Feature::prism(Role::Conductor, Shape2D::disc(v.at, v.pad / 2), s.z);
+                    proposed.push(NetFeature::new(Some(v.net.clone()), f));
                 }
             }
             _ => {}
@@ -227,14 +239,18 @@ fn verify_and_prune(doc: &Doc, lib: &PartLib, rules: &DesignRules, result: &mut 
     // clearance) with a *different*-net feature — existing or proposed. Each feature
     // is single-slab, so `Feature::clears` subsumes the old same-layer + distance gate.
     let mut unclean: BTreeSet<NetId> = BTreeSet::new();
-    for (_, p) in &proposed {
+    for p in &proposed {
         let Some(pnet) = &p.net else { continue };
         if unclean.contains(pnet) {
             continue;
         }
-        let clashes = existing.iter().chain(proposed.iter()).any(|(_, o)| {
-            o.net.as_ref() != Some(pnet) && !p.feature.clears(&o.feature, rules.min_clearance)
-        });
+        let clashes = existing
+            .iter()
+            .map(|(_, nf)| nf)
+            .chain(proposed.iter())
+            .any(|o| {
+                o.net.as_ref() != Some(pnet) && !p.feature.clears(&o.feature, rules.min_clearance)
+            });
         if clashes {
             unclean.insert(pnet.clone());
         }
@@ -337,6 +353,7 @@ fn collect_obstacles(
     doc: &Doc,
     net_pads: &BTreeMap<NetId, Vec<Point>>,
     cur: &NetId,
+    su: &Stackup,
 ) -> Vec<Obstacle> {
     let mut obs = Vec::new();
     // Other nets' pads.
@@ -348,20 +365,39 @@ fn collect_obstacles(
             obs.push(Obstacle::Pad(*p));
         }
     }
-    // Pre-existing copper of other nets (hand-routed Pinned, or prior Free).
+    // Pre-existing copper of other nets (hand-routed Pinned, or prior Free). Slab names
+    // convert to grid ordinals here (the router boundary); a trace on a slab the grid
+    // does not model (an inner layer) drops out.
     for t in doc.traces.values() {
         if t.net == *cur {
             continue;
         }
+        let Some(layer) = slab_layer(su, &t.layer) else {
+            continue;
+        };
         for w in t.path.windows(2) {
-            obs.push(Obstacle::Seg(w[0], w[1], t.width, t.layer));
+            obs.push(Obstacle::Seg(w[0], w[1], t.width, layer));
         }
     }
+    let cu = su.copper_slabs();
     for v in doc.vias.values() {
         if v.net == *cur {
             continue;
         }
-        obs.push(Obstacle::Via(v.at, v.pad, v.from, v.to));
+        // The via's spanned copper slabs, as grid ordinals (top-most and bottom-most it
+        // touches — the grid tests membership between them).
+        let spanned: Vec<Layer> = v
+            .spanned_slabs(&cu)
+            .into_iter()
+            .filter_map(|s| slab_layer(su, &s.name))
+            .collect();
+        let (Some(from), Some(to)) = (
+            spanned.iter().min_by_key(|l| l.depth()).copied(),
+            spanned.iter().max_by_key(|l| l.depth()).copied(),
+        ) else {
+            continue;
+        };
+        obs.push(Obstacle::Via(v.at, v.pad, from, to));
     }
     obs
 }
@@ -463,9 +499,19 @@ fn route_net(
     width: Nm,
     via_pad: Nm,
     via_drill: Nm,
+    top_name: &str,
+    bot_name: &str,
     next_tid: &mut u64,
     next_vid: &mut u64,
 ) -> Option<Vec<Command>> {
+    // Convert a grid ordinal back to the copper slab *name* it was resolved from (the
+    // outward half of the router boundary). The grid only ever produces Top/Bottom.
+    let layer_name = |l: Layer| -> String {
+        match l {
+            Layer::Top => top_name.to_string(),
+            _ => bot_name.to_string(),
+        }
+    };
     // Map each pad to the nearest grid node the current net may occupy.
     let mut pin_nodes: Vec<(usize, usize)> = Vec::with_capacity(pads.len());
     for p in pads {
@@ -497,7 +543,7 @@ fn route_net(
             TraceId(mint(next_tid)),
             Trace {
                 net: nid.clone(),
-                layer: Layer::Top,
+                layer: layer_name(Layer::Top),
                 path: vec![pads[0], seed_world],
                 width,
                 prov: Provenance::Free,
@@ -533,8 +579,9 @@ fn route_net(
                 Via {
                     net: nid.clone(),
                     at: grid.world(vi, vj),
-                    from: Layer::Top,
-                    to: Layer::Bottom,
+                    // Top..Bottom is the full copper extent on the 2-layer grid — the
+                    // through-via full-span default (Decision 18).
+                    span: None,
                     drill: via_drill,
                     pad: via_pad,
                     prov: Provenance::Free,
@@ -552,7 +599,7 @@ fn route_net(
                     TraceId(mint(next_tid)),
                     Trace {
                         net: nid.clone(),
-                        layer,
+                        layer: layer_name(layer),
                         path: pts,
                         width,
                         prov: Provenance::Free,
@@ -852,7 +899,7 @@ mod tests {
                 TraceId(1),
                 Trace {
                     net: NetId::new("A"),
-                    layer: Layer::Top,
+                    layer: "F.Cu".into(),
                     path: vec![Point::mm(-2, 0), Point::mm(2, 0)],
                     width: 200_000,
                     prov: Provenance::Free,
@@ -1013,7 +1060,7 @@ mod tests {
         // A Pinned wall on net WALL across x=6, full board height (on Top only).
         let wall = Trace {
             net: NetId::new("WALL"),
-            layer: Layer::Top,
+            layer: "F.Cu".into(),
             path: vec![Point::mm(6, -10), Point::mm(6, 10)],
             width: 200_000,
             prov: Provenance::Pinned,
@@ -1089,10 +1136,10 @@ mod tests {
         ];
         let mut h = doc_of(src);
         // Walls on BOTH layers spanning beyond the board: no crossing on either layer.
-        for (id, layer) in [(TraceId(1), Layer::Top), (TraceId(2), Layer::Bottom)] {
+        for (id, layer) in [(TraceId(1), "F.Cu"), (TraceId(2), "B.Cu")] {
             let wall = Trace {
                 net: NetId::new("WALL"),
-                layer,
+                layer: layer.to_string(),
                 path: vec![Point::mm(6, -12), Point::mm(6, 12)],
                 width: 200_000,
                 prov: Provenance::Pinned,

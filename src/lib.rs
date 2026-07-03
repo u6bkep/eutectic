@@ -63,7 +63,7 @@ mod tests {
     use super::part::part_library;
     use super::query::{Engine, Key};
     use super::region::{DEFAULT_CIRCLE_SEGS, difference, shape_to_region};
-    use super::route::{Layer, Trace, Via, Violation};
+    use super::route::{Trace, Via, Violation};
     use super::solve::{Constraint, PLACE_TOL, Problem, dist, solve};
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -1867,10 +1867,10 @@ mod tests {
         h
     }
 
-    fn trace(net: &str, layer: Layer, path: Vec<Point>, width: Nm) -> Trace {
+    fn trace(net: &str, layer: &str, path: Vec<Point>, width: Nm) -> Trace {
         Trace {
             net: NetId::new(net),
-            layer,
+            layer: layer.to_string(),
             path,
             width,
             prov: Provenance::Pinned,
@@ -1882,12 +1882,7 @@ mod tests {
     fn drc_clean_on_routed_two_pin_net() {
         let lib = part_library();
         let mut h = routed(two_pin_design());
-        let t = trace(
-            "VBUS",
-            Layer::Top,
-            vec![Point::mm(2, 0), Point::mm(9, 0)],
-            W,
-        );
+        let t = trace("VBUS", "F.Cu", vec![Point::mm(2, 0), Point::mm(9, 0)], W);
         h.commit(
             Transaction::one(Command::AddTrace(TraceId(1), t)),
             &lib,
@@ -1947,10 +1942,10 @@ mod tests {
         ];
         let mut h = routed(src);
         // Parallel 0.2mm-wide traces 0.1mm apart: 0.1mm < 0.15 + 0.1 + 0.1 = 0.35mm.
-        let a = trace("A", Layer::Top, vec![Point::mm(0, 0), Point::mm(10, 0)], W);
+        let a = trace("A", "F.Cu", vec![Point::mm(0, 0), Point::mm(10, 0)], W);
         let b = trace(
             "B",
-            Layer::Top,
+            "F.Cu",
             vec![
                 Point { x: 0, y: MM / 10 },
                 Point {
@@ -1979,7 +1974,7 @@ mod tests {
             &[Violation::Clearance {
                 a: NetId::new("A"),
                 b: NetId::new("B"),
-                layer: Layer::Top
+                layer: "F.Cu".to_string()
             }]
         );
     }
@@ -1992,7 +1987,7 @@ mod tests {
         let mut h = routed(two_pin_design());
         let t = trace(
             "VBUS",
-            Layer::Top,
+            "F.Cu",
             vec![Point::mm(2, 0), Point::mm(9, 0)],
             MM / 10,
         ); // 0.1mm
@@ -2020,23 +2015,12 @@ mod tests {
         let lib = part_library();
         let mut h = routed(two_pin_design());
         // Top trace pad->via, bottom trace via->pad, via bridging Top..Bottom at (5,0).
-        let top = trace(
-            "VBUS",
-            Layer::Top,
-            vec![Point::mm(2, 0), Point::mm(5, 0)],
-            W,
-        );
-        let bot = trace(
-            "VBUS",
-            Layer::Bottom,
-            vec![Point::mm(5, 0), Point::mm(9, 0)],
-            W,
-        );
+        let top = trace("VBUS", "F.Cu", vec![Point::mm(2, 0), Point::mm(5, 0)], W);
+        let bot = trace("VBUS", "B.Cu", vec![Point::mm(5, 0), Point::mm(9, 0)], W);
         let via = Via {
             net: NetId::new("VBUS"),
             at: Point::mm(5, 0),
-            from: Layer::Top,
-            to: Layer::Bottom,
+            span: None,
             drill: 300_000,
             pad: 600_000,
             prov: Provenance::Pinned,
@@ -2082,12 +2066,7 @@ mod tests {
         let d0 = eng.count(Key::Drc);
         let (conn0, geom0, route0) = (h.doc().conn_rev, h.doc().geom_rev, h.doc().route_rev);
 
-        let t = trace(
-            "VBUS",
-            Layer::Top,
-            vec![Point::mm(2, 0), Point::mm(9, 0)],
-            W,
-        );
+        let t = trace("VBUS", "F.Cu", vec![Point::mm(2, 0), Point::mm(9, 0)], W);
         h.commit(
             Transaction::one(Command::AddTrace(TraceId(1), t)),
             &lib,
@@ -2127,12 +2106,7 @@ mod tests {
         eng.query(h.doc(), &lib, Key::Drc);
         let (e0, n0) = (eng.count(Key::Erc), eng.count(Key::Netlist));
 
-        let t = trace(
-            "VBUS",
-            Layer::Top,
-            vec![Point::mm(2, 0), Point::mm(9, 0)],
-            W,
-        );
+        let t = trace("VBUS", "F.Cu", vec![Point::mm(2, 0), Point::mm(9, 0)], W);
         h.commit(
             Transaction::one(Command::AddTrace(TraceId(1), t)),
             &lib,
@@ -2169,12 +2143,7 @@ mod tests {
             s
         };
         let mut h = routed(spare("Cap"));
-        let t = trace(
-            "VBUS",
-            Layer::Top,
-            vec![Point::mm(2, 0), Point::mm(9, 0)],
-            W,
-        );
+        let t = trace("VBUS", "F.Cu", vec![Point::mm(2, 0), Point::mm(9, 0)], W);
         h.commit(
             Transaction::one(Command::AddTrace(TraceId(1), t)),
             &lib,
@@ -2218,12 +2187,7 @@ mod tests {
         let mut h = routed(two_pin_design());
         let before = h.doc().traces.len();
         // Unknown net.
-        let bad = trace(
-            "NOPE",
-            Layer::Top,
-            vec![Point::mm(0, 0), Point::mm(1, 0)],
-            W,
-        );
+        let bad = trace("NOPE", "F.Cu", vec![Point::mm(0, 0), Point::mm(1, 0)], W);
         assert!(
             h.commit(
                 Transaction::one(Command::AddTrace(TraceId(1), bad)),
@@ -2233,7 +2197,7 @@ mod tests {
             .is_err()
         );
         // Degenerate polyline.
-        let stub = trace("VBUS", Layer::Top, vec![Point::mm(0, 0)], W);
+        let stub = trace("VBUS", "F.Cu", vec![Point::mm(0, 0)], W);
         assert!(
             h.commit(
                 Transaction::one(Command::AddTrace(TraceId(1), stub)),

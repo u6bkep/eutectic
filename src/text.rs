@@ -50,7 +50,19 @@
 //! hint    <path> (<x>, <y>)        # weak override (a nudge; decays if ineffective)
 //! pin     <path> (<x>, <y>)        # strong override (explicit intent; kept)
 //! refdes  <path> <string>          # pin a reference designator (opaque; verbatim)
+//!
+//! # ---- routes state zone (tier-2 materialized, non-derivable — Decision 18) ----
+//! route <net> <slab> w=<width> (x,y) (x,y) ...  [free|hint|fixed]   # a routed polyline
+//! via   <net> (x,y) drill=<d> pad=<p> [<from>..<to>] [free|hint|fixed]  # a plated via
 //! ```
+//!
+//! Routes live in a `# routes` section beside `# overrides`. They are materialized
+//! state the parser fills directly (never re-derived at load — an autorouter is
+//! expensive/stochastic), so re-elaboration cannot wipe them. The layer is a copper
+//! slab **name** (Decision 13); provenance is a trailing keyword (`pinned` is the
+//! default and omitted; `free` = router-owned, `hint`/`fixed` complete the ladder). A
+//! via's span defaults to the full copper extent; an explicit `<from>..<to>` names a
+//! blind/buried span. Trace/via ids are minted at parse (session-local, never written).
 //!
 //! `<len>` and the coordinate components accept `<n>mm` (decimal ok), `<n>nm`, or a
 //! bare integer (interpreted as nm). A `<comp>.<pin>` reference splits at the *last*
@@ -73,21 +85,26 @@
 
 use crate::annotate::ClassEntry;
 use crate::diagnostic::{Diagnostic, Location};
-use crate::doc::{Doc, MM, Nm, Orient, Override, Point, Strength};
+use crate::doc::{Doc, MM, Nm, Orient, Override, Point, Provenance, Strength};
 use crate::elaborate::{GenDirective, RegionDecl, Source, board_rect, directive_coords};
 use crate::geom::{KeepoutKind, Material, Path, Role, Seg, Shape2D, Slab, ZRange, coord_ok};
-use crate::id::EntityId;
+use crate::id::{EntityId, TraceId, ViaId};
+use crate::route::{Trace, Via};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The parsed tier-1 state: the generative program plus the ID-keyed override maps,
-/// mirroring [`Doc`]'s tier-1 fields. A named struct (not a positional tuple) so a
-/// later section (e.g. a routes state-zone) can add a field without churning every
-/// destructuring site.
+/// The parsed tier-1/tier-2 state: the generative program, the ID-keyed override maps,
+/// and the persisted routing state zone (Decision 18 — routes are materialized but
+/// *not derivable*, so they persist rather than re-solve). A named struct (not a
+/// positional tuple) so adding a state section adds a field without churning every
+/// destructuring site. `TraceId`/`ViaId` are minted at parse (session-local, never
+/// serialized), so the maps key by fresh ids.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Parsed {
     pub source: Source,
     pub overrides: BTreeMap<EntityId, Override>,
     pub refdes_pins: BTreeMap<EntityId, String>,
+    pub traces: BTreeMap<TraceId, Trace>,
+    pub vias: BTreeMap<ViaId, Via>,
 }
 
 // ----------------------------------------------------------------------------
@@ -130,7 +147,68 @@ pub fn serialize(doc: &Doc) -> String {
             out.push_str(&format!("refdes {id} {}\n", quote_value(refdes)));
         }
     }
+
+    // The routing state zone (Decision 18) — a second state section beside `# overrides`.
+    // Emitted in canonical `BTreeMap` (id) order; the ids themselves are session-local
+    // and never printed (a `route`/`via` line carries no id). Empty ⇒ no section, so a
+    // routeless doc's text is byte-identical to before this feature.
+    if !doc.traces.is_empty() || !doc.vias.is_empty() {
+        out.push_str("\n# routes\n");
+        for t in doc.traces.values() {
+            out.push_str(&render_trace(t));
+            out.push('\n');
+        }
+        for v in doc.vias.values() {
+            out.push_str(&render_via(v));
+            out.push('\n');
+        }
+    }
     out
+}
+
+/// Serialize the provenance keyword of a persisted route: `pinned` is the default and
+/// prints nothing (hand/frozen routing is the common case). `free` marks router-owned
+/// copper (the rip-up-able tier). `hint`/`fixed` complete the ladder
+/// ([`Provenance`]) so any provenance a route may carry round-trips losslessly rather
+/// than silently collapsing to Pinned on save.
+fn prov_keyword(p: Provenance) -> &'static str {
+    match p {
+        Provenance::Pinned => "",
+        Provenance::Free => " free",
+        Provenance::Hint => " hint",
+        Provenance::Fixed => " fixed",
+    }
+}
+
+/// `route <net> <slab> w=<width> (x,y) (x,y) ... [free|hint|fixed]`. The layer is a
+/// copper slab name (Decision 13); the width and points are canonical lengths;
+/// provenance is a trailing keyword (`pinned` is the default and omitted).
+fn render_trace(t: &Trace) -> String {
+    let mut s = format!("route {} {} w={}", t.net, t.layer, fmt_len(t.width));
+    for p in &t.path {
+        s.push(' ');
+        s.push_str(&fmt_point(*p));
+    }
+    s.push_str(prov_keyword(t.prov));
+    s
+}
+
+/// `via <net> (x,y) drill=<d> pad=<p> [<from>..<to>] [free|hint|fixed]`. A `None` span
+/// is the full copper extent (the common through-via) and prints no span token; an
+/// explicit blind/buried span prints `<from>..<to>` (Decision 18).
+fn render_via(v: &Via) -> String {
+    let mut s = format!(
+        "via {} {} drill={} pad={}",
+        v.net,
+        fmt_point(v.at),
+        fmt_len(v.drill),
+        fmt_len(v.pad),
+    );
+    if let Some((from, to)) = &v.span {
+        s.push_str(&format!(" {from}..{to}"));
+    }
+    s.push_str(prov_keyword(v.prov));
+    s
 }
 
 fn render_directive(d: &GenDirective) -> String {
@@ -471,6 +549,13 @@ pub fn parse(text: &str) -> Result<Parsed, Vec<Diagnostic>> {
     let mut source: Source = Vec::new();
     let mut overrides: BTreeMap<EntityId, Override> = BTreeMap::new();
     let mut refdes_pins: BTreeMap<EntityId, String> = BTreeMap::new();
+    let mut traces: BTreeMap<TraceId, Trace> = BTreeMap::new();
+    let mut vias: BTreeMap<ViaId, Via> = BTreeMap::new();
+    // Session-local id mints (Decision 18 — ids are never serialized). File order
+    // becomes the id order, which is stable across a round-trip because serialize emits
+    // in BTreeMap (id) order.
+    let mut next_tid: u64 = 1;
+    let mut next_vid: u64 = 1;
     let mut errors: Vec<Diagnostic> = Vec::new();
 
     for (i, raw) in text.lines().enumerate() {
@@ -496,6 +581,17 @@ pub fn parse(text: &str) -> Result<Parsed, Vec<Diagnostic>> {
             Ok(Item::RefdesPin(id, refdes)) => {
                 refdes_pins.insert(id, refdes);
             }
+            Ok(Item::Route(t)) => {
+                let coords = t.path.iter().flat_map(|p| [p.x, p.y]).chain([t.width]);
+                check_coord_range(coords.collect(), lineno, &mut errors);
+                traces.insert(TraceId(next_tid), t);
+                next_tid += 1;
+            }
+            Ok(Item::Via(v)) => {
+                check_coord_range(vec![v.at.x, v.at.y, v.drill, v.pad], lineno, &mut errors);
+                vias.insert(ViaId(next_vid), v);
+                next_vid += 1;
+            }
             Err(e) => errors.push(Diagnostic::error(
                 "E_PARSE",
                 format!("{e} (in `{line}`)"),
@@ -511,6 +607,8 @@ pub fn parse(text: &str) -> Result<Parsed, Vec<Diagnostic>> {
             source,
             overrides,
             refdes_pins,
+            traces,
+            vias,
         })
     } else {
         Err(errors)
@@ -543,6 +641,8 @@ enum Item {
     Directive(GenDirective),
     Override(EntityId, Override),
     RefdesPin(EntityId, String),
+    Route(Trace),
+    Via(Via),
 }
 
 fn parse_line(line: &str) -> Result<Item, String> {
@@ -911,6 +1011,93 @@ fn parse_line(line: &str) -> Result<Item, String> {
                 },
             )
         }
+        "route" => {
+            // `route <net> <slab> w=<width> (x,y) (x,y) ... [free|hint|fixed]`. Net and
+            // slab are the two leading bare tokens; `w=` (required) precedes the points;
+            // an optional trailing provenance keyword (default `pinned`). The net/slab
+            // names are validated at LoadText + commit against the doc (unknown net /
+            // unknown-or-non-copper slab → hard `E_UNKNOWN_*`), not here — the parser only
+            // shapes the line. `TraceId` is minted by the caller.
+            const USAGE: &str = "route <net> <slab> w=<width> (x,y) (x,y) ... [free|hint|fixed]";
+            let open = rest.find('(').ok_or(USAGE)?;
+            let (prefix, ptspart) = rest.split_at(open);
+            // The points run up to a trailing provenance keyword, if any.
+            let (ptspart, prov) = split_trailing_prov(ptspart)?;
+            let pts = extract_points(ptspart)?;
+            if pts.len() < 2 {
+                return Err("route needs at least two points (a polyline)".into());
+            }
+            let toks: Vec<&str> = prefix.split_whitespace().collect();
+            let mut net: Option<String> = None;
+            let mut layer: Option<String> = None;
+            let mut width: Option<Nm> = None;
+            for tok in toks {
+                if let Some(w) = tok.strip_prefix("w=") {
+                    width = Some(parse_len(w)?);
+                } else if net.is_none() {
+                    net = Some(tok.to_string());
+                } else if layer.is_none() {
+                    layer = Some(tok.to_string());
+                } else {
+                    return Err(format!("route: unexpected token `{tok}` ({USAGE})"));
+                }
+            }
+            Item::Route(Trace {
+                net: crate::id::NetId::new(net.ok_or("route needs a net name")?),
+                layer: layer.ok_or("route needs a copper slab name")?,
+                path: pts,
+                width: width.ok_or("route needs w=<width>")?,
+                prov,
+            })
+        }
+        "via" => {
+            // `via <net> (x,y) drill=<d> pad=<p> [<from>..<to>] [free|hint|fixed]`. Net is
+            // the leading bare token; the single coordinate; then `drill=`/`pad=` and an
+            // optional `<from>..<to>` blind/buried span (default: full copper extent). A
+            // trailing provenance keyword (default `pinned`).
+            const USAGE: &str =
+                "via <net> (x,y) drill=<d> pad=<p> [<from>..<to>] [free|hint|fixed]";
+            let open = rest.find('(').ok_or(USAGE)?;
+            let (prefix, after) = rest.split_at(open);
+            let close = after.find(')').ok_or("unbalanced '(' in coordinate")?;
+            let at = {
+                let pts = extract_points(&after[..=close])?;
+                if pts.len() != 1 {
+                    return Err("via needs exactly one coordinate `(x, y)`".into());
+                }
+                pts[0]
+            };
+            let net = prefix
+                .split_whitespace()
+                .next()
+                .ok_or("via needs a net name")?;
+            let (tail, prov) = split_trailing_prov(&after[close + 1..])?;
+            let mut drill: Option<Nm> = None;
+            let mut pad: Option<Nm> = None;
+            let mut span: Option<(String, String)> = None;
+            for tok in tail.split_whitespace() {
+                if let Some(d) = tok.strip_prefix("drill=") {
+                    drill = Some(parse_len(d)?);
+                } else if let Some(p) = tok.strip_prefix("pad=") {
+                    pad = Some(parse_len(p)?);
+                } else if let Some((from, to)) = tok.split_once("..") {
+                    if from.is_empty() || to.is_empty() {
+                        return Err(format!("via span must be `<from>..<to>`: `{tok}`"));
+                    }
+                    span = Some((from.to_string(), to.to_string()));
+                } else {
+                    return Err(format!("via: unexpected token `{tok}` ({USAGE})"));
+                }
+            }
+            Item::Via(Via {
+                net: crate::id::NetId::new(net),
+                at,
+                span,
+                drill: drill.ok_or("via needs drill=<d>")?,
+                pad: pad.ok_or("via needs pad=<p>")?,
+                prov,
+            })
+        }
         "refdes" => {
             // `refdes <path> <string>`: two tokens, the value quoted only when it must
             // be (matching `quote_value` on the way out). The string is opaque — no
@@ -927,6 +1114,23 @@ fn parse_line(line: &str) -> Result<Item, String> {
         }
         other => return Err(format!("unknown directive `{other}`")),
     })
+}
+
+/// Strip a trailing provenance keyword (`free`/`hint`/`fixed`) off a route/via line's
+/// tail, returning `(remaining, provenance)`. No keyword ⇒ `Pinned` (the default,
+/// Decision 18 — hand-authored routing is pinned). The keyword must be the **last**
+/// whitespace token; anything else is left for the caller to parse.
+fn split_trailing_prov(s: &str) -> Result<(&str, Provenance), String> {
+    let t = s.trim_end();
+    let prov = match t.rsplit(char::is_whitespace).next() {
+        Some("free") => Provenance::Free,
+        Some("hint") => Provenance::Hint,
+        Some("fixed") => Provenance::Fixed,
+        _ => return Ok((s, Provenance::Pinned)),
+    };
+    // Drop the keyword we just recognised (it is the final token).
+    let cut = t.rfind(char::is_whitespace).map(|i| &t[..i]).unwrap_or("");
+    Ok((cut, prov))
 }
 
 /// Quote a `key=value` token value only when it needs it: whitespace, a `#` (which the
@@ -1494,6 +1698,167 @@ mod tests {
         h.doc().clone()
     }
 
+    // ---- routes state zone (Decision 18) --------------------------------
+
+    use crate::doc::Provenance;
+    use crate::id::NetId;
+
+    fn tr(net: &str, layer: &str, path: Vec<Point>, width: Nm, prov: Provenance) -> Trace {
+        Trace {
+            net: NetId::new(net),
+            layer: layer.into(),
+            path,
+            width,
+            prov,
+        }
+    }
+
+    /// The `# routes` state zone round-trips: a doc carrying pinned/free/hint/fixed
+    /// traces and a full-span + a blind/buried via reparses to the same `traces`/`vias`
+    /// (ids re-minted in the same BTreeMap order, so the maps compare equal).
+    #[test]
+    fn routes_round_trip() {
+        let mut doc = Doc::default();
+        doc.traces.insert(
+            TraceId(1),
+            tr(
+                "GND",
+                "F.Cu",
+                vec![Point::mm(1, 2), Point::mm(5, 2), Point::mm(5, 8)],
+                150_000,
+                Provenance::Pinned,
+            ),
+        );
+        doc.traces.insert(
+            TraceId(2),
+            tr(
+                "GND",
+                "B.Cu",
+                vec![Point::mm(2, 1), Point::mm(2, 9)],
+                150_000,
+                Provenance::Free,
+            ),
+        );
+        doc.traces.insert(
+            TraceId(3),
+            tr(
+                "VCC",
+                "F.Cu",
+                vec![Point::mm(0, 0), Point::mm(3, 0)],
+                200_000,
+                Provenance::Hint,
+            ),
+        );
+        doc.traces.insert(
+            TraceId(4),
+            tr(
+                "VCC",
+                "F.Cu",
+                vec![Point::mm(0, 5), Point::mm(3, 5)],
+                200_000,
+                Provenance::Fixed,
+            ),
+        );
+        doc.vias.insert(
+            ViaId(1),
+            Via {
+                net: NetId::new("GND"),
+                at: Point::mm(5, 8),
+                span: None,
+                drill: 300_000,
+                pad: 600_000,
+                prov: Provenance::Pinned,
+            },
+        );
+        doc.vias.insert(
+            ViaId(2),
+            Via {
+                net: NetId::new("VCC"),
+                at: Point::mm(3, 0),
+                span: Some(("F.Cu".into(), "In1.Cu".into())),
+                drill: 250_000,
+                pad: 500_000,
+                prov: Provenance::Free,
+            },
+        );
+
+        let text = serialize(&doc);
+        let parsed = parse(&text).expect("parse routes");
+        assert_eq!(parsed.traces, doc.traces, "traces round-trip:\n{text}");
+        assert_eq!(parsed.vias, doc.vias, "vias round-trip:\n{text}");
+        // Idempotent: re-serialize the parsed routes byte-equals.
+        let doc2 = Doc {
+            traces: parsed.traces,
+            vias: parsed.vias,
+            ..Default::default()
+        };
+        assert_eq!(serialize(&doc2), text, "serialize is idempotent");
+    }
+
+    /// Provenance keywords (Decision 18): `pinned` is the default and prints nothing;
+    /// `free`/`hint`/`fixed` are explicit trailing keywords. Hand-authored (keyword-less)
+    /// lines parse as Pinned.
+    #[test]
+    fn route_provenance_keywords() {
+        let mut doc = Doc::default();
+        doc.traces.insert(
+            TraceId(1),
+            tr(
+                "N",
+                "F.Cu",
+                vec![Point::mm(0, 0), Point::mm(1, 0)],
+                150_000,
+                Provenance::Pinned,
+            ),
+        );
+        doc.traces.insert(
+            TraceId(2),
+            tr(
+                "N",
+                "F.Cu",
+                vec![Point::mm(0, 1), Point::mm(1, 1)],
+                150_000,
+                Provenance::Free,
+            ),
+        );
+        let text = serialize(&doc);
+        // Pinned prints no keyword; Free prints ` free`.
+        let route_lines: Vec<&str> = text.lines().filter(|l| l.starts_with("route ")).collect();
+        assert!(
+            route_lines[0].ends_with(")") && !route_lines[0].contains("free"),
+            "pinned prints no keyword: `{}`",
+            route_lines[0]
+        );
+        assert!(route_lines[1].ends_with(" free"), "free prints the keyword");
+        // A hand-authored keyword-less line parses as Pinned.
+        let hand = "route N F.Cu w=0.15mm (0, 0) (1mm, 0)";
+        let p = parse(hand).expect("parse hand route");
+        assert_eq!(p.traces[&TraceId(1)].prov, Provenance::Pinned);
+    }
+
+    /// A blind/buried via's explicit `<from>..<to>` span parses (Decision 18 — parseable
+    /// today even though multilayer stackups are rare).
+    #[test]
+    fn via_blind_span_parses() {
+        let p = parse("via SIG (2mm, 3mm) drill=0.25mm pad=0.5mm F.Cu..In1.Cu free")
+            .expect("parse blind via");
+        let v = &p.vias[&ViaId(1)];
+        assert_eq!(v.span, Some(("F.Cu".into(), "In1.Cu".into())));
+        assert_eq!(v.prov, Provenance::Free);
+        assert_eq!(v.drill, 250_000);
+    }
+
+    /// A routeless doc serializes byte-identically to before this feature (no `# routes`
+    /// section), so existing files are undisturbed.
+    #[test]
+    fn no_routes_no_section() {
+        let doc = placed(uart_link());
+        assert!(
+            !serialize(&doc).contains("# routes"),
+            "a routeless doc emits no routes section"
+        );
+    }
+
     // ---- round-trip + idempotence ---------------------------------------
 
     /// `parse(serialize(doc))` reproduces `(source, overrides, refdes_pins)` exactly,
@@ -1530,6 +1895,7 @@ mod tests {
             source: src,
             overrides: ovr,
             refdes_pins: rd,
+            ..
         } = parse(&text).expect("parse");
         assert_eq!(src, doc.source, "source must round-trip");
         assert_eq!(ovr, doc.overrides, "overrides must round-trip");
@@ -2109,6 +2475,7 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
             source: src,
             overrides: ovr,
             refdes_pins: rp,
+            ..
         } = parse(&serialize(doc)).expect("parse");
         let elab = elaborate(&src, &ovr, &rp, &lib).expect("elaborate");
         assert_eq!(elab.components, doc.components, "components diverged");

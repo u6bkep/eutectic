@@ -140,6 +140,9 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> Result<String, String> {
     // elaboration). Routed copper (traces/vias) is drawn on top of this outline and
     // the placed pads.
     let board = source_board(doc);
+    // The stackup, resolved once — the render uses it to class copper/silk by z
+    // (Decision 13: the side/layer is a forward query over slab names, never stored).
+    let su = crate::elaborate::stackup(&doc.source);
 
     // Gather every point that must be in view: component origins, their pin pads,
     // and the board corners.
@@ -263,19 +266,17 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> Result<String, String> {
         if !d.is_empty() {
             out.push_str(&format!(
                 "  <path class=\"pour pour-{}\" data-net=\"{}\" d=\"{}\" fill=\"{}\" fill-opacity=\"0.25\" fill-rule=\"evenodd\" stroke=\"none\"/>\n",
-                layer_class(pf.layer),
+                layer_class(&su, &pf.layer),
                 xml_escape(&pf.net.0),
                 d,
-                layer_color(pf.layer),
+                layer_color(&su, &pf.layer),
             ));
         }
     }
 
-    // The stackup resolves each pad's layer-relative copper to absolute z, so pads
-    // fan out correctly (a through-hole pad becomes one conductor feature per copper
-    // slab). Today this is the default 2-layer stackup; the reader is the one place
-    // that changes when authored stackups land.
-    let su = crate::elaborate::stackup(&doc.source);
+    // (`su`, resolved above, resolves each pad's layer-relative copper to absolute z, so
+    // pads fan out correctly — a through-hole pad becomes one conductor feature per
+    // copper slab.)
     // Footprint auto-text (Decision 14): `refdes` is a whole-document query, computed once.
     let reg = crate::annotate::registry(&doc.source);
     let refdes = crate::annotate::refdes(doc, lib, &reg);
@@ -367,10 +368,10 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> Result<String, String> {
             .collect();
         out.push_str(&format!(
             "  <polyline class=\"trace trace-{}\" data-id=\"{}\" points=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n",
-            layer_class(t.layer),
+            layer_class(&su, &t.layer),
             tid,
             path.join(" "),
-            layer_color(t.layer),
+            layer_color(&su, &t.layer),
             fmt_mm(t.width),
         ));
     }
@@ -458,17 +459,30 @@ fn is_bottom_side(su: &Stackup, z: &ZRange) -> bool {
     su.bottom_copper().is_some_and(|bot| z.hi <= bot.lo)
 }
 
-/// SVG class suffix / stroke colour for a copper layer (Top warm, Bottom cool,
+/// Which outer copper side a copper slab **name** sits on, for render-only classing:
+/// top-most copper → `Top`, bottom-most → `Bottom`, anything between → `Inner`. A
+/// forward query against the stackup (Decision 13); an unknown name falls back to `Top`.
+fn copper_side(su: &Stackup, name: &str) -> Layer {
+    let cu = su.copper_slabs();
+    match cu.iter().position(|s| s.name == name) {
+        Some(0) => Layer::Top,
+        Some(i) if i + 1 == cu.len() => Layer::Bottom,
+        Some(i) => Layer::Inner((i - 1) as u8),
+        None => Layer::Top,
+    }
+}
+
+/// SVG class suffix / stroke colour for a copper slab name (Top warm, Bottom cool,
 /// inner green) — render-only, just enough to tell the layers apart by eye.
-fn layer_class(l: Layer) -> &'static str {
-    match l {
+fn layer_class(su: &Stackup, name: &str) -> &'static str {
+    match copper_side(su, name) {
         Layer::Top => "top",
         Layer::Bottom => "bottom",
         Layer::Inner(_) => "inner",
     }
 }
-fn layer_color(l: Layer) -> &'static str {
-    match l {
+fn layer_color(su: &Stackup, name: &str) -> &'static str {
+    match copper_side(su, name) {
         Layer::Top => "#cc0000",
         Layer::Bottom => "#0066cc",
         Layer::Inner(_) => "#00aa00",
@@ -886,49 +900,32 @@ fn gerber_stroke(shape: &Shape2D, out: &mut String, mode: &mut &str, g75: &mut b
     gerber_walk(shape.path(), out, mode, g75, false);
 }
 
-/// The KiCad-style layer token used in fab filenames: `F_Cu` / `B_Cu` / `In<n>_Cu`.
-fn layer_file(l: Layer) -> String {
-    match l {
-        Layer::Top => "F_Cu".to_string(),
-        Layer::Bottom => "B_Cu".to_string(),
-        Layer::Inner(n) => format!("In{}_Cu", n as u16 + 1),
-    }
+/// The KiCad-style layer token used in fab filenames, derived from the copper slab
+/// **name** (Decision 13): `F.Cu` → `F_Cu`, `B.Cu` → `B_Cu`, `In1.Cu` → `In1_Cu`.
+fn layer_file(slab: &Slab) -> String {
+    slab_file(&slab.name)
 }
 
-/// The copper layers to emit: the outer copper (`Top`/`Bottom`, always present —
-/// component pads occupy them under the all-layer pad model) plus any layer a trace
-/// sits on or a via terminates on, in physical stack-up order.
-fn copper_layers(doc: &Doc, lib: &PartLib) -> Vec<Layer> {
-    let mut set: BTreeSet<Layer> = BTreeSet::new();
-    set.insert(Layer::Top);
-    set.insert(Layer::Bottom);
-    for t in doc.traces.values() {
-        set.insert(t.layer);
-    }
-    for v in doc.vias.values() {
-        set.insert(v.from);
-        set.insert(v.to);
-    }
-    for pf in pours_of(doc, lib) {
-        set.insert(pf.layer);
-    }
-    set.into_iter().collect()
-}
-
-/// Every component pad copper region that flashes on `layer`, as `(world centre,
-/// aperture)`, in `(EntityId, pin-declaration, copper-region)` order. Each pad's
-/// real geometry is transformed to world space and reduced to a flashable aperture; a
-/// region flashes only on the layers it occupies. Toy-library pins (`pad: None`)
-/// contribute nothing.
-fn component_pad_flashes(doc: &Doc, lib: &PartLib, layer: Layer) -> Vec<(Point, Aperture)> {
-    // Derive each pad's converged copper features and flash those whose slab is this
-    // Gerber `layer`. `pad_features` already world-maps + assigns z; we match the slab
-    // z of `layer`, so a Through pad flashes on every copper layer and an SMD pad only
-    // on its own — exactly the old `pad_on_layer` selection, now off the Feature model.
+/// The copper slabs to emit, in physical stack-up order (top-down) — every conductor
+/// slab in the stackup. Component pads occupy the outer copper under the all-layer pad
+/// model, and a forward per-slab query attributes each trace/via/pour by name, so the
+/// full copper set is exactly the stackup's copper slabs (Decision 13 rule 3).
+fn copper_layers(doc: &Doc) -> Vec<Slab> {
     let su = crate::elaborate::stackup(&doc.source);
-    let Some(target_z) = crate::route::layer_z(&su, layer) else {
-        return Vec::new(); // this layer is not in the stackup
-    };
+    su.copper_slabs().into_iter().cloned().collect()
+}
+
+/// Every component pad copper region that flashes on the copper slab with z-range
+/// `target_z`, as `(world centre, aperture)`, in `(EntityId, pin-declaration,
+/// copper-region)` order. Each pad's real geometry is transformed to world space and
+/// reduced to a flashable aperture; a region flashes only on the slabs it occupies.
+/// Toy-library pins (`pad: None`) contribute nothing.
+fn component_pad_flashes(doc: &Doc, lib: &PartLib, target_z: ZRange) -> Vec<(Point, Aperture)> {
+    // Derive each pad's converged copper features and flash those whose slab z is this
+    // Gerber slab's z. `pad_features` already world-maps + assigns z, so a Through pad
+    // flashes on every copper slab and an SMD pad only on its own — a forward per-slab
+    // query off the Feature model.
+    let su = crate::elaborate::stackup(&doc.source);
     let mut out = Vec::new();
     for c in doc.components.values() {
         let Some(def) = lib.get(&c.part) else {
@@ -957,10 +954,20 @@ fn component_pad_flashes(doc: &Doc, lib: &PartLib, layer: Layer) -> Vec<(Point, 
 /// centreline as a `D02` move + `D01` draws with its width aperture, and each via
 /// pad / component pad as a `D03` flash with its shape aperture. Object order is
 /// `TraceId`, then `ViaId`, then component pads — fully deterministic. Ends `M02*`.
-pub fn gerber_layer(doc: &Doc, lib: &PartLib, layer: Layer) -> String {
-    let traces: Vec<&Trace> = doc.traces.values().filter(|t| t.layer == layer).collect();
-    let vias: Vec<&Via> = doc.vias.values().filter(|v| v.spans(layer)).collect();
-    let pads = component_pad_flashes(doc, lib, layer);
+pub fn gerber_layer(doc: &Doc, lib: &PartLib, slab: &Slab) -> String {
+    let su = crate::elaborate::stackup(&doc.source);
+    let cu = su.copper_slabs();
+    let traces: Vec<&Trace> = doc
+        .traces
+        .values()
+        .filter(|t| t.layer == slab.name)
+        .collect();
+    let vias: Vec<&Via> = doc
+        .vias
+        .values()
+        .filter(|v| v.spans_z(&cu, &slab.z))
+        .collect();
+    let pads = component_pad_flashes(doc, lib, slab.z);
 
     // Aperture table: distinct apertures, codes from 10 in `Ord` order.
     let mut aps: BTreeSet<Aperture> = BTreeSet::new();
@@ -980,7 +987,7 @@ pub fn gerber_layer(doc: &Doc, lib: &PartLib, layer: Layer) -> String {
         .collect();
 
     let mut out = String::new();
-    out.push_str(&format!("G04 {} *\n", layer_file(layer)));
+    out.push_str(&format!("G04 {} *\n", layer_file(slab)));
     out.push_str("%FSLAX46Y46*%\n");
     out.push_str("%MOMM*%\n");
     for (a, code) in &codes {
@@ -1018,7 +1025,7 @@ pub fn gerber_layer(doc: &Doc, lib: &PartLib, layer: Layer) -> String {
     // and hole rings are emitted as contours inside one `G36`/`G37` block; the region
     // fill rule treats a contour nested in another as a hole, so the knockouts come
     // out as voids. (A pour fill is already a tessellated polygon, so no arcs needed.)
-    for pf in pours_of(doc, lib).iter().filter(|p| p.layer == layer) {
+    for pf in pours_of(doc, lib).iter().filter(|p| p.layer == slab.name) {
         gerber_region_fill(&pf.fill, &mut out);
     }
 
@@ -1614,10 +1621,10 @@ pub fn fab_svg_set(doc: &Doc, lib: &PartLib) -> Result<Vec<(String, String)>, St
 /// layers lower board text through the slab-name materialization gate (Decision 13).
 pub fn gerber_set(doc: &Doc, lib: &PartLib) -> Result<Vec<(String, String)>, String> {
     let mut out = Vec::new();
-    for layer in copper_layers(doc, lib) {
+    for slab in copper_layers(doc) {
         out.push((
-            format!("board-{}.gbr", layer_file(layer)),
-            gerber_layer(doc, lib, layer),
+            format!("board-{}.gbr", layer_file(&slab)),
+            gerber_layer(doc, lib, &slab),
         ));
     }
     let su = crate::elaborate::stackup(&doc.source);
@@ -1670,6 +1677,17 @@ mod tests {
             .find(|s| s.role == Role::Mask && s.z == z)
             .cloned()
             .expect("mask slab present")
+    }
+
+    /// A copper [`Slab`] of `doc`'s stackup by name — the test-side of the export copper
+    /// loop now taking a slab (Decision 13). Panics if the name is not a copper slab.
+    fn cu(doc: &Doc, name: &str) -> Slab {
+        crate::elaborate::stackup(&doc.source)
+            .copper_slabs()
+            .into_iter()
+            .find(|s| s.name == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("no copper slab `{name}`"))
     }
 
     fn doc_psu(n: usize) -> (Doc, PartLib) {
@@ -2050,14 +2068,14 @@ psu.reg,LDO,0.000000,0.000000,0,T
         let net = NetId::new("N");
         let t0 = Trace {
             net: net.clone(),
-            layer: Layer::Top,
+            layer: "F.Cu".into(),
             path: vec![Point::mm(6, 5), Point::mm(10, 5)],
             width: 200_000,
             prov: Provenance::Pinned,
         };
         let t1 = Trace {
             net: net.clone(),
-            layer: Layer::Bottom,
+            layer: "B.Cu".into(),
             path: vec![Point::mm(10, 5), Point::mm(14, 5)],
             width: 200_000,
             prov: Provenance::Pinned,
@@ -2065,8 +2083,7 @@ psu.reg,LDO,0.000000,0.000000,0,T
         let v = Via {
             net,
             at: Point::mm(10, 5),
-            from: Layer::Top,
-            to: Layer::Bottom,
+            span: None,
             drill: 300_000,
             pad: 600_000,
             prov: Provenance::Pinned,
@@ -2087,7 +2104,7 @@ psu.reg,LDO,0.000000,0.000000,0,T
     #[test]
     fn gerber_layer_has_format_apertures_draws_and_flashes() {
         let (doc, lib) = hand_routed_board();
-        let top = gerber_layer(&doc, &lib, Layer::Top);
+        let top = gerber_layer(&doc, &lib, &cu(&doc, "F.Cu"));
         // Format spec + mm units + end.
         assert!(top.contains("%FSLAX46Y46*%"));
         assert!(top.contains("%MOMM*%"));
@@ -2104,7 +2121,7 @@ psu.reg,LDO,0.000000,0.000000,0,T
         assert_eq!(top.matches("D01*").count(), 1);
         assert_eq!(top.matches("D03*").count(), 1);
         // The Bottom layer carries the other trace and the same via flash.
-        let bot = gerber_layer(&doc, &lib, Layer::Bottom);
+        let bot = gerber_layer(&doc, &lib, &cu(&doc, "B.Cu"));
         assert_eq!(bot.matches("D01*").count(), 1);
         assert_eq!(bot.matches("D03*").count(), 1);
     }
@@ -2166,8 +2183,7 @@ psu.reg,LDO,0.000000,0.000000,0,T
         let v = Via {
             net: NetId::new("N"),
             at: Point::mm(12, 8),
-            from: Layer::Top,
-            to: Layer::Bottom,
+            span: None,
             drill: 300_000,
             pad: 600_000,
             prov: Provenance::Pinned,
@@ -2498,7 +2514,7 @@ psu.reg,LDO,0.000000,0.000000,0,T
     #[test]
     fn component_pads_flash_by_shape() {
         let (doc, lib) = padded_board();
-        let top = gerber_layer(&doc, &lib, Layer::Top);
+        let top = gerber_layer(&doc, &lib, &cu(&doc, "F.Cu"));
         // Rect pad 0.6x1.2 and circle pad 0.8 become R / C apertures.
         assert!(top.contains("R,0.600000X1.200000*%"), "got:\n{top}");
         assert!(top.contains("C,0.800000*%"), "got:\n{top}");
@@ -2513,8 +2529,8 @@ psu.reg,LDO,0.000000,0.000000,0,T
         let (doc, lib) = hand_routed_board();
         assert_eq!(gerber_set(&doc, &lib), gerber_set(&doc, &lib));
         assert_eq!(
-            gerber_layer(&doc, &lib, Layer::Top),
-            gerber_layer(&doc, &lib, Layer::Top)
+            gerber_layer(&doc, &lib, &cu(&doc, "F.Cu")),
+            gerber_layer(&doc, &lib, &cu(&doc, "F.Cu"))
         );
         assert_eq!(excellon_drill(&doc, &lib), excellon_drill(&doc, &lib));
         assert_eq!(gerber_edge_cuts(&doc, &lib), gerber_edge_cuts(&doc, &lib));
@@ -2583,7 +2599,7 @@ psu.reg,LDO,0.000000,0.000000,0,T
         let doc = h.doc();
         // The autorouter laid real copper, so the F_Cu Gerber has trace draws.
         assert!(!doc.traces.is_empty());
-        let top = gerber_layer(doc, &lib, Layer::Top);
+        let top = gerber_layer(doc, &lib, &cu(doc, "F.Cu"));
         assert!(top.matches("D01*").count() > 0);
         assert_eq!(gerber_set(doc, &lib), gerber_set(doc, &lib));
     }
@@ -2652,7 +2668,7 @@ psu.reg,LDO,0.000000,0.000000,0,T
     #[test]
     fn gerber_emits_pour_region_fill() {
         let (doc, lib) = poured_board();
-        let top = gerber_layer(&doc, &lib, Layer::Top);
+        let top = gerber_layer(&doc, &lib, &cu(&doc, "F.Cu"));
         assert!(top.contains("G36*"), "pour region opens:\n{top}");
         assert!(top.contains("G37*"), "pour region closes");
         // Outer board contour + a knockout hole around the SIG pad ⇒ ≥2 contours
@@ -2669,7 +2685,7 @@ psu.reg,LDO,0.000000,0.000000,0,T
             "outer + hole contours:\n{block}"
         );
         // The bottom layer carries no pour.
-        assert!(!gerber_layer(&doc, &lib, Layer::Bottom).contains("G36*"));
+        assert!(!gerber_layer(&doc, &lib, &cu(&doc, "B.Cu")).contains("G36*"));
     }
 
     #[test]
