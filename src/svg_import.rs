@@ -279,8 +279,16 @@ impl<'a> Pd<'a> {
             }
         }
         let s = std::str::from_utf8(&self.b[start..self.i]).expect("ascii subslice");
-        s.parse::<f64>()
-            .map_err(|e| format!("bad number {s:?} in path data: {e}"))
+        let v = s
+            .parse::<f64>()
+            .map_err(|e| format!("bad number {s:?} in path data: {e}"))?;
+        // Reject non-finite at the single float funnel (issue 0018): an overflowing
+        // exponent parses to ±inf, and the `x*SCALE as Nm` cast in `to_nm` would
+        // saturate (inf→i64::MAX, NaN→0) — a silent bogus coordinate. Fail loudly here.
+        if !v.is_finite() {
+            return Err(format!("non-finite number {s:?} in path data"));
+        }
+        Ok(v)
     }
 }
 
@@ -775,6 +783,17 @@ mod tests {
         assert!(
             import_board_outline(r#"<path d="M 0 0 L 10 0 L 10 8"/>"#).is_err(),
             "open path is not a board outline"
+        );
+    }
+
+    /// A non-finite coordinate (overflowing exponent ⇒ ±inf) is rejected at the number
+    /// funnel, not silently saturated into a bogus origin coordinate (issue 0018, F3).
+    #[test]
+    fn non_finite_coordinate_is_rejected() {
+        let e = import_board_outline(r#"<path d="M 1e400 0 L 10 0 L 10 8 Z"/>"#).unwrap_err();
+        assert!(
+            e.contains("non-finite"),
+            "expected non-finite error, got: {e}"
         );
     }
 }

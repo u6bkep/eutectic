@@ -83,15 +83,53 @@ pub const DEFAULT_CHORD_TOL: Nm = 1_000;
 /// unchecked. This resolves issue 0018 (the former silent-wrap-above-~1.28e9 hazard).
 pub const MAX_COORD: Nm = 1_000_000_000;
 
-/// Is a single coordinate within the enforced [`MAX_COORD`] range?
+/// Is a single coordinate within the enforced [`MAX_COORD`] ingest range?
 pub fn coord_ok(n: Nm) -> bool {
     n.unsigned_abs() <= MAX_COORD as u64
 }
 
-/// Are both components of a point within [`MAX_COORD`]? The ingest-boundary and
-/// debug-assert predicate the kernel's `i128` bound relies on.
+/// Are both components of a point within the [`MAX_COORD`] ingest range? The
+/// ingest-boundary validation predicate (text/import/command).
 pub fn point_ok(p: Point) -> bool {
     coord_ok(p.x) && coord_ok(p.y)
+}
+
+/// The **true** `i128`-safe coordinate ceiling — the largest magnitude for which the
+/// worst kernel product `64·C⁴` still fits in `i128` (`64·C⁴ ≤ i128::MAX` ⟹
+/// `C ≤ (2^127/64)^(1/4) = 1_276_901_416`). Rounded **down** to `1_276_000_000` for a
+/// small safety margin (`64·C⁴ ≈ 1.697e38 < 1.701e38`).
+///
+/// This is distinct from — and larger than — [`MAX_COORD`] on purpose. Ingest bounds
+/// *authored/imported* coordinates at `MAX_COORD` (1 m); the kernel then *composes*
+/// them (a placement offset + a footprint-local courtyard extent, an inflation by a
+/// clearance), and a composed world coordinate can legitimately exceed `MAX_COORD`
+/// while staying correct. The `~0.28e9` gap between the two constants is exactly that
+/// composition headroom. The kernel debug_asserts fire at `KERNEL_SAFE_COORD` (the
+/// real overflow risk), **not** at `MAX_COORD` — otherwise a part legally placed at the
+/// 1 m ingest bound would panic a debug build the instant its courtyard is measured.
+pub const KERNEL_SAFE_COORD: Nm = 1_276_000_000;
+
+// Compile-time guards on the two ceilings (issue 0018): the kernel ceiling must sit
+// above the ingest ceiling (that gap is the composition headroom), and the worst
+// kernel product `64·C⁴` at the kernel ceiling must still fit in `i128`.
+const _: () = assert!(KERNEL_SAFE_COORD > MAX_COORD);
+const _: () = {
+    let c = KERNEL_SAFE_COORD as i128;
+    let c2 = c * c;
+    assert!(c2.checked_mul(c2).is_some(), "C⁴ overflows i128");
+    assert!((c2 * c2).checked_mul(64).is_some(), "64·C⁴ overflows i128");
+};
+
+/// Is a single coordinate within the [`KERNEL_SAFE_COORD`] i128-safe range? The
+/// debug-assert predicate for the hot integer kernels (composition-frame, not ingest).
+pub fn coord_kernel_safe(n: Nm) -> bool {
+    n.unsigned_abs() <= KERNEL_SAFE_COORD as u64
+}
+
+/// Are both components of a point within [`KERNEL_SAFE_COORD`]? The kernel debug-assert
+/// predicate.
+pub fn point_kernel_safe(p: Point) -> bool {
+    coord_kernel_safe(p.x) && coord_kernel_safe(p.y)
 }
 
 // ----------------------------------------------------------------------------
@@ -649,11 +687,12 @@ fn skeletons_overlap(a: &Shape2D, b: &Shape2D) -> bool {
 /// Exact squared distance from point `p` to segment `a`–`b`, as `(num, den)` with
 /// `dist² = num/den` and `den > 0`.
 fn pt_seg_d2(p: Point, a: Point, b: Point) -> (i128, i128) {
-    // The worst i128 chain in the kernel (`|w|²·den ≤ 64·C⁴`); [`MAX_COORD`] is derived
-    // from it. Boundary validation guarantees the bound in release; debug fails loud.
+    // The worst i128 chain in the kernel (`|w|²·den ≤ 64·C⁴`); [`KERNEL_SAFE_COORD`] is
+    // its true ceiling. Assert against that (not the tighter ingest [`MAX_COORD`]) so
+    // legal composition — a placement + courtyard within the headroom — never panics.
     debug_assert!(
-        point_ok(p) && point_ok(a) && point_ok(b),
-        "pt_seg_d2 coordinate exceeds MAX_COORD; the i128 product may overflow (issue 0018)"
+        point_kernel_safe(p) && point_kernel_safe(a) && point_kernel_safe(b),
+        "pt_seg_d2 coordinate exceeds KERNEL_SAFE_COORD; the i128 product may overflow (issue 0018)"
     );
     let (vx, vy) = ((b.x - a.x) as i128, (b.y - a.y) as i128);
     let (wx, wy) = ((p.x - a.x) as i128, (p.y - a.y) as i128);
@@ -702,10 +741,10 @@ fn closest_on_segment(p: Point, a: Point, b: Point) -> Point {
 /// direction of the arc.)
 pub fn circumcenter(a: Point, b: Point, c: Point) -> (i128, i128, i128) {
     // Numerators are ~`C³` (e.g. `a2·(by−cy)`), lower-order than [`pt_seg_d2`]'s
-    // quartic, so [`MAX_COORD`] keeps them well within i128. Assert in debug.
+    // quartic, so [`KERNEL_SAFE_COORD`] keeps them well within i128. Assert in debug.
     debug_assert!(
-        point_ok(a) && point_ok(b) && point_ok(c),
-        "circumcenter coordinate exceeds MAX_COORD (issue 0018)"
+        point_kernel_safe(a) && point_kernel_safe(b) && point_kernel_safe(c),
+        "circumcenter coordinate exceeds KERNEL_SAFE_COORD (issue 0018)"
     );
     let (ax, ay) = (a.x as i128, a.y as i128);
     let (bx, by) = (b.x as i128, b.y as i128);
@@ -1315,15 +1354,38 @@ mod tests {
         assert!(!coord_ok(-MAX_COORD - 1));
     }
 
+    #[test]
+    fn kernel_safe_predicate_boundary_is_inclusive() {
+        // (The ceiling ordering + i128-safety are compile-time-guarded at the const;
+        // this checks the predicate's boundary behaviour.)
+        assert!(coord_kernel_safe(KERNEL_SAFE_COORD));
+        assert!(coord_kernel_safe(-KERNEL_SAFE_COORD));
+        assert!(!coord_kernel_safe(KERNEL_SAFE_COORD + 1));
+        assert!(!point_kernel_safe(pt(KERNEL_SAFE_COORD + 1, 0)));
+    }
+
+    /// Companion to the solver's F1 regression: the clearance kernel (`pt_seg_d2`) also
+    /// runs on composed world coords past `MAX_COORD` but within `KERNEL_SAFE_COORD`, so
+    /// a clearance check at that scale must not panic in debug (issue 0018, review F1).
+    #[test]
+    fn clearance_at_composed_coords_does_not_panic() {
+        let c = MAX_COORD + 400_000; // past ingest bound, inside kernel-safe range
+        let a = Shape2D::rect(pt(c, 0), MM, MM);
+        let b = Shape2D::rect(pt(c + 3 * MM, 0), MM, MM);
+        let _ = clearance_violated(&a, &b, 100_000); // exercises pt_seg_d2
+    }
+
     /// In debug builds the hot kernel predicate asserts its inputs are within
-    /// `MAX_COORD` — the loud backstop behind the release-time boundary validation
-    /// (issue 0018). Release builds trust the boundary and skip the check, so this is
-    /// debug-only.
+    /// `KERNEL_SAFE_COORD` — the loud backstop behind the release-time boundary
+    /// validation (issue 0018). Release builds trust the boundary and skip the check,
+    /// so this is debug-only. Note the trip point is `KERNEL_SAFE_COORD`, not the
+    /// tighter ingest `MAX_COORD` — legal composition between the two must NOT panic
+    /// (see `place_at_ingest_bound_with_courtyard_does_not_panic` in solve).
     #[test]
     #[cfg(debug_assertions)]
-    #[should_panic(expected = "MAX_COORD")]
+    #[should_panic(expected = "KERNEL_SAFE_COORD")]
     fn circumcenter_debug_asserts_coordinate_bound() {
-        let big = MAX_COORD + 1;
+        let big = KERNEL_SAFE_COORD + 1;
         let _ = circumcenter(pt(big, 0), pt(0, big), pt(1, 1));
     }
 

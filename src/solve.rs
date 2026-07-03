@@ -362,14 +362,20 @@ fn world_poly(local: &[Point], pos: (f64, f64)) -> Vec<Point> {
 fn poly_push(a: &[Point], ar: Nm, b: &[Point], br: Nm) -> Option<(f64, f64, f64)> {
     // Coordinate-magnitude bound. The exact overlap test squares a scaled projection
     // gap in i128; that stays in range while vertex coordinates stay within
-    // [`geom::MAX_COORD`] (±1 m). Beyond that the i128 products can overflow. Mirroring
-    // `Orient::apply`, the invariant is asserted in debug rather than range-checked
-    // here; the guarantee in release is the ingest-boundary `E_COORD_RANGE` validation
-    // that now enforces `MAX_COORD` crate-wide (issue 0018, resolved).
+    // [`geom::KERNEL_SAFE_COORD`] (the true i128 ceiling, above the ±1 m ingest bound so
+    // a placement + courtyard composition has headroom). Beyond it the i128 products can
+    // overflow. Mirroring `Orient::apply`, the invariant is asserted in debug rather than
+    // range-checked here; the release guarantee is the ingest-boundary `E_COORD_RANGE`
+    // validation that enforces `MAX_COORD` crate-wide (issue 0018, resolved).
     debug_assert!(
-        a.iter().chain(b).all(|&p| crate::geom::point_ok(p)),
-        "poly_push vertex magnitude exceeds MAX_COORD (issue 0018)"
+        a.iter()
+            .chain(b)
+            .all(|&p| crate::geom::point_kernel_safe(p)),
+        "poly_push vertex magnitude exceeds KERNEL_SAFE_COORD (issue 0018)"
     );
+    // Radii `ar`/`br` are ingest-bounded (widths/clearances ≤ MAX_COORD), so
+    // `r ≤ 2·MAX_COORD` and the separation test `r²·n2` stays ≤ `32·C⁴` — a factor
+    // under the `64·C⁴` distance chain, so it is not the binding term.
     let r = (ar + br) as i128; // combined disc radius (nm); the rounded margin
     let r2 = r * r;
 
@@ -688,6 +694,29 @@ mod tests {
                 y: cy - s,
             },
         ]
+    }
+
+    /// Regression (issue 0018, review F1): a part legally placed at the ±`MAX_COORD`
+    /// ingest bound plus a courtyard extent composes to world vertices *past*
+    /// `MAX_COORD` but within `KERNEL_SAFE_COORD` (i128-correct). The kernel
+    /// debug_asserts must fire at `KERNEL_SAFE_COORD`, not the tighter ingest bound, so
+    /// this legal composition must NOT panic in a debug build.
+    #[test]
+    fn place_at_ingest_bound_with_courtyard_does_not_panic() {
+        let bound = crate::geom::MAX_COORD;
+        let s = 400_000; // 0.4 mm courtyard half-side ⇒ vertices at bound + s
+        assert!(
+            crate::geom::coord_kernel_safe(bound + s),
+            "must be in kernel range"
+        );
+        // Two overlapping courtyards centred at the ingest bound: the SAT projection +
+        // penetration math runs on world coords > MAX_COORD without tripping the assert.
+        let a = square(bound, 0, s);
+        let b = square(bound - s, 0, s);
+        assert!(
+            poly_push(&a, 0, &b, 0).is_some(),
+            "overlapping ⇒ a push exists"
+        );
     }
 
     // ---- SAT correctness pins: overlapping / touching / separated / contained ----
