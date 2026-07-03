@@ -4,3 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# TTF/OpenType outline reader (Decision 17). The crate's only dependency: zero-dep
+# itself, well-fuzzed. Only the `std` feature (for float trig in the core outline path);
+# the layout/variable-font/apple/glyph-name features stay off — we use just the core
+# glyf/loca/cmap/hmtx/OS-2 tables.
+ttf-parser = { version = "0.25", default-features = false, features = ["std"] }

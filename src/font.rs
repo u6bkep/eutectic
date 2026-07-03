@@ -46,6 +46,12 @@ type Glyph = &'static [&'static [(i32, i32)]];
 
 use crate::doc::{Nm, Point};
 
+/// Outline-font entry points (Decision 17), re-exported so the public surface reads
+/// `font::text_regions` / `font::TtfFont` beside [`text_strokes`] even though the
+/// `ttf-parser`-backed implementation lives in [`crate::ttf`] (keeping this module
+/// dependency-free in spirit).
+pub use crate::ttf::{TtfFont, text_regions};
+
 /// Horizontal placement of a run of text relative to its anchor origin (Decision 14).
 ///
 /// - [`Justify::Left`] — the anchor is the **baseline-left** corner: the first glyph's

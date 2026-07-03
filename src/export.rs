@@ -277,6 +277,8 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> Result<String, String> {
     // Footprint auto-text (Decision 14): `refdes` is a whole-document query, computed once.
     let reg = crate::annotate::registry(&doc.source);
     let refdes = crate::annotate::refdes(doc, lib, &reg);
+    // Doc-wide outline font (Decision 17), resolved once; `None` ⇒ the stroke font.
+    let font = crate::elaborate::resolve_font(&doc.source);
 
     // One group per component: pads, an origin marker, and an id label.
     for (id, c) in &doc.components {
@@ -328,7 +330,7 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> Result<String, String> {
             let rd = refdes.get(id).map(String::as_str).unwrap_or("");
             let lbl = crate::annotate::label(c, def, &reg);
             let graphics = crate::part::graphic_features(def, c, &su);
-            let texts = crate::part::text_features(def, c, &su, rd, &lbl);
+            let texts = crate::part::text_features(def, c, &su, rd, &lbl, font.as_ref());
             for f in graphics.into_iter().chain(texts) {
                 if f.role != Role::Marking {
                     continue;
@@ -1349,6 +1351,7 @@ fn marking_features(
     // graphics; `refdes` is a whole-document query, computed once.
     let reg = crate::annotate::registry(&doc.source);
     let refdes = crate::annotate::refdes(doc, lib, &reg);
+    let font = crate::elaborate::resolve_font(&doc.source);
     for (id, c) in &doc.components {
         let Some(def) = lib.get(&c.part) else {
             continue;
@@ -1360,7 +1363,7 @@ fn marking_features(
         }
         let rd = refdes.get(id).map(String::as_str).unwrap_or("");
         let lbl = crate::annotate::label(c, def, &reg);
-        for f in crate::part::text_features(def, c, su, rd, &lbl) {
+        for f in crate::part::text_features(def, c, su, rd, &lbl, font.as_ref()) {
             if f.role == Role::Marking {
                 out.push(f);
             }

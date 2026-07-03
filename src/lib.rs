@@ -36,6 +36,7 @@ pub mod route;
 pub mod solve;
 pub mod svg_import;
 pub mod text;
+pub mod ttf;
 
 /// Build a root document from a generative source by elaborating it once.
 pub fn boot(

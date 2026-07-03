@@ -299,6 +299,12 @@ fn render_directive(d: &GenDirective) -> String {
             }
             s
         }
+        GenDirective::Font { path } => {
+            // `font "<path>"` — the doc-wide outline font (Decision 17). Double-quoted so
+            // the path may contain spaces; the built-in stroke font is the default when
+            // absent.
+            format!("font \"{path}\"")
+        }
     }
 }
 
@@ -815,6 +821,21 @@ fn parse_line(line: &str) -> Result<Item, String> {
                 layer,
                 orient,
             })
+        }
+        "font" => {
+            // `font "<path>"` — the doc-wide outline font (Decision 17). The path is
+            // double-quoted so it may contain spaces.
+            const USAGE: &str = "font \"<path/to/font.ttf>\"";
+            let q1 = rest.find('"').ok_or(USAGE)?;
+            let q2 = rest[q1 + 1..]
+                .find('"')
+                .map(|i| q1 + 1 + i)
+                .ok_or("font: path is missing its closing quote")?;
+            let path = rest[q1 + 1..q2].to_string();
+            if path.is_empty() {
+                return Err("font: empty path".into());
+            }
+            Item::Directive(GenDirective::Font { path })
         }
         "connect" => {
             let (a, b) = two_tokens(rest, "connect <compA>.<port> <compB>.<port>")?;
@@ -1732,6 +1753,23 @@ text \"VAL 3V3\" (2mm, 5mm) h=0.8mm layer=B.SilkS rot=90";
         let canon = serialize(&doc);
         assert!(canon.contains("layer=F.SilkS"), "silk token:\n{canon}");
         assert!(canon.contains("rot=90"), "cardinal rot token:\n{canon}");
+        assert_eq!(parse(&canon).unwrap().source, src);
+    }
+
+    #[test]
+    fn font_directive_parses_and_round_trips() {
+        // `font "<path>"` — the doc-wide outline font (Decision 17); the path may contain
+        // spaces (quoted).
+        let text = "font \"/usr/share/fonts/My Font.ttf\"";
+        let Parsed { source: src, .. } = parse(text).expect("parse");
+        assert_eq!(
+            src[0],
+            GenDirective::Font {
+                path: "/usr/share/fonts/My Font.ttf".into(),
+            }
+        );
+        let canon = serialize(&doc_of(src.clone(), BTreeMap::new()));
+        assert!(canon.contains("font \""), "font token:\n{canon}");
         assert_eq!(parse(&canon).unwrap().source, src);
     }
 

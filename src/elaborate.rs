@@ -167,6 +167,17 @@ pub enum GenDirective {
         layer: String,
         orient: Orient,
     },
+    /// Doc-wide **outline-font** selection (Decision 17): a filesystem `path` to a
+    /// TTF/OpenType file. When present (the last `Font` directive wins), board text and
+    /// footprint labels lower through [`crate::font::text_regions`] (filled glyph
+    /// outlines) instead of the built-in stroke font. A missing/unparseable file
+    /// **degrades** to the stroke font (a `W_FONT_LOAD` diagnostic, never a hard error);
+    /// with no directive the stroke font is the default. Not a placement/connectivity
+    /// directive — elaboration's passes ignore it; it is read only by the lowering
+    /// ([`resolve_font`]) and validation ([`font_diagnostics`]).
+    Font {
+        path: String,
+    },
 }
 
 /// The generative program (tier 1 authoritative).
@@ -1160,8 +1171,11 @@ pub fn features(source: &Source) -> Result<Vec<crate::geom::NetFeature>, String>
         }
     }
 
-    // Text: every authored string lowers to stroke-font `Marking` features (Decision
-    // 9). The strokes are derived here, never stored, so a renamed label re-derives.
+    // Text: every authored string lowers to `Marking` features (Decision 9). The
+    // geometry is derived here, never stored, so a renamed label re-derives. An
+    // outline `font` directive (Decision 17), if present and loadable, swaps the stroke
+    // font for filled glyph outlines; otherwise the built-in stroke font is used.
+    let font = resolve_font(source);
     for d in source {
         if let GenDirective::Text {
             string,
@@ -1171,11 +1185,58 @@ pub fn features(source: &Source) -> Result<Vec<crate::geom::NetFeature>, String>
             orient,
         } = d
         {
-            out.extend(text_features(string, *at, *height, layer, *orient, &su)?);
+            out.extend(text_features(
+                string,
+                *at,
+                *height,
+                layer,
+                *orient,
+                &su,
+                font.as_ref(),
+            )?);
         }
     }
 
     Ok(out)
+}
+
+/// The doc-wide outline font (Decision 17): the **last** [`GenDirective::Font`]'s file
+/// parsed as a [`TtfFont`](crate::font::TtfFont), or `None` when there is no directive
+/// **or the file fails to load**. Load failure degrades silently here (rendering must
+/// never fail); [`font_diagnostics`] is the channel that surfaces the failure to the user.
+pub fn resolve_font(source: &Source) -> Option<crate::font::TtfFont> {
+    let path = source.iter().rev().find_map(|d| match d {
+        GenDirective::Font { path } => Some(path),
+        _ => None,
+    })?;
+    crate::font::TtfFont::from_path(std::path::Path::new(path)).ok()
+}
+
+/// Validate the doc-wide [`GenDirective::Font`]: a `W_FONT_LOAD` **warning** when its
+/// file cannot be read or parsed (the lowering degrades to the stroke font — the doc
+/// still exports). Empty when there is no directive or it loads cleanly. Separated from
+/// [`resolve_font`] because feature lowering has no diagnostic channel and must never
+/// fail; this is the surfacing path a validation pass calls.
+pub fn font_diagnostics(source: &Source) -> Vec<Diagnostic> {
+    let Some(path) = source.iter().rev().find_map(|d| match d {
+        GenDirective::Font { path } => Some(path),
+        _ => None,
+    }) else {
+        return Vec::new();
+    };
+    match crate::font::TtfFont::from_path(std::path::Path::new(path)) {
+        Ok(_) => Vec::new(),
+        Err(reason) => vec![
+            Diagnostic::warning(
+                "W_FONT_LOAD",
+                format!(
+                    "font `{path}` could not be loaded ({reason}); using the built-in stroke font"
+                ),
+                Location::None,
+            )
+            .with_help("check the path, or remove the `font` directive to use the stroke font"),
+        ],
+    }
 }
 
 /// Lower one authored [`GenDirective::Text`] into stroke-font [`Role::Marking`]
@@ -1193,27 +1254,38 @@ fn text_features(
     layer: &str,
     orient: Orient,
     su: &Stackup,
+    font: Option<&crate::font::TtfFont>,
 ) -> Result<Vec<NetFeature>, String> {
     let z = slab_z(su, layer)?;
-    let pen = (height / 8).max(1); // a visible stroke width even for tiny heights
+    // rotate about the text origin, then place at `at`.
+    let place = |local: Point| {
+        let r = orient.apply(local);
+        Point {
+            x: r.x + at.x,
+            y: r.y + at.y,
+        }
+    };
     let mut out = Vec::new();
-    for stroke in crate::font::text_strokes(string, height, crate::font::Justify::Left) {
-        let pts: Vec<Point> = stroke
-            .into_iter()
-            .map(|local| {
-                // rotate about the text origin, then place at `at`.
-                let r = orient.apply(local);
-                Point {
-                    x: r.x + at.x,
-                    y: r.y + at.y,
-                }
-            })
-            .collect();
-        out.push(NetFeature::netless(Feature::prism(
-            Role::Marking,
-            Shape2D::trace(pts, pen),
-            z,
-        )));
+    if let Some(font) = font {
+        // Outline font: each glyph is a filled `Area` already — place it (no pen trace).
+        for shape in crate::font::text_regions(string, height, crate::font::Justify::Left, font) {
+            out.push(NetFeature::netless(Feature::prism(
+                Role::Marking,
+                shape.map_points(place),
+                z,
+            )));
+        }
+    } else {
+        // Stroke font: trace each centreline polyline at a visible pen width.
+        let pen = (height / 8).max(1);
+        for stroke in crate::font::text_strokes(string, height, crate::font::Justify::Left) {
+            let pts: Vec<Point> = stroke.into_iter().map(place).collect();
+            out.push(NetFeature::netless(Feature::prism(
+                Role::Marking,
+                Shape2D::trace(pts, pen),
+                z,
+            )));
+        }
     }
     Ok(out)
 }
@@ -1657,6 +1729,95 @@ mod tests {
             .max()
             .unwrap();
         assert!(max_x > MM, "string advances past the first glyph in +x");
+    }
+
+    /// Write the test TTF fixture to a unique temp path (removed by the caller). Board and
+    /// footprint lowering resolve fonts by *path*, so an end-to-end test needs a file.
+    fn write_fixture_font() -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        p.push(format!("ecad-test-{}-{stamp}.ttf", std::process::id()));
+        std::fs::write(&p, crate::ttf::build_test_ttf()).unwrap();
+        p
+    }
+
+    /// With a `font` directive resolving to a real file, board text lowers to filled
+    /// `Area` markings (outline glyphs) instead of stroke traces — and the font loads
+    /// cleanly (no diagnostic).
+    #[test]
+    fn features_ttf_font_lowers_text_to_area_markings() {
+        let path = write_fixture_font();
+        let src = vec![
+            GenDirective::Font {
+                path: path.to_string_lossy().into_owned(),
+            },
+            GenDirective::Text {
+                string: "HOo".into(),
+                at: pt(0, 0),
+                height: MM,
+                layer: "F.SilkS".into(),
+                orient: Orient::IDENTITY,
+            },
+        ];
+        let feats = features(&src).unwrap();
+        let marks: Vec<&NetFeature> = feats
+            .iter()
+            .filter(|f| f.feature.role == Role::Marking)
+            .collect();
+        assert_eq!(marks.len(), 3, "one Area per inked glyph (H, O, o)");
+        for m in &marks {
+            let Extent::Prism { shape, .. } = &m.feature.extent;
+            assert!(
+                matches!(shape, Shape2D::Area { .. }),
+                "outline text is a filled Area, got {shape:?}"
+            );
+        }
+        assert!(
+            font_diagnostics(&src).is_empty(),
+            "a loadable font emits no diagnostic"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A `font` directive pointing at a missing file **degrades** to the stroke font
+    /// (board text still lowers, as `Stroke` traces — the doc does not fail), while
+    /// [`font_diagnostics`] surfaces a `W_FONT_LOAD` warning.
+    #[test]
+    fn features_missing_font_degrades_to_stroke_with_diagnostic() {
+        let src = vec![
+            GenDirective::Font {
+                path: "/no/such/font/file.ttf".into(),
+            },
+            GenDirective::Text {
+                string: "R12".into(),
+                at: pt(0, 0),
+                height: MM,
+                layer: "F.SilkS".into(),
+                orient: Orient::IDENTITY,
+            },
+        ];
+        // Rendering must not fail; it falls back to the stroke font (traced polylines).
+        let feats = features(&src).unwrap();
+        let marks: Vec<&NetFeature> = feats
+            .iter()
+            .filter(|f| f.feature.role == Role::Marking)
+            .collect();
+        assert!(marks.len() >= 3, "stroke fallback still lowers the text");
+        for m in &marks {
+            let Extent::Prism { shape, .. } = &m.feature.extent;
+            assert!(
+                matches!(shape, Shape2D::Stroke { .. }),
+                "degraded to stroke traces, got {shape:?}"
+            );
+        }
+        // The failure is surfaced (as a warning, not an error) through the diagnostic path.
+        let diags = font_diagnostics(&src);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, "W_FONT_LOAD");
+        assert!(!diags[0].is_error(), "font load failure is a warning");
     }
 
     /// An unknown slab name is a hard elaboration error (no silent board-z fallback,

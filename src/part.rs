@@ -518,6 +518,7 @@ pub fn text_features(
     stackup: &geom::Stackup,
     refdes: &str,
     label: &str,
+    font: Option<&crate::font::TtfFont>,
 ) -> Vec<geom::Feature> {
     let flipped = comp.orient.is_bottom();
     let mut features = Vec::new();
@@ -538,29 +539,42 @@ pub fn text_features(
         let Some(slab) = stackup.slab(&layer) else {
             continue;
         };
-        let pen = (t.height / 8).max(1);
-        for stroke in crate::font::text_strokes(string, t.height, crate::font::Justify::Center) {
-            // Local frame: rotate by the anchor's own orient about `at`, offset to `at`,
-            // then the SAME `to_world` as graphics — bottom-side mirroring is the
-            // component quaternion's, no special case.
-            let world: Vec<Point> = stroke
-                .into_iter()
-                .map(|p| {
-                    let r = t.orient.apply(p);
-                    to_world(
-                        comp,
-                        Point {
-                            x: r.x + t.at.x,
-                            y: r.y + t.at.y,
-                        },
-                    )
-                })
-                .collect();
-            features.push(geom::Feature::prism(
-                slab.role.clone(),
-                Shape2D::trace(world, pen),
-                slab.z,
-            ));
+        // Local frame: rotate by the anchor's own orient about `at`, offset to `at`, then
+        // the SAME `to_world` as graphics — bottom-side mirroring is the component
+        // quaternion's, no special case. For an `Area` glyph, `map_points` also
+        // renormalizes ring winding under that reflection.
+        let place = |p: Point| {
+            let r = t.orient.apply(p);
+            to_world(
+                comp,
+                Point {
+                    x: r.x + t.at.x,
+                    y: r.y + t.at.y,
+                },
+            )
+        };
+        if let Some(font) = font {
+            // Outline font: filled-`Area` glyphs, centre-anchored like the stroke path.
+            for shape in
+                crate::font::text_regions(string, t.height, crate::font::Justify::Center, font)
+            {
+                features.push(geom::Feature::prism(
+                    slab.role.clone(),
+                    shape.map_points(place),
+                    slab.z,
+                ));
+            }
+        } else {
+            let pen = (t.height / 8).max(1);
+            for stroke in crate::font::text_strokes(string, t.height, crate::font::Justify::Center)
+            {
+                let world: Vec<Point> = stroke.into_iter().map(place).collect();
+                features.push(geom::Feature::prism(
+                    slab.role.clone(),
+                    Shape2D::trace(world, pen),
+                    slab.z,
+                ));
+            }
         }
     }
     features
@@ -1680,7 +1694,7 @@ mod tests {
         let refdes = crate::annotate::refdes(&doc, &lib, &reg)[&c.id].clone();
         assert_eq!(refdes, "R1");
 
-        let got = text_features(&def, &c, &su, &refdes, "");
+        let got = text_features(&def, &c, &su, &refdes, "", None);
         let lit = text_part(
             "R_0402",
             FpTextKind::Literal("R1".into()),
@@ -1688,7 +1702,7 @@ mod tests {
             "F.SilkS",
         );
         assert!(!got.is_empty());
-        assert_eq!(got, text_features(&lit, &c, &su, "", ""));
+        assert_eq!(got, text_features(&lit, &c, &su, "", "", None));
     }
 
     /// A `Label` anchor renders through the class registry template: `value = 4.7k` under
@@ -1711,7 +1725,7 @@ mod tests {
         let lbl = crate::annotate::label(&c, &def, &reg);
         assert_eq!(lbl, "4k7");
 
-        let got = text_features(&def, &c, &su, "", &lbl);
+        let got = text_features(&def, &c, &su, "", &lbl, None);
         let lit = text_part(
             "R_0402",
             FpTextKind::Literal("4k7".into()),
@@ -1719,7 +1733,7 @@ mod tests {
             "F.SilkS",
         );
         assert!(!got.is_empty());
-        assert_eq!(got, text_features(&lit, &c, &su, "", ""));
+        assert_eq!(got, text_features(&lit, &c, &su, "", "", None));
     }
 
     /// The lowered geometry is **live**: a params edit re-renders the label to different
@@ -1733,8 +1747,22 @@ mod tests {
         a.params.insert("value".into(), "100".into());
         let mut b = comp("R_0402", Point { x: 0, y: 0 }, Orient::default());
         b.params.insert("value".into(), "220".into());
-        let ga = text_features(&def, &a, &su, "", &crate::annotate::label(&a, &def, &reg));
-        let gb = text_features(&def, &b, &su, "", &crate::annotate::label(&b, &def, &reg));
+        let ga = text_features(
+            &def,
+            &a,
+            &su,
+            "",
+            &crate::annotate::label(&a, &def, &reg),
+            None,
+        );
+        let gb = text_features(
+            &def,
+            &b,
+            &su,
+            "",
+            &crate::annotate::label(&b, &def, &reg),
+            None,
+        );
         assert!(!ga.is_empty());
         assert_ne!(ga, gb, "different params → different lowered strokes");
     }
@@ -1756,8 +1784,8 @@ mod tests {
         );
         let top = comp("R", Point { x: 0, y: 0 }, Orient::default());
         let bot = comp("R", Point { x: 0, y: 0 }, Orient::default().flipped());
-        let tf = text_features(&def, &top, &su, "", "");
-        let bf = text_features(&def, &bot, &su, "", "");
+        let tf = text_features(&def, &top, &su, "", "", None);
+        let bf = text_features(&def, &bot, &su, "", "", None);
         assert!(!tf.is_empty());
         assert_eq!(tf.len(), bf.len());
 
@@ -1783,6 +1811,40 @@ mod tests {
         );
     }
 
+    /// End-to-end outline-font footprint text on the **bottom** side: an `O` (a glyph with
+    /// a counter) lowers to a filled `Area` marking that rides the same `to_world`
+    /// reflection as copper — and its winding survives. The outer ring stays CCW
+    /// (positive), the counter stays CW (negative): the hole reads through as a hole (an
+    /// island stays an island) rather than flipping to a solid blob under the flip.
+    #[test]
+    fn text_features_ttf_bottom_side_keeps_counter_a_hole() {
+        let su = Stackup::default_2layer();
+        let font = crate::font::TtfFont::from_bytes(crate::ttf::build_test_ttf()).unwrap();
+        let def = text_part(
+            "R",
+            FpTextKind::Literal("O".into()),
+            Point { x: 0, y: 0 },
+            "F.SilkS",
+        );
+        let bot = comp("R", Point { x: 0, y: 0 }, Orient::default().flipped());
+        let feats = text_features(&def, &bot, &su, "", "", Some(&font));
+        assert_eq!(feats.len(), 1, "one Area glyph");
+        let (shape, z) = prism_shape_z(&feats[0]);
+        assert_eq!(z, su.slab_z("B.SilkS").unwrap(), "flipped → B.SilkS");
+        let Shape2D::Area { region } = shape else {
+            panic!("outline text lowers to a filled Area, got {shape:?}");
+        };
+        assert_eq!(region.rings.len(), 2, "outer + counter");
+        assert!(
+            crate::region::signed_area2(&region.rings[0]) > 0,
+            "outer stays CCW after the bottom-side reflection"
+        );
+        assert!(
+            crate::region::signed_area2(&region.rings[1]) < 0,
+            "counter stays CW (a hole) after the reflection"
+        );
+    }
+
     /// Footprint text is centre-anchored (unlike left-origin board text): a 2-char run
     /// centres its **ink extent** on the anchor origin — the bbox centre lands on the
     /// anchor to within integer rounding (well under one stroke width) on both axes, not
@@ -1797,7 +1859,7 @@ mod tests {
             "F.SilkS",
         );
         let c = comp("R", Point { x: 0, y: 0 }, Orient::default());
-        let (lo, hi) = text_bbox(&text_features(&def, &c, &su, "", ""));
+        let (lo, hi) = text_bbox(&text_features(&def, &c, &su, "", "", None));
         let cx = (lo.x + hi.x) / 2;
         let cy = (lo.y + hi.y) / 2;
         let pen = MM / 8; // one stroke width
@@ -1821,7 +1883,7 @@ mod tests {
             "F.SilkS",
         );
         hidden.texts[0].hide = true;
-        assert!(text_features(&hidden, &c, &su, "", "").is_empty());
+        assert!(text_features(&hidden, &c, &su, "", "", None).is_empty());
 
         let no_slab = text_part(
             "R",
@@ -1829,6 +1891,6 @@ mod tests {
             Point { x: 0, y: 0 },
             "F.Fab", // not in the default stackup
         );
-        assert!(text_features(&no_slab, &c, &su, "", "").is_empty());
+        assert!(text_features(&no_slab, &c, &su, "", "", None).is_empty());
     }
 }
