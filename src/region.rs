@@ -332,6 +332,20 @@ impl Region {
         }
         islands
     }
+
+    /// The hole rings (CW, negative signed area) as a `Region` — the board region's
+    /// cutouts, a pour's knockouts. Each hole becomes its own outer (CCW) ring here, so
+    /// the result is the filled set of the negative space. Empty when there are no holes.
+    pub fn holes(&self) -> Region {
+        Region {
+            rings: self
+                .rings
+                .iter()
+                .filter(|r| signed_area2(r) < 0)
+                .map(|r| ensure_ccw(r.clone()))
+                .collect(),
+        }
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -754,6 +768,10 @@ fn segment_rect(a: Point, b: Point, r: Nm) -> Option<Ring> {
 /// this. The result is the dilation = union of the core area (polygons), one rectangle
 /// per skeleton edge, and one disc per skeleton vertex.
 pub fn shape_to_region(shape: &Shape2D, circle_segs: usize) -> Region {
+    // An `Area` is already a realised region — return it directly (no skeleton to dilate).
+    if let Some(region) = shape.region() {
+        return region.clone();
+    }
     let radius = shape.radius();
     // Flatten the skeleton (arcs → chord polyline) up front: the dilation operates on
     // straight edges + vertex discs, so an arc edge becomes a fan of fat segments —
@@ -802,7 +820,35 @@ pub fn shape_to_region(shape: &Shape2D, circle_segs: usize) -> Region {
             }
             union_all(pieces)
         }
+        // Handled by the early return above (an `Area` is already a region).
+        Shape2D::Area { .. } => unreachable!(),
     }
+}
+
+/// Dilate a filled [`Region`] by `d > 0`: its exact Minkowski sum with a disc of radius
+/// `d`, tessellating the disc with `circle_segs` directions. This is the **same offset
+/// decomposition** [`shape_to_region`] applies to a `Shape2D` skeleton (core area ∪ one
+/// fat rectangle per boundary edge ∪ one disc per vertex, all unioned), generalized from
+/// a single skeleton to a region's rings — so a hole shrinks and an island grows by `d`,
+/// exactly as `solid ⊕ disc` demands. Reuses the one boolean engine ([`union_all`]); no
+/// new offsetter. `d ≤ 0` is returned unchanged (erosion is not implemented — see
+/// [`Shape2D::inflated`](crate::geom::Shape2D::inflated)).
+pub fn dilate(region: &Region, d: Nm, circle_segs: usize) -> Region {
+    if d <= 0 {
+        return region.clone();
+    }
+    let mut pieces = vec![region.clone()];
+    for ring in &region.rings {
+        for (a, b) in ring_edges(ring) {
+            if let Some(rect) = segment_rect(a, b, d) {
+                pieces.push(Region::from_ring(rect));
+            }
+        }
+        for &p in ring {
+            pieces.push(Region::from_ring(disc_ring(p, d, circle_segs)));
+        }
+    }
+    union_all(pieces)
 }
 
 #[cfg(test)]
@@ -954,6 +1000,40 @@ mod tests {
         let expect = 8.0 + std::f64::consts::PI;
         assert!((a - expect).abs() < 0.05, "stadium area {a} ~ {expect}");
         assert!(region.contains_point(pt(2 * MM, 0)));
+    }
+
+    #[test]
+    fn dilate_grows_islands_and_shrinks_holes() {
+        // A 10mm square with a 4mm square hole (walls at ±2mm). Dilating by 1mm grows the
+        // outer boundary outward and moves the hole walls inward by 1mm (to ±1mm).
+        let outer = shape_to_region(
+            &Shape2D::rect(pt(0, 0), 10 * MM, 10 * MM),
+            DEFAULT_CIRCLE_SEGS,
+        );
+        let hole = shape_to_region(
+            &Shape2D::rect(pt(0, 0), 4 * MM, 4 * MM),
+            DEFAULT_CIRCLE_SEGS,
+        );
+        let holed = difference(&outer, &hole);
+        assert_eq!(holed.holes().rings.len(), 1, "one cutout hole");
+
+        let big = dilate(&holed, MM, DEFAULT_CIRCLE_SEGS);
+        // Outer boundary grew: a point 0.5mm outside the old edge is now filled.
+        assert!(
+            big.contains_point(pt(55 * MM / 10, 0)),
+            "outer edge grew outward"
+        );
+        // Hole shrank: a point 1.5mm from centre (was inside the ±2mm hole) is now filled.
+        assert!(
+            !holed.contains_point(pt(0, 15 * MM / 10)),
+            "was in the hole"
+        );
+        assert!(
+            big.contains_point(pt(0, 15 * MM / 10)),
+            "hole wall moved inward"
+        );
+        // d <= 0 is identity.
+        assert_eq!(dilate(&holed, 0, DEFAULT_CIRCLE_SEGS), holed);
     }
 
     #[test]

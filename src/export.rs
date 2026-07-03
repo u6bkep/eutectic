@@ -19,10 +19,10 @@
 
 use crate::doc::{Doc, MM, Nm, Point};
 use crate::geom::{
-    BoardShape, DEFAULT_CHORD_TOL, Extent, Path, Role, Seg, Shape2D, Slab, Stackup, ZRange,
-    circumcenter,
+    DEFAULT_CHORD_TOL, Extent, Path, Role, Seg, Shape2D, Slab, Stackup, ZRange, circumcenter,
 };
 use crate::part::{PartDef, PartLib, pin_world};
+use crate::region::Region;
 use crate::route::{Layer, Trace, Via};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -156,7 +156,7 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> Result<String, String> {
             }
         }
     }
-    if let Some((min, max)) = board.as_ref().and_then(BoardShape::bbox) {
+    if let Some((min, max)) = board.as_ref().and_then(Region::bbox) {
         pts.push(min);
         pts.push(max);
     }
@@ -206,30 +206,6 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> Result<String, String> {
         fmt_mm(y1 - y0),
     ));
 
-    // Board outline + cutouts (the real shape), or the implicit bounding box when
-    // the source carries no board. A polygon renders rect / rounded / concave alike.
-    let svg_poly = |class: &str, points: &[Point]| -> String {
-        let pts: Vec<String> = points
-            .iter()
-            .map(|p| format!("{},{}", fmt_mm(p.x), fmt_mm(flip(p.y))))
-            .collect();
-        format!(
-            "  <polygon class=\"{class}\" points=\"{}\" fill=\"none\" stroke=\"black\" stroke-width=\"0.1\"/>\n",
-            pts.join(" ")
-        )
-    };
-    // An arc-bearing outline/cutout emits a `<path>` (true `A` arcs); a straight one
-    // keeps the byte-identical `<polygon>`.
-    let svg_outline = |class: &str, shape: &Shape2D| -> String {
-        if has_curve(shape) {
-            format!(
-                "  <path class=\"{class}\" d=\"{}\" fill=\"none\" stroke=\"black\" stroke-width=\"0.1\"/>\n",
-                svg_path_d(shape, &flip)
-            )
-        } else {
-            svg_poly(class, &shape.points())
-        }
-    };
     // A pad's real copper as a *filled* shape (the footprint's honest extent),
     // mirroring `svg_outline`: a curve-aware `<path>` when the boundary bends
     // (rounded / oval pads), else the byte-identical `<polygon>`. No explicit fill
@@ -254,12 +230,16 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> Result<String, String> {
             )
         }
     };
+    // The board region (outline ∖ cutouts) as a single even-odd `<path>` — every ring
+    // (outer + cutout holes) stroked, holes read as voids for fill (Decision 16a). The
+    // rings are polygonized, so a curved board edge draws as a fine polyline (Decision
+    // 16b). Falls back to the implicit bounding box when the source carries no board.
     match &board {
-        Some(b) => {
-            out.push_str(&svg_outline("outline-board", &b.outline));
-            for c in &b.cutouts {
-                out.push_str(&svg_outline("outline-cutout", c));
-            }
+        Some(region) => {
+            out.push_str(&format!(
+                "  <path class=\"outline-board\" d=\"{}\" fill=\"none\" fill-rule=\"evenodd\" stroke=\"black\" stroke-width=\"0.1\"/>\n",
+                region_svg_d(region, &flip)
+            ));
         }
         None => {
             let (bx0, by0, bx1, by1) = (x0 + MARGIN, y0 + MARGIN, x1 - MARGIN, y1 - MARGIN);
@@ -277,23 +257,13 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> Result<String, String> {
     // pour (outer + hole subpaths, even-odd fill so knockouts read as voids), in the
     // pour's layer colour. Deterministic (pours iterate in source/net/layer order).
     for pf in pour_fills_of(doc, lib) {
-        let mut d = String::new();
-        for ring in &pf.fill.rings {
-            if ring.len() < 3 {
-                continue;
-            }
-            for (i, p) in ring.iter().enumerate() {
-                let cmd = if i == 0 { "M" } else { "L" };
-                d.push_str(&format!("{cmd}{},{} ", fmt_mm(p.x), fmt_mm(flip(p.y))));
-            }
-            d.push_str("Z ");
-        }
+        let d = region_svg_d(&pf.fill, &flip);
         if !d.is_empty() {
             out.push_str(&format!(
                 "  <path class=\"pour pour-{}\" data-net=\"{}\" d=\"{}\" fill=\"{}\" fill-opacity=\"0.25\" fill-rule=\"evenodd\" stroke=\"none\"/>\n",
                 layer_class(pf.layer),
                 xml_escape(&pf.net.0),
-                d.trim_end(),
+                d,
                 layer_color(pf.layer),
             ));
         }
@@ -457,6 +427,12 @@ fn svg_silk(shape: &Shape2D, flip: &impl Fn(Nm) -> Nm, bottom: bool) -> String {
             coords.join(" "),
             fmt_mm(shape.radius() * 2),
         ),
+        // A filled-area marking (e.g. TTF outline text) is an even-odd `<path>` so its
+        // counters read as voids.
+        Shape2D::Area { region } => format!(
+            "  <path class=\"{class}\" d=\"{}\" fill=\"{color}\" fill-rule=\"evenodd\" stroke=\"none\"/>\n",
+            region_svg_d(region, flip),
+        ),
     }
 }
 
@@ -487,10 +463,52 @@ fn layer_color(l: Layer) -> &'static str {
 
 // ---- 4. Gerber (RS-274X) + Excellon drill (fab output) ----
 
-/// The board outline + cutouts carried by tier-1 source (the shared assembler), if
-/// any. A real [`BoardShape`] now — rounded/concave outlines and cutouts, not a rect.
-fn source_board(doc: &Doc) -> Option<BoardShape> {
-    crate::elaborate::board_shape(&doc.source)
+/// The board as a filled [`Region`] (outline ∖ cutouts) carried by tier-1 source (the
+/// shared reader), if any. Rounded/concave outlines and cutouts alike — polygonized by
+/// the region kernel (Decision 16b), so a curved board edge draws as a fine polyline.
+fn source_board(doc: &Doc) -> Option<Region> {
+    crate::elaborate::board_region(&doc.source)
+}
+
+/// Emit a filled [`Region`] as one RS-274X `G36`/`G37` region block: each ring is a
+/// closed contour (`D02` move + `D01` draws, re-closing to the first point), so a hole
+/// ring nested in an outer reads as a void under the region fill rule. Rings with < 3
+/// points are skipped; the whole block is omitted if none qualify. All draws are
+/// straight (a region is already polygonized). Shared by the copper-pour fills and the
+/// [`Shape2D::Area`] arms — the one place ring-to-Gerber lives.
+fn gerber_region_fill(region: &Region, out: &mut String) {
+    if region.rings.iter().all(|r| r.len() < 3) {
+        return;
+    }
+    out.push_str("G36*\n");
+    for ring in &region.rings {
+        if ring.len() < 3 {
+            continue;
+        }
+        for (i, p) in ring.iter().chain(ring.first()).enumerate() {
+            let op = if i == 0 { "D02" } else { "D01" };
+            out.push_str(&format!("X{}Y{}{}*\n", gbr_coord(p.x), gbr_coord(p.y), op));
+        }
+    }
+    out.push_str("G37*\n");
+}
+
+/// The SVG path `d` for a filled [`Region`]: every ring as an `M …L …Z` subpath. Paired
+/// with `fill-rule="evenodd"` so hole rings read as voids. `flip` maps board-y into the
+/// SVG (downward) frame.
+fn region_svg_d(region: &Region, flip: &impl Fn(Nm) -> Nm) -> String {
+    let mut d = String::new();
+    for ring in &region.rings {
+        if ring.len() < 3 {
+            continue;
+        }
+        for (i, p) in ring.iter().enumerate() {
+            let cmd = if i == 0 { "M" } else { "L" };
+            d.push_str(&format!("{cmd}{},{} ", fmt_mm(p.x), fmt_mm(flip(p.y))));
+        }
+        d.push_str("Z ");
+    }
+    d.trim_end().to_string()
 }
 
 /// The derived copper-pour fills, for export. Builds the membership netlist from the
@@ -598,6 +616,9 @@ fn shape_flash(s: &Shape2D) -> Option<(Point, Aperture)> {
         Shape2D::Stroke { path, radius } if path.segs.is_empty() => Aperture::Circle(2 * radius),
         Shape2D::Stroke { .. } => Aperture::Obround(w, h),
         Shape2D::Polygon { .. } => Aperture::Rect(w, h),
+        // A pad's copper is never an `Area` — pads are discs/capsules/polygons. An `Area`
+        // (board/pour/glyph) is a filled region drawn via `gerber_region_fill`, not flashed.
+        Shape2D::Area { .. } => unreachable!("Shape2D::Area is not a flashable pad aperture"),
     };
     Some((center, ap))
 }
@@ -966,20 +987,7 @@ pub fn gerber_layer(doc: &Doc, lib: &PartLib, layer: Layer) -> String {
     // fill rule treats a contour nested in another as a hole, so the knockouts come
     // out as voids. (A pour fill is already a tessellated polygon, so no arcs needed.)
     for pf in pour_fills_of(doc, lib).iter().filter(|p| p.layer == layer) {
-        if pf.fill.rings.iter().all(|r| r.len() < 3) {
-            continue;
-        }
-        out.push_str("G36*\n");
-        for ring in &pf.fill.rings {
-            if ring.len() < 3 {
-                continue;
-            }
-            for (i, p) in ring.iter().chain(ring.first()).enumerate() {
-                let op = if i == 0 { "D02" } else { "D01" };
-                out.push_str(&format!("X{}Y{}{}*\n", gbr_coord(p.x), gbr_coord(p.y), op));
-            }
-        }
-        out.push_str("G37*\n");
+        gerber_region_fill(&pf.fill, &mut out);
     }
 
     out.push_str("M02*\n");
@@ -989,10 +997,20 @@ pub fn gerber_layer(doc: &Doc, lib: &PartLib, layer: Layer) -> String {
 /// The `Edge.Cuts` Gerber: the board outline as a closed rectangle drawn with a thin
 /// (0.1 mm) round pen. Uses the source `Board` rect, else the placement bounding box.
 pub fn gerber_edge_cuts(doc: &Doc, lib: &PartLib) -> String {
-    // The real board outline + cutouts; fall back to a rectangle around all geometry.
-    let board = source_board(doc).unwrap_or_else(|| {
+    // The board region (outline ∖ cutouts); fall back to a rectangle around all geometry.
+    let region = source_board(doc).unwrap_or_else(|| {
         let (min, max) = placement_bbox(doc, lib);
-        BoardShape::rect(min, max)
+        crate::region::shape_to_region(
+            &Shape2D::rect(
+                Point {
+                    x: (min.x + max.x) / 2,
+                    y: (min.y + max.y) / 2,
+                },
+                max.x - min.x,
+                max.y - min.y,
+            ),
+            crate::region::DEFAULT_CIRCLE_SEGS,
+        )
     });
     let mut out = String::new();
     out.push_str("G04 Edge.Cuts *\n");
@@ -1001,14 +1019,18 @@ pub fn gerber_edge_cuts(doc: &Doc, lib: &PartLib) -> String {
     out.push_str("%ADD10C,0.100000*%\n");
     out.push_str("D10*\n");
     out.push_str("G01*\n");
-    // Each contour (outline, then every cutout) walks the skeleton: straight edges draw
-    // as G01 lines, arc edges as G02/G03 multi-quadrant arcs (true curved board edges).
-    // `mode`/`g75` are modal so a straight-only board is byte-identical to before.
-    let mut mode = "G01";
-    let mut g75 = false;
-    gerber_contour(&board.outline, &mut out, &mut mode, &mut g75);
-    for c in &board.cutouts {
-        gerber_contour(c, &mut out, &mut mode, &mut g75);
+    // Each ring (outer boundary, then every cutout hole) draws as a closed contour of
+    // straight G01 lines. The region is polygonized, so a curved board edge or round
+    // cutout comes out as a fine polyline rather than a G02/G03 arc (Decision 16b — the
+    // arc is gone once the outline is a region).
+    for ring in &region.rings {
+        if ring.len() < 3 {
+            continue;
+        }
+        for (i, p) in ring.iter().chain(ring.first()).enumerate() {
+            let op = if i == 0 { "D02" } else { "D01" };
+            out.push_str(&format!("X{}Y{}{}*\n", gbr_coord(p.x), gbr_coord(p.y), op));
+        }
     }
     out.push_str("M02*\n");
     out
@@ -1083,11 +1105,12 @@ pub fn gerber_mask(doc: &Doc, lib: &PartLib, side: Layer) -> Result<String, Stri
     // inflated-copper opening there). A through-cut `Void` (a drill) extends past the
     // slab and is excluded — subsumed by the opening, and belongs to the drill file.
     let mut openings: Vec<(Point, Aperture)> = Vec::new();
-    // Board cutouts remove mask over their whole area — a netless `Role::Void` feature
-    // whose z intersects this mask slab. This is a pure forward query over the single
-    // materialization gate ([`crate::elaborate::features`], whose only `Void`s are board
-    // cutouts — pad drills live in `pad_features`, never here), no parallel re-derivation.
-    let mut cutouts: Vec<Shape2D> = Vec::new();
+    // Board cutouts remove mask over their whole area. A cutout is now a *hole* in the
+    // board region (Decision 16b/c), not a `Void` feature, so the openings come from
+    // `board_region().holes()` — the CW cutout rings — as region fills. A cutout is a
+    // full-stack through-cut, so it always pierces a present mask slab; the `mask_z`
+    // gate is just "does this side have a mask".
+    let mut cutout_holes = Region::default();
     if let Some(mask_z) = mask_z {
         for c in doc.components.values() {
             let Some(def) = lib.get(&c.part) else {
@@ -1110,14 +1133,8 @@ pub fn gerber_mask(doc: &Doc, lib: &PartLib, side: Layer) -> Result<String, Stri
                 }
             }
         }
-        for nf in crate::elaborate::features(&doc.source)? {
-            if nf.feature.role != Role::Void {
-                continue;
-            }
-            let Extent::Prism { shape, z } = nf.feature.extent;
-            if z.overlaps(&mask_z) {
-                cutouts.push(shape);
-            }
+        if let Some(region) = crate::elaborate::board_region(&doc.source) {
+            cutout_holes = region.holes();
         }
     }
 
@@ -1144,14 +1161,8 @@ pub fn gerber_mask(doc: &Doc, lib: &PartLib, side: Layer) -> Result<String, Stri
         out.push_str(&format!("D{code}*\n"));
         out.push_str(&format!("X{}Y{}D03*\n", gbr_coord(p.x), gbr_coord(p.y)));
     }
-    // Cutout openings as region fills.
-    let mut mode = "G01";
-    let mut g75 = false;
-    for cut in &cutouts {
-        out.push_str("G36*\n");
-        gerber_contour(cut, &mut out, &mut mode, &mut g75);
-        out.push_str("G37*\n");
-    }
+    // Cutout openings as region fills (one G36/G37 block per cutout hole ring).
+    gerber_region_fill(&cutout_holes, &mut out);
     out.push_str("M02*\n");
     Ok(out)
 }
@@ -1287,6 +1298,16 @@ pub fn gerber_silk(doc: &Doc, lib: &PartLib, slab: &Slab) -> Result<String, Stri
                 out.push_str("G36*\n");
                 gerber_contour(s, &mut out, &mut mode, &mut g75);
                 out.push_str("G37*\n");
+            }
+            // A filled-area marking (TTF outline text): its rings as a region fill. Reset
+            // to G01 first — a preceding stroke may have left arc mode set, and region
+            // contours are straight.
+            Shape2D::Area { region } => {
+                if mode != "G01" {
+                    out.push_str("G01*\n");
+                    mode = "G01";
+                }
+                gerber_region_fill(region, &mut out);
             }
         }
     }
@@ -1969,9 +1990,12 @@ psu.reg,LDO,0.000000,0.000000,0,T
     }
 
     #[test]
-    fn arc_board_authored_in_text_exports_as_g02_and_svg_arc() {
-        // End-to-end, closing stage 3's "dormant" gap: a half-disc board authored in
-        // the text front-end flows source → BoardShape → fab export as a true curve.
+    fn arc_board_flattens_to_polyline_in_edge_cuts_and_svg() {
+        // A half-disc board authored in the text front-end. Under Decision 16b/c the
+        // substrate is a `Shape2D::Area` (a polygonized region), so the curved edge
+        // exports as a fine straight-segment polyline (G01 / SVG `L`), not a G02/G03 /
+        // SVG `A` arc — the arc is gone once the outline becomes a region. The authored
+        // arc still lives in the `Board` directive; only this derived export is flat.
         let lib = part_library();
         let crate::text::Parsed { source: src, .. } =
             crate::text::parse("board (-2mm, 0mm) arc (0mm, 2mm) (2mm, 0mm)").unwrap();
@@ -1980,10 +2004,18 @@ psu.reg,LDO,0.000000,0.000000,0,T
             .unwrap();
         let doc = h.doc().clone();
         let g = gerber_edge_cuts(&doc, &lib);
-        assert!(g.contains("G75*"), "Edge.Cuts enables multi-quadrant:\n{g}");
         assert!(
-            g.contains("G02*") || g.contains("G03*"),
-            "Edge.Cuts draws an arc:\n{g}"
+            !g.contains("G02*") && !g.contains("G03*"),
+            "the arc is flattened — no G02/G03:\n{g}"
+        );
+        assert!(
+            g.matches("D01*").count() > 8,
+            "the curved edge draws as many straight G01 segments:\n{g}"
+        );
+        // The arc endpoints (−2,0) and (2,0) mm are exact ring vertices.
+        assert!(
+            g.contains("X-2000000Y0") && g.contains("X2000000Y0"),
+            "reaches endpoints:\n{g}"
         );
         let s = svg(&doc, &lib).unwrap();
         assert!(
@@ -1991,8 +2023,8 @@ psu.reg,LDO,0.000000,0.000000,0,T
             "outline is a path:\n{s}"
         );
         assert!(
-            s.contains(" A "),
-            "SVG outline carries an arc command:\n{s}"
+            !s.contains(" A "),
+            "the polygonized region carries no SVG arc command:\n{s}"
         );
     }
 
@@ -2355,6 +2387,58 @@ psu.reg,LDO,0.000000,0.000000,0,T
             gerber_mask(h.doc(), &lib, Layer::Bottom)
                 .unwrap()
                 .contains("G36*")
+        );
+    }
+
+    /// A board with a cutout: the substrate is one `Area` (outline ∖ cutout), so
+    /// `Edge.Cuts` draws both the outer boundary and the cutout hole ring, and the SVG
+    /// `outline-board` path carries the cutout ring too (Decision 16b/c).
+    #[test]
+    fn edge_cuts_and_svg_include_board_cutout() {
+        let lib = part_library();
+        let cutout = Shape2D::polygon(vec![
+            Point::mm(8, 8),
+            Point::mm(12, 8),
+            Point::mm(12, 12),
+            Point::mm(8, 12),
+        ]);
+        let mut h = History::new(Default::default());
+        h.commit(
+            Transaction::one(Command::SetSource(vec![
+                board_rect(Point::mm(0, 0), Point::mm(20, 20)),
+                G::Cutout { shape: cutout },
+            ])),
+            &lib,
+            "cut",
+        )
+        .unwrap();
+        let doc = h.doc();
+
+        let e = gerber_edge_cuts(doc, &lib);
+        assert!(
+            e.contains("X20000000Y20000000"),
+            "outer boundary corner:\n{e}"
+        );
+        assert!(e.contains("X12000000Y12000000"), "cutout ring corner:\n{e}");
+        assert!(
+            e.matches("D02*").count() >= 2,
+            "outer + cutout are two closed contours:\n{e}"
+        );
+
+        let s = svg(doc, &lib).unwrap();
+        assert!(
+            s.contains("class=\"outline-board\""),
+            "board outline path:\n{s}"
+        );
+        // The cutout's 8/12 mm coordinates appear only in the cutout ring (the outer
+        // square is 0/20 mm), and the path has a second subpath (the hole).
+        assert!(
+            s.contains("12.000000,12.000000") && s.contains("8.000000,8.000000"),
+            "cutout ring in the svg path:\n{s}"
+        );
+        assert!(
+            s.matches(" M").count() + s.matches("\"M").count() >= 2,
+            "outline path has an outer subpath and a cutout subpath:\n{s}"
         );
     }
 

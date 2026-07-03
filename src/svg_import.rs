@@ -1,5 +1,5 @@
 //! SVG board-outline import: parse `<path d="…">` geometry into the arc/Bézier-capable
-//! [`geom::Shape2D`] and return a [`geom::BoardShape`] (outline + cutouts).
+//! [`geom::Shape2D`] and return the authored `(outline, cutouts)` shapes.
 //!
 //! This is the consumer the Bézier [`geom::Seg::Quadratic`]/[`geom::Seg::Cubic`]
 //! primitives unblocked: an SVG `C`/`Q` segment maps straight onto a native curved
@@ -37,17 +37,18 @@
 //!   [`geom::DEFAULT_CHORD_TOL`] (an ellipse has no exact 3-point circular representation).
 
 use crate::doc::{Nm, Point};
-use crate::geom::{BoardShape, DEFAULT_CHORD_TOL, Path, Seg, Shape2D};
+use crate::geom::{DEFAULT_CHORD_TOL, Path, Seg, Shape2D};
 use std::f64::consts::PI;
 
 /// nm per SVG user unit (1 user unit = 1 mm).
 const SCALE: f64 = 1_000_000.0;
 
 /// Import a board outline from SVG text: parse every `<path>`'s `d` geometry, classify the
-/// closed subpaths (largest area = `outline`, the rest = `cutouts`), and return the
-/// [`geom::BoardShape`]. Errors (never panics) on malformed/empty path data, an
-/// unsupported command, or the absence of any closed subpath.
-pub fn import_board_outline(svg_text: &str) -> Result<BoardShape, String> {
+/// closed subpaths (largest area = `outline`, the rest = `cutouts`), and return the authored
+/// board geometry as `(outline, cutouts)` — [`geom::Shape2D`]s that become `Board`/`Cutout`
+/// directives (arcs/curves preserved). Errors (never panics) on malformed/empty path data,
+/// an unsupported command, or the absence of any closed subpath.
+pub fn import_board_outline(svg_text: &str) -> Result<(Shape2D, Vec<Shape2D>), String> {
     let ds = extract_path_ds(svg_text);
     if ds.is_empty() {
         return Err("no <path> element with a d attribute found".into());
@@ -79,10 +80,7 @@ pub fn import_board_outline(svg_text: &str) -> Result<BoardShape, String> {
     closed.sort_by_key(|x| std::cmp::Reverse(x.0));
     let mut it = closed.into_iter().map(|(_, s)| s);
     let outline = it.next().expect("non-empty checked above");
-    Ok(BoardShape {
-        outline,
-        cutouts: it.collect(),
-    })
+    Ok((outline, it.collect()))
 }
 
 /// A subpath under construction: its `start` and edges in *model* (nm, y-flipped) space,
@@ -630,25 +628,31 @@ mod tests {
         Point { x, y }
     }
 
+    /// Board membership for an imported `(outline, cutouts)`: inside the outline and
+    /// outside every cutout (the former `BoardShape::contains`).
+    fn on_board(b: &(Shape2D, Vec<Shape2D>), p: Point) -> bool {
+        b.0.contains_point(p) && !b.1.iter().any(|c| c.contains_point(p))
+    }
+
     /// `M 0 0 L 10 0 L 10 8 L 0 8 Z` ⇒ a rectangle. A point inside in *model* space
     /// (y-up) is contained; its y-mirror is not — confirming the y-flip happened.
     #[test]
     fn rectangle_path_is_contained_and_y_flipped() {
         let svg = r#"<svg><path d="M 0 0 L 10 0 L 10 8 L 0 8 Z"/></svg>"#;
         let b = import_board_outline(svg).unwrap();
-        assert!(b.cutouts.is_empty());
+        assert!(b.1.is_empty());
         // SVG corner (5,4) maps to model (5mm, -4mm): inside.
         assert!(
-            b.contains(pt(5 * MM, -4 * MM)),
+            on_board(&b, pt(5 * MM, -4 * MM)),
             "interior point on the board"
         );
         // The un-flipped point (5mm, +4mm) must be OFF the board (y was negated).
         assert!(
-            !b.contains(pt(5 * MM, 4 * MM)),
+            !on_board(&b, pt(5 * MM, 4 * MM)),
             "the un-flipped point must be off-board"
         );
         // Four corners.
-        assert_eq!(b.outline.points().len(), 4);
+        assert_eq!(b.0.points().len(), 4);
     }
 
     /// A closed path with a cubic top edge yields a `Seg::Cubic` in the outline.
@@ -657,13 +661,12 @@ mod tests {
         let svg = r#"<path d="M 0 0 C 2 3 8 3 10 0 L 10 5 L 0 5 Z"/>"#;
         let b = import_board_outline(svg).unwrap();
         assert!(
-            b.outline
-                .path()
+            b.0.path()
                 .segs
                 .iter()
                 .any(|s| matches!(s, Seg::Cubic { .. })),
             "the C command must map to a Seg::Cubic: {:?}",
-            b.outline.path().segs
+            b.0.path().segs
         );
     }
 
@@ -673,8 +676,7 @@ mod tests {
         let svg = r#"<path d="M 0 0 Q 5 6 10 0 L 10 5 L 0 5 Z"/>"#;
         let b = import_board_outline(svg).unwrap();
         assert!(
-            b.outline
-                .path()
+            b.0.path()
                 .segs
                 .iter()
                 .any(|s| matches!(s, Seg::Quadratic { .. })),
@@ -688,12 +690,12 @@ mod tests {
     fn outer_and_inner_subpaths_are_outline_and_cutout() {
         let svg = r#"<path d="M 0 0 L 20 0 L 20 20 L 0 20 Z M 5 5 L 15 5 L 15 15 L 5 15 Z"/>"#;
         let b = import_board_outline(svg).unwrap();
-        assert_eq!(b.cutouts.len(), 1, "inner loop is a cutout");
+        assert_eq!(b.1.len(), 1, "inner loop is a cutout");
         // Inside outer but outside inner: on board. (model y negated)
-        assert!(b.contains(pt(2 * MM, -2 * MM)));
+        assert!(on_board(&b, pt(2 * MM, -2 * MM)));
         // Centre of the inner rect: inside the outline, carved out ⇒ off-board.
-        assert!(b.outline.contains_point(pt(10 * MM, -10 * MM)));
-        assert!(!b.contains(pt(10 * MM, -10 * MM)));
+        assert!(b.0.contains_point(pt(10 * MM, -10 * MM)));
+        assert!(!on_board(&b, pt(10 * MM, -10 * MM)));
     }
 
     /// Relative `m`/`l` produce the same outline as the absolute form.
@@ -701,7 +703,7 @@ mod tests {
     fn relative_commands_match_absolute() {
         let abs = import_board_outline(r#"<path d="M 0 0 L 10 0 L 10 8 L 0 8 Z"/>"#).unwrap();
         let rel = import_board_outline(r#"<path d="m 0 0 l 10 0 l 0 8 l -10 0 z"/>"#).unwrap();
-        assert_eq!(abs.outline, rel.outline);
+        assert_eq!(abs.0, rel.0);
     }
 
     /// Relative cubic `c` matches its absolute `C` equivalent (controls relative to the
@@ -712,7 +714,7 @@ mod tests {
             import_board_outline(r#"<path d="M 0 0 C 2 3 8 3 10 0 L 10 5 L 0 5 Z"/>"#).unwrap();
         let rel =
             import_board_outline(r#"<path d="m 0 0 c 2 3 8 3 10 0 l 0 5 l -10 0 z"/>"#).unwrap();
-        assert_eq!(abs.outline, rel.outline);
+        assert_eq!(abs.0, rel.0);
     }
 
     /// A circular arc (`rx == ry`, no rotation) becomes a native `Seg::Arc`.
@@ -722,13 +724,9 @@ mod tests {
         let svg = r#"<path d="M 0 0 A 5 5 0 0 1 10 0 L 10 0 Z"/>"#;
         let b = import_board_outline(svg).unwrap();
         assert!(
-            b.outline
-                .path()
-                .segs
-                .iter()
-                .any(|s| matches!(s, Seg::Arc { .. })),
+            b.0.path().segs.iter().any(|s| matches!(s, Seg::Arc { .. })),
             "a circular A must map to a Seg::Arc: {:?}",
-            b.outline.path().segs
+            b.0.path().segs
         );
     }
 

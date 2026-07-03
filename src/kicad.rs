@@ -956,7 +956,7 @@ pub fn import_footprint_file(path: &str) -> Result<PartDef, String> {
 }
 
 // =============================================================================
-// Board outline (.kicad_pcb `Edge.Cuts`) → BoardShape
+// Board outline (.kicad_pcb `Edge.Cuts`) → (outline, cutouts)
 // =============================================================================
 //
 // A `.kicad_pcb` is one big S-expression `(kicad_pcb …)`, so we reuse the
@@ -1018,13 +1018,15 @@ fn on_edge_cuts(list: &[Sexp]) -> bool {
 }
 
 /// Import a `.kicad_pcb`'s board outline: parse the `Edge.Cuts` `gr_line`/`gr_arc`/
-/// `gr_circle` graphics, stitch them into closed loops, and return the
-/// [`geom::BoardShape`] (largest-area loop = `outline`, the rest = `cutouts`).
+/// `gr_circle` graphics, stitch them into closed loops, and return the authored board
+/// geometry as `(outline, cutouts)` — [`geom::Shape2D`]s that become `Board`/`Cutout`
+/// directives (largest-area loop = `outline`, the rest = `cutouts`; arcs preserved).
+/// The board's *derived* region (outline ∖ cutouts) is [`elaborate::board_region`].
 ///
 /// **Only the board boundary is imported** — no placed footprints, nets, tracks or
 /// zones (that full round-trip is a separate, larger feature; see issue 0017). Errors
 /// if there is no `Edge.Cuts` geometry or if its segments do not close into a loop.
-pub fn import_board_outline(text: &str) -> Result<geom::BoardShape, String> {
+pub fn import_board_outline(text: &str) -> Result<(geom::Shape2D, Vec<geom::Shape2D>), String> {
     let toks = tokenize(text)?;
     let root = read(&toks)?;
     let items = root.as_list().ok_or("top-level expression is not a list")?;
@@ -1083,14 +1085,13 @@ pub fn import_board_outline(text: &str) -> Result<geom::BoardShape, String> {
     let outline = shapes
         .next()
         .ok_or("Edge.Cuts has no closed loop to use as the board outline")?;
-    Ok(geom::BoardShape {
-        outline,
-        cutouts: shapes.collect(),
-    })
+    Ok((outline, shapes.collect()))
 }
 
 /// Convenience wrapper: read a `.kicad_pcb` file from disk and import its outline.
-pub fn import_board_outline_file(path: &str) -> Result<geom::BoardShape, String> {
+pub fn import_board_outline_file(
+    path: &str,
+) -> Result<(geom::Shape2D, Vec<geom::Shape2D>), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("reading {path:?}: {e}"))?;
     import_board_outline(&text)
 }
@@ -2399,6 +2400,12 @@ mod tests {
             .count()
     }
 
+    /// Board membership for an imported `(outline, cutouts)`: inside the outline and
+    /// outside every cutout (the former `BoardShape::contains`).
+    fn on_board(b: &(Shape2D, Vec<Shape2D>), p: Point) -> bool {
+        b.0.contains_point(p) && !b.1.iter().any(|c| c.contains_point(p))
+    }
+
     /// A rectangular outline authored as four `gr_line`s on `Edge.Cuts` (with the
     /// real `.kicad_pcb` nesting: a header, a `(stroke …)`, layer last). The lines
     /// are intentionally out of order to exercise the endpoint stitching.
@@ -2416,19 +2423,25 @@ mod tests {
   (gr_line (start -5 -5) (end -5 5) (stroke (width 0.1)) (layer "F.SilkS"))
 )"#;
         let b = import_board_outline(src).unwrap();
-        assert!(b.cutouts.is_empty());
+        assert!(b.1.is_empty());
         // 0..10 mm × 0..20 mm rectangle: a midpoint is inside, an outside point is not.
-        assert!(b.contains(Point {
-            x: 5_000_000,
-            y: 10_000_000
-        }));
-        assert!(!b.contains(Point {
-            x: 15_000_000,
-            y: 10_000_000
-        }));
+        assert!(on_board(
+            &b,
+            Point {
+                x: 5_000_000,
+                y: 10_000_000
+            }
+        ));
+        assert!(!on_board(
+            &b,
+            Point {
+                x: 15_000_000,
+                y: 10_000_000
+            }
+        ));
         // The non-Edge.Cuts silkscreen line is ignored: a pure 4-line rectangle.
-        assert_eq!(b.outline.points().len(), 4);
-        assert_eq!(arc_segs(&b.outline), 0);
+        assert_eq!(b.0.points().len(), 4);
+        assert_eq!(arc_segs(&b.0), 0);
     }
 
     /// An outline with one curved edge: three `gr_line`s + one 3-point `gr_arc` close a
@@ -2445,21 +2458,27 @@ mod tests {
   (gr_arc (start 0 10) (mid -2 5) (end 0 0) (stroke (width 0.1)) (layer "Edge.Cuts"))
 )"#;
         let b = import_board_outline(src).unwrap();
-        assert!(b.cutouts.is_empty());
-        assert_eq!(arc_segs(&b.outline), 1, "the gr_arc became a Seg::Arc edge");
+        assert!(b.1.is_empty());
+        assert_eq!(arc_segs(&b.0), 1, "the gr_arc became a Seg::Arc edge");
         // The arc's mid (-2,5)mm is the stored on-curve point.
-        assert!(b.outline.path().segs.iter().any(|seg| matches!(seg,
+        assert!(b.0.path().segs.iter().any(|seg| matches!(seg,
             Seg::Arc { mid, .. } if *mid == Point { x: -2_000_000, y: 5_000_000 })));
         // A point well inside the rectangular body is on the board; one past the arc
         // bulge to the left is off it.
-        assert!(b.contains(Point {
-            x: 5_000_000,
-            y: 5_000_000
-        }));
-        assert!(!b.contains(Point {
-            x: -3_000_000,
-            y: 5_000_000
-        }));
+        assert!(on_board(
+            &b,
+            Point {
+                x: 5_000_000,
+                y: 5_000_000
+            }
+        ));
+        assert!(!on_board(
+            &b,
+            Point {
+                x: -3_000_000,
+                y: 5_000_000
+            }
+        ));
     }
 
     /// A rectangular outline with an inner rectangular cutout: two disjoint closed
@@ -2478,21 +2497,27 @@ mod tests {
   (gr_line (start 10 20) (end 10 10) (stroke (width 0.1)) (layer "Edge.Cuts"))
 )"#;
         let b = import_board_outline(src).unwrap();
-        assert_eq!(b.cutouts.len(), 1, "inner loop classified as a cutout");
+        assert_eq!(b.1.len(), 1, "inner loop classified as a cutout");
         // Inside the outer rect but outside the inner cutout: on the board.
-        assert!(b.contains(Point {
-            x: 5_000_000,
-            y: 5_000_000
-        }));
+        assert!(on_board(
+            &b,
+            Point {
+                x: 5_000_000,
+                y: 5_000_000
+            }
+        ));
         // Centre of the inner cutout: inside the outline, but carved out ⇒ off-board.
-        assert!(b.outline.contains_point(Point {
+        assert!(b.0.contains_point(Point {
             x: 15_000_000,
             y: 15_000_000
         }));
-        assert!(!b.contains(Point {
-            x: 15_000_000,
-            y: 15_000_000
-        }));
+        assert!(!on_board(
+            &b,
+            Point {
+                x: 15_000_000,
+                y: 15_000_000
+            }
+        ));
     }
 
     /// A circular board: one `gr_circle` becomes a closed two-arc outline.
@@ -2503,19 +2528,18 @@ mod tests {
   (gr_circle (center 0 0) (end 10 0) (stroke (width 0.1)) (layer "Edge.Cuts"))
 )"#;
         let b = import_board_outline(src).unwrap();
-        assert!(b.cutouts.is_empty());
-        assert_eq!(
-            arc_segs(&b.outline),
-            2,
-            "circle modelled as two semicircle arcs"
-        );
+        assert!(b.1.is_empty());
+        assert_eq!(arc_segs(&b.0), 2, "circle modelled as two semicircle arcs");
         // Radius 10mm about the origin: centre is inside, a point past the radius is not.
-        assert!(b.contains(Point { x: 0, y: 0 }));
-        assert!(b.contains(Point { x: 9_000_000, y: 0 }));
-        assert!(!b.contains(Point {
-            x: 11_000_000,
-            y: 0
-        }));
+        assert!(on_board(&b, Point { x: 0, y: 0 }));
+        assert!(on_board(&b, Point { x: 9_000_000, y: 0 }));
+        assert!(!on_board(
+            &b,
+            Point {
+                x: 11_000_000,
+                y: 0
+            }
+        ));
     }
 
     #[test]

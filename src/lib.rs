@@ -56,11 +56,12 @@ mod tests {
     use super::command::{Command, Resolution, Transaction, suggested_resolutions};
     use super::doc::{DecayReason, Doc, MM, Nm, Point, Provenance};
     use super::elaborate::{GenDirective, Source, board_rect, psu_module};
-    use super::geom::{BoardShape, Shape2D};
+    use super::geom::Shape2D;
     use super::history::History;
     use super::id::{EntityId, NetId, TraceId, ViaId};
     use super::part::part_library;
     use super::query::{Engine, Key};
+    use super::region::{DEFAULT_CIRCLE_SEGS, difference, shape_to_region};
     use super::route::{Layer, Trace, Via, Violation};
     use super::solve::{Constraint, PLACE_TOL, Problem, dist, solve};
     use std::collections::{BTreeMap, BTreeSet};
@@ -491,13 +492,17 @@ mod tests {
             }, // in the cutout
         ];
         let d = placed(src);
-        let board = BoardShape {
-            outline,
-            cutouts: vec![cutout],
+        // The board region (outline ∖ cutout) as the substrate `Area`, mirroring
+        // `elaborate::board_region`.
+        let board = Shape2D::Area {
+            region: difference(
+                &shape_to_region(&outline, DEFAULT_CIRCLE_SEGS),
+                &shape_to_region(&cutout, DEFAULT_CIRCLE_SEGS),
+            ),
         };
         let (pa, pb) = (pos(&d, "a"), pos(&d, "b"));
         assert!(
-            board.contains(pa),
+            board.contains_point(pa),
             "part placed outside is pulled onto the board: {pa:?}"
         );
         // Pushed from the cutout centre to its boundary (~2 mm away).
@@ -1721,7 +1726,12 @@ mod tests {
         let prob = Problem {
             anchors,
             fixed: BTreeSet::new(),
-            board: Some(BoardShape::rect(Point::mm(0, 0), Point::mm(2, 2))),
+            board: Some(Shape2D::Area {
+                region: shape_to_region(
+                    &Shape2D::rect(Point::mm(1, 1), 2 * MM, 2 * MM),
+                    DEFAULT_CIRCLE_SEGS,
+                ),
+            }),
             // Want 20 mm apart inside a 2 mm board: impossible.
             constraints: vec![Constraint::MinSep { a, b, gap: 20 * MM }],
         };

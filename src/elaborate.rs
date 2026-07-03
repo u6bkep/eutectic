@@ -14,8 +14,7 @@
 use crate::diagnostic::{Diagnostic, Location};
 use crate::doc::*;
 use crate::geom::{
-    BoardShape, DEFAULT_CHORD_TOL, Feature, NetFeature, Role, Shape2D, Slab, Stackup, ZRange,
-    convex_hull,
+    DEFAULT_CHORD_TOL, Feature, NetFeature, Role, Shape2D, Slab, Stackup, ZRange, convex_hull,
 };
 use crate::id::{EntityId, NetId};
 use crate::part::{Dir, PartDef, PartLib, courtyard_half_extents, courtyard_shape};
@@ -306,9 +305,9 @@ pub fn elaborate(
     // Pass 2b: collect hard placement constraints (Fix), the board outline, and
     // relational constraints for the solver.
     let mut fixmap: BTreeMap<EntityId, Point> = BTreeMap::new();
-    // The board outline + cutouts (assembled from Board/Cutout directives); movable
-    // components are kept inside it by the solver.
-    let board = board_shape(source);
+    // The board region (outline ∖ cutouts) as a `Shape2D::Area`; movable components are
+    // kept inside it (and out of its holes) by the solver.
+    let board = board_region(source).map(|region| Shape2D::Area { region });
     let mut relational: Vec<Constraint> = Vec::new();
     for d in source {
         match d {
@@ -945,7 +944,7 @@ fn assemble_problem(
     base: &BTreeMap<EntityId, Point>,
     fixmap: &BTreeMap<EntityId, Point>,
     overrides: &BTreeMap<EntityId, Override>,
-    board: Option<&BoardShape>,
+    board: Option<&Shape2D>,
     relational: &[Constraint],
     suppress: &BTreeSet<EntityId>,
 ) -> Problem {
@@ -983,28 +982,40 @@ fn assemble_problem(
     }
 }
 
-/// Assemble the board outline + cutouts from the source. The outline is the last
-/// `Board` directive's [`Shape2D`] (`None` if there is none — the solver then leaves
-/// placement unbounded); cutouts are every `Cutout` directive's shape. This is the
-/// single shared reader (elaboration, autorouter, export all call it).
-pub fn board_shape(source: &Source) -> Option<BoardShape> {
+/// The board as a filled [`Region`](crate::region::Region): the last `Board` directive's
+/// outline **minus** every `Cutout` (Decision 16c). `None` if there is no `Board` (the
+/// solver then leaves placement unbounded). This is the single shared board-geometry
+/// reader — elaboration (the substrate/mask `Area` features), the solver (containment),
+/// the autorouter (grid bbox), and export (Edge.Cuts, SVG) all fold through it, so the
+/// board's truth lives in one place instead of a bespoke `outline`/`cutouts` struct.
+///
+/// The outline and cutouts are polygonized here (the region kernel flattens arcs at
+/// construction, Decision 16b): a curved board edge or round cutout becomes a fine
+/// polyline. The authored arcs survive in the `Board`/`Cutout` directives; this derived
+/// region does not carry them.
+pub fn board_region(source: &Source) -> Option<crate::region::Region> {
+    use crate::region::{DEFAULT_CIRCLE_SEGS, difference, shape_to_region, union_all};
     let outline = source.iter().rev().find_map(|d| match d {
-        GenDirective::Board { outline } => Some(outline.clone()),
+        GenDirective::Board { outline } => Some(outline),
         _ => None,
     })?;
-    let cutouts = source
+    let mut region = shape_to_region(outline, DEFAULT_CIRCLE_SEGS);
+    let cutouts: Vec<crate::region::Region> = source
         .iter()
         .filter_map(|d| match d {
-            GenDirective::Cutout { shape } => Some(shape.clone()),
+            GenDirective::Cutout { shape } => Some(shape_to_region(shape, DEFAULT_CIRCLE_SEGS)),
             _ => None,
         })
         .collect();
-    Some(BoardShape { outline, cutouts })
+    if !cutouts.is_empty() {
+        region = difference(&region, &union_all(cutouts));
+    }
+    Some(region)
 }
 
 /// Assemble every authored [`RegionDecl`] from the source, in declaration order. The
 /// single shared reader for pours / keep-outs / filled voids — the derived fill query
-/// (0004 stage 3), DRC, and export all call this, exactly as [`board_shape`] is the
+/// (0004 stage 3), DRC, and export all call this, exactly as [`board_region`] is the
 /// shared reader for the outline.
 pub fn regions(source: &Source) -> Vec<RegionDecl> {
     source
@@ -1018,7 +1029,7 @@ pub fn regions(source: &Source) -> Vec<RegionDecl> {
 
 /// The board [`Stackup`] for a source — the single shared reader that every consumer
 /// lowering an abstract layer to a real `ZRange` must go through (sibling to
-/// [`board_shape`] / [`regions`]).
+/// [`board_region`] / [`regions`]).
 ///
 /// Collects every [`Slab`](GenDirective::Slab) directive, in **declaration order**, into
 /// `Stackup { slabs }` — exactly as [`regions`] collects [`RegionDecl`]s. Declaration
@@ -1061,15 +1072,15 @@ fn slab_z(su: &Stackup, name: &str) -> Result<ZRange, String> {
 /// [`NetFeature`] model — a [`Feature`] (pure physical geometry) paired with the
 /// optional net it carries. This is the additive producer the convergence's Phase 2
 /// will wire DRC/export onto; for now it has no callers besides tests. It is the
-/// role-filtered union of what [`board_shape`] and [`regions`] read today
+/// role-filtered union of what [`board_region`] and [`regions`] read today
 /// (Decision 12.4), kept as one derived view, threading z through [`stackup`].
 ///
 /// Emitted per directive (net stays an *annotation* alongside the feature, never a
 /// field on `Feature` — connectivity is authoritative, Decision 12.1):
-///   - the **last** `Board` directive → one [`Role::Substrate`] netless feature,
-///     preserving [`board_shape`]'s "last `Board` wins" single-outline semantics.
+///   - the **last** `Board` directive minus every `Cutout` → one [`Role::Substrate`]
+///     netless feature carrying a [`Shape2D::Area`] (the [`board_region`], Decision 16c).
+///     Cutouts are holes in that Area, not separate `Void` features (Decision 16b).
 ///     (Unioning several `Board` directives into one multi-substrate body is deferred.)
-///   - every `Cutout` → a [`Role::Void`] netless feature (mirrors [`board_shape`]).
 ///   - every `Region` → a feature carrying the authored role + net, at its slab's z
 ///     (mirrors [`regions`]).
 ///
@@ -1082,47 +1093,31 @@ pub fn features(source: &Source) -> Result<Vec<crate::geom::NetFeature>, String>
     // The physical board *body* extent (the Substrate solid spans it). An empty stackup
     // has no extent — fall back to a zero range so the feature is still emitted.
     let board_z = su.board_z().unwrap_or(ZRange::new(0, 0));
-    // The *full* stackup extent — what a through-cut (a board cutout) pierces: the body
-    // plus mask and silk, so a milled cutout removes the ink and mask over it too.
-    let full_z = su.full_z().unwrap_or(ZRange::new(0, 0));
 
     let mut out: Vec<NetFeature> = Vec::new();
 
-    // Board: only the LAST `Board` becomes the substrate (reverse-find mirrors
-    // `board_shape`'s "last `Board` wins"). The same outline generates the mask solids.
-    let board_outline = source.iter().rev().find_map(|d| match d {
-        GenDirective::Board { outline } => Some(outline),
-        _ => None,
-    });
-    if let Some(outline) = board_outline {
+    // Board: the single `Role::Substrate` feature is the board region — the last
+    // `Board`'s outline minus every `Cutout` — carried as a `Shape2D::Area` (Decision
+    // 16c). Board-level cutouts are *holes* in this Area (routed contours, Decision 16b),
+    // not separate `Void` features. The same region (holes included) is the mask area.
+    if let Some(region) = board_region(source) {
+        let area = Shape2D::Area { region };
         out.push(NetFeature::netless(Feature::prism(
             Role::Substrate,
-            outline.clone(),
+            area.clone(),
             board_z,
         )));
 
         // Solder mask: one board-area solid per `Role::Mask` slab in the stackup, at the
         // slab's honest z, carrying the slab's material (Decision 13 — mask is a positive
         // generated solid, and its openings are `Void` deletion volumes; there are no
-        // negative layers). A stackup with no mask slab generates nothing; three generate
-        // three. No special cases. The board area is the substrate outline, so a custom
-        // outline (rounded / imported) masks to its true shape.
+        // negative layers). The mask area is the *same* board region **including the
+        // cutout holes**, so a cutout reads through the mask (its opening) exactly as
+        // before — now via the Area's holes rather than a separate cutout Void.
         for slab in su.slabs.iter().filter(|s| s.role == Role::Mask) {
-            let mut mask = Feature::prism(Role::Mask, outline.clone(), slab.z);
+            let mut mask = Feature::prism(Role::Mask, area.clone(), slab.z);
             mask.material = slab.material.clone();
             out.push(NetFeature::netless(mask));
-        }
-    }
-
-    // Cutouts: every one (mirrors `board_shape`), each a through-cut spanning the full
-    // stackup so it pierces mask and silk as well as the body.
-    for d in source {
-        if let GenDirective::Cutout { shape } = d {
-            out.push(NetFeature::netless(Feature::prism(
-                Role::Void,
-                shape.clone(),
-                full_z,
-            )));
         }
     }
 
@@ -1434,9 +1429,10 @@ mod tests {
         assert!(!rot_of(1).unwrap().is_bottom());
     }
 
-    /// Board + cutout + a Top conductor region lower to exactly one Substrate, one
-    /// Void, and one Conductor feature; net rides as an annotation and the conductor
-    /// sits on the top-copper z.
+    /// Board + cutout + a Top conductor region lower to exactly one Substrate (an `Area`
+    /// whose cutout is a *hole*, not a separate Void — Decision 16b/c), two mask solids,
+    /// and one Conductor feature; net rides as an annotation and the conductor sits on
+    /// the top-copper z.
     #[test]
     fn features_lowers_board_cutout_and_region() {
         let su = Stackup::default_2layer();
@@ -1454,9 +1450,13 @@ mod tests {
         ];
 
         let feats = features(&src).unwrap();
-        // one substrate, two mask solids (F/B.Mask in the default stackup), one void,
-        // one conductor.
-        assert_eq!(feats.len(), 5, "substrate + 2 masks + void + conductor");
+        // one substrate, two mask solids (F/B.Mask in the default stackup), one
+        // conductor. The cutout is a hole in the substrate Area — no separate Void.
+        assert_eq!(
+            feats.len(),
+            4,
+            "substrate + 2 masks + conductor (cutout is a hole)"
+        );
 
         let subs: Vec<&NetFeature> = feats
             .iter()
@@ -1464,20 +1464,21 @@ mod tests {
             .collect();
         assert_eq!(subs.len(), 1, "exactly one substrate feature");
         assert!(subs[0].net.is_none(), "substrate is netless");
-        let Extent::Prism { z, .. } = subs[0].feature.extent;
-        assert_eq!(z, su.board_z().unwrap(), "substrate spans the board body");
+        let Extent::Prism { shape, z } = &subs[0].feature.extent;
+        assert_eq!(*z, su.board_z().unwrap(), "substrate spans the board body");
+        // The substrate is an `Area` (outline ∖ cutout): its region has the outer ring
+        // plus one hole (the cutout), and the cutout centre is outside the filled area.
+        let region = shape.region().expect("substrate is a Shape2D::Area");
+        assert_eq!(region.rings.len(), 2, "outer boundary + one cutout hole");
+        assert!(region.contains_point(pt(MM, MM)), "board body is filled");
+        assert!(
+            !region.contains_point(pt(5 * MM, 5 * MM)),
+            "the cutout is a hole, not filled"
+        );
 
-        let voids: Vec<&NetFeature> = feats
-            .iter()
-            .filter(|f| f.feature.role == Role::Void)
-            .collect();
-        assert_eq!(voids.len(), 1, "exactly one void feature");
-        assert!(voids[0].net.is_none(), "void is netless");
-        let Extent::Prism { z, .. } = voids[0].feature.extent;
-        assert_eq!(
-            z,
-            su.full_z().unwrap(),
-            "a board cutout pierces the full stackup (mask + silk too)"
+        assert!(
+            !feats.iter().any(|f| f.feature.role == Role::Void),
+            "a board cutout is a hole in the substrate Area, not a Void feature"
         );
 
         let conds: Vec<&NetFeature> = feats
@@ -1522,14 +1523,20 @@ mod tests {
         assert_eq!(masks.len(), 2, "one mask solid per mask slab");
         assert!(masks.iter().all(|f| f.net.is_none()), "mask is netless");
 
-        // Each solid has the board outline at its slab's z and the slab's material.
+        // Each solid is the board region (as an `Area`) at its slab's z, with the slab's
+        // material. No cutouts here, so the region is just the outline.
+        let expected = board_region(&src).unwrap();
         for slab in &mask_slabs {
             let m = masks
                 .iter()
                 .find(|f| matches!(f.feature.extent, Extent::Prism { z, .. } if z == slab.z))
                 .unwrap_or_else(|| panic!("a mask solid at {:?}", slab.z));
             let Extent::Prism { shape, .. } = &m.feature.extent;
-            assert_eq!(*shape, outline, "mask solid uses the board outline");
+            assert_eq!(
+                shape.region(),
+                Some(&expected),
+                "mask solid is the board region"
+            );
             assert_eq!(
                 m.feature.material, slab.material,
                 "carries the slab material"
@@ -1568,7 +1575,7 @@ mod tests {
     }
 
     /// Two `Board` directives: only the last outline becomes the substrate feature
-    /// (mirrors `board_shape`'s "last `Board` wins").
+    /// (mirrors `board_region`'s "last `Board` wins").
     #[test]
     fn features_last_board_wins() {
         let first = Shape2D::rect(pt(0, 0), 4 * MM, 4 * MM);
@@ -1589,8 +1596,16 @@ mod tests {
             .collect();
         assert_eq!(subs.len(), 1, "only one substrate emitted");
         let Extent::Prism { shape, .. } = &subs[0].feature.extent;
-        assert_eq!(*shape, last, "the LAST board outline becomes the substrate");
-        assert_ne!(*shape, first, "the earlier board is dropped");
+        // The substrate Area is the LAST board's region: it fills out to ±4 mm (the 8 mm
+        // board) but the earlier 4 mm board's corner at (±2, ±2) is interior to it, and a
+        // point past the 4 mm board (e.g. (3 mm, 0)) is still on the board — proving the
+        // larger last outline won.
+        let region = shape.region().expect("substrate is a Shape2D::Area");
+        assert_eq!(*region, board_region(&src).unwrap());
+        assert!(
+            region.contains_point(pt(3 * MM, 0)),
+            "the LAST (8 mm) board won"
+        );
     }
 
     /// A `text` directive lowers to several `Role::Marking` stroke features sitting on

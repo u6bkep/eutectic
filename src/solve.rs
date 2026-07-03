@@ -55,7 +55,7 @@
 //! *checked and reported* rather than assumed.
 
 use crate::doc::{Nm, Point};
-use crate::geom::BoardShape;
+use crate::geom::Shape2D;
 use crate::id::EntityId;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -116,8 +116,9 @@ pub struct Problem {
     pub anchors: BTreeMap<EntityId, Point>,
     /// Nodes that cannot move (Fixed / Pinned provenance).
     pub fixed: BTreeSet<EntityId>,
-    /// Board boundary; movable nodes are kept inside the outline and out of cutouts.
-    pub board: Option<BoardShape>,
+    /// Board boundary as the substrate [`Shape2D::Area`] (outline ∖ cutouts); movable
+    /// nodes are kept inside the filled area and out of its holes.
+    pub board: Option<Shape2D>,
     pub constraints: Vec<Constraint>,
 }
 
@@ -203,8 +204,8 @@ pub fn solve(p: &Problem) -> Solution {
                     x: pp.0.round() as Nm,
                     y: pp.1.round() as Nm,
                 };
-                if !board.contains(pt) {
-                    let q = board.contain(pt);
+                if !board.contains_point(pt) {
+                    let q = board.closest_boundary_point(pt);
                     pp.0 = q.x as f64;
                     pp.1 = q.y as f64;
                 }

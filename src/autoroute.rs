@@ -253,8 +253,8 @@ fn verify_and_prune(doc: &Doc, lib: &PartLib, rules: &DesignRules, result: &mut 
 /// pins have room. (The grid spans the bbox; masking cells to a non-rectangular
 /// outline / out of cutouts is a follow-up — see architecture.md §8.)
 fn routing_area(doc: &Doc, net_pads: &BTreeMap<NetId, Vec<Point>>, pitch: Nm) -> Option<Rect> {
-    if let Some(board) = crate::elaborate::board_shape(&doc.source)
-        && let Some((min, max)) = board.bbox()
+    if let Some(region) = crate::elaborate::board_region(&doc.source)
+        && let Some((min, max)) = region.bbox()
     {
         return Some(Rect { min, max });
     }

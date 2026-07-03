@@ -193,6 +193,13 @@ pub enum Shape2D {
     /// `radius` (`0` ⇒ sharp; a rectangle with `radius` ⇒ a rounded rect). Edges may be
     /// arcs (e.g. a D-shaped or slotted board outline).
     Polygon { path: Path, radius: Nm },
+    /// A filled area with holes: a [`Region`](crate::region::Region) of oriented rings
+    /// (CCW islands minus CW holes) carried as a first-class shape (Decision 16a). Unlike
+    /// `Stroke`/`Polygon` it has no skeleton+radius — the rings *are* the boundary, already
+    /// polygonized (a board outline ∖ cutouts, a pour fill, a glyph with counters). Its
+    /// `radius()` is `0`; [`inflated`](Shape2D::inflated) uses the region kernel's exact
+    /// dilation ([`region::dilate`](crate::region::dilate)).
+    Area { region: crate::region::Region },
 }
 
 impl Shape2D {
@@ -308,18 +315,36 @@ impl Shape2D {
         Shape2D::Polygon { path, radius }
     }
 
-    /// This shape's skeleton path.
+    /// This shape's skeleton path. **Panics for [`Shape2D::Area`]**, which has no
+    /// skeleton — its boundary is the region's rings, reached via [`points`](Shape2D::points)
+    /// / [`region`](Shape2D::region) instead. Callers that may see an `Area` (exporters,
+    /// curve tests) branch on the variant first; the skeleton-only paths (pads, silk
+    /// strokes, authored outlines) never carry an `Area`.
     pub fn path(&self) -> &Path {
         match self {
             Shape2D::Stroke { path, .. } | Shape2D::Polygon { path, .. } => path,
+            Shape2D::Area { .. } => {
+                unreachable!("Shape2D::Area has no skeleton path; use points()/region()")
+            }
+        }
+    }
+
+    /// The region of a [`Shape2D::Area`], else `None`. The one accessor that reaches an
+    /// `Area`'s rings without going through the (panicking) skeleton [`path`](Shape2D::path).
+    pub fn region(&self) -> Option<&crate::region::Region> {
+        match self {
+            Shape2D::Area { region } => Some(region),
+            _ => None,
         }
     }
 
     /// The inflation radius (the Minkowski disc). Public so the offset kernel can
-    /// realise `skeleton ⊕ disc(radius)` as a filled region.
+    /// realise `skeleton ⊕ disc(radius)` as a filled region. An [`Area`](Shape2D::Area) is
+    /// already the filled set, so its radius is `0`.
     pub fn radius(&self) -> Nm {
         match self {
             Shape2D::Stroke { radius, .. } | Shape2D::Polygon { radius, .. } => *radius,
+            Shape2D::Area { .. } => 0,
         }
     }
 
@@ -337,6 +362,18 @@ impl Shape2D {
                 path: path.clone(),
                 radius: (radius + d).max(0),
             },
+            // An `Area` is already realised rings, so inflation is the region kernel's
+            // exact Minkowski dilation by a disc of `d` (same decomposition
+            // `shape_to_region` uses). `d == 0` is identity. **Negative `d` (erosion) is
+            // not implemented** — no consumer needs it yet (clearance offsets are always
+            // positive) — and returns the region unchanged; see the branch report.
+            Shape2D::Area { region } => Shape2D::Area {
+                region: if d > 0 {
+                    crate::region::dilate(region, d, crate::region::DEFAULT_CIRCLE_SEGS)
+                } else {
+                    region.clone()
+                },
+            },
         }
     }
 
@@ -352,6 +389,15 @@ impl Shape2D {
             Shape2D::Polygon { path, radius } => Shape2D::Polygon {
                 path: path.map(&f),
                 radius: *radius,
+            },
+            Shape2D::Area { region } => Shape2D::Area {
+                region: crate::region::Region {
+                    rings: region
+                        .rings
+                        .iter()
+                        .map(|ring| ring.iter().map(|&p| f(p)).collect())
+                        .collect(),
+                },
             },
         }
     }
@@ -387,7 +433,10 @@ impl Shape2D {
     /// here — geometry that must respect arcs uses [`bbox`]/[`segments`], and arc-aware
     /// export walks [`path`] directly.
     pub fn points(&self) -> Vec<Point> {
-        self.path().corners()
+        match self {
+            Shape2D::Area { region } => region.rings.iter().flatten().copied().collect(),
+            _ => self.path().corners(),
+        }
     }
 
     /// Is `p` inside this shape's filled area? `Polygon` uses point-in-polygon
@@ -433,13 +482,25 @@ impl Shape2D {
                 let n = pts.len();
                 (0..n).map(|i| (pts[i], pts[(i + 1) % n])).collect()
             }
+            // Every ring closes on itself (last→first); rings are not joined to each other.
+            Shape2D::Area { region } => region
+                .rings
+                .iter()
+                .filter(|r| r.len() >= 2)
+                .flat_map(|r| (0..r.len()).map(move |i| (r[i], r[(i + 1) % r.len()])))
+                .collect(),
         }
     }
 
     /// The flattened skeleton polyline (arcs subdivided). For a polygon this is the
-    /// boundary ring's points, not wrapped.
+    /// boundary ring's points, not wrapped; for an [`Area`](Shape2D::Area) it is every
+    /// ring's points concatenated (used only for bbox and the vertex-in-area overlap test,
+    /// where ring membership is irrelevant).
     fn skeleton_points(&self) -> Vec<Point> {
-        self.path().flatten(DEFAULT_CHORD_TOL)
+        match self {
+            Shape2D::Area { region } => region.rings.iter().flatten().copied().collect(),
+            _ => self.path().flatten(DEFAULT_CHORD_TOL),
+        }
     }
 
     /// Does this shape's *filled area* contain point `p`? Strokes have no area
@@ -448,6 +509,7 @@ impl Shape2D {
         match self {
             Shape2D::Stroke { .. } => false,
             Shape2D::Polygon { .. } => point_in_polygon(p, &self.skeleton_points()),
+            Shape2D::Area { region } => region.contains_point(p),
         }
     }
 }
@@ -1148,59 +1210,6 @@ impl Stackup {
     }
 }
 
-/// The board boundary: an `outline` ([`Role::Substrate`]) with interior `cutouts`
-/// ([`Role::Void`]). The **one** board representation — `outline`/`cutouts` are
-/// [`Shape2D`]s, so rounded corners (a `Polygon` radius) and concave / arbitrary
-/// (CAD-imported) outlines are expressible; `BoardShape::rect` is just a constructor
-/// for the common case. The interior of the board is "inside the outline and outside
-/// every cutout".
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BoardShape {
-    pub outline: Shape2D,
-    pub cutouts: Vec<Shape2D>,
-}
-
-impl BoardShape {
-    /// A rectangular board from opposite corners — sugar over the polygon form.
-    pub fn rect(min: Point, max: Point) -> BoardShape {
-        let c = Point {
-            x: (min.x + max.x) / 2,
-            y: (min.y + max.y) / 2,
-        };
-        BoardShape {
-            outline: Shape2D::rect(c, max.x - min.x, max.y - min.y),
-            cutouts: vec![],
-        }
-    }
-
-    /// Is `p` on the board: inside the outline and outside every cutout?
-    pub fn contains(&self, p: Point) -> bool {
-        self.outline.contains_point(p) && !self.cutouts.iter().any(|c| c.contains_point(p))
-    }
-
-    /// The nearest on-board point to `p`: if `p` is outside the outline, pull it to
-    /// the outline boundary; if it then sits inside a cutout, push it to that
-    /// cutout's boundary. Approximate (snaps to a boundary), enough to keep a placed
-    /// component on the board.
-    pub fn contain(&self, p: Point) -> Point {
-        let mut q = p;
-        if !self.outline.contains_point(q) {
-            q = self.outline.closest_boundary_point(q);
-        }
-        for c in &self.cutouts {
-            if c.contains_point(q) {
-                q = c.closest_boundary_point(q);
-            }
-        }
-        q
-    }
-
-    /// The outline's bounding box `(min, max)` — the area a routing grid spans.
-    pub fn bbox(&self) -> Option<(Point, Point)> {
-        self.outline.bbox()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1722,5 +1731,107 @@ mod tests {
         let r1 = clearance_violated(&a, &b, 2 * MM);
         let r2 = clearance_violated(&a, &b, 2 * MM);
         assert_eq!(r1, r2);
+    }
+
+    /// A 10 mm square with a 2 mm square hole (walls at ±1 mm), as a `Shape2D::Area`:
+    /// `radius`/`bbox`/`contains_point`/`points`/`inflated`/`closest_boundary_point` all
+    /// respect the hole.
+    #[test]
+    fn area_shape_geometry_ops() {
+        use crate::region::{DEFAULT_CIRCLE_SEGS, difference, shape_to_region};
+        let outer = shape_to_region(
+            &Shape2D::rect(pt(0, 0), 10 * MM, 10 * MM),
+            DEFAULT_CIRCLE_SEGS,
+        );
+        let hole = shape_to_region(
+            &Shape2D::rect(pt(0, 0), 2 * MM, 2 * MM),
+            DEFAULT_CIRCLE_SEGS,
+        );
+        let area = Shape2D::Area {
+            region: difference(&outer, &hole),
+        };
+
+        assert_eq!(area.radius(), 0, "an Area has no inflation radius");
+        assert_eq!(
+            area.bbox().unwrap(),
+            (pt(-5 * MM, -5 * MM), pt(5 * MM, 5 * MM)),
+            "bbox is the outer boundary"
+        );
+        assert!(area.contains_point(pt(4 * MM, 0)), "inside the filled ring");
+        assert!(!area.contains_point(pt(0, 0)), "the hole is not filled");
+        assert!(!area.contains_point(pt(9 * MM, 0)), "outside the board");
+        assert!(area.points().len() >= 8, "outer + hole ring vertices");
+
+        // A point deep in the hole is not filled; after a 1 mm dilation (walls at ±1 mm
+        // move inward, closing the hole) that same point is filled.
+        assert!(!area.contains_point(pt(0, 9 * MM / 10)));
+        assert!(
+            area.inflated(MM).contains_point(pt(0, 9 * MM / 10)),
+            "dilation shrinks/closes the hole"
+        );
+        // Dilation also grows the outer boundary outward.
+        let (lo, hi) = area.inflated(MM).bbox().unwrap();
+        assert!(
+            lo.x < -5 * MM && hi.x > 5 * MM,
+            "outer boundary grew by ~1 mm"
+        );
+
+        // The nearest boundary point to the hole centre lands on a hole wall (~1 mm away).
+        let q = area.closest_boundary_point(pt(0, 0));
+        let d2 = (q.x as i128).pow(2) + (q.y as i128).pow(2);
+        let mm = MM as i128;
+        assert!(
+            d2 >= (9 * mm / 10).pow(2) && d2 <= (11 * mm / 10).pow(2),
+            "closest boundary is the hole wall at ~1 mm: {q:?}"
+        );
+    }
+
+    /// `clears()` for an `Area` substrate: a shape inside the filled island violates (an
+    /// overlap), a shape deep in a hole clears, and a shape near a hole wall violates.
+    #[test]
+    fn area_clears_island_versus_hole() {
+        use crate::region::{DEFAULT_CIRCLE_SEGS, difference, shape_to_region};
+        // 20 mm square, 4 mm square hole (walls at ±2 mm).
+        let outer = shape_to_region(
+            &Shape2D::rect(pt(0, 0), 20 * MM, 20 * MM),
+            DEFAULT_CIRCLE_SEGS,
+        );
+        let hole = shape_to_region(
+            &Shape2D::rect(pt(0, 0), 4 * MM, 4 * MM),
+            DEFAULT_CIRCLE_SEGS,
+        );
+        let z = ZRange::new(0, 1000);
+        let area = Feature::prism(
+            Role::Substrate,
+            Shape2D::Area {
+                region: difference(&outer, &hole),
+            },
+            z,
+        );
+
+        // Inside the filled island: overlaps ⇒ violates even at zero clearance.
+        let inside = Feature::prism(Role::Conductor, Shape2D::disc(pt(5 * MM, 0), MM / 10), z);
+        assert!(
+            !area.clears(&inside, 0),
+            "a shape inside the filled area is a violation"
+        );
+
+        // Deep in the hole (walls ≥ ~1.9 mm away): clears a 1 mm rule.
+        let in_hole = Feature::prism(Role::Conductor, Shape2D::disc(pt(0, 0), MM / 10), z);
+        assert!(
+            area.clears(&in_hole, MM),
+            "a shape deep inside a hole clears the hole walls"
+        );
+
+        // Near a hole wall (edge gap ~0 mm): violates a 0.5 mm rule.
+        let near_wall = Feature::prism(
+            Role::Conductor,
+            Shape2D::disc(pt(19 * MM / 10, 0), MM / 10),
+            z,
+        );
+        assert!(
+            !area.clears(&near_wall, MM / 2),
+            "a shape hard against a hole wall violates"
+        );
     }
 }
