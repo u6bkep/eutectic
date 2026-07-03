@@ -5,7 +5,7 @@
 //! itself encodes how two instances mate (UART crosses tx<->rx). A designer never
 //! wires individual signals, so connecting tx-to-tx is not expressible.
 
-use crate::doc::{Component, MM, Nm, Point};
+use crate::doc::{Component, MM, Nm, Orient, Point};
 use crate::geom;
 use crate::geom::Shape2D;
 use crate::part::Dir::*;
@@ -68,6 +68,44 @@ pub struct PadGeo {
 pub struct FpGraphic {
     pub shape: Shape2D,
     pub layer: String,
+}
+
+/// What a footprint text **anchor** resolves to at lowering time (Decision 14). An
+/// anchor is never a frozen string: `Reference`/`Label` are re-derived from the
+/// component's live state (refdes annotation query / label query) every time features
+/// are lowered, so a refdes renumber or a params edit re-renders the silk. Only
+/// [`FpTextKind::Literal`] carries its own text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FpTextKind {
+    /// The reference designator — [`annotate::refdes`](crate::annotate::refdes) output
+    /// (KiCad `fp_text reference`, its `"REF**"` placeholder discarded on import).
+    Reference,
+    /// The rendered display label — [`annotate::label`](crate::annotate::label) output
+    /// (KiCad `fp_text value`; our vocabulary does not inherit KiCad's identity/display
+    /// conflation, so `value` is a display label, not identity).
+    Label,
+    /// A fixed string (KiCad `fp_text user`).
+    Literal(String),
+}
+
+/// A footprint **text anchor** (Decision 14): position, height, layer, and orientation
+/// for a piece of footprint text, plus the [`FpTextKind`] that says what string it
+/// renders. In **component-local** coordinates (the same frame as [`FpGraphic`] /
+/// [`PinDef::offset`]); `layer` is a **side-relative** slab name (swapped `F.`↔`B.` for
+/// a bottom-side placement, exactly like graphics). Lowered by [`text_features`], which
+/// generates strokes locally (anchor `orient` about `at`, KiCad-style centre-anchored)
+/// then maps them through the same `to_world` as graphics, so bottom-side mirroring
+/// falls out of the component quaternion. `hide` anchors carry through as data (they
+/// round-trip) but produce no features. The pen width is the `height / 8` rule (KiCad's
+/// explicit stroke thickness is not stored).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FpText {
+    pub kind: FpTextKind,
+    pub at: Point,
+    pub height: Nm,
+    pub layer: String,
+    pub orient: Orient,
+    pub hide: bool,
 }
 
 /// Signal/pin electrical direction.
@@ -162,6 +200,11 @@ pub struct PartDef {
     /// [`Role::Datum`](geom::Role)). Empty for the toy `part_library` and symbol-only
     /// parts.
     pub graphics: Vec<FpGraphic>,
+    /// Footprint **text anchors** ([`FpText`]) — reference/label/literal text — lowered
+    /// to features by [`text_features`] (Decision 14). Like `graphics`, these are
+    /// import-only data with no native-grammar serialization; empty for the toy
+    /// `part_library` and symbol-only parts.
+    pub texts: Vec<FpText>,
     /// An imported **courtyard** outline in component-local coordinates, if the
     /// footprint declared one (a `F.CrtYd`/`B.CrtYd` polygon). Per Decision 10 an
     /// imported courtyard IS the authoritative keep-out, so [`courtyard_shape`] and
@@ -442,6 +485,79 @@ pub fn graphic_features(
     features
 }
 
+/// World-frame physical features for a placed component's footprint [`texts`](PartDef::texts):
+/// each [`FpText`] anchor's resolved string, lowered to stroke geometry (Decision 14).
+/// The `text_features` sibling to [`graphic_features`]: the geometry takes the *same*
+/// placement path (rotated by the anchor's own `orient` about its `at`, then mapped
+/// through [`to_world`], so it rotates/flips with the component and bottom-side text
+/// mirrors with zero special-case code), side-swaps its `F.`↔`B.` slab prefix on a
+/// bottom placement ([`swap_side`]), and takes its [`Role`](geom::Role) from the resolved
+/// slab (so silk text is [`Role::Marking`](geom::Role) and text on a fab/Datum slab
+/// renders as `Datum` — nowhere in the Marking-filtered silk outputs, matching graphics).
+///
+/// The anchor kind resolves live: [`FpTextKind::Reference`] → `refdes`,
+/// [`FpTextKind::Label`] → `label`, [`FpTextKind::Literal`] → its own string. The two
+/// derived strings are passed in because `refdes` is a whole-document annotation query
+/// (see [`annotate::refdes`](crate::annotate::refdes)) that the caller computes once for
+/// all components; `label` is per-component ([`annotate::label`](crate::annotate::label)).
+///
+/// A `hide` anchor produces no features; a text whose (resolved) slab name is absent from
+/// the stackup is **skipped** — both exactly like `graphic_features`' skip. Footprint
+/// text is centre-anchored ([`Justify::Center`](crate::font::Justify)), unlike board text.
+pub fn text_features(
+    def: &PartDef,
+    comp: &Component,
+    stackup: &geom::Stackup,
+    refdes: &str,
+    label: &str,
+) -> Vec<geom::Feature> {
+    let flipped = comp.orient.is_bottom();
+    let mut features = Vec::new();
+    for t in &def.texts {
+        if t.hide {
+            continue;
+        }
+        let string = match &t.kind {
+            FpTextKind::Reference => refdes,
+            FpTextKind::Label => label,
+            FpTextKind::Literal(s) => s.as_str(),
+        };
+        let layer = if flipped {
+            swap_side(&t.layer)
+        } else {
+            t.layer.clone()
+        };
+        let Some(slab) = stackup.slab(&layer) else {
+            continue;
+        };
+        let pen = (t.height / 8).max(1);
+        for stroke in crate::font::text_strokes(string, t.height, crate::font::Justify::Center) {
+            // Local frame: rotate by the anchor's own orient about `at`, offset to `at`,
+            // then the SAME `to_world` as graphics — bottom-side mirroring is the
+            // component quaternion's, no special case.
+            let world: Vec<Point> = stroke
+                .into_iter()
+                .map(|p| {
+                    let r = t.orient.apply(p);
+                    to_world(
+                        comp,
+                        Point {
+                            x: r.x + t.at.x,
+                            y: r.y + t.at.y,
+                        },
+                    )
+                })
+                .collect();
+            features.push(geom::Feature::prism(
+                slab.role.clone(),
+                Shape2D::trace(world, pen),
+                slab.z,
+            ));
+        }
+    }
+    features
+}
+
 /// Default extra clearance added around a part's copper extent to form its
 /// courtyard keep-out, in nm (~0.25 mm, the KiCad-ish default).
 pub const COURTYARD_MARGIN: Nm = 250_000;
@@ -580,6 +696,7 @@ pub fn part_library() -> PartLib {
             ],
             interfaces: BTreeMap::new(),
             graphics: Vec::new(),
+            texts: Vec::new(),
             courtyard: None,
             class: None,
         },
@@ -594,6 +711,7 @@ pub fn part_library() -> PartLib {
             ],
             interfaces: BTreeMap::new(),
             graphics: Vec::new(),
+            texts: Vec::new(),
             courtyard: None,
             class: None,
         },
@@ -622,6 +740,7 @@ pub fn part_library() -> PartLib {
             ],
             interfaces: BTreeMap::from([("uart".into(), uart())]),
             graphics: Vec::new(),
+            texts: Vec::new(),
             courtyard: None,
             class: None,
         },
@@ -650,6 +769,7 @@ pub fn part_library() -> PartLib {
             ],
             interfaces: BTreeMap::from([("uart".into(), uart())]),
             graphics: Vec::new(),
+            texts: Vec::new(),
             courtyard: None,
             class: None,
         },
@@ -710,6 +830,7 @@ mod tests {
             ],
             interfaces: BTreeMap::new(),
             graphics: Vec::new(),
+            texts: Vec::new(),
             courtyard: None,
             class: None,
         };
@@ -1223,6 +1344,7 @@ mod tests {
             pins: vec![mk(2 * MM), mk(-2 * MM)],
             interfaces: BTreeMap::new(),
             graphics: Vec::new(),
+            texts: Vec::new(),
             courtyard: None,
             class: None,
         };
@@ -1276,6 +1398,7 @@ mod tests {
             }],
             interfaces: BTreeMap::new(),
             graphics: Vec::new(),
+            texts: Vec::new(),
             courtyard: None,
             class: None,
         };
@@ -1304,6 +1427,7 @@ mod tests {
                 shape: Shape2D::capsule(Point { x: -MM, y: 0 }, Point { x: MM, y: 0 }, 60_000),
                 layer: "F.SilkS".into(),
             }],
+            texts: vec![],
             courtyard: None,
             class: None,
         };
@@ -1340,6 +1464,7 @@ mod tests {
                 shape: Shape2D::capsule(Point { x: 0, y: 0 }, Point { x: MM, y: 0 }, 1),
                 layer: "F.Fab".into(), // not a slab in the default stackup
             }],
+            texts: vec![],
             courtyard: None,
             class: None,
         };
@@ -1377,6 +1502,7 @@ mod tests {
                     layer: "F.SilkS".into(),
                 },
             ],
+            texts: vec![],
             courtyard: None,
             class: None,
         };
@@ -1429,6 +1555,7 @@ mod tests {
             }],
             interfaces: BTreeMap::new(),
             graphics: Vec::new(),
+            texts: Vec::new(),
             courtyard: Some(Shape2D::rect(Point { x: 0, y: 0 }, 8 * MM, 4 * MM)),
             class: None,
         };
@@ -1458,5 +1585,222 @@ mod tests {
         assert_eq!(Orient::from_deg(450), Some(Orient::from_deg(90).unwrap()));
         assert_eq!(Orient::from_deg(360), Some(Orient::from_deg(0).unwrap()));
         assert_eq!(Orient::from_deg(45), None);
+    }
+
+    // ---- footprint auto-text lowering (Decision 14) --------------------------------
+
+    /// A part carrying a single text anchor (`height = 1mm`, identity orient), for the
+    /// lowering tests. Layer is side-relative like `graphics`.
+    fn text_part(name: &str, kind: FpTextKind, at: Point, layer: &str) -> PartDef {
+        PartDef {
+            name: name.into(),
+            pins: vec![],
+            interfaces: BTreeMap::new(),
+            graphics: vec![],
+            texts: vec![FpText {
+                kind,
+                at,
+                height: MM,
+                layer: layer.into(),
+                orient: Orient::default(),
+                hide: false,
+            }],
+            courtyard: None,
+            class: None,
+        }
+    }
+
+    /// The bbox over every feature's shape (features must be non-empty).
+    fn text_bbox(feats: &[geom::Feature]) -> (Point, Point) {
+        let mut lo = Point {
+            x: Nm::MAX,
+            y: Nm::MAX,
+        };
+        let mut hi = Point {
+            x: Nm::MIN,
+            y: Nm::MIN,
+        };
+        for f in feats {
+            let (s, _) = prism_shape_z(f);
+            let (a, b) = s.bbox().expect("a bounded shape");
+            lo.x = lo.x.min(a.x);
+            lo.y = lo.y.min(a.y);
+            hi.x = hi.x.max(b.x);
+            hi.y = hi.y.max(b.y);
+        }
+        (lo, hi)
+    }
+
+    /// A `Reference` anchor renders the *annotated* refdes wired through
+    /// [`crate::annotate::refdes`] — proven by matching the geometry of a `Literal("R1")`
+    /// anchor at the same placement (geometry, not string, since strokes are geometry).
+    #[test]
+    fn text_features_reference_renders_annotated_refdes() {
+        let su = Stackup::default_2layer();
+        let def = text_part(
+            "R_0402",
+            FpTextKind::Reference,
+            Point { x: 0, y: 0 },
+            "F.SilkS",
+        );
+        let c = comp("R_0402", Point { x: 0, y: 0 }, Orient::default());
+
+        let mut doc = crate::doc::Doc::default();
+        doc.components.insert(c.id.clone(), c.clone());
+        let mut lib = PartLib::new();
+        lib.insert("R_0402".into(), def.clone());
+        let reg = crate::annotate::registry(&[]);
+        let refdes = crate::annotate::refdes(&doc, &lib, &reg)[&c.id].clone();
+        assert_eq!(refdes, "R1");
+
+        let got = text_features(&def, &c, &su, &refdes, "");
+        let lit = text_part(
+            "R_0402",
+            FpTextKind::Literal("R1".into()),
+            Point { x: 0, y: 0 },
+            "F.SilkS",
+        );
+        assert!(!got.is_empty());
+        assert_eq!(got, text_features(&lit, &c, &su, "", ""));
+    }
+
+    /// A `Label` anchor renders through the class registry template: `value = 4.7k` under
+    /// a `{value:iec}` template → `4k7`, matching a `Literal("4k7")` anchor's geometry.
+    #[test]
+    fn text_features_label_renders_registry_template() {
+        use crate::elaborate::GenDirective;
+        let su = Stackup::default_2layer();
+        let def = text_part("R_0402", FpTextKind::Label, Point { x: 0, y: 0 }, "F.SilkS");
+        let mut c = comp("R_0402", Point { x: 0, y: 0 }, Orient::default());
+        c.params.insert("value".into(), "4.7k".into());
+        let reg = crate::annotate::registry(&[GenDirective::Class {
+            name: "R".into(),
+            entry: crate::annotate::ClassEntry {
+                prefix: None,
+                template: Some("{value:iec}".into()),
+                defaults: BTreeMap::new(),
+            },
+        }]);
+        let lbl = crate::annotate::label(&c, &def, &reg);
+        assert_eq!(lbl, "4k7");
+
+        let got = text_features(&def, &c, &su, "", &lbl);
+        let lit = text_part(
+            "R_0402",
+            FpTextKind::Literal("4k7".into()),
+            Point { x: 0, y: 0 },
+            "F.SilkS",
+        );
+        assert!(!got.is_empty());
+        assert_eq!(got, text_features(&lit, &c, &su, "", ""));
+    }
+
+    /// The lowered geometry is **live**: a params edit re-renders the label to different
+    /// strokes (nothing is baked at import).
+    #[test]
+    fn text_features_are_live_to_params() {
+        let su = Stackup::default_2layer();
+        let def = text_part("R_0402", FpTextKind::Label, Point { x: 0, y: 0 }, "F.SilkS");
+        let reg = crate::annotate::registry(&[]); // built-in R seed: `{value}` verbatim
+        let mut a = comp("R_0402", Point { x: 0, y: 0 }, Orient::default());
+        a.params.insert("value".into(), "100".into());
+        let mut b = comp("R_0402", Point { x: 0, y: 0 }, Orient::default());
+        b.params.insert("value".into(), "220".into());
+        let ga = text_features(&def, &a, &su, "", &crate::annotate::label(&a, &def, &reg));
+        let gb = text_features(&def, &b, &su, "", &crate::annotate::label(&b, &def, &reg));
+        assert!(!ga.is_empty());
+        assert_ne!(ga, gb, "different params → different lowered strokes");
+    }
+
+    /// A bottom-side component's text is mirrored and lands on the `B.*` slab — both
+    /// falling out of the component quaternion (no special-case code). NOTE: this crate's
+    /// flip ([`Orient::flipped`]) is a 180° rotation about the in-plane x-axis, so the
+    /// in-plane mirror is a **y-negation** (x unchanged), not the x-flip a naive reading
+    /// of "mirror" might expect. Anchored at `+2mm` in y, the top text sits above the axis
+    /// and the bottom text below — an observable reflection.
+    #[test]
+    fn text_features_bottom_side_mirrors_and_swaps_slab() {
+        let su = Stackup::default_2layer();
+        let def = text_part(
+            "R",
+            FpTextKind::Literal("LR".into()),
+            Point { x: 0, y: 2 * MM },
+            "F.SilkS",
+        );
+        let top = comp("R", Point { x: 0, y: 0 }, Orient::default());
+        let bot = comp("R", Point { x: 0, y: 0 }, Orient::default().flipped());
+        let tf = text_features(&def, &top, &su, "", "");
+        let bf = text_features(&def, &bot, &su, "", "");
+        assert!(!tf.is_empty());
+        assert_eq!(tf.len(), bf.len());
+
+        let (tlo, thi) = text_bbox(&tf);
+        let (blo, bhi) = text_bbox(&bf);
+        assert_eq!(
+            (blo.x, bhi.x),
+            (tlo.x, thi.x),
+            "x unchanged by the x-axis flip"
+        );
+        assert_eq!(
+            (blo.y, bhi.y),
+            (-thi.y, -tlo.y),
+            "y mirrored across the x-axis"
+        );
+        assert!(tlo.y > 0, "top text is above the axis (anchor +2mm)");
+
+        assert_eq!(prism_shape_z(&tf[0]).1, su.slab_z("F.SilkS").unwrap());
+        assert_eq!(
+            prism_shape_z(&bf[0]).1,
+            su.slab_z("B.SilkS").unwrap(),
+            "flipped text → B.SilkS"
+        );
+    }
+
+    /// Footprint text is centre-anchored (unlike left-origin board text): a 2-char run
+    /// centres on the anchor origin — exactly on the cap-height midline vertically, and
+    /// within a glyph cell horizontally (the advance box includes trailing spacing).
+    #[test]
+    fn text_features_center_justification_centers_on_anchor() {
+        let su = Stackup::default_2layer();
+        let def = text_part(
+            "R",
+            FpTextKind::Literal("II".into()),
+            Point { x: 0, y: 0 },
+            "F.SilkS",
+        );
+        let c = comp("R", Point { x: 0, y: 0 }, Orient::default());
+        let (lo, hi) = text_bbox(&text_features(&def, &c, &su, "", ""));
+        let cx = (lo.x + hi.x) / 2;
+        let cy = (lo.y + hi.y) / 2;
+        let cell = crate::font::GLYPH_ADVANCE as Nm * MM / crate::font::CELL_HEIGHT as Nm;
+        assert!(
+            cx.abs() < cell,
+            "horizontally centred within a glyph cell: cx={cx}"
+        );
+        assert_eq!(cy, 0, "vertically centred on the cap-height midline");
+    }
+
+    /// A hidden anchor emits nothing; text on a slab absent from the stackup is skipped
+    /// (no panic) — both mirroring `graphic_features`' skips.
+    #[test]
+    fn text_features_hide_and_missing_slab_emit_nothing() {
+        let su = Stackup::default_2layer();
+        let c = comp("R", Point { x: 0, y: 0 }, Orient::default());
+        let mut hidden = text_part(
+            "R",
+            FpTextKind::Literal("X".into()),
+            Point { x: 0, y: 0 },
+            "F.SilkS",
+        );
+        hidden.texts[0].hide = true;
+        assert!(text_features(&hidden, &c, &su, "", "").is_empty());
+
+        let no_slab = text_part(
+            "R",
+            FpTextKind::Literal("X".into()),
+            Point { x: 0, y: 0 },
+            "F.Fab", // not in the default stackup
+        );
+        assert!(text_features(&no_slab, &c, &su, "", "").is_empty());
     }
 }

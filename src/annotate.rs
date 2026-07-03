@@ -217,6 +217,7 @@ mod tests {
             pins: vec![],
             interfaces: BTreeMap::new(),
             graphics: vec![],
+            texts: vec![],
             courtyard: None,
             class: class.map(String::from),
         }

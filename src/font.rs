@@ -42,6 +42,69 @@ pub const GLYPH_ADVANCE: i32 = 6;
 /// A glyph = a list of polyline strokes; each stroke = a list of cell-space points.
 type Glyph = &'static [&'static [(i32, i32)]];
 
+use crate::doc::{Nm, Point};
+
+/// Horizontal placement of a run of text relative to its anchor origin (Decision 14).
+///
+/// - [`Justify::Left`] — the anchor is the **baseline-left** corner: the first glyph's
+///   left edge sits at local `x = 0` and the baseline at local `y = 0`. This is how
+///   board `text` directives lower (their authored `at` *is* the origin).
+/// - [`Justify::Center`] — the anchor is the run's **centre**: the advance box (the full
+///   `n · GLYPH_ADVANCE` wide, `CAP_HEIGHT` tall extent, trailing inter-glyph space
+///   included) is centred on the local origin. This matches KiCad, which anchors
+///   footprint text at its centre; the content is live (a refdes/label re-renders), so
+///   the centring offset cannot be baked at import and is applied here per lowering.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Justify {
+    Left,
+    Center,
+}
+
+/// The glyph cap height in font-units (`y = 0` baseline .. `y = CAP_HEIGHT` cap). The
+/// cell is one unit taller ([`CELL_HEIGHT`]) for leading; centring uses the cap box.
+const CAP_HEIGHT: i32 = 6;
+
+/// Lower `string` to stroke polylines in a **local** frame at world `height`, honouring
+/// `justify`. Each returned `Vec<Point>` is one centreline polyline (a single-point one
+/// is a dot — [`Shape2D::trace`](crate::geom::Shape2D::trace) of one point is a disc);
+/// the caller traces each at its pen width and places it (rotate + translate, then — for
+/// footprint text — through `to_world`). This is the one place the per-glyph cell→world
+/// scale and advance live, shared by board text ([`Justify::Left`], unchanged) and
+/// footprint auto-text ([`Justify::Center`]).
+///
+/// Cell→world is the integer scale `p * height / CELL_HEIGHT`; glyphs advance `+x` by
+/// `GLYPH_ADVANCE` font-units per character. For [`Justify::Center`] every point is then
+/// shifted by half the advance-box extent (`n · GLYPH_ADVANCE` wide, `CAP_HEIGHT` tall)
+/// so the origin lands at the run's centre.
+pub fn text_strokes(string: &str, height: Nm, justify: Justify) -> Vec<Vec<Point>> {
+    let cell_h = CELL_HEIGHT as Nm;
+    let (ox, oy) = match justify {
+        Justify::Left => (0, 0),
+        Justify::Center => {
+            let n = string.chars().count() as Nm;
+            (
+                (n * GLYPH_ADVANCE as Nm * height / cell_h) / 2,
+                (CAP_HEIGHT as Nm * height / cell_h) / 2,
+            )
+        }
+    };
+    let mut out = Vec::new();
+    for (i, ch) in string.chars().enumerate() {
+        let dx = i as i32 * GLYPH_ADVANCE;
+        for stroke in glyph_strokes(ch) {
+            let pts: Vec<Point> = stroke
+                .iter()
+                .map(|&(cx, cy)| Point {
+                    x: (dx + cx) as Nm * height / cell_h - ox,
+                    y: cy as Nm * height / cell_h - oy,
+                })
+                .collect();
+            out.push(pts);
+        }
+    }
+    out
+}
+
 // ---- uppercase A–Z ----------------------------------------------------------
 const A: Glyph = &[&[(0, 0), (2, 6), (4, 0)], &[(1, 3), (3, 3)]];
 const B: Glyph = &[

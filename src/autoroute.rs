@@ -815,6 +815,7 @@ mod tests {
                 pins: vec![pin],
                 interfaces: BTreeMap::new(),
                 graphics: Vec::new(),
+                texts: Vec::new(),
                 courtyard: None,
                 class: None,
             },

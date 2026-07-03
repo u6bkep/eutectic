@@ -1067,12 +1067,12 @@ pub fn features(source: &Source) -> Result<Vec<crate::geom::NetFeature>, String>
 }
 
 /// Lower one authored [`GenDirective::Text`] into stroke-font [`Role::Marking`]
-/// features (Decision 9). For each character, its centreline polylines (from
-/// [`crate::font`]) are scaled cell→world by `height / CELL_HEIGHT`, advanced in +x by
-/// `GLYPH_ADVANCE` font-units per character, rotated by `orient` about the text origin
-/// (exact for [`Orient::IDENTITY`]), then translated to `at`. Each stroke is traced at
-/// a pen width of `height / 8` on the named slab's z (via the shared [`slab_z`] — an
-/// unknown name is a hard error). The markings are **netless** — silk carries no
+/// features (Decision 9). The shared [`crate::font::text_strokes`] produces the glyph
+/// centreline polylines in a local frame (left-origin — board text's authored `at` *is*
+/// the origin, so it stays [`Justify::Left`](crate::font::Justify::Left)); each is then
+/// rotated by `orient` about that origin (exact for [`Orient::IDENTITY`]), translated to
+/// `at`, and traced at a pen width of `height / 8` on the named slab's z (via [`slab_z`]
+/// — an unknown name is a hard error). The markings are **netless** — silk carries no
 /// electrical identity.
 fn text_features(
     string: &str,
@@ -1084,32 +1084,24 @@ fn text_features(
 ) -> Result<Vec<NetFeature>, String> {
     let z = slab_z(su, layer)?;
     let pen = (height / 8).max(1); // a visible stroke width even for tiny heights
-    let cell_h = crate::font::CELL_HEIGHT as Nm;
     let mut out = Vec::new();
-    for (i, ch) in string.chars().enumerate() {
-        let dx = i as i32 * crate::font::GLYPH_ADVANCE;
-        for stroke in crate::font::glyph_strokes(ch) {
-            let pts: Vec<Point> = stroke
-                .iter()
-                .map(|&(cx, cy)| {
-                    // cell → world (integer scale), rotate about origin, then place.
-                    let local = Point {
-                        x: (dx + cx) as Nm * height / cell_h,
-                        y: cy as Nm * height / cell_h,
-                    };
-                    let r = orient.apply(local);
-                    Point {
-                        x: r.x + at.x,
-                        y: r.y + at.y,
-                    }
-                })
-                .collect();
-            out.push(NetFeature::netless(Feature::prism(
-                Role::Marking,
-                Shape2D::trace(pts, pen),
-                z,
-            )));
-        }
+    for stroke in crate::font::text_strokes(string, height, crate::font::Justify::Left) {
+        let pts: Vec<Point> = stroke
+            .into_iter()
+            .map(|local| {
+                // rotate about the text origin, then place at `at`.
+                let r = orient.apply(local);
+                Point {
+                    x: r.x + at.x,
+                    y: r.y + at.y,
+                }
+            })
+            .collect();
+        out.push(NetFeature::netless(Feature::prism(
+            Role::Marking,
+            Shape2D::trace(pts, pen),
+            z,
+        )));
     }
     Ok(out)
 }

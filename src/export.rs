@@ -294,9 +294,12 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> Result<String, String> {
     // slab). Today this is the default 2-layer stackup; the reader is the one place
     // that changes when authored stackups land.
     let su = crate::elaborate::stackup(&doc.source);
+    // Footprint auto-text (Decision 14): `refdes` is a whole-document query, computed once.
+    let reg = crate::annotate::registry(&doc.source);
+    let refdes = crate::annotate::refdes(doc, lib, &reg);
 
     // One group per component: pads, an origin marker, and an id label.
-    for c in doc.components.values() {
+    for (id, c) in &doc.components {
         out.push_str(&format!(
             "  <g class=\"component\" data-id=\"{}\">\n",
             xml_escape(c.id.as_str())
@@ -340,8 +343,13 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> Result<String, String> {
         }
         // Footprint silkscreen: each derived `Role::Marking` graphic (side-swapped +
         // placed by `graphic_features`) drawn as a silk stroke, same look as board text.
+        // Footprint auto-text (`text_features`) rides the same Marking-filtered path.
         if let Some(def) = lib.get(&c.part) {
-            for f in crate::part::graphic_features(def, c, &su) {
+            let rd = refdes.get(id).map(String::as_str).unwrap_or("");
+            let lbl = crate::annotate::label(c, def, &reg);
+            let graphics = crate::part::graphic_features(def, c, &su);
+            let texts = crate::part::text_features(def, c, &su, rd, &lbl);
+            for f in graphics.into_iter().chain(texts) {
                 if f.role != Role::Marking {
                     continue;
                 }
@@ -1186,11 +1194,22 @@ fn marking_features(
             out.push(nf.feature);
         }
     }
-    for c in doc.components.values() {
+    // Footprint auto-text (Decision 14) rides the same Marking-filtered silk path as
+    // graphics; `refdes` is a whole-document query, computed once.
+    let reg = crate::annotate::registry(&doc.source);
+    let refdes = crate::annotate::refdes(doc, lib, &reg);
+    for (id, c) in &doc.components {
         let Some(def) = lib.get(&c.part) else {
             continue;
         };
         for f in crate::part::graphic_features(def, c, su) {
+            if f.role == Role::Marking {
+                out.push(f);
+            }
+        }
+        let rd = refdes.get(id).map(String::as_str).unwrap_or("");
+        let lbl = crate::annotate::label(c, def, &reg);
+        for f in crate::part::text_features(def, c, su, rd, &lbl) {
             if f.role == Role::Marking {
                 out.push(f);
             }
@@ -1493,6 +1512,7 @@ psu.reg,LDO,0.000000,0.000000,0,T
                 }],
                 interfaces: BTreeMap::new(),
                 graphics: Vec::new(),
+                texts: Vec::new(),
                 courtyard: None,
                 class: None,
             },

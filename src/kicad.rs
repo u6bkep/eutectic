@@ -25,10 +25,17 @@
 //! - A courtyard polygon (`fp_poly`/`fp_rect` on `F.CrtYd`/`B.CrtYd`) →
 //!   [`PartDef::courtyard`], the authoritative courtyard (Decision 10). Loose
 //!   `fp_line`/`fp_arc` courtyard *segments* are not yet stitched into a loop.
+//! - **Footprint text** (`fp_text reference|value|user`, and the v7
+//!   `property "Reference"|"Value"` form) → [`PartDef::texts`] as [`FpText`] anchors
+//!   (Decision 14): `reference`→[`FpTextKind::Reference`], `value`→[`FpTextKind::Label`]
+//!   (both discard their placeholder string — the anchor re-derives it live at lowering),
+//!   `user`→[`FpTextKind::Literal`]. Height is the font-size *height* component; the
+//!   stroke thickness is ignored (the pen is the `height / 8` rule); `hide` is lifted (a
+//!   hidden anchor round-trips as data but produces no features). Lowered by
+//!   [`part::text_features`](crate::part::text_features).
 //!
-//! Still **skipped**: `fp_text`/reference-designator auto-text (a separate branch),
-//! and paste (`F.Paste`/`B.Paste`) — paste is *derived* at export from pad geometry,
-//! never authored (Decision 15).
+//! Still **skipped**: paste (`F.Paste`/`B.Paste`) — paste is *derived* at export from
+//! pad geometry, never authored (Decision 15).
 //! Layer references are **side-relative**: a footprint is authored top-side, so its
 //! `F.*` graphics swap to `B.*` when the component is placed bottom-side (see
 //! [`part::swap_side`](crate::part::swap_side)).
@@ -49,10 +56,12 @@
 //! Both the modern `(footprint "name" ...)` and the legacy `(module name ...)`
 //! headers are accepted; pad names may be quoted or bare.
 
-use crate::doc::{Nm, Point};
+use crate::doc::{Nm, Orient, Point};
 use crate::geom;
 use crate::geom::{Seg, Shape2D};
-use crate::part::{Drill, FpGraphic, PadCopper, PadGeo, PadLayers, PartDef, PinDef, PinRole};
+use crate::part::{
+    Drill, FpGraphic, FpText, FpTextKind, PadCopper, PadGeo, PadLayers, PartDef, PinDef, PinRole,
+};
 use std::collections::BTreeMap;
 
 /// A parsed S-expression node: either a leaf atom or a parenthesised list.
@@ -335,15 +344,120 @@ pub fn import_footprint(text: &str) -> Result<PartDef, String> {
         }
     }
 
+    // Footprint text → `texts` (Decision 14): `fp_text reference|value|user` and the v7
+    // `property "Reference"|"Value"` form. The placeholder string ("REF**"/the value
+    // placeholder) is discarded — a Reference/Label anchor re-derives its string at
+    // lowering; only `user` text keeps its literal. `hide` anchors import as data (they
+    // round-trip) but produce no features.
+    let mut texts: Vec<FpText> = Vec::new();
+    for item in items {
+        if let Some(t) = parse_fp_text(item)? {
+            texts.push(t);
+        }
+    }
+
     Ok(PartDef {
         name,
         pins,
         interfaces: BTreeMap::new(),
         graphics,
+        texts,
         courtyard,
         // The importer does not infer class from a footprint (Decision 14, out of scope).
         class: None,
     })
+}
+
+/// Parse one footprint text node into an [`FpText`] anchor, or `Ok(None)` if it isn't
+/// footprint text (or lacks a `(layer …)`). Two forms:
+///
+/// - classic `(fp_text reference|value|user "STR" (at x y [rot]) (layer L) [hide]
+///   (effects (font (size H W) (thickness T))))`, and
+/// - v7 `(property "Reference"|"Value" "STR" (at …) (layer L) [(hide yes)] (effects …))`.
+///
+/// Mapping (Decision 14): `reference`/`Reference` → [`FpTextKind::Reference`] (placeholder
+/// discarded), `value`/`Value` → [`FpTextKind::Label`] (placeholder discarded), `user` →
+/// [`FpTextKind::Literal`] keeping the string. Height is the font `(size H …)` height
+/// component (default 1 mm if absent); the stroke `(thickness …)` is **ignored** — the pen
+/// is the `height / 8` rule (Decision 14). `(at … rot)` becomes a local about-z
+/// [`Orient`] (exact for cardinals). The layer name is kept as imported (side-relative).
+/// Other `property` names (Footprint/Datasheet/…) are footprint metadata, not silk, and
+/// return `Ok(None)`.
+fn parse_fp_text(item: &Sexp) -> Result<Option<FpText>, String> {
+    let Some(list) = item.as_list() else {
+        return Ok(None);
+    };
+    let head = list.first().and_then(Sexp::as_atom).unwrap_or("");
+    let kind = match head {
+        "fp_text" => match list.get(1).and_then(Sexp::as_atom).unwrap_or("") {
+            "reference" => FpTextKind::Reference,
+            "value" => FpTextKind::Label,
+            "user" => FpTextKind::Literal(
+                list.get(2)
+                    .and_then(Sexp::as_atom)
+                    .unwrap_or("")
+                    .to_string(),
+            ),
+            _ => return Ok(None),
+        },
+        "property" => match list.get(1).and_then(Sexp::as_atom).unwrap_or("") {
+            "Reference" => FpTextKind::Reference,
+            "Value" => FpTextKind::Label,
+            _ => return Ok(None), // metadata property, not silk text
+        },
+        _ => return Ok(None),
+    };
+    let Some(layer) = layer_name(list) else {
+        return Ok(None);
+    };
+    let at = prim_xy(list, "at")?.unwrap_or(Point { x: 0, y: 0 });
+    let rot = list
+        .iter()
+        .find_map(|s| s.list_headed("at"))
+        .and_then(|a| a.get(3))
+        .and_then(Sexp::as_atom)
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    // Cardinal rotations get the tiny exact quaternion; off-axis angles are approximated.
+    let orient = Orient::from_deg(rot as i32).unwrap_or_else(|| Orient::from_angle_deg(rot));
+    let height = text_font_height(list).unwrap_or(1_000_000); // KiCad default text size ≈ 1 mm
+    Ok(Some(FpText {
+        kind,
+        at,
+        height,
+        layer,
+        orient,
+        hide: text_hidden(list),
+    }))
+}
+
+/// A footprint text's font **height** in nm: the first component of
+/// `(effects (font (size H W) …))` (KiCad lists height then width). `None` if absent.
+fn text_font_height(list: &[Sexp]) -> Option<Nm> {
+    list.iter()
+        .find_map(|s| s.list_headed("effects"))
+        .and_then(|eff| eff.iter().find_map(|s| s.list_headed("font")))
+        .and_then(|font| font.iter().find_map(|s| s.list_headed("size")))
+        .and_then(|size| size.get(1))
+        .and_then(Sexp::as_atom)
+        .and_then(|a| mm_to_nm(a).ok())
+}
+
+/// Is a footprint text hidden? Both the classic bare `hide` atom (at the text level) and
+/// the v7 `(hide yes)` list — at the text level or nested in `(effects …)` — count.
+/// `(hide no)` is explicitly not hidden.
+fn text_hidden(list: &[Sexp]) -> bool {
+    let hidden_in = |l: &[Sexp]| {
+        l.iter().any(|s| s.as_atom() == Some("hide"))
+            || l.iter()
+                .find_map(|s| s.list_headed("hide"))
+                .is_some_and(|h| h.get(1).and_then(Sexp::as_atom) != Some("no"))
+    };
+    hidden_in(list)
+        || list
+            .iter()
+            .find_map(|s| s.list_headed("effects"))
+            .is_some_and(hidden_in)
 }
 
 /// Parse one footprint graphic (`fp_line`/`fp_arc`/`fp_circle`/`fp_poly`/`fp_rect`)
@@ -1340,6 +1454,7 @@ pub fn join_symbol_footprint(symbol: &Symbol, footprint: &PartDef) -> JoinReport
         interfaces: BTreeMap::new(),
         // Silk/courtyard geometry is the footprint's, carried through the join.
         graphics: footprint.graphics.clone(),
+        texts: footprint.texts.clone(),
         courtyard: footprint.courtyard.clone(),
         class: None,
     };
@@ -1783,6 +1898,77 @@ mod tests {
             (lo.x, lo.y, hi.x, hi.y),
             (-2_000_000, -2_000_000, 2_000_000, 2_000_000),
             "courtyard is the imported 4×4mm outline, not the pad hull"
+        );
+    }
+
+    /// Footprint text (Decision 14): classic `fp_text reference|value|user`. The
+    /// `reference`/`value` placeholder strings are discarded (the kind is an anchor, not
+    /// a frozen string); `user` keeps its literal. Height is the font-size *height*
+    /// component (thickness ignored); `hide` and the `(at … rot)` local orient are lifted.
+    #[test]
+    fn imports_footprint_text_reference_value_user_and_hide() {
+        let src = r#"(footprint "R_0402"
+  (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu"))
+  (fp_text reference "REF**" (at 0 1 90) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15))))
+  (fp_text value "R_0402" (at 0 -1) (layer "F.Fab") hide (effects (font (size 0.5 0.5))))
+  (fp_text user "HELLO" (at 0 0) (layer "F.SilkS") (effects (font (size 0.8 0.8)))))"#;
+        let p = import_footprint(src).unwrap();
+        assert_eq!(p.texts.len(), 3);
+
+        let refr = p
+            .texts
+            .iter()
+            .find(|t| t.kind == FpTextKind::Reference)
+            .expect("a reference anchor");
+        assert_eq!(refr.layer, "F.SilkS");
+        assert_eq!(refr.height, 1_000_000, "font size height → 1mm");
+        assert!(!refr.hide);
+        assert_eq!(
+            refr.orient,
+            Orient::from_deg(90).unwrap(),
+            "the (at … 90) rotation is a local about-z orient"
+        );
+
+        let val = p
+            .texts
+            .iter()
+            .find(|t| t.kind == FpTextKind::Label)
+            .expect("a value → Label anchor");
+        assert_eq!(val.layer, "F.Fab");
+        assert_eq!(val.height, 500_000, "0.5mm height");
+        assert!(val.hide, "the bare `hide` token is lifted");
+
+        // `user` keeps its literal; reference/value placeholders never do (the kinds carry
+        // no string), so "REF**"/"R_0402" are inherently discarded.
+        assert!(
+            p.texts
+                .iter()
+                .any(|t| t.kind == FpTextKind::Literal("HELLO".into()) && t.layer == "F.SilkS")
+        );
+    }
+
+    /// The v7 `(property "Reference"|"Value" …)` form maps like `fp_text reference|value`;
+    /// `(hide yes)` inside `(effects …)` counts as hidden; other property names
+    /// (Datasheet/Footprint/…) are footprint metadata, not silk, and are skipped.
+    #[test]
+    fn imports_footprint_text_property_form() {
+        let src = r#"(footprint "R"
+  (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu"))
+  (property "Reference" "REF**" (at 0 1) (layer "F.SilkS") (effects (font (size 1 1))))
+  (property "Value" "10k" (at 0 -1) (layer "F.Fab") (effects (font (size 1 1)) (hide yes)))
+  (property "Datasheet" "http://x" (at 0 0) (layer "F.Fab") (effects (hide yes))))"#;
+        let p = import_footprint(src).unwrap();
+        assert_eq!(p.texts.len(), 2, "Reference + Value; Datasheet skipped");
+        assert!(
+            p.texts
+                .iter()
+                .any(|t| t.kind == FpTextKind::Reference && !t.hide)
+        );
+        assert!(
+            p.texts
+                .iter()
+                .any(|t| t.kind == FpTextKind::Label && t.hide),
+            "(hide yes) in effects → hidden"
         );
     }
 
