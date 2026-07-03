@@ -15,8 +15,8 @@ use crate::diagnostic::{Diagnostic, Location};
 use crate::doc::*;
 use crate::geom::{BoardShape, Feature, NetFeature, Role, Shape2D, Slab, Stackup, ZRange};
 use crate::id::{EntityId, NetId};
-use crate::part::{Dir, PartDef, PartLib, courtyard_half_extents};
-use crate::solve::{Constraint, PLACE_TOL, Problem, dist, solve};
+use crate::part::{Dir, PartDef, PartLib, courtyard_half_extents, courtyard_shape};
+use crate::solve::{Constraint, PLACE_TOL, Problem, courtyard_overlap_depth, dist, solve};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// An authored **filled region**: a `Shape2D` area carrying a [`Role`] — a copper
@@ -437,23 +437,28 @@ pub fn elaborate(
         }
     }
 
-    // Pass 2c: overlap-avoidance (issue 0005). No two component courtyards may
+    // Pass 2c: overlap-avoidance (issues 0005 / 0019). No two component courtyards may
     // overlap; generate a NoOverlap constraint for every pair (O(N²), as noted in
-    // the ticket). Courtyards are computed once per component (oriented; a part with
-    // no geometry has none and is dropped here), then paired. `components` is a
-    // BTreeMap, so the order — and thus the constraint set — is deterministic.
-    let courts: Vec<(EntityId, (Nm, Nm))> = components
+    // the ticket). Each courtyard is lowered once per component to a rounded convex
+    // polygon in its local frame, already rotated by its orientation (see
+    // [`component_courtyard`]); a part with no geometry has none and is dropped here.
+    // `components` is a BTreeMap, so the order — and thus the constraint set — is
+    // deterministic.
+    let courts: Vec<(EntityId, Vec<Point>, Nm)> = components
         .iter()
-        .map(|(id, c)| (id.clone(), oriented_courtyard(&lib[&c.part], c.orient)))
-        .filter(|(_, h)| *h != (0, 0))
+        .filter_map(|(id, c)| {
+            component_courtyard(&lib[&c.part], c.orient).map(|(poly, r)| (id.clone(), poly, r))
+        })
         .collect();
     for i in 0..courts.len() {
         for j in (i + 1)..courts.len() {
             relational.push(Constraint::NoOverlap {
                 a: courts[i].0.clone(),
+                a_poly: courts[i].1.clone(),
+                a_r: courts[i].2,
                 b: courts[j].0.clone(),
-                a_half: courts[i].1,
-                b_half: courts[j].1,
+                b_poly: courts[j].1.clone(),
+                b_r: courts[j].2,
             });
         }
     }
@@ -782,6 +787,45 @@ pub fn elaborate(
     // conflict surfaced loudly, non-blocking like the pos findings above.
     report.refdes_pin_dups = crate::annotate::duplicate_refdes_pins(refdes_pins);
 
+    // Honest verify (Decision 10's third leg / issue 0019). The solver now pushes the
+    // *true* polygonal courtyards, but a converged placement can still leave a residual
+    // overlap the push could not clear — two fixed/pinned parts placed into each other.
+    // Re-check every NoOverlap pair against the real rounded polygons at the final
+    // placement and report any that still overlap. Because the solver push consumes the
+    // polygon itself (not the looser AABB proxy), this is the tighter truth — the check
+    // deliberately *not* shipped pre-0019, when it could only ever false-positive.
+    for c in &relational {
+        if let Constraint::NoOverlap {
+            a,
+            a_poly,
+            a_r,
+            b,
+            b_poly,
+            b_r,
+        } = c
+        {
+            let (Some(&pa), Some(&pb)) = (solved_final.get(a), solved_final.get(b)) else {
+                continue;
+            };
+            let world = |poly: &[Point], o: Point| -> Vec<Point> {
+                poly.iter()
+                    .map(|p| Point {
+                        x: p.x + o.x,
+                        y: p.y + o.y,
+                    })
+                    .collect()
+            };
+            // Report only overlaps deeper than the placement tolerance: a converged
+            // movable pair carries at most the solver's sub-µm residual, which is slop,
+            // not a collision. A genuine unresolvable overlap (two fixed parts pinned
+            // into each other) penetrates by far more.
+            let depth = courtyard_overlap_depth(&world(a_poly, pa), *a_r, &world(b_poly, pb), *b_r);
+            if depth > PLACE_TOL as f64 {
+                report.courtyard_overlaps.push((a.clone(), b.clone()));
+            }
+        }
+    }
+
     Ok(Elaborated {
         components,
         nets,
@@ -813,6 +857,43 @@ fn note_missing(
         ));
     }
     true
+}
+
+/// A placed component's courtyard as a **rounded convex polygon** in its local frame,
+/// already rotated by `orient` (not translated — the solver adds the node position each
+/// sweep). Returns `(vertices, radius)`, the keep-out being `hull(vertices) ⊕
+/// disc(radius)`, or `None` for a footprint-less part (no courtyard ⇒ exempt from
+/// overlap-avoidance, exactly as before).
+///
+/// Prefers the real polygonal courtyard ([`courtyard_shape`] — the convex pad hull ⊕
+/// margin): this is issue 0019's whole point. A *rotated* part reserves its rotated
+/// hull, so neighbours nestle into concavities the axis-aligned box would over-reserve.
+/// A part with copper but no 2-D hull (a lone round pad / collinear pads) has no polygon
+/// courtyard; it falls back to the axis-aligned box proxy from [`courtyard_half_extents`]
+/// (via [`oriented_courtyard`]), lowered as a 4-vertex radius-0 polygon so the identical
+/// SAT path serves it and its behaviour is unchanged from the pre-0019 AABB push.
+fn component_courtyard(def: &PartDef, orient: Orient) -> Option<(Vec<Point>, Nm)> {
+    if let Some(shape) = courtyard_shape(def) {
+        let verts = shape
+            .points()
+            .into_iter()
+            .map(|p| orient.apply(p))
+            .collect();
+        return Some((verts, shape.radius()));
+    }
+    let (hw, hh) = oriented_courtyard(def, orient);
+    if (hw, hh) == (0, 0) {
+        return None;
+    }
+    Some((
+        vec![
+            Point { x: hw, y: hh },
+            Point { x: -hw, y: hh },
+            Point { x: -hw, y: -hh },
+            Point { x: hw, y: -hh },
+        ],
+        0,
+    ))
 }
 
 /// A part's courtyard half-extents oriented for a placed component. The courtyard is

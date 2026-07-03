@@ -549,6 +549,182 @@ mod tests {
         );
     }
 
+    /// A library with a long rectangular part (`BAR`, a 6 mm × 1 mm pad) and a small
+    /// square (`DOT`, a 0.5 mm pad). The rectangle is what makes rotation *matter*: a
+    /// square's courtyard is rotation-invariant, but a rotated bar's true hull is very
+    /// different from the axis-aligned box of it — the crux of issue 0019.
+    fn bar_lib() -> super::part::PartLib {
+        use super::geom::Shape2D;
+        use super::part::{PadCopper, PadGeo, PadLayers, PartDef, PinDef, PinRole};
+        let pad = |w, h| PinDef {
+            name: "1".into(),
+            number: "1".into(),
+            role: PinRole::Passive,
+            offset: Point { x: 0, y: 0 },
+            pad: Some(PadGeo {
+                copper: vec![PadCopper {
+                    shape: Shape2D::rect(Point { x: 0, y: 0 }, w, h),
+                    layers: PadLayers::Top,
+                }],
+                drill: None,
+            }),
+        };
+        let mk = |name: &str, w, h| PartDef {
+            name: name.into(),
+            pins: vec![pad(w, h)],
+            interfaces: BTreeMap::new(),
+            graphics: Vec::new(),
+            texts: Vec::new(),
+            courtyard: None,
+            class: None,
+        };
+        let mut lib = super::part::PartLib::new();
+        lib.insert("BAR".into(), mk("BAR", 6 * MM, MM));
+        lib.insert("DOT".into(), mk("DOT", 500_000, 500_000));
+        lib
+    }
+
+    /// Issue 0019: the solver exploits the *rotated* polygonal courtyard, not the
+    /// axis-aligned box of it. A bar rotated 45° has a large square AABB but a thin
+    /// diagonal true hull. A small part parked in the empty corner of that AABB — well
+    /// clear of the bar itself — must be left untouched (least change), where the old
+    /// AABB-proxy push would have shoved it out of a box it never really occupied.
+    #[test]
+    fn placement_exploits_rotated_courtyard() {
+        use super::doc::Orient;
+        let lib = bar_lib();
+        // BAR at the origin, rotated 45° so its length runs along the +diagonal.
+        // DOT parked on the −diagonal corner (2.3 mm, −2.3 mm): inside the bar's ~±2.7 mm
+        // AABB, but ~4 mm from the bar's real hull.
+        let src = vec![
+            GenDirective::Instance {
+                path: "bar".into(),
+                part: "BAR".into(),
+                params: BTreeMap::new(),
+                label: None,
+            },
+            GenDirective::Instance {
+                path: "dot".into(),
+                part: "DOT".into(),
+                params: BTreeMap::new(),
+                label: None,
+            },
+            GenDirective::Place {
+                path: "bar".into(),
+                pos: Point { x: 0, y: 0 },
+            },
+            GenDirective::Rotate {
+                path: "bar".into(),
+                orient: Orient::from_angle_deg(45.0),
+            },
+            GenDirective::Place {
+                path: "dot".into(),
+                pos: Point {
+                    x: 2_300_000,
+                    y: -2_300_000,
+                },
+            },
+        ];
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "s")
+            .unwrap();
+        let dot = pos(h.doc(), "dot");
+        // The DOT clears the rotated bar, so least-change leaves it exactly at its anchor.
+        assert!(
+            dist(
+                dot,
+                Point {
+                    x: 2_300_000,
+                    y: -2_300_000
+                }
+            ) <= PLACE_TOL as f64,
+            "DOT in the empty AABB corner must stay put (0019), got {dot:?}"
+        );
+        assert!(
+            h.doc().report.courtyard_overlaps.is_empty(),
+            "no residual overlap: {:?}",
+            h.doc().report.courtyard_overlaps
+        );
+
+        // Negative control: the same DOT dropped on the bar's centre *does* overlap the
+        // real hull and is pushed off it.
+        let src2 = vec![
+            GenDirective::Instance {
+                path: "bar".into(),
+                part: "BAR".into(),
+                params: BTreeMap::new(),
+                label: None,
+            },
+            GenDirective::Instance {
+                path: "dot".into(),
+                part: "DOT".into(),
+                params: BTreeMap::new(),
+                label: None,
+            },
+            GenDirective::Rotate {
+                path: "bar".into(),
+                orient: Orient::from_angle_deg(45.0),
+            },
+            GenDirective::Place {
+                path: "bar".into(),
+                pos: Point { x: 0, y: 0 },
+            },
+            GenDirective::Place {
+                path: "dot".into(),
+                pos: Point { x: 0, y: 0 },
+            },
+        ];
+        let mut h2 = History::new(Default::default());
+        h2.commit(Transaction::one(Command::SetSource(src2)), &lib, "s")
+            .unwrap();
+        let dot2 = pos(h2.doc(), "dot");
+        assert!(
+            dist(dot2, Point { x: 0, y: 0 }) > PLACE_TOL as f64,
+            "DOT on the bar centre must be pushed off, got {dot2:?}"
+        );
+    }
+
+    /// Honest verify (Decision 10's third leg / issue 0019): two parts *fixed* into
+    /// each other cannot be separated by the push, so the final placement still has a
+    /// real courtyard overlap — which the verify reports on the true polygons, rather
+    /// than pretending the placement is clean.
+    #[test]
+    fn honest_verify_reports_fixed_courtyard_overlap() {
+        let lib = bar_lib();
+        let src = vec![
+            GenDirective::Instance {
+                path: "d1".into(),
+                part: "DOT".into(),
+                params: BTreeMap::new(),
+                label: None,
+            },
+            GenDirective::Instance {
+                path: "d2".into(),
+                part: "DOT".into(),
+                params: BTreeMap::new(),
+                label: None,
+            },
+            // Both hard-fixed 0.2 mm apart: courtyards (0.25 mm half + 0.25 mm margin)
+            // deeply overlap and neither can move.
+            GenDirective::Fix {
+                path: "d1".into(),
+                pos: Point { x: 0, y: 0 },
+            },
+            GenDirective::Fix {
+                path: "d2".into(),
+                pos: Point { x: 200_000, y: 0 },
+            },
+        ];
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "s")
+            .unwrap();
+        assert_eq!(
+            h.doc().report.courtyard_overlaps,
+            vec![(EntityId::new("d1"), EntityId::new("d2"))],
+            "the fixed overlap must be reported honestly"
+        );
+    }
+
     /// Stage-3 / issue 0006: DRC clearance is pad-aware — it sees the real copper
     /// extent of a pad, not its centre point. Two 0.5 mm pads of different nets
     /// 0.6 mm apart (0.1 mm edge gap) clash a 0.15 mm rule; 1 mm apart they clear.

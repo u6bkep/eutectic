@@ -352,6 +352,12 @@ pub struct ReconReport {
     /// `C7`) — surfaced loudly as an error, kept until resolved, but non-blocking
     /// like the other override findings (the geometry still elaborated).
     pub refdes_pin_dups: Vec<(String, Vec<EntityId>)>,
+    /// Honest verify (Decision 10 / issue 0019): component pairs whose real polygonal
+    /// courtyards still overlap at the final placement. Empty when the solver separated
+    /// everything; non-empty only when a pair could not be pushed apart (e.g. two
+    /// fixed/pinned parts placed into each other). Each pair is ordered `(a, b)` with
+    /// `a < b`, matching the deterministic constraint order.
+    pub courtyard_overlaps: Vec<(EntityId, EntityId)>,
 }
 
 impl ReconReport {
@@ -361,6 +367,7 @@ impl ReconReport {
             && self.redundant_pins.is_empty()
             && self.orphaned.is_empty()
             && self.refdes_pin_dups.is_empty()
+            && self.courtyard_overlaps.is_empty()
     }
 }
 
@@ -422,6 +429,16 @@ impl crate::diagnostic::Diagnose for ReconReport {
                 format!("refdes `{refdes}` is pinned on multiple entities: {joined}"),
                 Location::Entity(ids[0].clone()),
             ));
+        }
+        for (a, b) in &self.courtyard_overlaps {
+            out.push(
+                Diagnostic::error(
+                    "E_COURTYARD_OVERLAP",
+                    format!("courtyards of `{a}` and `{b}` overlap at the final placement"),
+                    Location::Entity(a.clone()),
+                )
+                .with_help("free a pin/fix so the solver can separate them, or move one part"),
+            );
         }
         out
     }

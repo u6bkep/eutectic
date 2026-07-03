@@ -89,15 +89,25 @@ pub enum Constraint {
         b_off: Point,
         within: Nm,
     },
-    /// Two component courtyards (axis-aligned boxes, centred on each node, with the
-    /// given half-extents already oriented) must not overlap (issue 0005). When they
-    /// do, the nodes are pushed apart along the axis of least penetration. Two
-    /// overlapping *fixed* parts cannot be separated and are reported as unsatisfied.
+    /// Two component courtyards must not overlap (issues 0005 / 0019). Each courtyard
+    /// is a **rounded convex polygon** — a hull of vertices ⊕ a disc of `radius` (the
+    /// courtyard margin) — given in the node's local frame *already rotated by its
+    /// orientation* but not translated, so its world vertices are `pos[node] + vertex`.
+    /// A footprint whose only proxy is an axis-aligned box arrives as a 4-vertex
+    /// polygon with `radius = 0`, so the same code path serves both (issue 0019
+    /// replaced the axis-aligned-box push with exact convex-polygon SAT; the box is now
+    /// just a degenerate polygon).
+    ///
+    /// When they overlap the nodes are pushed apart along the minimum-translation axis
+    /// (see [`poly_push`]). Two overlapping *fixed* parts cannot be separated and are
+    /// reported as unsatisfied.
     NoOverlap {
         a: EntityId,
         b: EntityId,
-        a_half: (Nm, Nm),
-        b_half: (Nm, Nm),
+        a_poly: Vec<Point>,
+        a_r: Nm,
+        b_poly: Vec<Point>,
+        b_r: Nm,
     },
 }
 
@@ -291,43 +301,147 @@ fn constraint_residual(c: &Constraint, pos: &BTreeMap<EntityId, (f64, f64)>) -> 
         Constraint::NoOverlap {
             a,
             b,
-            a_half,
-            b_half,
+            a_poly,
+            a_r,
+            b_poly,
+            b_r,
         } => {
             let (Some(&pa), Some(&pb)) = (pos.get(a), pos.get(b)) else {
                 return 0.0;
             };
-            aabb_push(pa, half_f64(*a_half), pb, half_f64(*b_half)).map_or(0.0, |(d, _, _)| d)
+            let aw = world_poly(a_poly, pa);
+            let bw = world_poly(b_poly, pb);
+            poly_push(&aw, *a_r, &bw, *b_r).map_or(0.0, |(d, _, _)| d)
         }
     }
 }
 
-fn half_f64(h: (Nm, Nm)) -> (f64, f64) {
-    (h.0 as f64, h.1 as f64)
+/// The world integer vertices of a rotated local polygon translated to a node whose
+/// (f64) position is `pos`, rounded to nm. The solver's working state is f64, but the
+/// separation *decision* is exact i128 on these integer vertices — the containment
+/// clamp rounds to nm the same way, so the two stay consistent.
+fn world_poly(local: &[Point], pos: (f64, f64)) -> Vec<Point> {
+    let (ox, oy) = (pos.0.round() as Nm, pos.1.round() as Nm);
+    local
+        .iter()
+        .map(|p| Point {
+            x: p.x + ox,
+            y: p.y + oy,
+        })
+        .collect()
 }
 
-/// Penetration of two axis-aligned courtyards (centres `pa`/`pb`, half-extents
-/// `ah`/`bh`). Returns `(depth, ux, uy)` — the minimum-translation separation: push
-/// `b` by `+depth·(ux,uy)` and `a` by `−depth·(ux,uy)` to just clear. `None` if the
-/// boxes are disjoint (touching counts as disjoint). Axis of least penetration; the
-/// push sign carries `b` to the far side, deterministic when centres coincide.
-fn aabb_push(
-    pa: (f64, f64),
-    ah: (f64, f64),
-    pb: (f64, f64),
-    bh: (f64, f64),
-) -> Option<(f64, f64, f64)> {
-    let (dx, dy) = (pb.0 - pa.0, pb.1 - pa.1);
-    let ox = (ah.0 + bh.0) - dx.abs();
-    let oy = (ah.1 + bh.1) - dy.abs();
-    if ox <= 0.0 || oy <= 0.0 {
-        return None;
+/// Minimum-translation push separating two **rounded convex polygons** — hulls `a`/`b`
+/// (world integer vertices, either winding) each ⊕ a disc of radius `ar`/`br`. Returns
+/// `(depth, ux, uy)`: push `b` by `+depth·(ux,uy)` and `a` by `−depth·(ux,uy)` to just
+/// clear; `None` when the rounded shapes are disjoint (touching counts as disjoint).
+///
+/// Exact convex-polygon SAT. The candidate separating axes are every edge normal of
+/// each hull (covering edge/edge and vertex/edge contact) **plus** every vertex-to-
+/// vertex direction (covering the rounded corner/corner case, whose separating axis is
+/// no edge normal). For two convex hulls the closest-feature direction is always in
+/// this set, so the axis of greatest separation — equivalently least penetration once
+/// the disc radii are folded in — is found exactly. The overlap test and axis choice
+/// are exact i128 (dot products of integer vertices with integer axis vectors); only
+/// the returned magnitude and unit direction are f64, applied to the f64 working state.
+///
+/// Determinism: axes are visited in a fixed order (a's edges, b's edges, then vertex
+/// pairs in nested order); the disjoint test short-circuits on the first separating
+/// axis; the penetration axis is chosen by strict `<`, so the first minimiser wins.
+fn poly_push(a: &[Point], ar: Nm, b: &[Point], br: Nm) -> Option<(f64, f64, f64)> {
+    let r = (ar + br) as i128; // combined disc radius (nm); the rounded margin
+    let r2 = r * r;
+
+    // Track the minimum-penetration axis (the MTV) across all candidate axes.
+    let mut best_pen = f64::INFINITY;
+    let mut best_dir = (0.0_f64, 0.0_f64);
+
+    let mut consider = |nx: i128, ny: i128| -> Option<()> {
+        if nx == 0 && ny == 0 {
+            return Some(()); // a zero axis (coincident vertices / degenerate edge)
+        }
+        let n2 = nx * nx + ny * ny;
+        let proj = |poly: &[Point]| {
+            let mut lo = i128::MAX;
+            let mut hi = i128::MIN;
+            for p in poly {
+                let d = p.x as i128 * nx + p.y as i128 * ny;
+                lo = lo.min(d);
+                hi = hi.max(d);
+            }
+            (lo, hi)
+        };
+        let (a_lo, a_hi) = proj(a);
+        let (b_lo, b_hi) = proj(b);
+        // Signed hull overlap along this axis, in |n|-scaled units.
+        let depth = a_hi.min(b_hi) - a_lo.max(b_lo);
+        if depth <= 0 {
+            // Hull projections disjoint on this axis by gap = -depth (scaled). The
+            // rounded shapes clear iff that real gap ≥ r, i.e. gap² ≥ r²·|n|² (exact).
+            let gap = -depth;
+            if gap * gap >= r2 * n2 {
+                return None; // separating axis found ⇒ shapes disjoint
+            }
+        }
+        // No separation on this axis: real penetration is depth/|n| + r. Fold the disc
+        // radius into the depth and keep the least-penetration axis for the MTV.
+        let inv_len = 1.0 / (n2 as f64).sqrt();
+        let pen = depth as f64 * inv_len + r as f64;
+        if pen < best_pen {
+            best_pen = pen;
+            // Orient the axis so it carries b to the side it already lies on.
+            let sign = if (b_lo + b_hi) - (a_lo + a_hi) >= 0 {
+                1.0
+            } else {
+                -1.0
+            };
+            best_dir = (nx as f64 * inv_len * sign, ny as f64 * inv_len * sign);
+        }
+        Some(())
+    };
+
+    // Edge normals of each hull: edge (dx,dy) ⇒ normal (dy,-dx). `consider` yields
+    // `None` on the first axis that separates the shapes, which `?` turns into an early
+    // "disjoint ⇒ no push" return from `poly_push`.
+    for poly in [a, b] {
+        let n = poly.len();
+        for i in 0..n {
+            let p = poly[i];
+            let q = poly[(i + 1) % n];
+            consider((q.y - p.y) as i128, -((q.x - p.x) as i128))?;
+        }
     }
-    if ox <= oy {
-        Some((ox, if dx >= 0.0 { 1.0 } else { -1.0 }, 0.0))
+    // Vertex-to-vertex directions (the rounded corner/corner separating axes).
+    for &pa in a {
+        for &pb in b {
+            consider((pb.x - pa.x) as i128, (pb.y - pa.y) as i128)?;
+        }
+    }
+
+    if best_pen.is_finite() && best_pen > 0.0 {
+        Some((best_pen, best_dir.0, best_dir.1))
     } else {
-        Some((oy, 0.0, if dy >= 0.0 { 1.0 } else { -1.0 }))
+        None
     }
+}
+
+/// Penetration depth (nm) of two rounded convex courtyards at integer **world**
+/// vertices, or `0.0` when disjoint (touching counts as disjoint). The honest verify's
+/// measurement (Decision 10's third leg): exact-i128 SAT decision, run on the solver's
+/// final placement against the real polygon courtyards. Reported against a tolerance,
+/// not `> 0`, because the solver converges only to within [`RES_TOL`] — a sub-µm
+/// residual is convergence slop, not a collision, so a bare "overlaps?" bool would fire
+/// on every normal placement. A thin wrapper over [`poly_push`].
+pub fn courtyard_overlap_depth(a: &[Point], ar: Nm, b: &[Point], br: Nm) -> f64 {
+    poly_push(a, ar, b, br).map_or(0.0, |(d, _, _)| d)
+}
+
+/// True iff two rounded convex courtyards strictly overlap (touching counts as
+/// disjoint) — the exact geometric predicate, no tolerance. Used by tests and callers
+/// wanting the raw truth; the honest verify uses [`courtyard_overlap_depth`] with a
+/// tolerance.
+pub fn courtyards_overlap(a: &[Point], ar: Nm, b: &[Point], br: Nm) -> bool {
+    poly_push(a, ar, b, br).is_some()
 }
 
 /// Residual of a separation constraint: how far `dist(a+a_off, b+b_off)` is from
@@ -398,14 +512,17 @@ fn apply_constraint(
         Constraint::NoOverlap {
             a,
             b,
-            a_half,
-            b_half,
+            a_poly,
+            a_r,
+            b_poly,
+            b_r,
         } => {
             let (Some(&pa), Some(&pb)) = (pos.get(a), pos.get(b)) else {
                 return;
             };
-            let Some((depth, ux, uy)) = aabb_push(pa, half_f64(*a_half), pb, half_f64(*b_half))
-            else {
+            let aw = world_poly(a_poly, pa);
+            let bw = world_poly(b_poly, pb);
+            let Some((depth, ux, uy)) = poly_push(&aw, *a_r, &bw, *b_r) else {
                 return;
             };
             let (a_fixed, b_fixed) = (fixed.contains(a), fixed.contains(b));
@@ -523,5 +640,221 @@ fn align(
                 p.1 = target;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A square courtyard hull, half-side `s`, centred at `(cx, cy)` (world nm).
+    fn square(cx: Nm, cy: Nm, s: Nm) -> Vec<Point> {
+        vec![
+            Point {
+                x: cx + s,
+                y: cy + s,
+            },
+            Point {
+                x: cx - s,
+                y: cy + s,
+            },
+            Point {
+                x: cx - s,
+                y: cy - s,
+            },
+            Point {
+                x: cx + s,
+                y: cy - s,
+            },
+        ]
+    }
+
+    // ---- SAT correctness pins: overlapping / touching / separated / contained ----
+
+    #[test]
+    fn sat_overlapping_squares_push_apart() {
+        // Two 1000-half squares (radius 0), centres 500 apart on x: they overlap by
+        // 2·1000 − 500 = 1500 along x, and x is the min-penetration axis.
+        let a = square(0, 0, 1000);
+        let b = square(500, 0, 1000);
+        let (depth, ux, uy) = poly_push(&a, 0, &b, 0).expect("overlap");
+        assert!((depth - 1500.0).abs() < 1e-6, "depth {depth}");
+        assert!(
+            (ux - 1.0).abs() < 1e-9 && uy.abs() < 1e-9,
+            "push along +x: ({ux},{uy})"
+        );
+    }
+
+    #[test]
+    fn sat_touching_squares_are_disjoint() {
+        // Edge-to-edge (centres 2000 apart, each 1000 half): touching counts as clear.
+        assert!(poly_push(&square(0, 0, 1000), 0, &square(2000, 0, 1000), 0).is_none());
+    }
+
+    #[test]
+    fn sat_separated_squares_no_push() {
+        assert!(poly_push(&square(0, 0, 1000), 0, &square(5000, 0, 1000), 0).is_none());
+    }
+
+    #[test]
+    fn sat_contained_square_pushes_out() {
+        // A small square wholly inside a large one still overlaps (Some push).
+        assert!(poly_push(&square(0, 0, 200), 0, &square(0, 0, 2000), 0).is_some());
+    }
+
+    // ---- The disc (courtyard-margin) radius folds into the separation exactly. ----
+
+    #[test]
+    fn sat_radius_separation_is_the_sum_of_radii() {
+        // Hulls 1000-half, centres 2000 apart ⇒ hull edges touch (gap 0). With radii
+        // 400 + 600 = 1000 the rounded shapes overlap by exactly 1000.
+        let a = square(0, 0, 1000);
+        let b = square(2000, 0, 1000);
+        let (depth, _, _) = poly_push(&a, 400, &b, 600).expect("rounded overlap");
+        assert!((depth - 1000.0).abs() < 1e-6, "depth {depth}");
+        // Move them so the hull gap equals the summed radii ⇒ exactly touching ⇒ clear.
+        assert!(poly_push(&a, 400, &square(3000, 0, 1000), 600).is_none());
+        // One nm closer than that ⇒ overlap.
+        assert!(poly_push(&a, 400, &square(2999, 0, 1000), 600).is_some());
+    }
+
+    // ---- Rotation: a rotated hull is NOT its axis-aligned box (issue 0019). ----
+
+    #[test]
+    fn sat_rotated_hull_beats_the_aabb_proxy() {
+        // `a` is a diamond (a 45°-rotated square): vertices on the axes at ±1414. Its
+        // axis-aligned bounding box is [-1414, 1414]². `b` is a small square parked in
+        // that box's corner at (1100, 1100) — inside the AABB, but well outside the
+        // diamond (|1100|+|1100| = 2200 > 1414). The polygon SAT clears them; an AABB
+        // proxy (the pre-0019 push) would have seen the corner as occupied and shoved.
+        let diamond = vec![
+            Point { x: 1414, y: 0 },
+            Point { x: 0, y: 1414 },
+            Point { x: -1414, y: 0 },
+            Point { x: 0, y: -1414 },
+        ];
+        let b = square(1100, 1100, 100);
+        assert!(
+            poly_push(&diamond, 0, &b, 0).is_none(),
+            "rotated diamond clears the corner square the AABB would flag"
+        );
+        // Sanity: the same square at the diamond's centre does overlap.
+        assert!(poly_push(&diamond, 0, &square(0, 0, 100), 0).is_some());
+    }
+
+    #[test]
+    fn courtyards_overlap_matches_push() {
+        assert!(courtyards_overlap(
+            &square(0, 0, 1000),
+            0,
+            &square(500, 0, 1000),
+            0
+        ));
+        assert!(!courtyards_overlap(
+            &square(0, 0, 1000),
+            0,
+            &square(3000, 0, 1000),
+            0
+        ));
+    }
+
+    // ---- The relaxation loop converges (no oscillation) on a crowded cluster. ----
+
+    #[test]
+    fn crowded_cluster_converges_without_overlap() {
+        use crate::id::EntityId;
+        // Six identical square courtyards all dropped at the origin. The Gauss-Seidel
+        // NoOverlap projections must fan them out and settle (converge), leaving no
+        // residual overlap — the anti-oscillation check.
+        let ids: Vec<EntityId> = (0..6).map(|i| EntityId::new(format!("c{i}"))).collect();
+        let local = square(0, 0, 1000); // centred hull, in local frame
+        let mut anchors = BTreeMap::new();
+        for id in &ids {
+            anchors.insert(id.clone(), Point { x: 0, y: 0 });
+        }
+        let mut constraints = Vec::new();
+        for i in 0..ids.len() {
+            for j in (i + 1)..ids.len() {
+                constraints.push(Constraint::NoOverlap {
+                    a: ids[i].clone(),
+                    a_poly: local.clone(),
+                    a_r: 250_000,
+                    b: ids[j].clone(),
+                    b_poly: local.clone(),
+                    b_r: 250_000,
+                });
+            }
+        }
+        let p = Problem {
+            anchors,
+            fixed: BTreeSet::new(),
+            board: None,
+            constraints,
+        };
+        let sol = solve(&p);
+        assert!(
+            sol.converged,
+            "crowded cluster must converge (iters {})",
+            sol.iters
+        );
+        // Every pair clears at the final placement, up to the solver's sub-µm residual
+        // (the honest verify's own tolerance) — no oscillation, no gross residual.
+        for i in 0..ids.len() {
+            for j in (i + 1)..ids.len() {
+                let wa: Vec<Point> = local
+                    .iter()
+                    .map(|q| Point {
+                        x: q.x + sol.positions[&ids[i]].x,
+                        y: q.y + sol.positions[&ids[i]].y,
+                    })
+                    .collect();
+                let wb: Vec<Point> = local
+                    .iter()
+                    .map(|q| Point {
+                        x: q.x + sol.positions[&ids[j]].x,
+                        y: q.y + sol.positions[&ids[j]].y,
+                    })
+                    .collect();
+                let depth = courtyard_overlap_depth(&wa, 250_000, &wb, 250_000);
+                assert!(
+                    depth <= PLACE_TOL as f64,
+                    "pair {i},{j} overlaps by {depth} nm"
+                );
+            }
+        }
+    }
+
+    // ---- Honest verify: two fixed parts pushed into each other cannot separate. ----
+
+    #[test]
+    fn fixed_overlap_is_unsatisfiable() {
+        use crate::id::EntityId;
+        let (a, b) = (EntityId::new("a"), EntityId::new("b"));
+        let local = square(0, 0, 1000);
+        let mut anchors = BTreeMap::new();
+        anchors.insert(a.clone(), Point { x: 0, y: 0 });
+        anchors.insert(b.clone(), Point { x: 500, y: 0 }); // overlapping
+        let mut fixed = BTreeSet::new();
+        fixed.insert(a.clone());
+        fixed.insert(b.clone());
+        let p = Problem {
+            anchors,
+            fixed,
+            board: None,
+            constraints: vec![Constraint::NoOverlap {
+                a: a.clone(),
+                a_poly: local.clone(),
+                a_r: 0,
+                b: b.clone(),
+                b_poly: local.clone(),
+                b_r: 0,
+            }],
+        };
+        let sol = solve(&p);
+        assert!(
+            !sol.converged,
+            "two fixed overlapping parts cannot be separated"
+        );
+        assert_eq!(sol.unsatisfied.len(), 1);
     }
 }
