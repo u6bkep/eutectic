@@ -61,7 +61,7 @@
 
 use crate::doc::{Nm, Point};
 use crate::font::Justify;
-use crate::geom::{Path, Seg, Shape2D};
+use crate::geom::{Path, Seg, Shape2D, point_kernel_safe};
 use crate::region::Region;
 
 /// A parsed outline font. Owns the file bytes; a [`ttf_parser::Face`] borrows them and is
@@ -233,11 +233,26 @@ struct Outliner {
 
 impl Outliner {
     /// Font-unit `(x, y)` → world-nm [`Point`], with the glyph's pen offset `dx` on x.
+    ///
+    /// Coordinate range (issue 0018): a glyph coord is `font_unit · height/cap (+ dx)`.
+    /// `height` is ingest-bounded (≤ `MAX_COORD`), but a font unit can be several × the
+    /// cap height (ascenders / wide glyphs) and `dx` accumulates the run's advance, so a
+    /// coord scales to a few × `height` and is **not** structurally ≤ the kernel ceiling
+    /// — a meter-scale `height` or an enormous run overflows the `i128` product in the
+    /// curve-flatten's `pt_seg_d2`. That is unreachable for any realistic silk text
+    /// (heights ≤ tens of mm keep coords far under `KERNEL_SAFE_COORD`), and the fault
+    /// class is cosmetic (garbage silk, never copper/DRC). We assert it loud in debug
+    /// (mirroring the kernel predicates); release relies on the ingest-bounded height.
     fn map(&self, x: f32, y: f32) -> Point {
-        Point {
+        let p = Point {
             x: scale_f(x, self.height, self.cap) + self.dx,
             y: scale_f(y, self.height, self.cap),
-        }
+        };
+        debug_assert!(
+            point_kernel_safe(p),
+            "ttf glyph coordinate exceeds KERNEL_SAFE_COORD; text height/run too large (issue 0018)"
+        );
+        p
     }
     /// Finish the current contour (if it has any edges) into `contours`.
     fn flush(&mut self) {
@@ -608,6 +623,19 @@ mod tests {
         assert_eq!(face.units_per_em(), 1000);
         assert_eq!(face.capital_height(), None, "fixture has no OS/2");
         assert_eq!(cap_height_units(&face), 700, "cap height from H ink");
+    }
+
+    /// Coordinate-range guard (issue 0018): a pathological text height scales glyph
+    /// coordinates past `KERNEL_SAFE_COORD`, which the `map` funnel asserts in debug
+    /// (the curve-flatten `pt_seg_d2` would otherwise risk an i128 wrap). Debug-only;
+    /// release trusts the ingest-bounded height. `H` spans 600 units of a 700-unit cap,
+    /// so height 2e9 ⇒ x ≈ 1.71e9 > the ceiling.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "KERNEL_SAFE_COORD")]
+    fn pathological_height_trips_the_coord_guard() {
+        let font = TtfFont::from_bytes(build_test_ttf()).unwrap();
+        let _ = text_regions("H", 2_000_000_000, Justify::Left, &font);
     }
 
     /// `H` is one solid island: a single ring, positive (CCW) area, spanning the scaled
