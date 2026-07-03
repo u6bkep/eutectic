@@ -266,6 +266,35 @@ mod tests {
         assert_eq!(reg["R"].template.as_deref(), Some("{value} {tol}"));
     }
 
+    #[test]
+    fn authored_class_with_no_template_kills_seed_template_wholesale() {
+        // `class R` authored with `template: None` must REPLACE the R seed wholesale, not
+        // field-merge — so the seed's `template = "{value}"` is gone (`None`), leaving
+        // only the query-level `"{value}"` fallback. The label is behaviourally unchanged
+        // *only* because the R seed template happens to equal that fallback; the
+        // wholesale-replace semantics are observable here at the registry map. C's seed
+        // is untouched.
+        let src = vec![GenDirective::Class {
+            name: "R".to_string(),
+            entry: ClassEntry {
+                prefix: None,
+                template: None,
+                defaults: params(&[("tol", "1%")]),
+            },
+        }];
+        let reg = registry(&src);
+        assert_eq!(
+            reg["R"].template, None,
+            "seed template replaced wholesale, not merged"
+        );
+        assert_eq!(reg["R"].defaults["tol"], "1%");
+        assert_eq!(
+            reg["C"].template.as_deref(),
+            Some("{value}"),
+            "C seed untouched"
+        );
+    }
+
     // ---- class heuristic ----
 
     #[test]

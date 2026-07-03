@@ -1519,6 +1519,35 @@ slab F.Cu 1.565mm 1.6mm conductor copper";
         );
     }
 
+    /// Documented limitation: a param value containing `" ` (a double quote followed by
+    /// whitespace) serializes WITHOUT escaping the inner quote — `p:x="a" b"` — so the
+    /// tokenizer closes the quoted run at the inner `"` and the trailing `b"` is an
+    /// orphan token: the output does not reparse. Pinned here (the same limitation as
+    /// `text`-label serialization) so a future escaping fix updates this test on purpose.
+    #[test]
+    fn embedded_double_quote_is_a_documented_serialize_limitation() {
+        let mut params = BTreeMap::new();
+        params.insert("x".to_string(), "a\" b".to_string());
+        let doc = doc_of(
+            vec![GenDirective::Instance {
+                path: "u1".into(),
+                part: "MCU".into(),
+                params,
+                label: None,
+            }],
+            BTreeMap::new(),
+        );
+        let text = serialize(&doc);
+        assert!(
+            text.contains("p:x=\"a\" b\""),
+            "unescaped inner quote expected: {text}"
+        );
+        assert!(
+            parse(&text).is_err(),
+            "embedded `\" ` value is not round-trippable (documented limitation)"
+        );
+    }
+
     /// Elaboration copies an instance's `params`/`label` verbatim onto its `Component`.
     #[test]
     fn elaboration_copies_params_and_label_onto_component() {

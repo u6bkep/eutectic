@@ -8,9 +8,10 @@
 //! [`parse`] accepts, after trimming and stripping an optional trailing unit token:
 //!
 //!   - **plain decimals** — `10000`, `0.1`, `4.7`, `0.47`;
-//!   - **SI multiplier suffix** — a trailing scale letter `p n u µ m k K M G`
-//!     (`10k`, `100n`, `4.7u`); `k` and `K` are both kilo, lowercase `m` is milli and
-//!     uppercase `M` is mega;
+//!   - **SI multiplier suffix** — a trailing scale letter `p n u µ μ m k K M G`
+//!     (`10k`, `100n`, `4.7u`); micro accepts both the micro sign `µ` (U+00B5) and Greek
+//!     mu `μ` (U+03BC); `k` and `K` are both kilo, lowercase `m` is milli and uppercase
+//!     `M` is mega;
 //!   - **IEC 60062 letter notation** — a scale letter used *as the decimal point*
 //!     (`2R6` = 2.6, `4k7` = 4700, `1M2` = 1_200_000, `R47` = 0.47, `4m7` = 0.0047);
 //!     `R` denotes the ones place and is IEC-only.
@@ -187,14 +188,28 @@ impl Quantity {
             }
             d.max(1)
         };
-        // Place (base-10) of the leading digit of the value.
-        let leading = self.exp + ndigits - 1;
+        // Place (base-10) of the leading digit of the value. Saturating: `mant`/`exp`
+        // are public, so a caller can construct an extreme `exp` (e.g. `i32::MAX`) that
+        // would overflow this add in debug; parse-derived values are nowhere near the
+        // bound. When `eng` lands in the formatter tables `exp` is small and `cshift`
+        // reduces to `≈ -(ndigits-1)`; the out-of-table case degrades to `scientific`.
+        let leading = self.exp.saturating_add(ndigits).saturating_sub(1);
+        // `saturating_mul`: floor division (`div_euclid`) near `i32::MIN` yields a
+        // quotient whose ×3 would overflow below the bound. Both branches saturate;
+        // an out-of-table `eng` just routes to the `scientific` fallback anyway.
         let eng = if toward_zero {
-            (leading / 3) * 3
+            (leading / 3).saturating_mul(3)
         } else {
-            leading.div_euclid(3) * 3
+            leading.div_euclid(3).saturating_mul(3)
         };
-        (eng, self.mant, self.exp - eng)
+        (eng, self.mant, self.exp.saturating_sub(eng))
+    }
+
+    /// A sane fallback for exponents beyond the prefix/letter tables — plain
+    /// `<mant>e<exp>` scientific, which never allocates a giant zero-run the way an
+    /// unscaled decimal of an extreme exponent would.
+    fn scientific(&self) -> String {
+        format!("{}e{}", self.mant, self.exp)
     }
 
     /// Render `|mant| × 10^shift` as a minimal decimal string (no trailing zeros, an
@@ -223,7 +238,7 @@ impl Quantity {
     }
 
     /// SI engineering notation with a caller-supplied `unit` (`2.6kΩ`, `470mF`, `10`).
-    /// An exponent beyond the prefix table falls back to the unscaled decimal.
+    /// An exponent beyond the prefix table falls back to `<mant>e<exp>` scientific.
     pub fn format_si(&self, unit: &str) -> String {
         if self.mant == 0 {
             return format!("0{unit}");
@@ -235,15 +250,12 @@ impl Quantity {
                 "{sign}{}{p}{unit}",
                 Self::render_scaled(cm.unsigned_abs(), cshift)
             ),
-            None => format!(
-                "{sign}{}{unit}",
-                Self::render_scaled(self.mant.unsigned_abs(), self.exp)
-            ),
+            None => format!("{}{unit}", self.scientific()),
         }
     }
 
     /// IEC 60062 letter-as-decimal-point notation (`2k6`, `R47`, `4m7`, `1M2`). An
-    /// exponent beyond the letter table falls back to the SI form with an empty unit.
+    /// exponent beyond the letter table falls back to `<mant>e<exp>` scientific.
     pub fn format_iec(&self) -> String {
         if self.mant == 0 {
             return "0".to_string();
@@ -251,7 +263,7 @@ impl Quantity {
         let sign = if self.mant < 0 { "-" } else { "" };
         let (eng, cm, cshift) = self.engineering(true);
         let Some(letter) = iec_letter(eng) else {
-            return self.format_si("");
+            return self.scientific();
         };
         let coeff = Self::render_scaled(cm.unsigned_abs(), cshift);
         let body = match coeff.split_once('.') {
@@ -366,5 +378,18 @@ mod tests {
         assert_eq!(parse("4k7").unwrap().format_si("Ω"), "4.7kΩ");
         assert_eq!(parse("2.6k").unwrap().format_iec(), "2k6");
         assert_eq!(parse("100nF").unwrap().format_si("F"), "100nF");
+    }
+
+    #[test]
+    fn extreme_caller_exponent_degrades_without_panic() {
+        // `mant`/`exp` are public, so a caller can construct an exponent that would
+        // overflow the engineering arithmetic in debug. Formatting must not panic (and
+        // must not allocate a giant zero-run); it degrades to `<mant>e<exp>` scientific.
+        let hi = q(1, i32::MAX);
+        assert_eq!(hi.format_si("Ω"), format!("1e{}Ω", i32::MAX));
+        assert_eq!(hi.format_iec(), format!("1e{}", i32::MAX));
+        let lo = q(-5, i32::MIN);
+        assert_eq!(lo.format_si("F"), format!("-5e{}F", i32::MIN));
+        assert_eq!(lo.format_iec(), format!("-5e{}", i32::MIN));
     }
 }
