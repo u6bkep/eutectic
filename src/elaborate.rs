@@ -726,6 +726,11 @@ pub fn elaborate(
     // Decision 17: a doc-wide `font` that fails to load degrades to the stroke font — a
     // finding on a valid doc (a `W_FONT_LOAD` warning), never a fault.
     report.font_load_failure = font_load_failure(source);
+    // Issue 0024: an outer copper side with no mask slab, while the stackup does carry a
+    // mask — the forgot-one-side footgun. A degrade (a `W_COPPER_NO_MASK` warning), not a
+    // fault; the side resolution reuses the same top_mask/bottom_mask query pad openings
+    // use, so the lint agrees with what the mask export actually covers.
+    report.unmasked_copper = stackup(source).unmasked_outer_copper();
 
     for (id, ov) in overrides {
         if !base.contains_key(id) || ov.pos.is_none() {
@@ -1841,6 +1846,80 @@ mod tests {
             .find(|d| d.code == "W_FONT_LOAD")
             .expect("a W_FONT_LOAD diagnostic");
         assert!(!w.is_error(), "font load failure is a warning");
+    }
+
+    /// Issue 0024: an outer copper side with no mask slab — while the stackup carries a
+    /// mask elsewhere — surfaces as a non-blocking `W_COPPER_NO_MASK` warning that leaves
+    /// the doc `is_clean`. A fully-masked board is silent; a deliberately maskless board
+    /// (zero mask slabs) is silent too.
+    #[test]
+    fn unmasked_copper_warns_but_stays_clean() {
+        use crate::diagnostic::Diagnose;
+        let cu = |name: &str, lo, hi| {
+            GenDirective::Slab(Slab {
+                name: name.into(),
+                z: ZRange::new(lo, hi),
+                role: Role::Conductor,
+                material: None,
+            })
+        };
+        let mask = |name: &str, lo, hi| {
+            GenDirective::Slab(Slab {
+                name: name.into(),
+                z: ZRange::new(lo, hi),
+                role: Role::Mask,
+                material: None,
+            })
+        };
+        let ov = BTreeMap::new();
+        let rp = BTreeMap::new();
+
+        // Default stackup (both masks) → no warning.
+        let src: Source = vec![];
+        let el = elaborate(&src, &ov, &rp, &PartLib::new()).unwrap();
+        assert!(
+            el.report.unmasked_copper.is_empty(),
+            "default board fully masked"
+        );
+
+        // F.Mask only, both copper → the bottom copper side is unmasked.
+        let f_mask_only: Source = vec![
+            cu("F.Cu", 1_965_000, 2_000_000),
+            cu("B.Cu", 0, 35_000),
+            mask("F.Mask", 2_000_000, 2_010_000),
+        ];
+        let el = elaborate(&f_mask_only, &ov, &rp, &PartLib::new()).unwrap();
+        assert_eq!(el.report.unmasked_copper, vec!["B.Cu".to_string()]);
+        assert!(
+            el.report.is_clean(),
+            "an unmasked-copper warning keeps the doc clean"
+        );
+        let diags = el.report.diagnostics();
+        let w = diags
+            .iter()
+            .find(|d| d.code == "W_COPPER_NO_MASK")
+            .expect("a W_COPPER_NO_MASK diagnostic");
+        assert!(!w.is_error(), "unmasked copper is a warning");
+        assert!(
+            w.message.contains("B.Cu"),
+            "the message names the slab: {}",
+            w.message
+        );
+
+        // Zero mask slabs anywhere → deliberately maskless, silent.
+        let bare: Source = vec![cu("F.Cu", 1_965_000, 2_000_000), cu("B.Cu", 0, 35_000)];
+        let el = elaborate(&bare, &ov, &rp, &PartLib::new()).unwrap();
+        assert!(
+            el.report.unmasked_copper.is_empty(),
+            "bare-copper board is silent"
+        );
+        assert!(
+            !el.report
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == "W_COPPER_NO_MASK"),
+            "no warning for a deliberately maskless board"
+        );
     }
 
     /// An unknown slab name is a hard elaboration error (no silent board-z fallback,

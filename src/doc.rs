@@ -364,6 +364,15 @@ pub struct ReconReport {
     /// surfaces as a `W_FONT_LOAD` **warning** so a silently-ignored directive is still
     /// visible. `None` when there is no directive or it loaded cleanly.
     pub font_load_failure: Option<(String, String)>,
+    /// Outer copper slab names (issue 0024) whose side has no solder-mask slab covering
+    /// it, while the stackup *does* carry a mask elsewhere — the *forgot-one-side*
+    /// footgun. A **degrade**, not a fault (like [`font_load_failure`](Self::font_load_failure)):
+    /// the board still elaborates and exports, so this does **not** dirty
+    /// [`is_clean`](ReconReport::is_clean); it surfaces as a `W_COPPER_NO_MASK` warning.
+    /// Empty on a fully-masked board *and* on a deliberately maskless one (zero mask
+    /// slabs anywhere — the resolution lives in
+    /// [`Stackup::unmasked_outer_copper`](crate::geom::Stackup::unmasked_outer_copper)).
+    pub unmasked_copper: Vec<String>,
 }
 
 impl ReconReport {
@@ -374,8 +383,10 @@ impl ReconReport {
             && self.orphaned.is_empty()
             && self.refdes_pin_dups.is_empty()
             && self.courtyard_overlaps.is_empty()
-        // NB: `font_load_failure` is deliberately excluded — a font that fails to load
-        // degrades to the stroke font (Decision 17), leaving the doc clean.
+        // NB: `font_load_failure` and `unmasked_copper` are deliberately excluded — a
+        // font that fails to load degrades to the stroke font (Decision 17), and unmasked
+        // outer copper (issue 0024) still elaborates/exports honestly. Both are warnings
+        // that leave the doc clean.
     }
 }
 
@@ -457,6 +468,19 @@ impl crate::diagnostic::Diagnose for ReconReport {
                     Location::None,
                 )
                 .with_help("check the path (absolute is safest), or remove the `font` directive"),
+            );
+        }
+        for name in &self.unmasked_copper {
+            // Degrade, not fault (issue 0024): a warning, and `is_clean` ignores it. Only
+            // fires when the board has mask elsewhere — a deliberately maskless board is
+            // silent (resolved upstream in `Stackup::unmasked_outer_copper`).
+            out.push(
+                Diagnostic::warning(
+                    "W_COPPER_NO_MASK",
+                    format!("outer copper slab `{name}` is not covered by any solder-mask slab"),
+                    Location::None,
+                )
+                .with_help("add a `Role::Mask` slab outboard of this copper, or remove all mask slabs for a deliberately bare-copper board"),
             );
         }
         out

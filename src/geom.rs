@@ -1303,6 +1303,41 @@ impl Stackup {
             .map(|s| s.z)
     }
 
+    /// The **outer** copper slabs (top face / bottom face of the copper stack) that no
+    /// `Role::Mask` slab covers — the *forgot-one-side* footgun (issue 0024). Names in
+    /// deterministic order (top before bottom). The "does a mask cover this side" test
+    /// reuses the very [`top_mask`](Self::top_mask)/[`bottom_mask`](Self::bottom_mask)
+    /// resolution a pad opening uses ([`PinDef::pad_features`](crate::part::PinDef::pad_features)) —
+    /// side is derived from role + z-position, never a parallel notion.
+    ///
+    /// Returns empty when the stackup has **no** `Role::Mask` slab at all: that is a
+    /// deliberately maskless board, not a mistake, so it is silent (per the ticket).
+    /// Inner copper is never included — only an outer face is ever exposed to mask.
+    pub fn unmasked_outer_copper(&self) -> Vec<String> {
+        // A board with zero mask slabs anywhere is deliberately bare copper — silent.
+        if !self.slabs.iter().any(|s| s.role == Role::Mask) {
+            return Vec::new();
+        }
+        let cu = self.copper_slabs();
+        let mut out = Vec::new();
+        if self.top_mask().is_none()
+            && let Some(top) = cu.first()
+        {
+            out.push(top.name.clone());
+        }
+        // The `out.last()` guard is defensive: a single-copper stackup has one slab that
+        // is both top and bottom outer, and if a mask slab existed but sat *inside* that
+        // copper's own z-span (outboard of neither face — a physically-nonsensical
+        // stackup), both branches would name it. Unreachable for any real stackup.
+        if self.bottom_mask().is_none()
+            && let Some(bot) = cu.last()
+            && out.last() != Some(&bot.name)
+        {
+            out.push(bot.name.clone());
+        }
+        out
+    }
+
     /// The physical **board body** vertical extent — the span of the conductor and
     /// substrate slabs (copper + dielectric), lowest face to highest. This is the z a
     /// board substrate prism or a through-hole/plated barrel spans; it deliberately
@@ -1507,6 +1542,77 @@ mod tests {
             (0, BOARD_THICKNESS),
             "board_z spans the copper+substrate body, not the surface mask/silk"
         );
+    }
+
+    #[test]
+    fn unmasked_outer_copper_lint() {
+        // Fully-masked default board: nothing unmasked.
+        assert!(Stackup::default_2layer().unmasked_outer_copper().is_empty());
+
+        // F.Mask only + both copper: the bottom copper side is unmasked, top is fine.
+        let cu_top = |name: &str| Slab {
+            name: name.into(),
+            z: ZRange::new(1_500_000, 1_535_000),
+            role: Role::Conductor,
+            material: None,
+        };
+        let cu_bot = |name: &str| Slab {
+            name: name.into(),
+            z: ZRange::new(0, 35_000),
+            role: Role::Conductor,
+            material: None,
+        };
+        let f_mask = Slab {
+            name: "F.Mask".into(),
+            z: ZRange::new(1_535_000, 1_545_000),
+            role: Role::Mask,
+            material: None,
+        };
+        let su = Stackup {
+            slabs: vec![cu_top("F.Cu"), cu_bot("B.Cu"), f_mask.clone()],
+        };
+        assert_eq!(su.unmasked_outer_copper(), vec!["B.Cu".to_string()]);
+
+        // Zero mask slabs anywhere: deliberately maskless, silent.
+        let bare = Stackup {
+            slabs: vec![cu_top("F.Cu"), cu_bot("B.Cu")],
+        };
+        assert!(bare.unmasked_outer_copper().is_empty());
+
+        // Mask present but neither side covered: both outer coppers named, top first.
+        let stray_mask = Slab {
+            name: "mid.Mask".into(),
+            z: ZRange::new(700_000, 710_000),
+            role: Role::Mask,
+            material: None,
+        };
+        let su2 = Stackup {
+            slabs: vec![cu_top("F.Cu"), cu_bot("B.Cu"), stray_mask],
+        };
+        assert_eq!(
+            su2.unmasked_outer_copper(),
+            vec!["F.Cu".to_string(), "B.Cu".to_string()]
+        );
+
+        // Single copper slab with a mask below it: the bottom face is masked, the top
+        // face is bare, so the sole copper is named once via the top branch. (This does
+        // not reach the dedupe guard — `bottom_mask()` is Some here — it exercises the
+        // ordinary top-unmasked/bottom-masked path on a one-copper board.)
+        let one = Stackup {
+            slabs: vec![cu_bot("F.Cu"), stray_mask_below()],
+        };
+        assert_eq!(one.unmasked_outer_copper(), vec!["F.Cu".to_string()]);
+    }
+
+    // A mask slab below the sole copper (outboard of its bottom face): `bottom_mask`
+    // resolves it, `top_mask` finds nothing above — so the copper's top face is unmasked.
+    fn stray_mask_below() -> Slab {
+        Slab {
+            name: "far.Mask".into(),
+            z: ZRange::new(-100, -50),
+            role: Role::Mask,
+            material: None,
+        }
     }
 
     /// A zero-height slab (`lo == hi`, permitted by `ZRange::new`) flows through the
