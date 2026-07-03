@@ -16,9 +16,12 @@
 
 use crate::doc::{Doc, MM, Nm, PinRef, Point};
 use crate::elaborate::stackup;
-use crate::geom::{Extent, Feature, NetFeature, Role, Shape2D, Stackup, ZRange};
+use crate::geom::{
+    Extent, Feature, KeepoutKind, Material, NetFeature, Role, Shape2D, Stackup, ZRange,
+};
 use crate::id::{NetId, TraceId};
 use crate::part::{PartLib, PinRole, pin_world};
+use crate::region::{DEFAULT_CIRCLE_SEGS, Region, difference, shape_to_region, union_all};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
@@ -112,6 +115,16 @@ pub struct DesignRules {
     /// have distance 0; this small slop absorbs deliberate near-misses without
     /// fusing genuinely separate copper.
     pub touch_tol: Nm,
+    /// Minimum gap from copper to a copper/route **keep-out** region's edge (issue
+    /// 0023). Default `0`: a keep-out is a hard boundary — copper *overlapping or
+    /// touching* it violates, but merely abutting the edge does not.
+    pub keepout_clearance: Nm,
+    /// Minimum gap from copper to the **board edge** — the substrate boundary and the
+    /// walls of any cutout (issue 0023). Copper closer than this, or spilling outside
+    /// the board, violates. Applies to traces/vias/pads; a copper pour is expected to
+    /// be authored inset (its relationship to the edge is a fill-pullback concern), so
+    /// pours are exempt from this check — see [`check_drc`].
+    pub edge_clearance: Nm,
 }
 
 impl Default for DesignRules {
@@ -120,6 +133,8 @@ impl Default for DesignRules {
             min_clearance: 150_000,   // 0.15 mm
             min_trace_width: 150_000, // 0.15 mm
             touch_tol: MM / 100,      // 0.01 mm
+            keepout_clearance: 0,     // a keep-out edge is a hard boundary
+            edge_clearance: 200_000,  // 0.2 mm from the board edge
         }
     }
 }
@@ -139,6 +154,13 @@ pub enum Violation {
     /// `islands` is how many disconnected pin groups remain (>1 ⇒ unrouted /
     /// partially routed; the net is fully routed iff this would be 1).
     Unrouted { net: NetId, islands: usize },
+    /// Copper of `net` intrudes a `Role::Keepout` region of the given [`KeepoutKind`]
+    /// (issue 0023). Only copper-relevant kinds ([`KeepoutKind::Copper`]/`Route`) are
+    /// checked; component keep-outs (courtyards) are a placement concern, not DRC.
+    Keepout { net: NetId, kind: KeepoutKind },
+    /// Copper of `net` is closer to the board edge (or a cutout wall) than the
+    /// edge-clearance rule allows, or spills outside the board entirely (issue 0023).
+    EdgeClearance { net: NetId },
 }
 
 /// DRC violations stay a typed domain result (the autorouter consumes them as
@@ -160,6 +182,16 @@ impl crate::diagnostic::Diagnose for Violation {
             Violation::Unrouted { net, islands } => Diagnostic::error(
                 "E_DRC_UNROUTED",
                 format!("net `{net}` is not fully routed ({islands} disconnected islands)"),
+                Location::Net(net.clone()),
+            ),
+            Violation::Keepout { net, kind } => Diagnostic::error(
+                "E_DRC_KEEPOUT",
+                format!("copper of net `{net}` intrudes a {kind:?} keep-out"),
+                Location::Net(net.clone()),
+            ),
+            Violation::EdgeClearance { net } => Diagnostic::error(
+                "E_DRC_EDGE_CLEARANCE",
+                format!("copper of net `{net}` is too close to the board edge"),
                 Location::Net(net.clone()),
             ),
         };
@@ -209,46 +241,97 @@ pub fn check_drc(
         net_pads.insert(nid.clone(), pts);
     }
 
-    // --- 2. Clearance: copper of *different* nets must be >= min_clearance. ---
-    // All copper — traces, vias, AND pads — reduces to converged `geom::Feature`
-    // prisms (a world-frame `Shape2D` over a stackup `ZRange`), each tagged with its
-    // single copper layer. A different-net pair is checked by `Feature::clears`, which
-    // fuses the z-overlap (same/adjacent slab) and edge-to-edge distance tests.
+    // Everything physical, in the world frame, from the one unified producer
+    // ([`world_features`], Decision 16c) — copper (pads/traces/vias/pours), the
+    // substrate, keep-outs, voids, mask and markings. DRC filters it by role/net; the
+    // former parallel copper producer (`net_features` alone) is gone, so keep-outs now
+    // reach DRC (issue 0023). A committed `Doc` always resolves its slab names, so this
+    // never errors here; on the impossible error we fall back to an empty stream.
     let su = stackup(&doc.source);
-    let feats = net_features(doc, lib, netlist, &su);
-    for i in 0..feats.len() {
-        for j in (i + 1)..feats.len() {
-            let (la, a) = &feats[i];
-            let (_lb, b) = &feats[j];
-            let (Some(an), Some(bn)) = (&a.net, &b.net) else {
-                continue;
-            };
-            if an == bn {
+    let world = world_features(doc, lib, netlist, rules, &su).unwrap_or_default();
+
+    // Netted copper conductors, each paired with the copper [`Layer`] it sits on
+    // (forward-derived from its z) and whether it is a **pour** (`Shape2D::Area`) vs
+    // solid copper (a trace/via/pad). The layer is the clearance-report granularity.
+    let conductors: Vec<(Layer, bool, &Feature, &NetId)> = world
+        .iter()
+        .filter_map(|nf| {
+            let net = nf.net.as_ref()?;
+            if nf.feature.role != Role::Conductor {
+                return None;
+            }
+            let layer = feature_layer(&su, &nf.feature)?;
+            let is_pour = matches!(&nf.feature.extent, Extent::Prism { shape, .. } if matches!(shape, Shape2D::Area { .. }));
+            Some((layer, is_pour, &nf.feature, net))
+        })
+        .collect();
+    // Keep-out features (any kind) and the board substrate region, both netless.
+    let keepouts: Vec<(KeepoutKind, &Feature)> = world
+        .iter()
+        .filter_map(|nf| match nf.feature.role {
+            Role::Keepout(kind) => Some((kind, &nf.feature)),
+            _ => None,
+        })
+        .collect();
+    let substrate: Option<&Region> = world.iter().find_map(|nf| {
+        if nf.feature.role != Role::Substrate {
+            return None;
+        }
+        let Extent::Prism { shape, .. } = &nf.feature.extent;
+        shape.region()
+    });
+
+    // --- 2. Clearance: copper of *different* nets must be >= min_clearance. ---
+    // `Feature::clears` fuses the z-overlap (same/adjacent slab) and edge-to-edge
+    // distance tests. Solid-vs-solid and pour-vs-pour are checked; a pour is knocked
+    // out around the solid copper it was built from (by construction, at exactly the
+    // clearance), so pour-vs-solid is clean and skipped — checking it would only
+    // surface tessellation-slop false positives.
+    for i in 0..conductors.len() {
+        for j in (i + 1)..conductors.len() {
+            let (la, pa, fa, na) = conductors[i];
+            let (_lb, pb, fb, nb) = conductors[j];
+            if na == nb || pa != pb {
                 continue;
             }
-            // `Feature::clears` fuses the z-overlap and edge-distance tests. Every
-            // feature is single-slab, so a z-overlapping different-net pair shares that
-            // slab — `la == lb` — and one geometric test settles the pair. (For the
-            // default 2-layer stackup this is exactly the old discrete same-layer gate.)
-            if !a.feature.clears(&b.feature, rules.min_clearance) {
-                out.push(clearance(an, bn, *la));
+            if !fa.clears(fb, rules.min_clearance) {
+                out.push(clearance(na, nb, la));
             }
         }
     }
 
-    // Copper pours are real copper too. They are clearance-clean against the foreign
-    // copper they were built from (knocked out by construction), so the only new
-    // clearance class is **pour-vs-pour**: two different-net pours overlapping (or
-    // within clearance) on the same layer is a short.
-    let pours = pour_fills(doc, lib, netlist, rules);
-    for i in 0..pours.len() {
-        for j in (i + 1)..pours.len() {
-            let (a, b) = (&pours[i], &pours[j]);
-            if a.net != b.net
-                && a.layer == b.layer
-                && crate::region::regions_within(&a.fill, &b.fill, rules.min_clearance)
-            {
-                out.push(clearance(&a.net, &b.net, a.layer));
+    // --- 2b. Keep-out enforcement (issue 0023). Copper (incl. pours) must clear a
+    // copper/route keep-out. Component keep-outs (courtyards) are a placement concern,
+    // not DRC, so they are not checked here. z-overlap gates the keep-out to its slab.
+    for (_la, _pa, f, net) in &conductors {
+        for (kind, kf) in &keepouts {
+            if !matches!(kind, KeepoutKind::Copper | KeepoutKind::Route) {
+                continue;
+            }
+            if !f.clears(kf, rules.keepout_clearance) {
+                out.push(Violation::Keepout {
+                    net: (*net).clone(),
+                    kind: *kind,
+                });
+            }
+        }
+    }
+
+    // --- 2c. Board-edge clearance (issue 0023). Solid copper grown by the edge rule
+    // must stay inside the board region (outline ∖ cutouts); a piece that spills out —
+    // over the edge or into a cutout wall — leaves a non-empty remainder. Pours are
+    // exempt (they are authored inset; edge pull-back is a fill concern).
+    if let Some(board) = substrate {
+        for (_la, is_pour, f, net) in &conductors {
+            if *is_pour {
+                continue;
+            }
+            let Extent::Prism { shape, .. } = &f.extent;
+            let grown = shape_to_region(&shape.inflated(rules.edge_clearance), DEFAULT_CIRCLE_SEGS);
+            if !difference(&grown, board).is_empty() {
+                out.push(Violation::EdgeClearance {
+                    net: (*net).clone(),
+                });
             }
         }
     }
@@ -262,21 +345,27 @@ pub fn check_drc(
         }
         let net_traces: Vec<&Trace> = doc.traces.values().filter(|t| t.net == *nid).collect();
         let net_vias: Vec<&Via> = doc.vias.values().filter(|v| v.net == *nid).collect();
-        // This net's pour copper as `(layer, island)` pairs. Same-net fills on a layer
-        // are unioned *before* islanding, so overlapping same-net pours merge into one
-        // island (no spurious split); the layer is kept so trace/via incidence can be
-        // gated by it (copper on a different layer reaches the pour only through a via).
-        // A pad/trace/via on an island joins everything else on it, so a pour collapses
-        // the ratsnest; a pour fragmented by its knockouts leaves pads on different
-        // islands disconnected (surfaced as remaining `Unrouted` islands — honest DRC).
-        let mut by_layer: BTreeMap<Layer, Vec<crate::region::Region>> = BTreeMap::new();
-        for p in pours.iter().filter(|p| p.net == *nid) {
-            by_layer.entry(p.layer).or_default().push(p.fill.clone());
+        // This net's pour copper as `(layer, island)` pairs, sourced from the same
+        // unified stream. Same-net fills on a layer are unioned *before* islanding, so
+        // overlapping same-net pours merge into one island (no spurious split); the
+        // layer is kept so trace/via incidence can be gated by it (copper on a different
+        // layer reaches the pour only through a via). A pad/trace/via on an island joins
+        // everything else on it, so a pour collapses the ratsnest; a pour fragmented by
+        // its knockouts leaves pads on different islands disconnected (honest DRC).
+        let mut by_layer: BTreeMap<Layer, Vec<Region>> = BTreeMap::new();
+        for (la, is_pour, f, net) in &conductors {
+            if !is_pour || *net != nid {
+                continue;
+            }
+            let Extent::Prism { shape, .. } = &f.extent;
+            if let Some(region) = shape.region() {
+                by_layer.entry(*la).or_default().push(region.clone());
+            }
         }
-        let net_islands: Vec<(Layer, crate::region::Region)> = by_layer
+        let net_islands: Vec<(Layer, Region)> = by_layer
             .into_iter()
             .flat_map(|(layer, fills)| {
-                crate::region::union_all(fills)
+                union_all(fills)
                     .islands()
                     .into_iter()
                     .map(move |i| (layer, i))
@@ -294,6 +383,19 @@ pub fn check_drc(
     out.sort();
     out.dedup();
     out
+}
+
+/// The copper [`Layer`] a single-slab copper [`Feature`] sits on, by matching its z to
+/// the stackup's copper slabs (a **forward** query — identity flows from the stackup,
+/// never reconstructed heuristically; Decision 13 rule 3). `None` if the feature's z is
+/// not a copper slab. The one place DRC turns a converged feature back into the
+/// discrete [`Layer`] its clearance report is keyed on.
+fn feature_layer(su: &Stackup, f: &Feature) -> Option<Layer> {
+    let Extent::Prism { z, .. } = &f.extent;
+    copper_layers_z(su)
+        .into_iter()
+        .find(|(_, lz)| lz == z)
+        .map(|(l, _)| l)
 }
 
 /// Normalised clearance violation: net ids sorted so a pair reports once.
@@ -424,71 +526,111 @@ pub(crate) fn net_features(
 }
 
 // ----------------------------------------------------------------------------
-// Copper pours (the derived fill — 0004 stage 3).
+// The unified world-frame feature producer (Decision 16c).
 // ----------------------------------------------------------------------------
 
-/// A materialized copper pour: the filled copper of one `Conductor` region, after the
-/// clearance knockouts. `fill` is a [`crate::region::Region`] (outer boundary minus a
-/// hole around every foreign-net obstacle), bound to its `net` and `layer`. This is a
-/// **derived** value (re-/computed from the authored region + current copper), never
-/// stored — so it cannot go stale.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PourFill {
-    pub net: NetId,
-    pub layer: Layer,
-    pub fill: crate::region::Region,
-}
-
-/// Resolve a region's **slab name** to the copper [`Layer`] it pours on (Decision 13):
-/// its slab z must match a copper slab exactly. `None` if the name is unknown or names
-/// a non-copper slab — such a `Conductor` region is nonsense (a net-bound pour on silk)
-/// and is rejected up front by [`crate::elaborate::features`], the materialization gate;
-/// here it simply contributes no copper pour.
-fn region_copper_layer(su: &Stackup, name: &str) -> Option<Layer> {
+/// Resolve a region's **slab name** to the copper [`Layer`] + its z (Decision 13): the
+/// slab z must match a copper slab exactly. `None` if the name is unknown or names a
+/// non-copper slab — a net-bound pour on silk is nonsense, rejected up front by
+/// [`crate::elaborate::features`], the materialization gate; here it contributes no pour.
+fn region_copper_layer(su: &Stackup, name: &str) -> Option<(Layer, ZRange)> {
     let z = su.slab_z(name)?;
-    copper_layers_z(su)
-        .into_iter()
-        .find(|(_, sz)| *sz == z)
-        .map(|(l, _)| l)
+    copper_layers_z(su).into_iter().find(|(_, sz)| *sz == z)
 }
 
-/// Compute every copper pour's fill: for each authored `Conductor` region, knock the
-/// clearance-expanded **foreign** copper (different net, same layer) out of the pour
-/// outline. Same-net copper is *not* knocked out — it is what the pour connects to
-/// (connectivity through the fill is checked in a later stage). Pure function of the
-/// authored regions, the current copper, and the design rules.
+/// **The** single producer of world-frame [`Feature`]s (Decision 16c): one query that
+/// emits *everything* physical — the substrate, solder-mask solids, board-authored
+/// keep-outs / voids / markings, every placed pad (copper + drill/mask `Void`s),
+/// footprint graphics + text, routed traces and vias (+ their drill `Void`s), and copper
+/// pours — each paired with the net it carries (an annotation, never a field on
+/// `Feature`; Decision 12.1). DRC, the autorouter self-check, and every exporter are
+/// *filters over this one stream* by role / net, replacing the former parallel copper
+/// producer that left keep-outs unenforced (issue 0023).
 ///
-/// A region targets a copper [`Layer`] by resolving its slab name against the stackup
-/// (Decision 13); a `Conductor` region whose name is not a copper slab contributes no
-/// pour here (it is rejected as nonsense by [`crate::elaborate::features`]). Foreign
-/// copper is the netted copper from [`net_features`] on the pour's layer; each obstacle
-/// is inflated by `min_clearance` (a [`Shape2D::inflated`] radius bump — the exact
-/// Minkowski offset) and unioned, then subtracted from the outline by the region
-/// kernel. (Floating/unnetted pads are an ERC fault and are not yet knocked out — a
-/// noted limit.)
-pub fn pour_fills(
+/// Fallible only through the slab-name materialization gate ([`crate::elaborate::features`]):
+/// an unknown slab name is a hard error. A committed `Doc` always resolves cleanly.
+///
+/// `rules` is read only for the pour-knockout clearance (a pour's fill is a derived fab
+/// artifact of the authored outline minus the clearance-expanded foreign copper;
+/// Decision 4). Emission order is stable (source geometry, then per-component pad
+/// `Void`s + graphics + text, then routed copper, then pours in source order) so every
+/// derived export stays byte-stable.
+pub fn world_features(
     doc: &Doc,
     lib: &PartLib,
     netlist: &BTreeMap<NetId, Vec<(PinRef, PinRole)>>,
     rules: &DesignRules,
-) -> Vec<PourFill> {
-    use crate::region::{DEFAULT_CIRCLE_SEGS, difference, shape_to_region, union_all};
-    let su = stackup(&doc.source);
-    let feats = net_features(doc, lib, netlist, &su);
-    let mut out = Vec::new();
+    su: &Stackup,
+) -> Result<Vec<NetFeature>, String> {
+    // Source-only geometry: substrate `Area`, mask solids, keep-outs, region voids, and
+    // lowered board text. (Conductor pours are *not* emitted there — they need the
+    // placed copper to knock out, so they are lowered below.)
+    let mut out = crate::elaborate::features(&doc.source)?;
+
+    // Routed + placed copper conductors (traces, vias fanned per spanned slab, and pad
+    // copper) via the shared lowering — kept as an internal helper of this producer (it
+    // is also the autorouter's self-check input).
+    let copper = net_features(doc, lib, netlist, su);
+
+    // Via drills become geometry (Decision 5 / 16b): each via a full-stackup **plated**
+    // through-cut `Void` (a disc of the drill diameter). `Via.drill` was a scalar that
+    // never reached the drill file — now it is an enumerable `Void`, like a pad drill.
+    if let Some(full) = su.full_z() {
+        for v in doc.vias.values() {
+            out.push(NetFeature::netless(
+                Feature::prism(Role::Void, Shape2D::disc(v.at, v.drill / 2), full)
+                    .with_material(Material::named("copper")),
+            ));
+        }
+    }
+
+    // Per-component non-conductor pad features (plated drill `Void`s + mask openings) and
+    // footprint graphics + text (Markings / a fab Datum). The pad *conductor* copper rode
+    // in through `copper` above; this completes the stream with the rest so the one
+    // producer carries every pad + footprint feature. `refdes` is a whole-document
+    // annotation query, computed once.
+    let reg = crate::annotate::registry(&doc.source);
+    let refdes = crate::annotate::refdes(doc, lib, &reg);
+    for (id, c) in &doc.components {
+        let Some(def) = lib.get(&c.part) else {
+            continue;
+        };
+        for pin in &def.pins {
+            for f in pin.pad_features(c, su) {
+                if f.role != Role::Conductor {
+                    out.push(NetFeature::netless(f));
+                }
+            }
+        }
+        for f in crate::part::graphic_features(def, c, su) {
+            out.push(NetFeature::netless(f));
+        }
+        let rd = refdes.get(id).map(String::as_str).unwrap_or("");
+        let lbl = crate::annotate::label(c, def, &reg);
+        for f in crate::part::text_features(def, c, su, rd, &lbl) {
+            out.push(NetFeature::netless(f));
+        }
+    }
+
+    // Copper conductors into the stream (net annotation preserved; consumers re-derive
+    // the Layer pairing via `feature_layer`).
+    out.extend(copper.iter().map(|(_, nf)| nf.clone()));
+
+    // Copper pours: each authored `Conductor` region lowers to a `NetFeature` whose
+    // `Feature` is a filled `Shape2D::Area` — the outline ∖ the clearance-expanded
+    // foreign copper (same-net copper is what the pour connects to, so it is *not*
+    // knocked out). Emitted in source order for byte-stable export.
     for r in crate::elaborate::regions(&doc.source) {
-        if r.role != crate::geom::Role::Conductor {
+        if r.role != Role::Conductor {
             continue;
         }
         let Some(name) = &r.net else { continue };
-        let Some(layer) = region_copper_layer(&su, &r.layer) else {
+        let Some((layer, z)) = region_copper_layer(su, &r.layer) else {
             continue;
         };
         let net = NetId::new(name.clone());
         let outline = shape_to_region(&r.shape, DEFAULT_CIRCLE_SEGS);
-        // Foreign copper on this pour's layer. Each feature is single-slab, so the
-        // `layer == r.layer`-resolved match reproduces the old `PieceLayers::on(..)`.
-        let obstacles: Vec<crate::region::Region> = feats
+        let obstacles: Vec<Region> = copper
             .iter()
             .filter(|(l, nf)| *l == layer && nf.net.as_ref() != Some(&net))
             .map(|(_, nf)| {
@@ -497,9 +639,57 @@ pub fn pour_fills(
             })
             .collect();
         let fill = difference(&outline, &union_all(obstacles));
-        out.push(PourFill { net, layer, fill });
+        out.push(NetFeature::new(
+            Some(net),
+            Feature::prism(Role::Conductor, Shape2D::Area { region: fill }, z),
+        ));
     }
-    out
+    Ok(out)
+}
+
+/// A copper pour materialised for export/DRC rendering: its `net`, the copper [`Layer`]
+/// it fills, and its knocked-out `fill` region. A thin view over the [`Shape2D::Area`]
+/// conductor features [`world_features`] emits, so pour geometry has exactly one source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pour {
+    pub net: NetId,
+    pub layer: Layer,
+    pub fill: Region,
+}
+
+/// Every copper pour of a document as [`Pour`]s, read from the unified [`world_features`]
+/// stream (its `Conductor` `Area` features). The pour-rendering exporters (Gerber region
+/// fills, SVG pour paths) fold through this, so pours are the same features DRC sees.
+/// Deterministic (source order). Returns empty on the impossible slab-resolution error.
+pub fn pours(
+    doc: &Doc,
+    lib: &PartLib,
+    netlist: &BTreeMap<NetId, Vec<(PinRef, PinRole)>>,
+    rules: &DesignRules,
+    su: &Stackup,
+) -> Vec<Pour> {
+    let Ok(world) = world_features(doc, lib, netlist, rules, su) else {
+        return Vec::new();
+    };
+    world
+        .into_iter()
+        .filter_map(|nf| {
+            let net = nf.net?;
+            if nf.feature.role != Role::Conductor {
+                return None;
+            }
+            let layer = feature_layer(su, &nf.feature)?;
+            let Extent::Prism { shape, .. } = nf.feature.extent;
+            match shape {
+                Shape2D::Area { region } => Some(Pour {
+                    net,
+                    layer,
+                    fill: region,
+                }),
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 // ----------------------------------------------------------------------------
@@ -847,7 +1037,13 @@ mod pour_tests {
     fn pour_knocks_out_foreign_keeps_same_net() {
         let (doc, lib) = board_pour_scene("F.Cu");
         let nl = netlist_of(&doc);
-        let fills = pour_fills(&doc, &lib, &nl, &DesignRules::default());
+        let fills = pours(
+            &doc,
+            &lib,
+            &nl,
+            &DesignRules::default(),
+            &stackup(&doc.source),
+        );
         assert_eq!(fills.len(), 1, "one conductor pour");
         let f = &fills[0];
         assert_eq!(f.net, NetId::new("GND"));
@@ -883,7 +1079,13 @@ mod pour_tests {
         // The SIG pad now lives on B.Cu; a Top pour must not knock it out.
         let (doc, lib) = board_pour_scene("B.Cu");
         let nl = netlist_of(&doc);
-        let fills = pour_fills(&doc, &lib, &nl, &DesignRules::default());
+        let fills = pours(
+            &doc,
+            &lib,
+            &nl,
+            &DesignRules::default(),
+            &stackup(&doc.source),
+        );
         assert!(
             fills[0].fill.contains_point(Point::mm(15, 5)),
             "different-layer copper is not knocked out"
@@ -999,8 +1201,8 @@ mod pour_tests {
         let nl = netlist_of(&doc);
         let rules = DesignRules::default();
         assert_eq!(
-            pour_fills(&doc, &lib, &nl, &rules),
-            pour_fills(&doc, &lib, &nl, &rules)
+            pours(&doc, &lib, &nl, &rules, &stackup(&doc.source)),
+            pours(&doc, &lib, &nl, &rules, &stackup(&doc.source))
         );
     }
 
@@ -1534,6 +1736,156 @@ mod pour_tests {
             )),
             "overlapping GND/PWR pours short: {:?}",
             drc(h.doc(), &lib)
+        );
+    }
+
+    /// Issue 0023: an authored **copper keep-out** now excludes copper — DRC gates the
+    /// unified stream's copper against `Role::Keepout` features. A trace crossing a F.Cu
+    /// copper keep-out flags `Violation::Keepout`; a keep-out on the *other* layer does
+    /// not (z-overlap gates it to its slab).
+    #[test]
+    fn copper_keepout_is_enforced() {
+        use crate::geom::KeepoutKind;
+        let mut lib = part_library();
+        lib.insert("P".into(), one_pad("F.Cu"));
+        let mk = |layer: &str| {
+            // A SIG pad in a safe corner establishes the net (so its trace may be added);
+            // the trace then runs through the keep-out square.
+            let src = vec![
+                board_rect(Point::mm(0, 0), Point::mm(20, 20)),
+                G::Instance {
+                    path: "p".into(),
+                    part: "P".into(),
+                    params: std::collections::BTreeMap::new(),
+                    label: None,
+                },
+                G::Place {
+                    path: "p".into(),
+                    pos: Point::mm(3, 3),
+                },
+                G::ConnectPins {
+                    net: "SIG".into(),
+                    pins: vec![("p".into(), "1".into())],
+                },
+                G::Region(RegionDecl {
+                    shape: Shape2D::rect(Point::mm(10, 10), 4 * MM, 4 * MM),
+                    role: Role::Keepout(KeepoutKind::Copper),
+                    net: None,
+                    layer: layer.into(),
+                }),
+            ];
+            let mut h = History::new(Default::default());
+            h.commit(Transaction::one(Command::SetSource(src)), &lib, "ko")
+                .unwrap();
+            // A Top trace running straight through the keep-out square's centre.
+            let t = Trace {
+                net: NetId::new("SIG"),
+                layer: Layer::Top,
+                path: vec![Point::mm(6, 10), Point::mm(14, 10)],
+                width: 150_000,
+                prov: crate::doc::Provenance::Pinned,
+            };
+            h.commit(
+                Transaction::one(Command::AddTrace(TraceId(1), t)),
+                &lib,
+                "t",
+            )
+            .unwrap();
+            h
+        };
+        // Keep-out on the trace's own layer (F.Cu): the trace intrudes it.
+        let same = mk("F.Cu");
+        assert!(
+            drc(same.doc(), &lib).iter().any(|v| matches!(
+                v,
+                Violation::Keepout { net, kind }
+                    if *net == NetId::new("SIG") && *kind == KeepoutKind::Copper
+            )),
+            "a Top trace crossing a F.Cu copper keep-out must flag: {:?}",
+            drc(same.doc(), &lib)
+        );
+        // Keep-out on B.Cu: a Top trace does not overlap it in z, so no keep-out fault.
+        let other = mk("B.Cu");
+        assert!(
+            !drc(other.doc(), &lib)
+                .iter()
+                .any(|v| matches!(v, Violation::Keepout { .. })),
+            "a B.Cu keep-out must not gate a Top trace: {:?}",
+            drc(other.doc(), &lib)
+        );
+    }
+
+    /// Issue 0023: copper too close to the board edge flags `EdgeClearance`. A trace
+    /// hugging the left edge (0.1 mm in, under the 0.2 mm rule) violates; a trace routed
+    /// through the board interior does not.
+    #[test]
+    fn copper_near_board_edge_flags_edge_clearance() {
+        let mut lib = part_library();
+        lib.insert("P".into(), one_pad("F.Cu"));
+        let scene = |x_mm: i64| {
+            // A centred SIG pad establishes the net; the trace under test runs vertically
+            // at `x_mm`/10 mm from the left edge.
+            let src = vec![
+                board_rect(Point::mm(0, 0), Point::mm(20, 20)),
+                G::Instance {
+                    path: "p".into(),
+                    part: "P".into(),
+                    params: std::collections::BTreeMap::new(),
+                    label: None,
+                },
+                G::Place {
+                    path: "p".into(),
+                    pos: Point::mm(10, 10),
+                },
+                G::ConnectPins {
+                    net: "SIG".into(),
+                    pins: vec![("p".into(), "1".into())],
+                },
+            ];
+            let mut h = History::new(Default::default());
+            h.commit(Transaction::one(Command::SetSource(src)), &lib, "board")
+                .unwrap();
+            let t = Trace {
+                net: NetId::new("SIG"),
+                layer: Layer::Top,
+                path: vec![
+                    Point {
+                        x: x_mm * MM / 10,
+                        y: 2 * MM,
+                    },
+                    Point {
+                        x: x_mm * MM / 10,
+                        y: 18 * MM,
+                    },
+                ],
+                width: 150_000,
+                prov: crate::doc::Provenance::Pinned,
+            };
+            h.commit(
+                Transaction::one(Command::AddTrace(TraceId(1), t)),
+                &lib,
+                "t",
+            )
+            .unwrap();
+            h
+        };
+        // Centreline 0.1 mm from the x=0 edge (x_mm/10 = 1 → 0.1 mm): within the rule.
+        let near = scene(1);
+        assert!(
+            drc(near.doc(), &lib).iter().any(
+                |v| matches!(v, Violation::EdgeClearance { net } if *net == NetId::new("SIG"))
+            ),
+            "copper 0.1mm from the edge must flag: {:?}",
+            drc(near.doc(), &lib)
+        );
+        // Centreline 10 mm in: comfortably clear.
+        let mid = scene(100);
+        assert!(
+            !drc(mid.doc(), &lib)
+                .iter()
+                .any(|v| matches!(v, Violation::EdgeClearance { .. })),
+            "interior copper must not flag edge clearance: {:?}",
+            drc(mid.doc(), &lib)
         );
     }
 }

@@ -425,7 +425,15 @@ impl PinDef {
             };
             let world = local.map_points(|p| to_world(comp, p));
             if let Some(z) = stackup.full_z() {
-                features.push(geom::Feature::prism(geom::Role::Void, world, z));
+                // A pad drill is a *plated* through-hole (its barrel connects the copper
+                // it fans out to), so the Void carries a copper material — the
+                // plated/non-plated bit the Excellon PTH/NPTH split reads (Decision 16b).
+                // Mask-opening Voids stay material-less; a standalone authored `Void`
+                // region defaults material-less too, so it drills NPTH.
+                features.push(
+                    geom::Feature::prism(geom::Role::Void, world, z)
+                        .with_material(geom::Material::named("copper")),
+                );
             }
         }
         features

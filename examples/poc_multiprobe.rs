@@ -575,6 +575,9 @@ fn main() {
                 Clearance { .. } => clr.push(v.clone()),
                 MinWidth { .. } => mw.push(v.clone()),
                 Unrouted { .. } => un.push(v.clone()),
+                // Keep-out / edge-clearance violations (issue 0023) fall outside this
+                // demo's three-way summary; count them under none of the buckets.
+                Keepout { .. } | EdgeClearance { .. } => {}
             }
         }
         (clr, mw, un)
@@ -601,15 +604,17 @@ fn main() {
     write("netlist.txt", &netlist(doc), &mut wrote);
     write("placement.csv", &placement_csv(doc), &mut wrote);
     write("board.svg", &svg(doc, &lib).unwrap(), &mut wrote);
-    // gerber_set already includes board.drl (== excellon_drill(doc)); call it
-    // explicitly too only to assert the two agree.
+    // gerber_set already includes the split drill file(s) (== excellon_drill(doc, lib));
+    // call it explicitly too only to assert the two agree.
     let gset = gerber_set(doc, &lib).unwrap();
-    assert_eq!(
-        gset.iter()
-            .find(|(n, _)| n == "board.drl")
-            .map(|(_, c)| c.as_str()),
-        Some(excellon_drill(doc).as_str())
-    );
+    for (name, content) in excellon_drill(doc, &lib) {
+        assert_eq!(
+            gset.iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, c)| c.as_str()),
+            Some(content.as_str())
+        );
+    }
     for (name, content) in gset {
         write(&name, &content, &mut wrote);
     }

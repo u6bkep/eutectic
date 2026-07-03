@@ -1143,6 +1143,15 @@ pub fn features(source: &Source) -> Result<Vec<crate::geom::NetFeature>, String>
                     slab.role
                 ));
             }
+            // A `Conductor` region is a **copper pour**: its materialised feature is a
+            // *filled* `Shape2D::Area` (outline ∖ foreign-copper knockouts), which needs
+            // the placed copper to derive — so it is lowered by the unified world-frame
+            // producer ([`crate::route::world_features`]), not here. This source-only
+            // query still validates the pour's slab above (the materialization gate,
+            // Decision 13); it just does not emit the raw outline as geometry.
+            if *role == Role::Conductor {
+                continue;
+            }
             let net_opt = net.as_ref().map(|n| NetId::new(n.clone()));
             out.push(NetFeature::new(
                 net_opt,
@@ -1429,10 +1438,12 @@ mod tests {
         assert!(!rot_of(1).unwrap().is_bottom());
     }
 
-    /// Board + cutout + a Top conductor region lower to exactly one Substrate (an `Area`
-    /// whose cutout is a *hole*, not a separate Void — Decision 16b/c), two mask solids,
-    /// and one Conductor feature; net rides as an annotation and the conductor sits on
-    /// the top-copper z.
+    /// Board + cutout + a Top conductor region: `features()` (the source-only geometry
+    /// query) lowers exactly one Substrate (an `Area` whose cutout is a *hole*, not a
+    /// separate Void — Decision 16b/c) and two mask solids. A **Conductor** region is a
+    /// copper pour: its filled `Area` needs the placed copper to knock out, so it is
+    /// lowered by [`crate::route::world_features`], not here — `features()` still
+    /// *validates* the pour's slab (this call succeeds) but emits no conductor.
     #[test]
     fn features_lowers_board_cutout_and_region() {
         let su = Stackup::default_2layer();
@@ -1450,12 +1461,12 @@ mod tests {
         ];
 
         let feats = features(&src).unwrap();
-        // one substrate, two mask solids (F/B.Mask in the default stackup), one
-        // conductor. The cutout is a hole in the substrate Area — no separate Void.
+        // one substrate + two mask solids (F/B.Mask in the default stackup). The cutout is
+        // a hole in the substrate Area — no separate Void; the pour is lowered elsewhere.
         assert_eq!(
             feats.len(),
-            4,
-            "substrate + 2 masks + conductor (cutout is a hole)"
+            3,
+            "substrate + 2 masks (cutout is a hole; the pour lowers in world_features)"
         );
 
         let subs: Vec<&NetFeature> = feats
@@ -1480,22 +1491,9 @@ mod tests {
             !feats.iter().any(|f| f.feature.role == Role::Void),
             "a board cutout is a hole in the substrate Area, not a Void feature"
         );
-
-        let conds: Vec<&NetFeature> = feats
-            .iter()
-            .filter(|f| f.feature.role == Role::Conductor)
-            .collect();
-        assert_eq!(conds.len(), 1, "exactly one conductor feature");
-        assert_eq!(
-            conds[0].net,
-            Some(NetId::new("GND")),
-            "conductor carries its net annotation"
-        );
-        let Extent::Prism { z, .. } = conds[0].feature.extent;
-        assert_eq!(
-            z,
-            su.top_copper().unwrap(),
-            "F.Cu region sits on top copper"
+        assert!(
+            !feats.iter().any(|f| f.feature.role == Role::Conductor),
+            "a Conductor pour is lowered by world_features, not the source-only features()"
         );
     }
 

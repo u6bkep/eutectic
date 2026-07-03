@@ -515,13 +515,14 @@ fn region_svg_d(region: &Region, flip: &impl Fn(Nm) -> Nm) -> String {
     d.trim_end().to_string()
 }
 
-/// The derived copper-pour fills, for export. Builds the membership netlist from the
-/// materialized nets (roles are irrelevant to pours) and calls the shared
-/// [`crate::route::pour_fills`]. Pure — same inputs, same fills.
-fn pour_fills_of(doc: &Doc, lib: &PartLib) -> Vec<crate::route::PourFill> {
+/// The membership netlist from the materialized nets (roles are irrelevant to the
+/// geometry producer). The bridge every exporter uses to feed the unified
+/// [`crate::route::world_features`] / [`crate::route::pours`] queries.
+fn doc_netlist(
+    doc: &Doc,
+) -> BTreeMap<crate::id::NetId, Vec<(crate::doc::PinRef, crate::part::PinRole)>> {
     use crate::part::PinRole;
-    let netlist = doc
-        .nets
+    doc.nets
         .iter()
         .map(|(nid, net)| {
             (
@@ -532,8 +533,21 @@ fn pour_fills_of(doc: &Doc, lib: &PartLib) -> Vec<crate::route::PourFill> {
                     .collect(),
             )
         })
-        .collect();
-    crate::route::pour_fills(doc, lib, &netlist, &crate::route::DesignRules::default())
+        .collect()
+}
+
+/// The derived copper-pour fills, for export — the [`crate::route::pours`] view over the
+/// unified feature stream (the same `Shape2D::Area` conductor features DRC sees). Pure —
+/// same inputs, same fills.
+fn pour_fills_of(doc: &Doc, lib: &PartLib) -> Vec<crate::route::Pour> {
+    let su = crate::elaborate::stackup(&doc.source);
+    crate::route::pours(
+        doc,
+        lib,
+        &doc_netlist(doc),
+        &crate::route::DesignRules::default(),
+        &su,
+    )
 }
 
 /// Bounding box of all placed/routed geometry (pad world points, trace vertices,
@@ -1040,16 +1054,68 @@ pub fn gerber_edge_cuts(doc: &Doc, lib: &PartLib) -> String {
     out
 }
 
-/// The Excellon drill program for the board's plated holes (via drills today — the
-/// model carries no other through-holes). Tools are the distinct drill diameters,
-/// sorted and numbered `T1..`; under each tool, its hole coordinates in `ViaId`
-/// order. Coordinates and tool sizes are decimal millimetres via [`fmt_mm`]
-/// (explicit decimal points, so zero-suppression mode is moot). Deterministic.
-pub fn excellon_drill(doc: &Doc) -> String {
-    let mut dias: BTreeSet<Nm> = BTreeSet::new();
-    for v in doc.vias.values() {
-        dias.insert(v.drill);
+/// One drilled hole gathered from the unified feature stream: a round hole at a point,
+/// or a slot between two points (a routed `G85` hole). `Ord` so a tool's hits emit in a
+/// canonical order (byte-stable, diffable output).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum DrillKind {
+    Round(Point),
+    Slot(Point, Point),
+}
+
+/// The board's drilled holes, read **forward** from the unified feature stream
+/// ([`crate::route::world_features`]): every full-stackup through-cut `Role::Void` (a
+/// pad drill or a via drill), as `(plated, diameter, kind)`. This is the fix for issue
+/// 0022 — the drill file is now a query over the same `Void` features the solder-mask
+/// export sees, so pad drills (previously omitted) and via drills both appear.
+///
+/// A mask opening is a *partial-z* `Void` (at the mask slab) and a board-authored void
+/// is single-slab, so neither is a through-cut — both are excluded by the full-z gate. A
+/// void's **plating** is carried by its material (Decision 16b): pad/via drills are
+/// plated (a copper barrel), a material-less void is NPTH. A disc void is a `Round` hit;
+/// a capsule (slot) void a `Slot`. Any other drill-void shape is an un-handled seam.
+fn drill_hits(doc: &Doc, lib: &PartLib) -> Vec<(bool, Nm, DrillKind)> {
+    let su = crate::elaborate::stackup(&doc.source);
+    let full = su.full_z();
+    let world = crate::route::world_features(
+        doc,
+        lib,
+        &doc_netlist(doc),
+        &crate::route::DesignRules::default(),
+        &su,
+    )
+    .unwrap_or_default();
+    let mut hits = Vec::new();
+    for nf in world {
+        if nf.feature.role != Role::Void {
+            continue;
+        }
+        let Extent::Prism { shape, z } = &nf.feature.extent;
+        if Some(*z) != full {
+            continue; // not a through-cut (mask opening / single-slab authored void)
+        }
+        let plated = nf.feature.material.is_some();
+        let dia = shape.radius() * 2;
+        let pts = shape.points();
+        let kind = match pts.as_slice() {
+            [c] => DrillKind::Round(*c),
+            [a, b] => DrillKind::Slot(*a, *b),
+            // A drill Void is always a disc or capsule stroke; anything else is a shape
+            // no drill-lowering produces today. Leave a loud seam rather than dead code.
+            _ => unimplemented!("drill Void with a non-disc/capsule shape ({pts:?})"),
+        };
+        hits.push((plated, dia, kind));
     }
+    hits
+}
+
+/// One Excellon drill program for a set of `hits` (all one plating class). Tools are the
+/// distinct diameters, sorted and numbered `T1..`; under each tool its hits emit in
+/// canonical order — round holes as a coordinate, slots as a `G85` routed hole. `label`
+/// names the file's plating in the header comment. Coordinates and tool sizes are
+/// decimal millimetres via [`fmt_mm`]. Deterministic.
+fn excellon_program(hits: &[(Nm, DrillKind)], label: &str) -> String {
+    let dias: BTreeSet<Nm> = hits.iter().map(|(d, _)| *d).collect();
     let tools: BTreeMap<Nm, u32> = dias
         .iter()
         .enumerate()
@@ -1058,7 +1124,7 @@ pub fn excellon_drill(doc: &Doc) -> String {
 
     let mut out = String::new();
     out.push_str("M48\n");
-    out.push_str("; Excellon drill: plated through holes (via drills)\n");
+    out.push_str(&format!("; Excellon drill: {label}\n"));
     out.push_str("FMAT,2\n");
     out.push_str("METRIC,TZ\n");
     for (d, t) in &tools {
@@ -1067,14 +1133,56 @@ pub fn excellon_drill(doc: &Doc) -> String {
     out.push_str("%\n");
     for (d, t) in &tools {
         out.push_str(&format!("T{}\n", t));
-        for v in doc.vias.values() {
-            if v.drill == *d {
-                out.push_str(&format!("X{}Y{}\n", fmt_mm(v.at.x), fmt_mm(v.at.y)));
+        let mut kinds: Vec<DrillKind> = hits
+            .iter()
+            .filter(|(hd, _)| hd == d)
+            .map(|(_, k)| *k)
+            .collect();
+        kinds.sort();
+        for k in kinds {
+            match k {
+                DrillKind::Round(c) => {
+                    out.push_str(&format!("X{}Y{}\n", fmt_mm(c.x), fmt_mm(c.y)));
+                }
+                // A slot is a routed hole: position at one end, then `G85` to the other.
+                DrillKind::Slot(a, b) => {
+                    out.push_str(&format!(
+                        "X{}Y{}G85X{}Y{}\n",
+                        fmt_mm(a.x),
+                        fmt_mm(a.y),
+                        fmt_mm(b.x),
+                        fmt_mm(b.y)
+                    ));
+                }
             }
         }
     }
     out.push_str("T0\n");
     out.push_str("M30\n");
+    out
+}
+
+/// The board's Excellon drill program(s), split by plating (issue 0022 / Decision 16b):
+/// `board-PTH.drl` for plated through-holes (pad + via drills) and `board-NPTH.drl` for
+/// non-plated holes. Each file is emitted only when it has holes, so a board with no
+/// NPTH holes ships only the PTH file. `(filename, content)` pairs; deterministic.
+pub fn excellon_drill(doc: &Doc, lib: &PartLib) -> Vec<(String, String)> {
+    let hits = drill_hits(doc, lib);
+    let mut out = Vec::new();
+    for (plated, label, filename) in [
+        (true, "plated through-holes (PTH)", "board-PTH.drl"),
+        (false, "non-plated holes (NPTH)", "board-NPTH.drl"),
+    ] {
+        let group: Vec<(Nm, DrillKind)> = hits
+            .iter()
+            .filter(|(p, _, _)| *p == plated)
+            .map(|(_, d, k)| (*d, *k))
+            .collect();
+        if group.is_empty() {
+            continue;
+        }
+        out.push((filename.to_string(), excellon_program(&group, label)));
+    }
     out
 }
 
@@ -1360,7 +1468,8 @@ pub fn gerber_set(doc: &Doc, lib: &PartLib) -> Result<Vec<(String, String)>, Str
         "board-Edge_Cuts.gbr".to_string(),
         gerber_edge_cuts(doc, lib),
     ));
-    out.push(("board.drl".to_string(), excellon_drill(doc)));
+    // Drill program(s), split PTH / NPTH (issue 0022); only non-empty files are emitted.
+    out.extend(excellon_drill(doc, lib));
     Ok(out)
 }
 
@@ -1813,14 +1922,85 @@ psu.reg,LDO,0.000000,0.000000,0,T
 
     #[test]
     fn excellon_lists_via_drills() {
-        let (doc, _lib) = hand_routed_board();
-        let drl = excellon_drill(&doc);
+        let (doc, lib) = hand_routed_board();
+        let files = excellon_drill(&doc, &lib);
+        // The via is a plated through-hole, so it lands in the PTH file; the Cap pads are
+        // footprint-less (no drill), so there is no NPTH file.
+        let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["board-PTH.drl"], "PTH only, no NPTH");
+        let drl = &files[0].1;
         assert!(drl.starts_with("M48"));
         assert!(drl.contains("METRIC"));
         // One tool at the via's 0.3mm drill, with the via's coordinate.
         assert!(drl.contains("T1C0.300000"), "got:\n{drl}");
         assert!(drl.contains("X10.000000Y5.000000"), "got:\n{drl}");
         assert!(drl.trim_end().ends_with("M30"));
+    }
+
+    /// Issue 0022: the drill file is a forward query over through-cut `Void` features, so
+    /// a plated through-hole **pad**'s drill now reaches the PTH file — not only vias. A
+    /// board with a drilled pad *and* a via yields both, with correct diameters at the
+    /// right coordinates, and there is no NPTH file (both holes are plated).
+    #[test]
+    fn excellon_includes_pad_and_via_drills() {
+        let mut lib = part_library();
+        let fp = crate::kicad::import_footprint(
+            r#"(footprint "TH" (pad "1" thru_hole circle (at 0 0) (size 1.5 1.5) (drill 0.8) (layers "*.Cu")))"#,
+        )
+        .unwrap();
+        lib.insert("TH".into(), fp);
+        let mut h = History::new(Default::default());
+        h.commit(
+            Transaction::one(Command::SetSource(vec![
+                board_rect(Point::mm(0, 0), Point::mm(20, 20)),
+                G::Instance {
+                    path: "j".into(),
+                    part: "TH".into(),
+                    params: std::collections::BTreeMap::new(),
+                    label: None,
+                },
+                G::Place {
+                    path: "j".into(),
+                    pos: Point::mm(5, 5),
+                },
+                // Establishes net N so the via may be added.
+                G::ConnectPins {
+                    net: "N".into(),
+                    pins: vec![("j".into(), "1".into())],
+                },
+            ])),
+            &lib,
+            "th",
+        )
+        .unwrap();
+        // A via, so the file carries both a pad drill and a via drill.
+        let v = Via {
+            net: NetId::new("N"),
+            at: Point::mm(12, 8),
+            from: Layer::Top,
+            to: Layer::Bottom,
+            drill: 300_000,
+            pad: 600_000,
+            prov: Provenance::Pinned,
+        };
+        h.commit(Transaction::one(Command::AddVia(ViaId(0), v)), &lib, "via")
+            .unwrap();
+        let doc = h.doc();
+
+        let files = excellon_drill(doc, &lib);
+        let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["board-PTH.drl"],
+            "both holes are plated ⇒ one PTH file, no NPTH: {names:?}"
+        );
+        let drl = &files[0].1;
+        // Both tools present: the pad drill (0.8mm) and the via drill (0.3mm).
+        assert!(drl.contains("C0.800000"), "pad drill tool 0.8mm:\n{drl}");
+        assert!(drl.contains("C0.300000"), "via drill tool 0.3mm:\n{drl}");
+        // Hit coordinates: the pad at (5,5), the via at (12,8).
+        assert!(drl.contains("X5.000000Y5.000000"), "pad drill hit:\n{drl}");
+        assert!(drl.contains("X12.000000Y8.000000"), "via drill hit:\n{drl}");
     }
 
     #[test]
@@ -2043,7 +2223,7 @@ psu.reg,LDO,0.000000,0.000000,0,T
                 "board-F_SilkS.gbr",
                 "board-B_SilkS.gbr",
                 "board-Edge_Cuts.gbr",
-                "board.drl",
+                "board-PTH.drl",
             ]
         );
     }
@@ -2109,7 +2289,7 @@ psu.reg,LDO,0.000000,0.000000,0,T
             gerber_layer(&doc, &lib, Layer::Top),
             gerber_layer(&doc, &lib, Layer::Top)
         );
-        assert_eq!(excellon_drill(&doc), excellon_drill(&doc));
+        assert_eq!(excellon_drill(&doc, &lib), excellon_drill(&doc, &lib));
         assert_eq!(gerber_edge_cuts(&doc, &lib), gerber_edge_cuts(&doc, &lib));
     }
 
