@@ -48,8 +48,10 @@ ink-box Center justification, footprint text through `to_world` — mirroring fr
 quaternion — into both silk export paths, KiCad `fp_text` + v7 `property` import incl.
 `${REFERENCE}`/`${VALUE}` → live anchors, lowercase case-fold + Ω/µ glyphs). Every
 branch adversarially reviewed pre-merge; all findings fixed.
-**Still open**: bottom-flip axis convention (`Orient::flipped()` is Rx(180); KiCad/fab
-convention is Ry(180) — fix dispatched); courtyard solver packing (0019); TTF outline
+**Bottom-flip convention fixed (2026-07-03, `feat/flip-axis`)**: `Orient::flipped()`
+is Ry(180) (x-negates — KiCad/fab board-turn convention; bottom silk reads upright);
+placement CSV reports the authored angle for bottom parts (KiCad `.pos` style, `0,B`).
+**Still open**: courtyard solver packing (0019); TTF outline
 fonts; trace/via slab-name migration rides with 0011. This record is
 still meant to be folded into `architecture.md` §8.
 
@@ -620,11 +622,12 @@ Then the post-convergence steps proceed on the corrected foundation:
   paste derived at export, fab an ordinary authorable zero-height `Datum` slab
   (branch feat/datum-slabs). No fab output consumer yet — an authored fab slab
   renders nowhere (documented).
-- **Bottom-flip axis convention**: `Orient::flipped()` rotates about in-plane X
-  (y-negates); KiCad/fab convention flips about Y — bottom silk reads upside-down
-  under conventional board handling, and future `.kicad_pcb` *placement* import must
-  map side=back to a Ry(180)-based orient (Rx(180) = Ry(180)∘Rz(180); quaternions are
-  what's serialized, so no data migration either way). Fix to Ry(180) dispatched.
+- ~~Bottom-flip axis convention~~ — **resolved (2026-07-03, branch feat/flip-axis)**:
+  `Orient::flipped()` is Ry(180) (x-negates, y preserved — KiCad/fab board-turn
+  convention, bottom silk upright); placement CSV decomposes the flip and reports the
+  authored angle for bottom parts (KiCad `.pos` style). Quaternions are what's
+  serialized, so no data migration. Future `.kicad_pcb` *placement* import maps
+  side=back via Ry(180) — recorded as issue 0021.
 - Whether component bodies get a dedicated role/material or reuse `Keepout`.
 - Relation to issue 0004 (planes / multilayer): the volumetric convergence is the
   natural home for that work.
