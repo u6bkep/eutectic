@@ -29,7 +29,9 @@
 //!   `property "Reference"|"Value"` form) → [`PartDef::texts`] as [`FpText`] anchors
 //!   (Decision 14): `reference`→[`FpTextKind::Reference`], `value`→[`FpTextKind::Label`]
 //!   (both discard their placeholder string — the anchor re-derives it live at lowering),
-//!   `user`→[`FpTextKind::Literal`]. Height is the font-size *height* component; the
+//!   `user`→[`FpTextKind::Literal`] (except a whole-string `${REFERENCE}`/`${VALUE}` KiCad
+//!   text variable, which resolves to the live Reference/Label anchor). Height is the
+//!   font-size *height* component; the
 //!   stroke thickness is ignored (the pen is the `height / 8` rule); `hide` is lifted (a
 //!   hidden anchor round-trips as data but produces no features). Lowered by
 //!   [`part::text_features`](crate::part::text_features).
@@ -377,12 +379,14 @@ pub fn import_footprint(text: &str) -> Result<PartDef, String> {
 ///
 /// Mapping (Decision 14): `reference`/`Reference` → [`FpTextKind::Reference`] (placeholder
 /// discarded), `value`/`Value` → [`FpTextKind::Label`] (placeholder discarded), `user` →
-/// [`FpTextKind::Literal`] keeping the string. Height is the font `(size H …)` height
-/// component (default 1 mm if absent); the stroke `(thickness …)` is **ignored** — the pen
-/// is the `height / 8` rule (Decision 14). `(at … rot)` becomes a local about-z
-/// [`Orient`] (exact for cardinals). The layer name is kept as imported (side-relative).
-/// Other `property` names (Footprint/Datasheet/…) are footprint metadata, not silk, and
-/// return `Ok(None)`.
+/// [`FpTextKind::Literal`] keeping the string — except a `user` string that is *exactly*
+/// the `${REFERENCE}`/`${VALUE}` KiCad text variable resolves to the live Reference/Label
+/// anchor (fab layers commonly echo the refdes this way); mixed content stays literal
+/// (see [`text_kind_from_user`]). Height is the font `(size H …)` height component
+/// (default 1 mm if absent); the stroke `(thickness …)` is **ignored** — the pen is the
+/// `height / 8` rule (Decision 14). `(at … rot)` becomes a local about-z [`Orient`] (exact
+/// for cardinals). The layer name is kept as imported (side-relative). Other `property`
+/// names (Footprint/Datasheet/…) are footprint metadata, not silk, and return `Ok(None)`.
 fn parse_fp_text(item: &Sexp) -> Result<Option<FpText>, String> {
     let Some(list) = item.as_list() else {
         return Ok(None);
@@ -392,12 +396,7 @@ fn parse_fp_text(item: &Sexp) -> Result<Option<FpText>, String> {
         "fp_text" => match list.get(1).and_then(Sexp::as_atom).unwrap_or("") {
             "reference" => FpTextKind::Reference,
             "value" => FpTextKind::Label,
-            "user" => FpTextKind::Literal(
-                list.get(2)
-                    .and_then(Sexp::as_atom)
-                    .unwrap_or("")
-                    .to_string(),
-            ),
+            "user" => text_kind_from_user(list.get(2).and_then(Sexp::as_atom).unwrap_or("")),
             _ => return Ok(None),
         },
         "property" => match list.get(1).and_then(Sexp::as_atom).unwrap_or("") {
@@ -429,6 +428,17 @@ fn parse_fp_text(item: &Sexp) -> Result<Option<FpText>, String> {
         orient,
         hide: text_hidden(list),
     }))
+}
+
+/// Map a `fp_text user` string to a kind: the KiCad text variables `${REFERENCE}` and
+/// `${VALUE}`, matched as the **whole** string, become the live Reference/Label anchors;
+/// anything else (including mixed content like `X ${REFERENCE}`) stays a verbatim literal.
+fn text_kind_from_user(s: &str) -> FpTextKind {
+    match s {
+        "${REFERENCE}" => FpTextKind::Reference,
+        "${VALUE}" => FpTextKind::Label,
+        _ => FpTextKind::Literal(s.to_string()),
+    }
 }
 
 /// A footprint text's font **height** in nm: the first component of
@@ -1944,6 +1954,34 @@ mod tests {
             p.texts
                 .iter()
                 .any(|t| t.kind == FpTextKind::Literal("HELLO".into()) && t.layer == "F.SilkS")
+        );
+    }
+
+    /// A `fp_text user` whose *whole* string is a `${REFERENCE}`/`${VALUE}` KiCad text
+    /// variable resolves to the live Reference/Label anchor (the fixtures' F.Fab echoes);
+    /// mixed content stays a verbatim literal.
+    #[test]
+    fn imports_user_text_variables_but_leaves_mixed_content_literal() {
+        let src = r#"(footprint "R"
+  (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu"))
+  (fp_text user "${REFERENCE}" (at 0 0) (layer "F.Fab") (effects (font (size 1 1))))
+  (fp_text user "${VALUE}" (at 0 1) (layer "F.Fab") (effects (font (size 1 1))))
+  (fp_text user "R ${REFERENCE}" (at 0 2) (layer "F.SilkS") (effects (font (size 1 1)))))"#;
+        let p = import_footprint(src).unwrap();
+        assert_eq!(p.texts.len(), 3);
+        assert!(
+            p.texts.iter().any(|t| t.kind == FpTextKind::Reference),
+            "whole-string ${{REFERENCE}} → Reference anchor"
+        );
+        assert!(
+            p.texts.iter().any(|t| t.kind == FpTextKind::Label),
+            "whole-string ${{VALUE}} → Label anchor"
+        );
+        assert!(
+            p.texts
+                .iter()
+                .any(|t| t.kind == FpTextKind::Literal("R ${REFERENCE}".into())),
+            "mixed content stays a verbatim literal"
         );
     }
 

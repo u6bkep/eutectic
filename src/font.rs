@@ -19,14 +19,16 @@
 //!
 //! # Coverage
 //!
-//! Uppercase `A`–`Z`, digits `0`–`9`, space, and `.`, `-`, `:`, `/`. These are simple
-//! utilitarian block glyphs — legible, not beautiful. An **unknown** character (this
-//! includes **lowercase**) renders a fallback box outline so it is visibly wrong
-//! rather than silently dropped; a space renders nothing.
+//! Uppercase `A`–`Z`, digits `0`–`9`, space, `.`, `-`, `:`, `/`, plus `Ω` and `µ` (the
+//! two symbols component labels reach for). These are simple utilitarian block glyphs —
+//! legible, not beautiful. **Lowercase** letters have no dedicated glyphs yet, so they
+//! **case-fold** to the uppercase form; a genuinely **unknown** character renders a
+//! fallback box outline so it is visibly wrong rather than silently dropped; a space
+//! renders nothing.
 //!
 //! # Deliberate follow-ups (NOT in this slice)
 //!
-//! - lowercase glyphs + the rest of printable ASCII,
+//! - true lowercase glyphs (today they case-fold) + the rest of printable ASCII,
 //! - importing a real Hershey vector font (far larger, properly kerned coverage),
 //! - outline / TTF fonts (filled glyphs — a different lowering than this stroke path).
 
@@ -49,20 +51,17 @@ use crate::doc::{Nm, Point};
 /// - [`Justify::Left`] — the anchor is the **baseline-left** corner: the first glyph's
 ///   left edge sits at local `x = 0` and the baseline at local `y = 0`. This is how
 ///   board `text` directives lower (their authored `at` *is* the origin).
-/// - [`Justify::Center`] — the anchor is the run's **centre**: the advance box (the full
-///   `n · GLYPH_ADVANCE` wide, `CAP_HEIGHT` tall extent, trailing inter-glyph space
-///   included) is centred on the local origin. This matches KiCad, which anchors
-///   footprint text at its centre; the content is live (a refdes/label re-renders), so
-///   the centring offset cannot be baked at import and is applied here per lowering.
+/// - [`Justify::Center`] — the anchor is the run's **centre**: the run's actual **ink
+///   extent** (the bounding box of the rendered strokes, not the advance box — a trailing
+///   inter-glyph gap would bias the run off the anchor) is centred on the local origin.
+///   This matches KiCad, which anchors footprint text at its centre; the content is live
+///   (a refdes/label re-renders), so the centring offset cannot be baked at import and is
+///   applied here per lowering.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Justify {
     Left,
     Center,
 }
-
-/// The glyph cap height in font-units (`y = 0` baseline .. `y = CAP_HEIGHT` cap). The
-/// cell is one unit taller ([`CELL_HEIGHT`]) for leading; centring uses the cap box.
-const CAP_HEIGHT: i32 = 6;
 
 /// Lower `string` to stroke polylines in a **local** frame at world `height`, honouring
 /// `justify`. Each returned `Vec<Point>` is one centreline polyline (a single-point one
@@ -73,36 +72,52 @@ const CAP_HEIGHT: i32 = 6;
 /// footprint auto-text ([`Justify::Center`]).
 ///
 /// Cell→world is the integer scale `p * height / CELL_HEIGHT`; glyphs advance `+x` by
-/// `GLYPH_ADVANCE` font-units per character. For [`Justify::Center`] every point is then
-/// shifted by half the advance-box extent (`n · GLYPH_ADVANCE` wide, `CAP_HEIGHT` tall)
-/// so the origin lands at the run's centre.
+/// `GLYPH_ADVANCE` font-units per character. For [`Justify::Center`] the whole run is then
+/// shifted so its **ink bounding box** is centred on the origin (both axes). Tracing adds
+/// the pen radius symmetrically, so the traced-feature centre coincides with the origin.
 pub fn text_strokes(string: &str, height: Nm, justify: Justify) -> Vec<Vec<Point>> {
     let cell_h = CELL_HEIGHT as Nm;
-    let (ox, oy) = match justify {
-        Justify::Left => (0, 0),
-        Justify::Center => {
-            let n = string.chars().count() as Nm;
-            (
-                (n * GLYPH_ADVANCE as Nm * height / cell_h) / 2,
-                (CAP_HEIGHT as Nm * height / cell_h) / 2,
-            )
-        }
-    };
-    let mut out = Vec::new();
+    let mut out: Vec<Vec<Point>> = Vec::new();
     for (i, ch) in string.chars().enumerate() {
         let dx = i as i32 * GLYPH_ADVANCE;
         for stroke in glyph_strokes(ch) {
             let pts: Vec<Point> = stroke
                 .iter()
                 .map(|&(cx, cy)| Point {
-                    x: (dx + cx) as Nm * height / cell_h - ox,
-                    y: cy as Nm * height / cell_h - oy,
+                    x: (dx + cx) as Nm * height / cell_h,
+                    y: cy as Nm * height / cell_h,
                 })
                 .collect();
             out.push(pts);
         }
     }
+    if justify == Justify::Center
+        && let Some((lo, hi)) = ink_bbox(&out)
+    {
+        let (ox, oy) = ((lo.x + hi.x) / 2, (lo.y + hi.y) / 2);
+        for stroke in &mut out {
+            for p in stroke {
+                p.x -= ox;
+                p.y -= oy;
+            }
+        }
+    }
     out
+}
+
+/// The bounding box of every point across `strokes` (their centreline ink extent), or
+/// `None` if there are no points (empty/all-space run).
+fn ink_bbox(strokes: &[Vec<Point>]) -> Option<(Point, Point)> {
+    let mut pts = strokes.iter().flatten();
+    let first = *pts.next()?;
+    let (mut lo, mut hi) = (first, first);
+    for p in pts {
+        lo.x = lo.x.min(p.x);
+        lo.y = lo.y.min(p.y);
+        hi.x = hi.x.max(p.x);
+        hi.y = hi.y.max(p.y);
+    }
+    Some((lo, hi))
 }
 
 // ---- uppercase A–Z ----------------------------------------------------------
@@ -295,15 +310,37 @@ const DASH: Glyph = &[&[(1, 3), (3, 3)]];
 const COLON: Glyph = &[&[(2, 1)], &[(2, 4)]];
 const SLASH: Glyph = &[&[(0, 0), (4, 6)]];
 
-/// The fallback for any character not covered (notably **lowercase** and full ASCII —
-/// deliberate follow-ups): a box outline, so an unsupported glyph is *visibly* wrong
-/// rather than silently dropped.
+// ---- symbols commonly used in component labels -----------------------------
+/// Ω (ohm, U+03A9): a horseshoe loop splaying into two feet — so `{value:si:Ω}` renders
+/// honestly instead of a fallback box.
+const OMEGA: Glyph = &[&[
+    (0, 0),
+    (1, 0),
+    (1, 2),
+    (0, 3),
+    (0, 5),
+    (1, 6),
+    (3, 6),
+    (4, 5),
+    (4, 3),
+    (3, 2),
+    (3, 0),
+    (4, 0),
+]];
+/// µ (micro, U+00B5; U+03BC greek mu aliases here): a `u` bowl whose left stem drops as
+/// the descender leg.
+const MU: Glyph = &[&[(0, 5), (0, 0)], &[(0, 1), (1, 0), (3, 0), (4, 1), (4, 5)]];
+
+/// The fallback for any character not covered (the rest of printable ASCII / symbols is a
+/// deliberate follow-up): a box outline, so an unsupported glyph is *visibly* wrong
+/// rather than silently dropped. Lowercase does **not** reach this — it case-folds.
 const FALLBACK: Glyph = &[&[(0, 0), (4, 0), (4, 6), (0, 6), (0, 0)]];
 
-/// The stroke polylines for `ch` in cell coordinates. Covers uppercase `A`–`Z`,
-/// digits `0`–`9`, space, `.`, `-`, `:`, `/`. A space returns an empty slice (advance
-/// only); any other unsupported character (including lowercase) returns the
-/// [`FALLBACK`] box. The returned strokes are scaled + traced by the lowering.
+/// The stroke polylines for `ch` in cell coordinates. Covers uppercase `A`–`Z`, digits
+/// `0`–`9`, space, `.`, `-`, `:`, `/`, `Ω`, and `µ` (`µ`/`μ` share a glyph). A space
+/// returns an empty slice (advance only); **lowercase** case-folds to its uppercase glyph;
+/// any other unsupported character returns the [`FALLBACK`] box. The returned strokes are
+/// scaled + traced by the lowering.
 pub fn glyph_strokes(ch: char) -> Glyph {
     match ch {
         'A' => A,
@@ -347,6 +384,12 @@ pub fn glyph_strokes(ch: char) -> Glyph {
         '-' => DASH,
         ':' => COLON,
         '/' => SLASH,
+        'Ω' => OMEGA,
+        // Micro sign (U+00B5) and Greek small mu (U+03BC) share one glyph.
+        'µ' | 'μ' => MU,
+        // No dedicated lowercase glyphs yet: case-fold to the uppercase form rather than
+        // drop to a box. (Uppercase never falls back here, so this can't loop.)
+        c if c.is_ascii_lowercase() => glyph_strokes(c.to_ascii_uppercase()),
         _ => FALLBACK,
     }
 }
@@ -371,12 +414,34 @@ mod tests {
         assert!(glyph_strokes(' ').is_empty(), "space is advance-only");
     }
 
-    /// An unknown character (lowercase is a deliberate follow-up) falls back to a
-    /// visible box rather than vanishing.
+    /// A genuinely unknown character falls back to a visible box rather than vanishing —
+    /// but lowercase does not: it case-folds to its uppercase glyph.
     #[test]
-    fn unknown_char_falls_back_to_a_box() {
-        assert_eq!(glyph_strokes('a'), FALLBACK, "lowercase is unsupported");
-        assert_eq!(glyph_strokes('@'), FALLBACK);
+    fn unknown_char_boxes_but_lowercase_case_folds() {
+        assert_eq!(glyph_strokes('@'), FALLBACK, "unsupported char → box");
+        for (lo, up) in [('a', 'A'), ('r', 'R'), ('k', 'K'), ('z', 'Z')] {
+            assert_eq!(
+                glyph_strokes(lo),
+                glyph_strokes(up),
+                "`{lo}` folds to `{up}`"
+            );
+            assert_ne!(glyph_strokes(lo), FALLBACK, "`{lo}` is not a box");
+        }
+    }
+
+    /// Ω and µ render real glyphs (so `{value:si:Ω}` / IEC labels are honest), and the
+    /// two mu code points share one glyph.
+    #[test]
+    fn ohm_and_micro_have_glyphs() {
+        for ch in ['Ω', 'µ', 'μ'] {
+            assert_ne!(glyph_strokes(ch), FALLBACK, "`{ch}` should have a glyph");
+            assert!(!glyph_strokes(ch).is_empty());
+        }
+        assert_eq!(
+            glyph_strokes('µ'),
+            glyph_strokes('μ'),
+            "U+00B5 and U+03BC alias"
+        );
     }
 
     /// Every stroke point sits inside the cell bounds (`x ∈ [0, GLYPH_ADVANCE]`,
@@ -384,7 +449,7 @@ mod tests {
     #[test]
     fn strokes_stay_within_the_cell() {
         let all = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-:/ ";
-        for ch in all.chars().chain(['a', '@']) {
+        for ch in all.chars().chain(['a', '@', 'Ω', 'µ', 'μ']) {
             for stroke in glyph_strokes(ch) {
                 for &(x, y) in *stroke {
                     assert!((0..=GLYPH_ADVANCE).contains(&x), "{ch}: x={x} out of cell");

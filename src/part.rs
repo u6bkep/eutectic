@@ -1757,8 +1757,9 @@ mod tests {
     }
 
     /// Footprint text is centre-anchored (unlike left-origin board text): a 2-char run
-    /// centres on the anchor origin — exactly on the cap-height midline vertically, and
-    /// within a glyph cell horizontally (the advance box includes trailing spacing).
+    /// centres its **ink extent** on the anchor origin — the bbox centre lands on the
+    /// anchor to within integer rounding (well under one stroke width) on both axes, not
+    /// biased left by the advance box's trailing inter-glyph gap.
     #[test]
     fn text_features_center_justification_centers_on_anchor() {
         let su = Stackup::default_2layer();
@@ -1772,12 +1773,12 @@ mod tests {
         let (lo, hi) = text_bbox(&text_features(&def, &c, &su, "", ""));
         let cx = (lo.x + hi.x) / 2;
         let cy = (lo.y + hi.y) / 2;
-        let cell = crate::font::GLYPH_ADVANCE as Nm * MM / crate::font::CELL_HEIGHT as Nm;
+        let pen = MM / 8; // one stroke width
         assert!(
-            cx.abs() < cell,
-            "horizontally centred within a glyph cell: cx={cx}"
+            cx.abs() < pen,
+            "horizontally centred on the anchor: cx={cx}"
         );
-        assert_eq!(cy, 0, "vertically centred on the cap-height midline");
+        assert!(cy.abs() < pen, "vertically centred on the anchor: cy={cy}");
     }
 
     /// A hidden anchor emits nothing; text on a slab absent from the stackup is skipped
