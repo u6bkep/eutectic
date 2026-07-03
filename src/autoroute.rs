@@ -11,53 +11,53 @@
 //! ## Algorithm (Lee/A* maze routing, net by net)
 //!
 //! The board (the source `Board` outline if present, else the placement bounding
-//! box) is discretised into a square routing grid. We A* over `(x, y, layer)` with
-//! `Top`/`Bottom` copper and vias to change layer, routing each net's pins together
-//! incrementally (MST-style: each remaining pin is routed to the net's existing
-//! connected copper). Obstacles — the board exterior, other-net pads, other-net
-//! pre-existing (`Pinned`/`Free`) traces & vias, and copper already routed this run
-//! for *other* nets — map to blocked grid cells; same-net copper is never blocked.
+//! box) is discretised into a square routing grid over **all** copper layers of the
+//! stackup. We A* over `(i, j, layer)` and change layer with a via, routing each net's
+//! pins together incrementally (MST-style: each remaining pin is routed to the net's
+//! existing connected copper). Obstacles are derived from [`crate::route::world_features`]
+//! — the same unified stream DRC reads — so they are *honest*: real pad **extents**
+//! (not points), other-net traces/vias on their true slabs, copper **pours** (`Area`
+//! conductors), and hard `Role::Keepout` copper/route regions all map to blocked grid
+//! cells on the slabs they occupy. Same-net copper is never blocked. Cells outside the
+//! board region (or within the edge clearance of its boundary, including inside cutout
+//! holes) are unroutable on every layer. A pin whose footprint carries **no** pad copper
+//! (a bare terminal — the toy library, an unmodelled footprint) has no extent to stamp,
+//! so its world point is added as a small point obstacle for *other* nets, preserving the
+//! "don't run copper through another net's terminal" guarantee the old point model gave.
 //!
-//! ## Grid pitch (and why clearance falls out)
+//! ## Grid pitch, via legality, and clearance (the trace/via pitch split)
 //!
-//! `pitch = via_pad + min_clearance`, with `via_pad = 2 * min_trace_width`,
-//! `via_drill = min_trace_width`. All routed copper lies on grid nodes / axis-aligned
-//! grid edges, and **distinct nets never share a grid node** (node ownership). The
-//! minimum distance between two grid nodes used by different nets is therefore exactly
-//! `pitch`, which was chosen so that *every* adjacent-node copper pairing meets the
-//! edge-to-edge clearance rule:
-//!
-//! - track↔track: `pitch − width  = via_pad + clr − width ≥ clr`
-//! - track↔via:   `pitch − pad/2 − width/2 ≥ clr`
-//! - via↔via:     `pitch − pad/2 − pad/2   = clr` (exactly — passes, DRC is strict `<`)
-//!
-//! So routed-vs-routed clearance is *heuristically* clean on-grid; off-grid obstacles
-//! (pads and pre-existing traces/vias) get radius-based cell blocking. But this
-//! construction invariant is **not trusted**: it fails at sub-grid pitch and never
-//! covered the off-grid pad stubs, so [`autoroute`] runs a final pad-aware clearance
-//! check ([`verify_and_prune`]) and drops any net whose proposed copper actually
-//! clashes. `routed` therefore means *verified clean*, not clean-by-assertion
-//! (issue 0003).
+//! The routing grid pitch is `min_trace_width + min_clearance` — fine enough to resolve
+//! adjacent fine-pitch (e.g. 0.4 mm) pads, which the old `via_pad + clearance` pitch
+//! could not. A **via** needs more room than a trace (its pad is wider), so via legality
+//! is a *separate* per-cell mask, not a coarser grid: a via may be placed at a node only
+//! if `via_pad + clearance` of room clears every obstacle there. Two adjacent grid nodes
+//! used by different nets are `pitch` apart, which is exactly the trace↔trace clearance
+//! floor; the wider via↔copper cases are handled by the via mask + the obstacle blocking
+//! radii. As before this construction invariant is **not trusted** — [`verify_and_prune`]
+//! re-checks the proposed copper against the real DRC and drops any net that clashes.
 //!
 //! ## Honest limitations (documented, by design)
 //!
 //! This is greedy net-by-net maze routing — deliberately basic. There is **no
-//! rip-up-and-retry, no topological/push-and-shove, no length/impedance matching**.
-//! Consequently **net ordering matters**: a net that fails may well be routable in a
-//! different order (an earlier net can wall off a later one). Failures are *reported*
-//! (the net goes in `unrouted`), never fatal and never emitted as partial/overlapping
-//! copper — a net that cannot connect all its pins contributes **no** commands.
-//! Pads are points (the model carries no pad size); existing *same-net* copper is
-//! treated as a non-obstacle but is not used as a routing seed (the router re-routes
-//! a net from its pins). All geometry is integer nm; everything is deterministic.
+//! rip-up-and-retry, no topological/push-and-shove, no length/impedance matching, no
+//! net-ordering optimization, and no H/V per-layer directionality bias** (a per-layer
+//! preferred-direction cost would slot into [`astar`]'s orthogonal step cost; it is not
+//! built — issue 0008 owns that design cycle). Consequently **net ordering matters**: a
+//! net that fails may well be routable in a different order. Failures are *reported* (the
+//! net goes in `unrouted`), never fatal and never emitted as partial/overlapping copper.
+//! Vias are always through (full copper extent, `span: None`); blind/buried vias are out
+//! of scope. All geometry is integer nm; everything is deterministic.
 
 use crate::command::Command;
 use crate::doc::{Doc, Nm, PinRef, Point, Provenance};
 use crate::elaborate::stackup;
-use crate::geom::{Feature, NetFeature, Role, Shape2D, Stackup};
+use crate::geom::{Extent, Feature, KeepoutKind, NetFeature, Role, Shape2D, Stackup, ZRange};
 use crate::id::{NetId, TraceId, ViaId};
 use crate::part::{PartLib, PinRole, pin_world};
-use crate::route::{DesignRules, Layer, Trace, Via, layer_slab_name, net_features, slab_layer};
+use crate::route::{
+    DesignRules, Layer, Trace, Via, copper_layers_z, layer_slab_name, world_features,
+};
 use crate::solve::Rect;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
@@ -75,63 +75,80 @@ pub struct AutorouteResult {
     pub unrouted: Vec<NetId>,
 }
 
-// Layer index in the 2-layer grid (only Top/Bottom are routed).
-const TOP: usize = 0;
-const BOT: usize = 1;
-fn layer_of(l: usize) -> Layer {
-    if l == TOP { Layer::Top } else { Layer::Bottom }
-}
-
 /// Propose a routing transaction for `doc`. Pure: reads facts, returns commands.
 pub fn autoroute(doc: &Doc, lib: &PartLib, rules: &DesignRules) -> AutorouteResult {
     let width = rules.min_trace_width;
     let via_pad = 2 * rules.min_trace_width;
     let via_drill = rules.min_trace_width;
-    let pitch = via_pad + rules.min_clearance;
+    // The trace/via pitch split (issue 0003): the grid is as fine as a trace + its
+    // clearance needs, *not* as coarse as a via — so adjacent fine-pitch pads resolve.
+    // Via legality is a separate per-cell mask (see `BlockMap::via`).
+    let pitch = rules.min_trace_width + rules.min_clearance;
+    // A via pad's centre must keep this far from any *other* net's trace centreline
+    // (edge-to-edge = via_pad/2 + width/2 + clearance). Enforced during A* via placement.
+    let via_clear = rules.min_clearance + via_pad / 2 + width / 2;
 
-    // World pad positions for every net's pins, keyed by net (BTreeMap → sorted,
-    // deterministic). A pin with no resolvable world position is dropped.
-    let mut net_pads: BTreeMap<NetId, Vec<Point>> = BTreeMap::new();
+    // The stackup fixes the layer count and the slab name ↔ ordinal bridge. A stackup
+    // with no copper cannot be routed. `layers[k]` is the k-th copper slab top-down
+    // (0 = Top, last = Bottom), matching `route::copper_layers_z` / `Layer::depth`.
+    let su = stackup(&doc.source);
+    let layers: Vec<Layer> = copper_layers_z(&su).into_iter().map(|(l, _)| l).collect();
+    if layers.is_empty() {
+        return AutorouteResult::default();
+    }
+    let layer_names: Vec<String> = layers
+        .iter()
+        .map(|&l| layer_slab_name(&su, l).unwrap_or_default())
+        .collect();
+    if layer_names.iter().any(String::is_empty) {
+        return AutorouteResult::default();
+    }
+    let nl = layers.len();
+
+    // World pad positions and per-net *layer occupancy* for every net's pins. A pad
+    // participates on the copper slabs its geometry actually touches (an SMD pad on one,
+    // a through-hole pad on all); a pin with no resolvable world position is dropped.
+    // Occupancy drives seeding — an SMD pad seeds only on its own layer.
+    let netlist = doc_netlist(doc);
+    let mut net_pads: BTreeMap<NetId, Vec<Pad>> = BTreeMap::new();
     for (nid, net) in &doc.nets {
-        let mut pts = Vec::new();
+        let mut pads = Vec::new();
         for pr in &net.members {
             if let Some(c) = doc.components.get(&pr.comp)
                 && let Some(def) = lib.get(&c.part)
                 && let Some(p) = pin_world(c, def, &pr.pin)
             {
-                pts.push(p);
+                let (pad_layers, has_copper) = pad_layers(doc, lib, &su, pr, &layers);
+                pads.push(Pad {
+                    at: p,
+                    layers: pad_layers,
+                    has_copper,
+                });
             }
         }
-        net_pads.insert(nid.clone(), pts);
+        net_pads.insert(nid.clone(), pads);
     }
 
     // Routing area: the source Board outline, else the bounding box of all pads.
     let Some(area) = routing_area(doc, &net_pads, pitch) else {
-        // Nothing to route (no geometry).
         return AutorouteResult::default();
     };
-    let grid = Grid::new(area, pitch);
+    let grid = Grid::new(area, pitch, nl);
     if grid.cols == 0 || grid.rows == 0 {
         return AutorouteResult::default();
     }
 
-    // The router's grid is positional (Top/Bottom ordinals); it converts to/from slab
-    // *names* here at its boundary (Decision 13 rule 2). The two outer-copper names are
-    // resolved once; a stackup with no copper cannot be routed.
-    let su = stackup(&doc.source);
-    let (Some(top_name), Some(bot_name)) = (
-        layer_slab_name(&su, Layer::Top),
-        layer_slab_name(&su, Layer::Bottom),
-    ) else {
-        return AutorouteResult::default();
-    };
+    // Cells masked out by the board: outside the outline (or in a cutout hole), or within
+    // the edge clearance of any boundary. Unroutable on *all* layers, shared across nets.
+    let board_mask = BoardMask::build(doc, &grid, rules, width);
 
     // Ownership of each (node, layer) by a net (its routed copper passes through).
-    // -1 = free. Distinct nets never share a node ⇒ clearance falls out of `pitch`.
-    let mut owner = vec![[-1i32; 2]; grid.cols * grid.rows];
+    // -1 = free. Distinct nets never share a node ⇒ trace↔trace clearance falls out of
+    // `pitch`. Flat `cols*rows*nl`, layer-minor.
+    let mut owner = vec![-1i32; grid.cols * grid.rows * nl];
 
-    // Id minting: continue past any ids already in the doc (caller-assigned, like
-    // KiCad UUIDs — a hand edit and the autorouter mint the same way).
+    // Id minting: continue past any ids already in the doc (caller-assigned, like KiCad
+    // UUIDs — a hand edit and the autorouter mint the same way).
     let mut next_tid = doc.traces.keys().map(|t| t.0 + 1).max().unwrap_or(1);
     let mut next_vid = doc.vias.keys().map(|v| v.0 + 1).max().unwrap_or(1);
 
@@ -144,10 +161,22 @@ pub fn autoroute(doc: &Doc, lib: &PartLib, rules: &DesignRules) -> AutorouteResu
             continue;
         }
 
-        // Per-net obstacle map: every *other* net's pads, and all pre-existing
-        // traces/vias whose net differs (Pinned hand routes are fixed obstacles).
-        let obstacles = collect_obstacles(doc, &net_pads, nid, &su);
-        let block = BlockMap::build(&grid, &obstacles, rules, width, via_pad);
+        // Per-net obstacle map derived from the honest world-feature stream: every
+        // *other* net's copper (pads/traces/vias/pours) plus copper/route keep-outs, plus
+        // the point terminals of foreign pins that carry no pad copper.
+        let block = BlockMap::build(
+            &grid,
+            &board_mask,
+            doc,
+            lib,
+            rules,
+            &su,
+            &netlist,
+            &net_pads,
+            nid,
+            width,
+            via_pad,
+        );
 
         match route_net(
             &grid,
@@ -159,8 +188,8 @@ pub fn autoroute(doc: &Doc, lib: &PartLib, rules: &DesignRules) -> AutorouteResu
             width,
             via_pad,
             via_drill,
-            &top_name,
-            &bot_name,
+            via_clear,
+            &layer_names,
             &mut next_tid,
             &mut next_vid,
         ) {
@@ -173,30 +202,23 @@ pub fn autoroute(doc: &Doc, lib: &PartLib, rules: &DesignRules) -> AutorouteResu
     }
 
     // Don't trust the construction invariant — verify the proposed copper against the
-    // same pad-aware clearance DRC uses, and drop any net that actually clashes.
+    // real DRC and drop any net that actually clashes.
     verify_and_prune(doc, lib, rules, &mut result);
     result
 }
 
-/// Self-honesty (issue 0003): the grid's "clearance-clean by construction" invariant
-/// fails at sub-grid pitch (and never covered the off-grid pad stubs), so do not
-/// trust it. Check each *proposed* piece of copper against all other-net copper
-/// (existing pads / pre-existing traces+vias + other proposed copper) with the same
-/// `geom` clearance DRC uses; any routed net whose proposed copper clashes is dropped
-/// — its commands removed, the net moved to `unrouted`. So `routed` means *verified
-/// clearance-clean*, not clean-by-assertion. Dropping every clashing net is
-/// conservative (it can drop a net that a smarter order/rip-up would keep — that is
-/// future work, issue 0008); the point here is honesty, not optimality.
-///
-/// Note the asymmetry with DRC (issue 0023): this self-check verifies only copper-vs-copper
-/// clearance — it does **not** route around `Role::Keepout` regions or the board edge, so
-/// the router may lay copper that DRC then flags. Keep-out-aware routing is future work;
-/// today keep-outs are enforced at the check layer (`check_drc`), not the placer.
-fn verify_and_prune(doc: &Doc, lib: &PartLib, rules: &DesignRules, result: &mut AutorouteResult) {
-    // Existing copper (pads + pre-existing traces/vias) via the shared machinery.
-    // Clearance ignores roles, so a Passive placeholder role is fine.
-    let netlist: BTreeMap<NetId, Vec<(PinRef, PinRole)>> = doc
-        .nets
+/// A pad: its world centre, the copper layer ordinals its geometry occupies, and whether
+/// it actually carries pad copper (a bare terminal has none — see [`pad_layers`]).
+struct Pad {
+    at: Point,
+    layers: Vec<usize>,
+    has_copper: bool,
+}
+
+/// The membership-only netlist a `Doc` carries (roles are irrelevant to clearance /
+/// world_features, so a `Passive` placeholder is fine).
+fn doc_netlist(doc: &Doc) -> BTreeMap<NetId, Vec<(PinRef, PinRole)>> {
+    doc.nets
         .iter()
         .map(|(nid, net)| {
             (
@@ -207,14 +229,79 @@ fn verify_and_prune(doc: &Doc, lib: &PartLib, rules: &DesignRules, result: &mut 
                     .collect(),
             )
         })
-        .collect();
+        .collect()
+}
+
+/// The grid-layer ordinals a pin's pad copper occupies, and whether it carries any pad
+/// copper at all. Scan the pad's conductor features and match each feature's slab z to a
+/// copper slab, returning its ordinal: an SMD pad matches one layer; a through-hole pad
+/// matches every copper slab. A pin with **no** pad copper (a bare connection point — the
+/// toy library's parts, or a footprint whose pads the stackup lacks) is layer-agnostic,
+/// so it may seed on *any* layer (mirroring the ratsnest, which treats pads as all-layer
+/// points) — the returned `has_copper` is `false` so the caller instead adds it as a
+/// point obstacle for other nets.
+fn pad_layers(
+    doc: &Doc,
+    lib: &PartLib,
+    su: &Stackup,
+    pr: &PinRef,
+    layers: &[Layer],
+) -> (Vec<usize>, bool) {
+    let all = || (0..layers.len()).collect::<Vec<_>>();
+    let cu = su.copper_slabs();
+    let Some(c) = doc.components.get(&pr.comp) else {
+        return (all(), false);
+    };
+    let Some(def) = lib.get(&c.part) else {
+        return (all(), false);
+    };
+    let Some(pin) = def.pins.iter().find(|p| p.number == pr.pin) else {
+        return (all(), false);
+    };
+    let mut out = Vec::new();
+    for f in pin.pad_features(c, su) {
+        if f.role != Role::Conductor {
+            continue;
+        }
+        let Extent::Prism { z, .. } = &f.extent;
+        if let Some(slab) = cu.iter().find(|s| s.z == *z)
+            && let Some(k) = layers
+                .iter()
+                .position(|&l| layer_slab_name(su, l).as_deref() == Some(slab.name.as_str()))
+            && !out.contains(&k)
+        {
+            out.push(k);
+        }
+    }
+    if out.is_empty() {
+        return (all(), false);
+    }
+    out.sort_unstable();
+    (out, true)
+}
+
+/// Self-honesty (issue 0003): the grid's "clearance-clean by construction" invariant
+/// fails at sub-grid pitch (and never covered the off-grid pad stubs), so do not
+/// trust it. Check each *proposed* piece of copper against all other-net copper
+/// (existing pads / pre-existing traces+vias + other proposed copper) with the same
+/// `geom` clearance DRC uses, and additionally against copper/route keep-outs and the
+/// board edge (issue 0023 — the router now masks these out during search, so a clash
+/// here means a construction slip; checking it makes `routed` mean *DRC-clean*, not
+/// merely copper-vs-copper clean). Any routed net whose proposed copper clashes is
+/// dropped — its commands removed, the net moved to `unrouted`. Dropping every clashing
+/// net is conservative (it can drop a net that a smarter order/rip-up would keep — that
+/// is future work, issue 0008); the point here is honesty, not optimality.
+fn verify_and_prune(doc: &Doc, lib: &PartLib, rules: &DesignRules, result: &mut AutorouteResult) {
+    let netlist = doc_netlist(doc);
     let su = stackup(&doc.source);
     let cu = su.copper_slabs();
-    let existing = net_features(doc, lib, &netlist, &su);
+    // The full honest stream: existing copper, keep-outs, substrate.
+    let world = world_features(doc, lib, &netlist, rules, &su)
+        .expect("world_features on a committed doc (slab gate enforced at commit)");
 
-    // This run's proposed copper, lowered the same way `net_features` lowers the
-    // doc's: a trace is one Conductor prism on its named slab; a via fans out to one
-    // prism per copper slab it spans (so every feature is single-slab).
+    // This run's proposed copper, lowered the same way `net_features` lowers the doc's:
+    // a trace is one Conductor prism on its named slab; a via fans out to one prism per
+    // copper slab it spans (so every feature is single-slab).
     let mut proposed: Vec<NetFeature> = Vec::new();
     for cmd in &result.commands {
         match cmd {
@@ -235,23 +322,52 @@ fn verify_and_prune(doc: &Doc, lib: &PartLib, rules: &DesignRules, result: &mut 
         }
     }
 
-    // A proposed net is unclean if any of its features clashes (z-overlap ∧ within
-    // clearance) with a *different*-net feature — existing or proposed. Each feature
-    // is single-slab, so `Feature::clears` subsumes the old same-layer + distance gate.
+    // Keep-out features (copper/route kinds only) and the board substrate region, for the
+    // keepout + edge checks that make `routed` mean DRC-clean.
+    let keepouts: Vec<&Feature> = world
+        .iter()
+        .filter(|nf| {
+            matches!(
+                nf.feature.role,
+                Role::Keepout(KeepoutKind::Copper | KeepoutKind::Route)
+            )
+        })
+        .map(|nf| &nf.feature)
+        .collect();
+    let substrate: Option<&crate::region::Region> = world.iter().find_map(|nf| {
+        if nf.feature.role != Role::Substrate {
+            return None;
+        }
+        let Extent::Prism { shape, .. } = &nf.feature.extent;
+        shape.region()
+    });
+
     let mut unclean: BTreeSet<NetId> = BTreeSet::new();
     for p in &proposed {
         let Some(pnet) = &p.net else { continue };
         if unclean.contains(pnet) {
             continue;
         }
-        let clashes = existing
+        // Copper-vs-copper: any different-net conductor (existing or proposed) too close.
+        let copper_clash = world.iter().chain(proposed.iter()).any(|o| {
+            o.feature.role == Role::Conductor
+                && o.net.as_ref() != Some(pnet)
+                && !p.feature.clears(&o.feature, rules.min_clearance)
+        });
+        // Keep-out intrusion (z-gated by `Feature::clears`).
+        let keepout_clash = keepouts
             .iter()
-            .map(|(_, nf)| nf)
-            .chain(proposed.iter())
-            .any(|o| {
-                o.net.as_ref() != Some(pnet) && !p.feature.clears(&o.feature, rules.min_clearance)
-            });
-        if clashes {
+            .any(|kf| !p.feature.clears(kf, rules.keepout_clearance));
+        // Board-edge: solid copper grown by the edge rule must stay inside the board.
+        let edge_clash = substrate.is_some_and(|board| {
+            let Extent::Prism { shape, .. } = &p.feature.extent;
+            let grown = crate::region::shape_to_region(
+                &shape.inflated(rules.edge_clearance),
+                crate::region::DEFAULT_CIRCLE_SEGS,
+            );
+            !crate::region::difference(&grown, board).is_empty()
+        });
+        if copper_clash || keepout_clash || edge_clash {
             unclean.insert(pnet.clone());
         }
     }
@@ -271,18 +387,18 @@ fn verify_and_prune(doc: &Doc, lib: &PartLib, rules: &DesignRules, result: &mut 
 
 /// Choose the routing area: the board outline's bounding box if a `Board` is
 /// declared, else the bounding box of every pad, padded by two grid pitches so edge
-/// pins have room. (The grid spans the bbox; masking cells to a non-rectangular
-/// outline / out of cutouts is a follow-up — see architecture.md §8.)
-fn routing_area(doc: &Doc, net_pads: &BTreeMap<NetId, Vec<Point>>, pitch: Nm) -> Option<Rect> {
+/// pins have room. The grid spans the bbox; the [`BoardMask`] then carves it to the
+/// real (non-rectangular, cutout-holed) outline.
+fn routing_area(doc: &Doc, net_pads: &BTreeMap<NetId, Vec<Pad>>, pitch: Nm) -> Option<Rect> {
     if let Some(region) = crate::elaborate::board_region(&doc.source)
         && let Some((min, max)) = region.bbox()
     {
         return Some(Rect { min, max });
     }
-    let mut it = net_pads.values().flatten().copied();
+    let mut it = net_pads.values().flatten().map(|p| p.at);
     let first = it.next()?;
     let (mut min, mut max) = (first, first);
-    for p in net_pads.values().flatten().copied() {
+    for p in net_pads.values().flatten().map(|p| p.at) {
         min.x = min.x.min(p.x);
         min.y = min.y.min(p.y);
         max.x = max.x.max(p.x);
@@ -310,10 +426,11 @@ struct Grid {
     pitch: Nm,
     cols: usize,
     rows: usize,
+    layers: usize,
 }
 
 impl Grid {
-    fn new(area: Rect, pitch: Nm) -> Grid {
+    fn new(area: Rect, pitch: Nm, layers: usize) -> Grid {
         let cols = ((area.max.x - area.min.x) / pitch).max(0) as usize + 1;
         let rows = ((area.max.y - area.min.y) / pitch).max(0) as usize + 1;
         Grid {
@@ -321,6 +438,7 @@ impl Grid {
             pitch,
             cols,
             rows,
+            layers,
         }
     }
     fn world(&self, i: usize, j: usize) -> Point {
@@ -332,151 +450,262 @@ impl Grid {
     fn idx(&self, i: usize, j: usize) -> usize {
         j * self.cols + i
     }
-}
-
-// ----------------------------------------------------------------------------
-// Obstacles → blocked cells.
-// ----------------------------------------------------------------------------
-
-/// An off-grid obstacle a routed trace/via of the current net must clear. (On-grid
-/// same-run copper is handled by node ownership, not here.)
-enum Obstacle {
-    /// A pad (point, present on all layers — the model carries no pad size).
-    Pad(Point),
-    /// A pre-existing trace centreline segment on one layer, with its copper width.
-    Seg(Point, Point, Nm, Layer),
-    /// A pre-existing via: centre, pad diameter, and the layer span it occupies.
-    Via(Point, Nm, Layer, Layer),
-}
-
-fn collect_obstacles(
-    doc: &Doc,
-    net_pads: &BTreeMap<NetId, Vec<Point>>,
-    cur: &NetId,
-    su: &Stackup,
-) -> Vec<Obstacle> {
-    let mut obs = Vec::new();
-    // Other nets' pads.
-    for (nid, pts) in net_pads {
-        if nid == cur {
-            continue;
-        }
-        for p in pts {
-            obs.push(Obstacle::Pad(*p));
-        }
+    fn cells(&self) -> usize {
+        self.cols * self.rows
     }
-    // Pre-existing copper of other nets (hand-routed Pinned, or prior Free). Slab names
-    // convert to grid ordinals here (the router boundary); a trace on a slab the grid
-    // does not model (an inner layer) drops out.
-    for t in doc.traces.values() {
-        if t.net == *cur {
-            continue;
-        }
-        let Some(layer) = slab_layer(su, &t.layer) else {
-            continue;
+    /// Flat index into a `cells * layers` array (layer-minor).
+    fn lidx(&self, i: usize, j: usize, l: usize) -> usize {
+        self.idx(i, j) * self.layers + l
+    }
+    /// The inclusive cell index box covering world bbox `(lo, hi)` grown by `margin`,
+    /// clamped to the grid — the scan window for stamping one obstacle.
+    fn bbox_range(&self, lo: Point, hi: Point, margin: Nm) -> (usize, usize, usize, usize) {
+        let clampi =
+            |v: Nm| ((v - self.origin.x) / self.pitch).clamp(0, self.cols as Nm - 1) as usize;
+        let clampj =
+            |v: Nm| ((v - self.origin.y) / self.pitch).clamp(0, self.rows as Nm - 1) as usize;
+        // ±one cell of slop is fine — the exact distance test inside decides membership.
+        (
+            clampi(lo.x - margin - self.pitch),
+            clampi(hi.x + margin + self.pitch),
+            clampj(lo.y - margin - self.pitch),
+            clampj(hi.y + margin + self.pitch),
+        )
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Board masking: cells outside the board (or too near an edge) are unroutable.
+// ----------------------------------------------------------------------------
+
+/// Cells the board itself forbids on every layer: a node outside the board region
+/// (outline ∖ cutouts) or within `edge_clearance + half_width + half_edge` of its
+/// boundary. Shared across nets (the board doesn't change per net).
+struct BoardMask {
+    blocked: Vec<bool>,
+}
+
+impl BoardMask {
+    fn build(doc: &Doc, grid: &Grid, rules: &DesignRules, width: Nm) -> BoardMask {
+        let mut blocked = vec![false; grid.cells()];
+        let Some(board) = crate::elaborate::board_region(&doc.source) else {
+            // No outline ⇒ nothing to mask (the pad-bbox area is the routable region).
+            return BoardMask { blocked };
         };
-        for w in t.path.windows(2) {
-            obs.push(Obstacle::Seg(w[0], w[1], t.width, layer));
-        }
-    }
-    let cu = su.copper_slabs();
-    for v in doc.vias.values() {
-        if v.net == *cur {
-            continue;
-        }
-        // The via's spanned copper slabs, as grid ordinals (top-most and bottom-most it
-        // touches — the grid tests membership between them).
-        let spanned: Vec<Layer> = v
-            .spanned_slabs(&cu)
-            .into_iter()
-            .filter_map(|s| slab_layer(su, &s.name))
+        // The boundary edges (outer ring + cutout walls) as segments, once.
+        let edges: Vec<(Point, Point)> = board
+            .rings
+            .iter()
+            .filter(|r| r.len() >= 2)
+            .flat_map(|r| (0..r.len()).map(move |k| (r[k], r[(k + 1) % r.len()])))
             .collect();
-        let (Some(from), Some(to)) = (
-            spanned.iter().min_by_key(|l| l.depth()).copied(),
-            spanned.iter().max_by_key(|l| l.depth()).copied(),
-        ) else {
-            continue;
-        };
-        obs.push(Obstacle::Via(v.at, v.pad, from, to));
+        // A trace of `width` at a node stays `edge_clearance` clear only if the node is
+        // `edge_clearance + width/2` from any wall; the half-edge slop covers the edges
+        // leaving the node.
+        let pull = rules.edge_clearance + width / 2 + grid.pitch / 2;
+        for j in 0..grid.rows {
+            for i in 0..grid.cols {
+                let w = grid.world(i, j);
+                let inside = board.contains_point(w);
+                let near_edge = edges.iter().any(|(a, b)| within(w, *a, *b, pull));
+                if !inside || near_edge {
+                    blocked[grid.idx(i, j)] = true;
+                }
+            }
+        }
+        BoardMask { blocked }
     }
-    obs
+    fn blocked(&self, grid: &Grid, i: usize, j: usize) -> bool {
+        self.blocked[grid.idx(i, j)]
+    }
 }
 
-/// Per-net precomputed blocked-cell map. `trace[layer][idx]` = a trace of the current
-/// net may not occupy that node on that layer; `via[idx]` = a via may not be placed
-/// there. Sized so a node *and the half-edges leaving it* stay clearance-clean.
+// ----------------------------------------------------------------------------
+// Obstacles → blocked cells (honest, from world_features).
+// ----------------------------------------------------------------------------
+
+/// Per-net precomputed blocked-cell map. `trace[idx*nl + l]` = a trace of the current
+/// net may not occupy that node on layer `l`; `via[idx]` = a via may not be placed there
+/// (a via needs `via_pad + clearance` of room; since a through via touches every layer,
+/// the via mask is one per-cell test). Sized so a node *and the half-edges leaving it*
+/// stay clearance-clean, and starting from the board mask.
 struct BlockMap {
-    trace: [Vec<bool>; 2],
+    trace: Vec<bool>,
     via: Vec<bool>,
 }
 
 impl BlockMap {
+    #[allow(clippy::too_many_arguments)]
     fn build(
         grid: &Grid,
-        obs: &[Obstacle],
+        board: &BoardMask,
+        doc: &Doc,
+        lib: &PartLib,
         rules: &DesignRules,
+        su: &Stackup,
+        netlist: &BTreeMap<NetId, Vec<(PinRef, PinRole)>>,
+        net_pads: &BTreeMap<NetId, Vec<Pad>>,
+        cur: &NetId,
         width: Nm,
         via_pad: Nm,
     ) -> BlockMap {
-        let n = grid.cols * grid.rows;
-        let mut trace = [vec![false; n], vec![false; n]];
-        let mut via = vec![false; n];
-        let clr = rules.min_clearance;
-        let half_edge = grid.pitch / 2; // a routed edge reaches a neighbour `pitch` away
+        let cells = grid.cells();
+        let nl = grid.layers;
+        let mut trace = vec![false; cells * nl];
+        let mut via = vec![false; cells];
+        // The board mask blocks the cell on every layer, and a via there too (it needs
+        // room on all layers).
         for j in 0..grid.rows {
             for i in 0..grid.cols {
-                let w = grid.world(i, j);
-                let idx = grid.idx(i, j);
-                for ob in obs {
-                    match ob {
-                        Obstacle::Pad(p) => {
-                            // Trace-vs-pad threshold + half-edge slop, both layers.
-                            if within(w, *p, *p, clr + width / 2 + half_edge) {
-                                trace[TOP][idx] = true;
-                                trace[BOT][idx] = true;
-                            }
-                            // Via-vs-pad threshold.
-                            if within(w, *p, *p, clr + via_pad / 2 + half_edge) {
-                                via[idx] = true;
-                            }
-                        }
-                        Obstacle::Seg(a, b, ow, layer) => {
-                            let li = if *layer == Layer::Top { TOP } else { BOT };
-                            // Only Top/Bottom obstacle traces map onto the 2-layer grid;
-                            // any inner-layer obstacle (not produced here) is ignored.
-                            if *layer == Layer::Top || *layer == Layer::Bottom {
-                                if within(w, *a, *b, clr + width / 2 + ow / 2 + half_edge) {
-                                    trace[li][idx] = true;
-                                }
-                                // A via's annulus sits on both outer layers, so any
-                                // nearby outer-layer obstacle trace blocks via placement.
-                                if within(w, *a, *b, clr + via_pad / 2 + ow / 2 + half_edge) {
-                                    via[idx] = true;
-                                }
-                            }
-                        }
-                        Obstacle::Via(p, opad, from, to) => {
-                            let spans = |l: Layer| {
-                                let (lo, hi) =
-                                    (from.depth().min(to.depth()), from.depth().max(to.depth()));
-                                lo <= l.depth() && l.depth() <= hi
-                            };
-                            for (li, l) in [(TOP, Layer::Top), (BOT, Layer::Bottom)] {
-                                if spans(l)
-                                    && within(w, *p, *p, clr + width / 2 + opad / 2 + half_edge)
-                                {
-                                    trace[li][idx] = true;
-                                }
-                            }
-                            if within(w, *p, *p, clr + via_pad / 2 + opad / 2 + half_edge) {
-                                via[idx] = true;
-                            }
-                        }
+                if board.blocked(grid, i, j) {
+                    let idx = grid.idx(i, j);
+                    via[idx] = true;
+                    for l in 0..nl {
+                        trace[idx * nl + l] = true;
                     }
                 }
             }
         }
+
+        let clr = rules.min_clearance;
+        let half_edge = grid.pitch / 2; // a routed edge reaches a neighbour `pitch` away
+
+        // The honest obstacle stream: every different-net copper conductor on its true
+        // slab, plus copper/route keep-outs. Pours are `Area` conductors here — treated
+        // exactly like solid copper (no special case). We rasterize each onto the grid.
+        let world = world_features(doc, lib, netlist, rules, su)
+            .expect("world_features on a committed doc (slab gate enforced at commit)");
+        let cu = su.copper_slabs();
+        let slab_ord = |z: &ZRange| -> Option<usize> { cu.iter().position(|s| s.z == *z) };
+
+        for nf in &world {
+            let f = &nf.feature;
+            match f.role {
+                Role::Conductor => {
+                    if nf.net.as_ref() == Some(cur) {
+                        continue; // same-net copper is not an obstacle
+                    }
+                    let Extent::Prism { shape, z } = &f.extent;
+                    let Some(l) = slab_ord(z) else { continue };
+                    Self::stamp(
+                        grid,
+                        &mut trace,
+                        &mut via,
+                        nl,
+                        shape,
+                        Some(l),
+                        clr,
+                        width,
+                        via_pad,
+                        half_edge,
+                    );
+                }
+                Role::Keepout(KeepoutKind::Copper | KeepoutKind::Route) => {
+                    // A copper/route keep-out is a hard block on every copper slab its z
+                    // overlaps (netless ⇒ blocks all nets). If it overlaps no copper slab,
+                    // block all layers conservatively.
+                    let Extent::Prism { shape, z } = &f.extent;
+                    let mut any = false;
+                    for (k, s) in cu.iter().enumerate() {
+                        if s.z.overlaps(z) {
+                            Self::stamp(
+                                grid,
+                                &mut trace,
+                                &mut via,
+                                nl,
+                                shape,
+                                Some(k),
+                                clr,
+                                width,
+                                via_pad,
+                                half_edge,
+                            );
+                            any = true;
+                        }
+                    }
+                    if !any {
+                        Self::stamp(
+                            grid, &mut trace, &mut via, nl, shape, None, clr, width, via_pad,
+                            half_edge,
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Foreign bare-pin terminals: a pin whose footprint carries no pad copper emits no
+        // world feature, so stamp its world point as a small obstacle for *other* nets on
+        // the layers it occupies — preserving the "don't route through another net's
+        // terminal" guarantee. (A pad *with* copper already blocked via its extent above.)
+        for (nid, pads) in net_pads {
+            if nid == cur {
+                continue;
+            }
+            for p in pads {
+                if p.has_copper {
+                    continue;
+                }
+                let dot = Shape2D::disc(p.at, 0);
+                for &l in &p.layers {
+                    Self::stamp(
+                        grid,
+                        &mut trace,
+                        &mut via,
+                        nl,
+                        &dot,
+                        Some(l),
+                        clr,
+                        width,
+                        via_pad,
+                        half_edge,
+                    );
+                }
+            }
+        }
         BlockMap { trace, via }
+    }
+
+    /// Stamp one obstacle `shape` onto the grid: block the trace mask on layer `l` (or all
+    /// layers if `l` is `None`) for nodes within `clr + width/2 + half_edge`, and the via
+    /// mask (all-layer) for nodes within `clr + via_pad/2 + half_edge`. Scans only the
+    /// obstacle's grown bbox, so a small pad on a big board is cheap.
+    #[allow(clippy::too_many_arguments)]
+    fn stamp(
+        grid: &Grid,
+        trace: &mut [bool],
+        via: &mut [bool],
+        nl: usize,
+        shape: &Shape2D,
+        l: Option<usize>,
+        clr: Nm,
+        width: Nm,
+        via_pad: Nm,
+        half_edge: Nm,
+    ) {
+        let trace_thr = clr + width / 2 + half_edge;
+        let via_thr = clr + via_pad / 2 + half_edge;
+        let Some((lo, hi)) = shape.bbox() else { return };
+        let (imin, imax, jmin, jmax) = grid.bbox_range(lo, hi, trace_thr.max(via_thr));
+        for j in jmin..=jmax {
+            for i in imin..=imax {
+                let node = Shape2D::disc(grid.world(i, j), 0);
+                let idx = grid.idx(i, j);
+                if crate::geom::clearance_violated(shape, &node, trace_thr) {
+                    match l {
+                        Some(l) => trace[idx * nl + l] = true,
+                        None => {
+                            for ll in 0..nl {
+                                trace[idx * nl + ll] = true;
+                            }
+                        }
+                    }
+                }
+                if crate::geom::clearance_violated(shape, &node, via_thr) {
+                    via[idx] = true;
+                }
+            }
+        }
     }
 }
 
@@ -485,93 +714,81 @@ impl BlockMap {
 // ----------------------------------------------------------------------------
 
 type State = (usize, usize, usize); // (i, j, layer)
-/// A polyline run on one layer (world points), as produced from an A* path.
-type Run = (Layer, Vec<Point>);
+/// A polyline run on one layer (world points), as produced from an A* path; the `usize`
+/// is the layer ordinal.
+type Run = (usize, Vec<Point>);
 
 #[allow(clippy::too_many_arguments)]
 fn route_net(
     grid: &Grid,
     block: &BlockMap,
-    owner: &mut [[i32; 2]],
+    owner: &mut [i32],
     net_seq: i32,
     nid: &NetId,
-    pads: &[Point],
+    pads: &[Pad],
     width: Nm,
     via_pad: Nm,
     via_drill: Nm,
-    top_name: &str,
-    bot_name: &str,
+    via_clear: Nm,
+    layer_names: &[String],
     next_tid: &mut u64,
     next_vid: &mut u64,
 ) -> Option<Vec<Command>> {
-    // Convert a grid ordinal back to the copper slab *name* it was resolved from (the
-    // outward half of the router boundary). The grid only ever produces Top/Bottom.
-    let layer_name = |l: Layer| -> String {
-        match l {
-            Layer::Top => top_name.to_string(),
-            _ => bot_name.to_string(),
-        }
-    };
-    // Map each pad to the nearest grid node the current net may occupy.
-    let mut pin_nodes: Vec<(usize, usize)> = Vec::with_capacity(pads.len());
+    // Map each pad to the nearest grid node the current net may occupy, on one of the
+    // layers the pad exists on (an SMD pad seeds only on its own layer).
+    let mut pin_nodes: Vec<State> = Vec::with_capacity(pads.len());
     for p in pads {
-        pin_nodes.push(nearest_routable(grid, block, owner, net_seq, *p)?);
+        pin_nodes.push(nearest_routable(grid, block, owner, net_seq, p)?);
     }
 
     // Claim list for rollback if any pin fails (so a partial net blocks no one).
-    let mut claimed: Vec<(usize, usize)> = Vec::new();
-    let claim = |owner: &mut [[i32; 2]],
-                 i: usize,
-                 j: usize,
-                 l: usize,
-                 claimed: &mut Vec<(usize, usize)>| {
-        let idx = grid.idx(i, j);
-        if owner[idx][l] != net_seq {
-            owner[idx][l] = net_seq;
-            claimed.push((idx, l));
+    let mut claimed: Vec<usize> = Vec::new();
+    let claim = |owner: &mut [i32], i: usize, j: usize, l: usize, claimed: &mut Vec<usize>| {
+        let idx = grid.lidx(i, j, l);
+        if owner[idx] != net_seq {
+            owner[idx] = net_seq;
+            claimed.push(idx);
         }
     };
 
     let mut commands: Vec<Command> = Vec::new();
 
     // Seed the connected tree at pin 0; stub its pad onto its grid node.
-    let (si, sj) = pin_nodes[0];
-    claim(owner, si, sj, TOP, &mut claimed);
+    let (si, sj, sl) = pin_nodes[0];
+    claim(owner, si, sj, sl, &mut claimed);
     let seed_world = grid.world(si, sj);
-    if seed_world != pads[0] {
+    if seed_world != pads[0].at {
         commands.push(Command::AddTrace(
             TraceId(mint(next_tid)),
             Trace {
                 net: nid.clone(),
-                layer: layer_name(Layer::Top),
-                path: vec![pads[0], seed_world],
+                layer: layer_names[sl].clone(),
+                path: vec![pads[0].at, seed_world],
                 width,
                 prov: Provenance::Free,
             },
         ));
     }
     // The set of (node, layer) currently in the net's connected copper.
-    let mut tree: Vec<State> = vec![(si, sj, TOP)];
+    let mut tree: Vec<State> = vec![(si, sj, sl)];
 
     // Route each remaining pin to the existing tree.
     for k in 1..pin_nodes.len() {
         let goal = pin_nodes[k];
-        let Some(path) = astar(grid, block, owner, net_seq, &tree, goal) else {
-            // Roll back this net's claims and emit nothing for it.
-            for (idx, l) in claimed {
-                owner[idx][l] = -1;
+        let Some(path) = astar(grid, block, owner, net_seq, &tree, goal, via_clear) else {
+            for idx in claimed {
+                owner[idx] = -1;
             }
             return None;
         };
 
-        // Claim the path's cells, add them to the tree.
         for &(i, j, l) in &path {
             claim(owner, i, j, l, &mut claimed);
             tree.push((i, j, l));
         }
 
-        // Convert the grid path into per-layer trace runs + via points, appending
-        // the goal pad onto the final run so the trace literally touches the pad.
+        // Convert the grid path into per-layer trace runs + via points, appending the
+        // goal pad onto the final run so the trace literally touches the pad.
         let (runs, vias) = path_to_runs(grid, &path);
         for (vi, vj) in vias {
             commands.push(Command::AddVia(
@@ -579,8 +796,9 @@ fn route_net(
                 Via {
                     net: nid.clone(),
                     at: grid.world(vi, vj),
-                    // Top..Bottom is the full copper extent on the 2-layer grid — the
-                    // through-via full-span default (Decision 18).
+                    // A through via — the full copper extent (Decision 18's default).
+                    // Blind/buried is out of scope; the grid blocked the via site on every
+                    // layer, which is honest for a through barrel.
                     span: None,
                     drill: via_drill,
                     pad: via_pad,
@@ -591,7 +809,7 @@ fn route_net(
         let last = runs.len().saturating_sub(1);
         for (ri, (layer, mut pts)) in runs.into_iter().enumerate() {
             if ri == last {
-                pts.push(pads[k]); // stub onto the goal pad
+                pts.push(pads[k].at); // stub onto the goal pad
             }
             let pts = coalesce(pts);
             if pts.len() >= 2 {
@@ -599,7 +817,7 @@ fn route_net(
                     TraceId(mint(next_tid)),
                     Trace {
                         net: nid.clone(),
-                        layer: layer_name(layer),
+                        layer: layer_names[layer].clone(),
                         path: pts,
                         width,
                         prov: Provenance::Free,
@@ -618,52 +836,68 @@ fn mint(counter: &mut u64) -> u64 {
     v
 }
 
-/// Nearest grid node to `p` that the current net may occupy on the Top layer
-/// (deterministic: scans in fixed order, picks min squared distance, ties by index).
+/// Nearest grid node to `p.at` that the current net may occupy, on one of the copper
+/// layers the pad exists on (deterministic: scans in fixed layer→row→col order, picks
+/// min squared distance, ties by scan order). Seeding on the pad's own layer keeps a
+/// surface pad's stub honest; a via at the seed lets the router reach other layers.
 fn nearest_routable(
     grid: &Grid,
     block: &BlockMap,
-    owner: &[[i32; 2]],
+    owner: &[i32],
     net_seq: i32,
-    p: Point,
-) -> Option<(usize, usize)> {
-    let mut best: Option<((usize, usize), i128)> = None;
-    for j in 0..grid.rows {
-        for i in 0..grid.cols {
-            let idx = grid.idx(i, j);
-            if block.trace[TOP][idx] || (owner[idx][TOP] != -1 && owner[idx][TOP] != net_seq) {
-                continue;
-            }
-            let w = grid.world(i, j);
-            let dx = (w.x - p.x) as i128;
-            let dy = (w.y - p.y) as i128;
-            let d2 = dx * dx + dy * dy;
-            if best.is_none_or(|(_, bd)| d2 < bd) {
-                best = Some(((i, j), d2));
+    p: &Pad,
+) -> Option<State> {
+    let mut best: Option<(State, i128)> = None;
+    for &l in &p.layers {
+        for j in 0..grid.rows {
+            for i in 0..grid.cols {
+                let idx = grid.idx(i, j);
+                let lidx = grid.lidx(i, j, l);
+                if block.trace[idx * grid.layers + l]
+                    || (owner[lidx] != -1 && owner[lidx] != net_seq)
+                {
+                    continue;
+                }
+                let w = grid.world(i, j);
+                let dx = (w.x - p.at.x) as i128;
+                let dy = (w.y - p.at.y) as i128;
+                let d2 = dx * dx + dy * dy;
+                if best.is_none_or(|(_, bd)| d2 < bd) {
+                    best = Some(((i, j, l), d2));
+                }
             }
         }
     }
-    best.map(|(ij, _)| ij)
+    best.map(|(s, _)| s)
 }
 
-/// A* over `(i, j, layer)` from any node in `tree` (multi-source) to `goal` (reachable
-/// on either layer). Orthogonal steps cost one pitch; a layer change costs a via
-/// penalty. Deterministic: the frontier orders by `(f, i, j, layer)`.
+/// A* over `(i, j, layer)` from any node in `tree` (multi-source) to `goal` (a specific
+/// node+layer). Orthogonal steps cost one pitch; a via step to an *adjacent* layer costs
+/// a via penalty (so a full N-layer through-hop costs proportionally more than a single
+/// layer change). Deterministic: the frontier orders by `(f, i, j, layer)`.
 fn astar(
     grid: &Grid,
     block: &BlockMap,
-    owner: &[[i32; 2]],
+    owner: &[i32],
     net_seq: i32,
     tree: &[State],
-    goal: (usize, usize),
+    goal: State,
+    via_clear: Nm,
 ) -> Option<Vec<State>> {
     let pitch = grid.pitch;
     let via_pen = 10 * pitch; // strongly prefer staying on one layer (fewer vias)
-    let n = grid.cols * grid.rows;
-    let sidx = |s: State| s.2 * n + grid.idx(s.0, s.1);
+    let cells = grid.cells();
+    let nl = grid.layers;
+    let sidx = |s: State| grid.lidx(s.0, s.1, s.2);
+    // A via pad must keep `via_clear` from any foreign copper centreline. Same-run copper
+    // of *other* nets lives in `owner` (the committed obstacles are already in `block.via`),
+    // so a via is illegal if any node within `via_clear` is owned by another net. Scan the
+    // Chebyshev box of that radius and test the exact Euclidean distance.
+    let ring = (via_clear / pitch) as usize + 1;
+    let vc2 = (via_clear as i128) * (via_clear as i128);
 
-    let mut g = vec![i64::MAX; n * 2];
-    let mut came: Vec<Option<State>> = vec![None; n * 2];
+    let mut g = vec![i64::MAX; cells * nl];
+    let mut came: Vec<Option<State>> = vec![None; cells * nl];
     let mut heap: BinaryHeap<Reverse<(i64, usize, usize, usize)>> = BinaryHeap::new();
 
     let h = |i: usize, j: usize| -> i64 {
@@ -683,11 +917,43 @@ fn astar(
 
     let passable = |i: usize, j: usize, l: usize| -> bool {
         let idx = grid.idx(i, j);
-        !block.trace[l][idx] && (owner[idx][l] == -1 || owner[idx][l] == net_seq)
+        let lidx = grid.lidx(i, j, l);
+        !block.trace[idx * nl + l] && (owner[lidx] == -1 || owner[lidx] == net_seq)
     };
+    // A through via at (i,j) is legal only if the site clears via room (committed
+    // obstacles, in `block.via`), is passable on *every* copper layer (the barrel touches
+    // all of them), and keeps `via_clear` from any *other* net's same-run copper.
     let via_ok = |i: usize, j: usize| -> bool {
         let idx = grid.idx(i, j);
-        !block.via[idx] && passable(i, j, TOP) && passable(i, j, BOT)
+        if block.via[idx] || !(0..nl).all(|l| passable(i, j, l)) {
+            return false;
+        }
+        let c = grid.world(i, j);
+        let lo_i = i.saturating_sub(ring);
+        let hi_i = (i + ring).min(grid.cols - 1);
+        let lo_j = j.saturating_sub(ring);
+        let hi_j = (j + ring).min(grid.rows - 1);
+        for nj in lo_j..=hi_j {
+            for ni in lo_i..=hi_i {
+                if ni == i && nj == j {
+                    continue;
+                }
+                let foreign = (0..nl).any(|l| {
+                    let o = owner[grid.lidx(ni, nj, l)];
+                    o != -1 && o != net_seq
+                });
+                if !foreign {
+                    continue;
+                }
+                let w = grid.world(ni, nj);
+                let dx = (w.x - c.x) as i128;
+                let dy = (w.y - c.y) as i128;
+                if dx * dx + dy * dy < vc2 {
+                    return false;
+                }
+            }
+        }
+        true
     };
 
     while let Some(Reverse((f, i, j, l))) = heap.pop() {
@@ -696,8 +962,7 @@ fn astar(
         if f > gs.saturating_add(h(i, j)) {
             continue; // stale
         }
-        if (i, j) == goal {
-            // Reconstruct.
+        if s == goal {
             let mut path = vec![s];
             let mut cur = s;
             while let Some(prev) = came[sidx(cur)] {
@@ -722,32 +987,38 @@ fn astar(
         if j > 0 {
             nbrs.push((i, j - 1, l, pitch));
         }
-        // Layer change in place (a via).
-        let other = if l == TOP { BOT } else { TOP };
+        // Via moves to the adjacent layer(s): one hop per crossed layer (so a deep hop
+        // costs proportionally). A through via touches every copper layer, so the site
+        // must clear via room on all of them (`via_ok`).
         if via_ok(i, j) {
-            nbrs.push((i, j, other, via_pen));
+            if l + 1 < nl {
+                nbrs.push((i, j, l + 1, via_pen));
+            }
+            if l > 0 {
+                nbrs.push((i, j, l - 1, via_pen));
+            }
         }
 
-        for (ni, nj, nl, step) in nbrs {
-            if nl == l && !passable(ni, nj, nl) {
+        for (ni, nj, nlyr, step) in nbrs {
+            if nlyr == l && !passable(ni, nj, nlyr) {
                 continue;
             }
-            let ns = (ni, nj, nl);
+            let ns = (ni, nj, nlyr);
             let ng = gs.saturating_add(step);
             if ng < g[sidx(ns)] {
                 g[sidx(ns)] = ng;
                 came[sidx(ns)] = Some(s);
-                heap.push(Reverse((ng.saturating_add(h(ni, nj)), ni, nj, nl)));
+                heap.push(Reverse((ng.saturating_add(h(ni, nj)), ni, nj, nlyr)));
             }
         }
     }
     None
 }
 
-/// Split an A* path into per-layer polyline runs (in world coords) plus the grid
-/// nodes where a via is dropped. A layer change between consecutive states is a via
-/// at that (shared) node; both the closing and opening run carry the node's point, so
-/// the via touches copper on both layers (and the ratsnest unions them).
+/// Split an A* path into per-layer polyline runs (in world coords) plus the grid nodes
+/// where a via is dropped. A layer change between consecutive states is a via at that
+/// (shared) node. Consecutive via steps at the same node (a multi-layer hop) collapse to
+/// one through via — it already spans every layer — so a deep hop emits a single via.
 fn path_to_runs(grid: &Grid, path: &[State]) -> (Vec<Run>, Vec<(usize, usize)>) {
     let mut runs: Vec<Run> = Vec::new();
     let mut vias: Vec<(usize, usize)> = Vec::new();
@@ -758,13 +1029,16 @@ fn path_to_runs(grid: &Grid, path: &[State]) -> (Vec<Run>, Vec<(usize, usize)>) 
         if l == cur_layer {
             cur_pts.push(grid.world(i, j));
         } else {
-            runs.push((layer_of(cur_layer), std::mem::take(&mut cur_pts)));
-            vias.push((i, j)); // same (i,j) as the previous state
+            runs.push((cur_layer, std::mem::take(&mut cur_pts)));
+            // A through via at (i,j) spans all layers, so record it once per site.
+            if vias.last() != Some(&(i, j)) {
+                vias.push((i, j));
+            }
             cur_layer = l;
             cur_pts = vec![grid.world(i, j)];
         }
     }
-    runs.push((layer_of(cur_layer), cur_pts));
+    runs.push((cur_layer, cur_pts));
     (runs, vias)
 }
 
@@ -779,7 +1053,6 @@ fn coalesce(pts: Vec<Point>) -> Vec<Point> {
         while out.len() >= 2 {
             let a = out[out.len() - 2];
             let b = out[out.len() - 1];
-            // (b-a) × (p-a) == 0  ⇒  a,b,p collinear ⇒ b is redundant.
             let cross = (b.x - a.x) as i128 * (p.y - a.y) as i128
                 - (b.y - a.y) as i128 * (p.x - a.x) as i128;
             if cross == 0 {
@@ -845,7 +1118,6 @@ mod tests {
     fn verify_prunes_a_net_whose_trace_clashes_a_pad() {
         use crate::geom::Shape2D;
         use crate::part::{PadCopper, PadGeo, PadLayers, PartDef, PinDef, PinRole};
-        // A part with one pin carrying a 0.5 mm square copper pad.
         let pin = PinDef {
             name: "1".into(),
             number: "1".into(),
@@ -872,7 +1144,6 @@ mod tests {
                 class: None,
             },
         );
-        // Net B's pad sits at the origin; net A is a separate net.
         let src = vec![
             G::Instance {
                 path: "b".into(),
@@ -893,7 +1164,6 @@ mod tests {
         h.commit(Transaction::one(Command::SetSource(src)), &lib, "src")
             .unwrap();
 
-        // A net-A trace whose centreline runs straight through net B's pad.
         let mut result = AutorouteResult {
             commands: vec![Command::AddTrace(
                 TraceId(1),
@@ -984,7 +1254,6 @@ mod tests {
         let lib = part_library();
         let mut h = doc_of(two_net_board());
 
-        // Before: both nets are unrouted (ratsnest islands).
         let before = drc(&h);
         assert!(
             before
@@ -1050,14 +1319,12 @@ mod tests {
                 net: "VBUS".into(),
                 pins: vec![("reg".into(), "VOUT".into()), ("dec".into(), "p1".into())],
             },
-            // Single-pin net carrying a hand-routed wall (not itself routed).
             G::ConnectPins {
                 net: "WALL".into(),
                 pins: vec![("reg".into(), "VIN".into())],
             },
         ];
         let mut h = doc_of(src);
-        // A Pinned wall on net WALL across x=6, full board height (on Top only).
         let wall = Trace {
             net: NetId::new("WALL"),
             layer: "F.Cu".into(),
@@ -1077,7 +1344,6 @@ mod tests {
             r.unrouted.is_empty(),
             "VBUS should route around/under the wall"
         );
-        // The detour around a full-height Top wall forces a layer change.
         assert!(
             r.commands.iter().any(|c| matches!(c, Command::AddVia(..))),
             "crossing a full-height Top wall should drop to Bottom via a via"
@@ -1098,8 +1364,7 @@ mod tests {
     }
 
     /// An intentionally impossible net (walled off on *both* layers) is reported as
-    /// unrouted rather than producing bad copper: no commands for it, no new
-    /// clearance/width violations, and DRC still flags it unrouted.
+    /// unrouted rather than producing bad copper.
     #[test]
     fn impossible_net_is_reported_not_botched() {
         let lib = part_library();
@@ -1135,7 +1400,6 @@ mod tests {
             },
         ];
         let mut h = doc_of(src);
-        // Walls on BOTH layers spanning beyond the board: no crossing on either layer.
         for (id, layer) in [(TraceId(1), "F.Cu"), (TraceId(2), "B.Cu")] {
             let wall = Trace {
                 net: NetId::new("WALL"),
@@ -1160,7 +1424,6 @@ mod tests {
             r.commands
         );
 
-        // Applying nothing changes nothing; DRC still flags VBUS unrouted, no new DRC errors.
         let after = drc(&h);
         assert!(
             !has_clearance_or_width(&after),
@@ -1178,7 +1441,6 @@ mod tests {
     #[test]
     fn autoroute_three_pin_net() {
         let lib = part_library();
-        // Three caps' p1 pads + reg.VOUT all on one net.
         let src = vec![
             board_rect(Point::mm(-6, -12), Point::mm(30, 12)),
             G::Instance {

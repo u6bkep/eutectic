@@ -532,7 +532,12 @@ pub(crate) fn layer_slab_name(stackup: &Stackup, l: Layer) -> Option<String> {
 }
 
 /// The router ordinal [`Layer`] a copper slab **name** maps to (the inward half of the
-/// router's bridge): `None` for an unknown or non-copper name. Router-internal.
+/// router's bridge): `None` for an unknown or non-copper name. Router-internal. The
+/// autorouter now works in ordinals derived once from [`copper_layers_z`], so this
+/// inward half currently has only the round-trip test as a caller; it is retained as the
+/// documented sibling of [`layer_slab_name`] (Decision 13 rule 2) for a future
+/// name→ordinal consumer.
+#[allow(dead_code)]
 pub(crate) fn slab_layer(stackup: &Stackup, name: &str) -> Option<Layer> {
     copper_layers_z(stackup)
         .into_iter()
