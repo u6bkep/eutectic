@@ -174,7 +174,8 @@ pub enum GenDirective {
     /// **degrades** to the stroke font (a `W_FONT_LOAD` diagnostic, never a hard error);
     /// with no directive the stroke font is the default. Not a placement/connectivity
     /// directive — elaboration's passes ignore it; it is read only by the lowering
-    /// ([`resolve_font`]) and validation ([`font_diagnostics`]).
+    /// ([`resolve_font`]) and by [`elaborate`], which records any load failure on the
+    /// [`ReconReport`] (a `W_FONT_LOAD` warning) via [`font_load_failure`].
     Font {
         path: String,
     },
@@ -699,6 +700,9 @@ pub fn elaborate(
     let mut report = ReconReport::default();
     let mut decayed: BTreeSet<EntityId> = BTreeSet::new();
     let mut prov_map: BTreeMap<EntityId, Provenance> = BTreeMap::new();
+    // Decision 17: a doc-wide `font` that fails to load degrades to the stroke font — a
+    // finding on a valid doc (a `W_FONT_LOAD` warning), never a fault.
+    report.font_load_failure = font_load_failure(source);
 
     for (id, ov) in overrides {
         if !base.contains_key(id) || ov.pos.is_none() {
@@ -1212,30 +1216,20 @@ pub fn resolve_font(source: &Source) -> Option<crate::font::TtfFont> {
     crate::font::TtfFont::from_path(std::path::Path::new(path)).ok()
 }
 
-/// Validate the doc-wide [`GenDirective::Font`]: a `W_FONT_LOAD` **warning** when its
-/// file cannot be read or parsed (the lowering degrades to the stroke font — the doc
-/// still exports). Empty when there is no directive or it loads cleanly. Separated from
-/// [`resolve_font`] because feature lowering has no diagnostic channel and must never
-/// fail; this is the surfacing path a validation pass calls.
-pub fn font_diagnostics(source: &Source) -> Vec<Diagnostic> {
-    let Some(path) = source.iter().rev().find_map(|d| match d {
+/// The doc-wide [`GenDirective::Font`] failure, if any: `(path, reason)` when the last
+/// `Font` directive's file cannot be read or parsed. `None` when there is no directive or
+/// it loads cleanly. Distinct from [`resolve_font`] because feature lowering has no
+/// diagnostic channel and must never fail; this feeds the [`ReconReport`]'s
+/// `font_load_failure` field, which the `Diagnose` impl renders as a `W_FONT_LOAD`
+/// warning — the path that surfaces a silently-ignored directive to the user.
+pub fn font_load_failure(source: &Source) -> Option<(String, String)> {
+    let path = source.iter().rev().find_map(|d| match d {
         GenDirective::Font { path } => Some(path),
         _ => None,
-    }) else {
-        return Vec::new();
-    };
+    })?;
     match crate::font::TtfFont::from_path(std::path::Path::new(path)) {
-        Ok(_) => Vec::new(),
-        Err(reason) => vec![
-            Diagnostic::warning(
-                "W_FONT_LOAD",
-                format!(
-                    "font `{path}` could not be loaded ({reason}); using the built-in stroke font"
-                ),
-                Location::None,
-            )
-            .with_help("check the path, or remove the `font` directive to use the stroke font"),
-        ],
+        Ok(_) => None,
+        Err(reason) => Some((path.clone(), reason)),
     }
 }
 
@@ -1775,18 +1769,21 @@ mod tests {
                 "outline text is a filled Area, got {shape:?}"
             );
         }
-        assert!(
-            font_diagnostics(&src).is_empty(),
-            "a loadable font emits no diagnostic"
+        assert_eq!(
+            font_load_failure(&src),
+            None,
+            "a loadable font records no failure"
         );
         std::fs::remove_file(&path).ok();
     }
 
     /// A `font` directive pointing at a missing file **degrades** to the stroke font
-    /// (board text still lowers, as `Stroke` traces — the doc does not fail), while
-    /// [`font_diagnostics`] surfaces a `W_FONT_LOAD` warning.
+    /// (board text still lowers, as `Stroke` traces — the doc does not fail), and the
+    /// failure surfaces on the [`ReconReport`] as a non-blocking `W_FONT_LOAD` warning
+    /// that leaves the doc `is_clean`.
     #[test]
-    fn features_missing_font_degrades_to_stroke_with_diagnostic() {
+    fn missing_font_degrades_to_stroke_with_warning() {
+        use crate::diagnostic::Diagnose;
         let src = vec![
             GenDirective::Font {
                 path: "/no/such/font/file.ttf".into(),
@@ -1813,11 +1810,18 @@ mod tests {
                 "degraded to stroke traces, got {shape:?}"
             );
         }
-        // The failure is surfaced (as a warning, not an error) through the diagnostic path.
-        let diags = font_diagnostics(&src);
-        assert_eq!(diags.len(), 1);
-        assert_eq!(diags[0].code, "W_FONT_LOAD");
-        assert!(!diags[0].is_error(), "font load failure is a warning");
+        // Elaboration succeeds; the failure rides on the report as a warning that does
+        // NOT dirty the doc (Decision 17 degrade-never-fail).
+        let el = elaborate(&src, &BTreeMap::new(), &BTreeMap::new(), &PartLib::new())
+            .expect("elaborates despite the bad font");
+        assert!(el.report.font_load_failure.is_some());
+        assert!(el.report.is_clean(), "a font degrade keeps the doc clean");
+        let diags = el.report.diagnostics();
+        let w = diags
+            .iter()
+            .find(|d| d.code == "W_FONT_LOAD")
+            .expect("a W_FONT_LOAD diagnostic");
+        assert!(!w.is_error(), "font load failure is a warning");
     }
 
     /// An unknown slab name is a hard elaboration error (no silent board-z fallback,

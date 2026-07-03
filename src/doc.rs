@@ -358,6 +358,12 @@ pub struct ReconReport {
     /// fixed/pinned parts placed into each other). Each pair is ordered `(a, b)` with
     /// `a < b`, matching the deterministic constraint order.
     pub courtyard_overlaps: Vec<(EntityId, EntityId)>,
+    /// The doc-wide outline `font` (Decision 17) failed to load: `(path, reason)`. A
+    /// **degrade**, not a fault — text still lowered (in the built-in stroke font), so the
+    /// doc is valid and this does **not** dirty [`is_clean`](ReconReport::is_clean). It
+    /// surfaces as a `W_FONT_LOAD` **warning** so a silently-ignored directive is still
+    /// visible. `None` when there is no directive or it loaded cleanly.
+    pub font_load_failure: Option<(String, String)>,
 }
 
 impl ReconReport {
@@ -368,6 +374,8 @@ impl ReconReport {
             && self.orphaned.is_empty()
             && self.refdes_pin_dups.is_empty()
             && self.courtyard_overlaps.is_empty()
+        // NB: `font_load_failure` is deliberately excluded — a font that fails to load
+        // degrades to the stroke font (Decision 17), leaving the doc clean.
     }
 }
 
@@ -438,6 +446,17 @@ impl crate::diagnostic::Diagnose for ReconReport {
                     Location::Entity(a.clone()),
                 )
                 .with_help("free a pin/fix so the solver can separate them, or move one part"),
+            );
+        }
+        if let Some((path, reason)) = &self.font_load_failure {
+            // Degrade, not fault (Decision 17): a warning, and `is_clean` ignores it.
+            out.push(
+                Diagnostic::warning(
+                    "W_FONT_LOAD",
+                    format!("font `{path}` could not be loaded ({reason}); using the built-in stroke font"),
+                    Location::None,
+                )
+                .with_help("check the path (absolute is safest), or remove the `font` directive"),
             );
         }
         out

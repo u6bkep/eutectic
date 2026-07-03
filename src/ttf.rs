@@ -36,6 +36,28 @@
 //!
 //! Kerning (advances are per-glyph `hmtx` only — no `kern`/GPOS pair adjustment); font
 //! embedding in the document; per-text font overrides (the font is doc-wide).
+//!
+//! # Caveats
+//!
+//! - **Glyph `Area`s are render/clearance-safe but not boolean-clean.** Flattened
+//!   contours are self-intersection-robust for tessellation, drawing, and the tolerance
+//!   DRC (which reads segments under the non-zero winding rule), but a glyph's rings may
+//!   be non-simple or mutually overlapping (e.g. an italic that self-touches, or a
+//!   diacritic overlapping its base). They therefore **must not enter the region boolean
+//!   engine** (`union`/`difference`/`dilate`) without a normalization pass first.
+//!   Consequently [`Shape2D::inflated`] with `d ≠ 0` is **not valid** on a glyph `Area`
+//!   today: `d < 0` already panics (the region erosion guard), and `d > 0` would feed
+//!   these rings to the offset kernel — don't. Placement (`map_points`) and bbox are
+//!   fine; those never run booleans.
+//! - **`from_path` resolves relative paths against the process CWD.** A `font` directive
+//!   with a relative path is interpreted relative to wherever the tool runs, not the
+//!   document's directory — prefer an **absolute path**. A document-relative base
+//!   directory is future work.
+//! - **The font is re-parsed per derivation.** Each `features`/silk pass calls
+//!   [`resolve_font`](crate::elaborate::resolve_font), which reads and validates the file
+//!   afresh (glyph lookups within one `text_regions` call reuse a single `Face`). Parsing
+//!   only walks the table directory, so the cost is modest; a parsed-font cache is a
+//!   deliberate follow-up, not built here.
 
 use crate::doc::{Nm, Point};
 use crate::font::Justify;
@@ -62,7 +84,9 @@ impl TtfFont {
     }
 
     /// Load a font from a filesystem path. `Err` distinguishes I/O (missing/unreadable)
-    /// from parse failure so the diagnostic can say which.
+    /// from parse failure so the diagnostic can say which. A **relative** `path` resolves
+    /// against the process working directory (not the document's dir) — prefer an absolute
+    /// path; a doc-relative base is future work.
     pub fn from_path(path: &std::path::Path) -> Result<TtfFont, String> {
         let data =
             std::fs::read(path).map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
