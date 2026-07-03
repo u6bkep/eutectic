@@ -548,7 +548,8 @@ containment edge cases, determinism). **Stage 2 done:** the region *primitive* �
 `GenDirective::Region`, assembled by the shared `elaborate::regions(&Source)` reader (mirroring
 `board_shape`), and round-tripped by the text front-end (`region <role> [net=..] layer=.. <pts>`, with
 keep-out kinds and inner layers). It is tier-1 authoritative; the knockout fill stays derived.
-**Stage 3 done:** the **derived pour-fill query** — `route::pour_fills(...)` computes, for each
+**Stage 3 done:** the **derived pour-fill query** — `route::pours(...)` (a view over the unified
+`route::world_features`, Decision 16) computes, for each
 `Conductor` region, `fill = outline − ⋃(foreign_copper ⊕ clearance)` via the stage-1 kernel
 (`Shape2D::inflated` is the exact Minkowski offset = a radius bump; foreign = different-net copper on
 the pour's layer; same-net copper is *not* knocked out — it is what the pour connects to). The fill is
@@ -579,8 +580,8 @@ fill is emitted per layer as an RS-274X `G36`/`G37` **region fill** — the oute
 as contours in one region statement, so the knockouts come out as voids (a fill is already a
 tessellated polygon, so no arcs needed). `copper_layers` includes pour layers (an inner-layer pour
 gets its own Gerber). SVG draws each pour as a translucent layer-coloured `<path>` with even-odd fill
-(holes read as voids), under the components/traces. The shared `export::pour_fills_of` builds the
-membership netlist and calls `route::pour_fills`, so DRC and fab see identical fills. Tests: Gerber
+(holes read as voids), under the components/traces. The shared `export::pours_of` builds the
+membership netlist and calls `route::pours`, so DRC and fab see identical fills. Tests: Gerber
 emits `G36`/`G37` with outer + knockout-hole contours (bottom layer has none); SVG draws the pour
 path; fab output deterministic with a pour. **Scope note:** the custom-pad / rounded-outline
 bounding-box-collapse fidelity debt was not repaid by the pour work itself — it was repaid
@@ -1303,11 +1304,15 @@ definitions and Excellon coordinates/tool sizes use the same six-decimal-mm `fmt
   `TraceId`, then `ViaId`, then `(EntityId, pin)` — deterministic. Ends `M02*`.
 - **`gerber_edge_cuts(doc, lib) -> String`** — the board outline as a closed rectangle drawn with a
   thin 0.1 mm pen, from the source `Board` rect, else the placement/route bounding box.
-- **`excellon_drill(doc) -> String`** — `M48` header, `METRIC`, one **tool** per distinct via drill
-  diameter (`T1..`, sorted), then each tool's hole coordinates (`ViaId` order), `M30`. Decimal-point
-  coordinates so zero-suppression mode is moot.
+- **`excellon_drill(doc, lib) -> Vec<(String, String)>`** — a forward query over the through-cut
+  `Role::Void` features of `route::world_features` (pad **and** via drills; issue 0022), split by
+  plating into `board-PTH.drl` / `board-NPTH.drl` (only the non-empty file(s) emitted). Each file:
+  `M48` header, `METRIC`, one **tool** per distinct drill diameter (`T1..`, sorted), then each tool's
+  hits in canonical order (round holes as a coordinate, slots as a `G85` routed hole), `M30`.
+  Decimal-point coordinates so zero-suppression mode is moot.
 - **`gerber_set(doc, lib) -> Vec<(String, String)>`** — the convenient fileset: `board-F_Cu.gbr` /
-  `board-B_Cu.gbr` / `board-In<n>_Cu.gbr` (stack-up order) + `board-Edge_Cuts.gbr` + `board.drl`.
+  `board-B_Cu.gbr` / `board-In<n>_Cu.gbr` (stack-up order) + `board-Edge_Cuts.gbr` + the split drill
+  file(s) (`board-PTH.drl` / `board-NPTH.drl`).
 
 **Honest limits.** **Not validated against a real Gerber viewer** — assertions here are
 syntactic/structural (format directives, aperture defs, draw/flash counts, exact coordinates). **DRC

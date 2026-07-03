@@ -174,6 +174,11 @@ pub fn autoroute(doc: &Doc, lib: &PartLib, rules: &DesignRules) -> AutorouteResu
 /// clearance-clean*, not clean-by-assertion. Dropping every clashing net is
 /// conservative (it can drop a net that a smarter order/rip-up would keep — that is
 /// future work, issue 0008); the point here is honesty, not optimality.
+///
+/// Note the asymmetry with DRC (issue 0023): this self-check verifies only copper-vs-copper
+/// clearance — it does **not** route around `Role::Keepout` regions or the board edge, so
+/// the router may lay copper that DRC then flags. Keep-out-aware routing is future work;
+/// today keep-outs are enforced at the check layer (`check_drc`), not the placer.
 fn verify_and_prune(doc: &Doc, lib: &PartLib, rules: &DesignRules, result: &mut AutorouteResult) {
     // Existing copper (pads + pre-existing traces/vias) via the shared machinery.
     // Clearance ignores roles, so a Passive placeholder role is fine.

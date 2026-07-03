@@ -116,8 +116,9 @@ pub struct DesignRules {
     /// fusing genuinely separate copper.
     pub touch_tol: Nm,
     /// Minimum gap from copper to a copper/route **keep-out** region's edge (issue
-    /// 0023). Default `0`: a keep-out is a hard boundary — copper *overlapping or
-    /// touching* it violates, but merely abutting the edge does not.
+    /// 0023). Default `0`: copper that *overlaps* the keep-out violates, but copper
+    /// merely touching its edge (an exact zero-gap tangency) does not — the underlying
+    /// clearance test is strict `<`. Set a positive value for a real pull-back margin.
     pub keepout_clearance: Nm,
     /// Minimum gap from copper to the **board edge** — the substrate boundary and the
     /// walls of any cutout (issue 0023). Copper closer than this, or spilling outside
@@ -245,10 +246,17 @@ pub fn check_drc(
     // ([`world_features`], Decision 16c) — copper (pads/traces/vias/pours), the
     // substrate, keep-outs, voids, mask and markings. DRC filters it by role/net; the
     // former parallel copper producer (`net_features` alone) is gone, so keep-outs now
-    // reach DRC (issue 0023). A committed `Doc` always resolves its slab names, so this
-    // never errors here; on the impossible error we fall back to an empty stream.
+    // reach DRC (issue 0023).
+    //
+    // A committed `Doc` always resolves its slab names — `elaborate` (run on every
+    // commit, `command::apply`) rejects any Region/Text on an unknown or non-copper slab
+    // with the `E_UNKNOWN_SLAB`/`E_POUR_NON_COPPER` family, so `world_features` cannot
+    // fail here. An `Err` means an un-elaborated doc bypassed the commit gate — a broken
+    // invariant, made loud on purpose: returning an empty (⇒ "clean") violation set for a
+    // doc that never materialised would silently pass a shorted board, the worst failure.
     let su = stackup(&doc.source);
-    let world = world_features(doc, lib, netlist, rules, &su).unwrap_or_default();
+    let world = world_features(doc, lib, netlist, rules, &su)
+        .expect("world_features on a committed doc (slab gate enforced at commit)");
 
     // Netted copper conductors, each paired with the copper [`Layer`] it sits on
     // (forward-derived from its z) and whether it is a **pour** (`Shape2D::Area`) vs
@@ -273,6 +281,10 @@ pub fn check_drc(
             _ => None,
         })
         .collect();
+    // The board region for the edge-clearance check. `world_features` emits exactly one
+    // `Substrate` feature (the `board_region` — "last `Board` wins" already collapses to
+    // one outline ∖ cutouts), so taking the first is taking the only one; if multi-body
+    // substrates ever land, edge clearance must union them.
     let substrate: Option<&Region> = world.iter().find_map(|nf| {
         if nf.feature.role != Role::Substrate {
             return None;
@@ -287,10 +299,26 @@ pub fn check_drc(
     // out around the solid copper it was built from (by construction, at exactly the
     // clearance), so pour-vs-solid is clean and skipped — checking it would only
     // surface tessellation-slop false positives.
+    //
+    // COUPLING: the skip is sound *only* because `world_features` knocked pours out at
+    // the same `rules.min_clearance` this check uses. Both read that one scalar, so they
+    // cannot diverge today. A future **per-net** clearance would break the equivalence
+    // (a pour knocked out at net A's clearance vs a solid on net B checked at B's) — at
+    // which point pour-vs-solid must be re-enabled. The `is_pour` classification the skip
+    // pivots on is asserted below so a mislabelled feature can never silently un-check a
+    // real short.
     for i in 0..conductors.len() {
         for j in (i + 1)..conductors.len() {
             let (la, pa, fa, na) = conductors[i];
             let (_lb, pb, fb, nb) = conductors[j];
+            // A pour is exactly the `Area`-shaped conductors; solid copper is never
+            // `Area`. If this ever drifts, the `pa != pb` skip below would drop a real
+            // pair — so pin it in debug builds.
+            debug_assert_eq!(
+                pa,
+                matches!(&fa.extent, Extent::Prism { shape, .. } if matches!(shape, Shape2D::Area { .. })),
+                "is_pour must track Shape2D::Area"
+            );
             if na == nb || pa != pb {
                 continue;
             }
@@ -660,7 +688,8 @@ pub struct Pour {
 /// Every copper pour of a document as [`Pour`]s, read from the unified [`world_features`]
 /// stream (its `Conductor` `Area` features). The pour-rendering exporters (Gerber region
 /// fills, SVG pour paths) fold through this, so pours are the same features DRC sees.
-/// Deterministic (source order). Returns empty on the impossible slab-resolution error.
+/// Deterministic (source order). Panics only if `world_features` errors, which cannot
+/// happen on a committed doc (the commit-time slab gate) — see [`check_drc`].
 pub fn pours(
     doc: &Doc,
     lib: &PartLib,
@@ -668,9 +697,8 @@ pub fn pours(
     rules: &DesignRules,
     su: &Stackup,
 ) -> Vec<Pour> {
-    let Ok(world) = world_features(doc, lib, netlist, rules, su) else {
-        return Vec::new();
-    };
+    let world = world_features(doc, lib, netlist, rules, su)
+        .expect("world_features on a committed doc (slab gate enforced at commit)");
     world
         .into_iter()
         .filter_map(|nf| {
@@ -1196,7 +1224,7 @@ mod pour_tests {
     }
 
     #[test]
-    fn pour_fills_are_deterministic() {
+    fn pours_are_deterministic() {
         let (doc, lib) = board_pour_scene("F.Cu");
         let nl = netlist_of(&doc);
         let rules = DesignRules::default();
@@ -1886,6 +1914,350 @@ mod pour_tests {
                 .any(|v| matches!(v, Violation::EdgeClearance { .. })),
             "interior copper must not flag edge clearance: {:?}",
             drc(mid.doc(), &lib)
+        );
+    }
+
+    /// A `Route` keep-out is enforced like a `Copper` one; a `Component` keep-out (a
+    /// courtyard — a placement concern) is NOT a DRC copper fault (guards against
+    /// double-reporting vs the placement courtyard verify).
+    #[test]
+    fn route_keepout_enforced_component_keepout_ignored() {
+        use crate::geom::KeepoutKind;
+        let mut lib = part_library();
+        lib.insert("P".into(), one_pad("F.Cu"));
+        let mk = |kind: KeepoutKind| {
+            let src = vec![
+                board_rect(Point::mm(0, 0), Point::mm(20, 20)),
+                G::Instance {
+                    path: "p".into(),
+                    part: "P".into(),
+                    params: std::collections::BTreeMap::new(),
+                    label: None,
+                },
+                G::Place {
+                    path: "p".into(),
+                    pos: Point::mm(3, 3),
+                },
+                G::ConnectPins {
+                    net: "SIG".into(),
+                    pins: vec![("p".into(), "1".into())],
+                },
+                G::Region(RegionDecl {
+                    shape: Shape2D::rect(Point::mm(10, 10), 4 * MM, 4 * MM),
+                    role: Role::Keepout(kind),
+                    net: None,
+                    layer: "F.Cu".into(),
+                }),
+            ];
+            let mut h = History::new(Default::default());
+            h.commit(Transaction::one(Command::SetSource(src)), &lib, "ko")
+                .unwrap();
+            let t = Trace {
+                net: NetId::new("SIG"),
+                layer: Layer::Top,
+                path: vec![Point::mm(6, 10), Point::mm(14, 10)],
+                width: 150_000,
+                prov: crate::doc::Provenance::Pinned,
+            };
+            h.commit(
+                Transaction::one(Command::AddTrace(TraceId(1), t)),
+                &lib,
+                "t",
+            )
+            .unwrap();
+            h
+        };
+        let route = mk(KeepoutKind::Route);
+        assert!(
+            drc(route.doc(), &lib).iter().any(|v| matches!(
+                v,
+                Violation::Keepout { kind, .. } if *kind == KeepoutKind::Route
+            )),
+            "a Route keep-out gates copper: {:?}",
+            drc(route.doc(), &lib)
+        );
+        let comp = mk(KeepoutKind::Component);
+        assert!(
+            !drc(comp.doc(), &lib)
+                .iter()
+                .any(|v| matches!(v, Violation::Keepout { .. })),
+            "a Component keep-out (courtyard) is not a DRC copper fault: {:?}",
+            drc(comp.doc(), &lib)
+        );
+    }
+
+    /// Boundary at clearance 0: copper whose edge is *exactly tangent* to a keep-out
+    /// (zero gap) does not violate — the clearance test is strict `<`. Only overlap does.
+    #[test]
+    fn keepout_tangent_does_not_violate() {
+        use crate::geom::KeepoutKind;
+        let mut lib = part_library();
+        lib.insert("P".into(), one_pad("F.Cu"));
+        let src = vec![
+            board_rect(Point::mm(0, 0), Point::mm(20, 20)),
+            G::Instance {
+                path: "p".into(),
+                part: "P".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Place {
+                path: "p".into(),
+                pos: Point::mm(3, 3),
+            },
+            G::ConnectPins {
+                net: "SIG".into(),
+                pins: vec![("p".into(), "1".into())],
+            },
+            // Keep-out square spans x ∈ [8mm, 12mm].
+            G::Region(RegionDecl {
+                shape: Shape2D::rect(Point::mm(10, 10), 4 * MM, 4 * MM),
+                role: Role::Keepout(KeepoutKind::Copper),
+                net: None,
+                layer: "F.Cu".into(),
+            }),
+        ];
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "ko")
+            .unwrap();
+        // A vertical trace (width 0.15mm ⇒ r = 0.075mm) whose centreline is 0.075mm left
+        // of the keep-out edge, so its right copper edge lands exactly on x = 8mm.
+        let t = Trace {
+            net: NetId::new("SIG"),
+            layer: Layer::Top,
+            path: vec![
+                Point {
+                    x: 8 * MM - 75_000,
+                    y: 6 * MM,
+                },
+                Point {
+                    x: 8 * MM - 75_000,
+                    y: 14 * MM,
+                },
+            ],
+            width: 150_000,
+            prov: crate::doc::Provenance::Pinned,
+        };
+        h.commit(
+            Transaction::one(Command::AddTrace(TraceId(1), t)),
+            &lib,
+            "t",
+        )
+        .unwrap();
+        assert!(
+            !drc(h.doc(), &lib)
+                .iter()
+                .any(|v| matches!(v, Violation::Keepout { .. })),
+            "copper tangent to the keep-out edge (gap 0) must not violate: {:?}",
+            drc(h.doc(), &lib)
+        );
+    }
+
+    /// Edge clearance: copper fully outside the board flags, copper inside a cutout hole
+    /// flags, and a copper pour reaching the board edge is exempt (pull-back is a fill
+    /// concern, not a DRC fault).
+    #[test]
+    fn edge_clearance_outside_cutout_and_pour_exempt() {
+        let mut lib = part_library();
+        lib.insert("P".into(), one_pad("F.Cu"));
+
+        // (a) A trace entirely outside the 10×10 board (at x = 12mm).
+        let outside = {
+            let src = vec![
+                board_rect(Point::mm(0, 0), Point::mm(10, 10)),
+                G::Instance {
+                    path: "p".into(),
+                    part: "P".into(),
+                    params: std::collections::BTreeMap::new(),
+                    label: None,
+                },
+                G::Place {
+                    path: "p".into(),
+                    pos: Point::mm(5, 5),
+                },
+                G::ConnectPins {
+                    net: "SIG".into(),
+                    pins: vec![("p".into(), "1".into())],
+                },
+            ];
+            let mut h = History::new(Default::default());
+            h.commit(Transaction::one(Command::SetSource(src)), &lib, "o")
+                .unwrap();
+            let t = Trace {
+                net: NetId::new("SIG"),
+                layer: Layer::Top,
+                path: vec![Point::mm(12, 2), Point::mm(12, 8)],
+                width: 150_000,
+                prov: crate::doc::Provenance::Pinned,
+            };
+            h.commit(
+                Transaction::one(Command::AddTrace(TraceId(1), t)),
+                &lib,
+                "t",
+            )
+            .unwrap();
+            h
+        };
+        assert!(
+            drc(outside.doc(), &lib)
+                .iter()
+                .any(|v| matches!(v, Violation::EdgeClearance { .. })),
+            "copper outside the board must flag edge clearance: {:?}",
+            drc(outside.doc(), &lib)
+        );
+
+        // (b) A trace inside a cutout hole (the cutout wall is a board edge).
+        let in_cutout = {
+            let src = vec![
+                board_rect(Point::mm(0, 0), Point::mm(20, 20)),
+                G::Cutout {
+                    shape: Shape2D::rect(Point::mm(10, 10), 4 * MM, 4 * MM),
+                },
+                G::Instance {
+                    path: "p".into(),
+                    part: "P".into(),
+                    params: std::collections::BTreeMap::new(),
+                    label: None,
+                },
+                G::Place {
+                    path: "p".into(),
+                    pos: Point::mm(3, 3),
+                },
+                G::ConnectPins {
+                    net: "SIG".into(),
+                    pins: vec![("p".into(), "1".into())],
+                },
+            ];
+            let mut h = History::new(Default::default());
+            h.commit(Transaction::one(Command::SetSource(src)), &lib, "c")
+                .unwrap();
+            // A short trace inside the [8,12]² cutout.
+            let t = Trace {
+                net: NetId::new("SIG"),
+                layer: Layer::Top,
+                path: vec![Point::mm(9, 10), Point::mm(11, 10)],
+                width: 150_000,
+                prov: crate::doc::Provenance::Pinned,
+            };
+            h.commit(
+                Transaction::one(Command::AddTrace(TraceId(1), t)),
+                &lib,
+                "t",
+            )
+            .unwrap();
+            h
+        };
+        assert!(
+            drc(in_cutout.doc(), &lib)
+                .iter()
+                .any(|v| matches!(v, Violation::EdgeClearance { .. })),
+            "copper inside a cutout must flag edge clearance: {:?}",
+            drc(in_cutout.doc(), &lib)
+        );
+
+        // (c) A board-covering pour reaches the edge but is EXEMPT from edge clearance.
+        let pour = {
+            let src = vec![
+                board_rect(Point::mm(0, 0), Point::mm(20, 20)),
+                G::Instance {
+                    path: "p".into(),
+                    part: "P".into(),
+                    params: std::collections::BTreeMap::new(),
+                    label: None,
+                },
+                G::Place {
+                    path: "p".into(),
+                    pos: Point::mm(10, 10),
+                },
+                G::ConnectPins {
+                    net: "GND".into(),
+                    pins: vec![("p".into(), "1".into())],
+                },
+                G::Region(RegionDecl {
+                    shape: Shape2D::polygon(vec![
+                        Point::mm(0, 0),
+                        Point::mm(20, 0),
+                        Point::mm(20, 20),
+                        Point::mm(0, 20),
+                    ]),
+                    role: Role::Conductor,
+                    net: Some("GND".into()),
+                    layer: "F.Cu".into(),
+                }),
+            ];
+            let mut h = History::new(Default::default());
+            h.commit(Transaction::one(Command::SetSource(src)), &lib, "p")
+                .unwrap();
+            h
+        };
+        assert!(
+            !drc(pour.doc(), &lib)
+                .iter()
+                .any(|v| matches!(v, Violation::EdgeClearance { .. })),
+            "a pour at the board edge is exempt from edge clearance: {:?}",
+            drc(pour.doc(), &lib)
+        );
+    }
+
+    /// The commit gate that makes `world_features`' fail-loud sound: a `SetSource` naming
+    /// a typo'd slab is REJECTED at commit (via `elaborate`), so no doc with an
+    /// unresolvable slab ever reaches DRC. (Companion to `region_on_unknown_slab_is_rejected`,
+    /// pinning the Conductor-pour variant the reviewer flagged.)
+    #[test]
+    fn setsource_conductor_on_bad_slab_is_rejected_at_commit() {
+        let mut lib = part_library();
+        lib.insert("P".into(), one_pad("F.Cu"));
+        let src = vec![
+            board_rect(Point::mm(0, 0), Point::mm(10, 10)),
+            G::Instance {
+                path: "p".into(),
+                part: "P".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::ConnectPins {
+                net: "GND".into(),
+                pins: vec![("p".into(), "1".into())],
+            },
+            G::Region(RegionDecl {
+                shape: Shape2D::rect(Point::mm(5, 5), MM, MM),
+                role: Role::Conductor,
+                net: Some("GND".into()),
+                layer: "F.Cuu".into(), // typo
+            }),
+        ];
+        let mut h = History::new(Default::default());
+        let err = h
+            .commit(Transaction::one(Command::SetSource(src)), &lib, "typo")
+            .unwrap_err();
+        assert!(
+            err.iter().any(|d| d.code == "E_UNKNOWN_SLAB"),
+            "a Conductor pour on a typo'd slab is rejected at commit: {err:?}"
+        );
+    }
+
+    /// Fail-loud, not fail-silent (the reviewer's finding 1): if a doc that bypassed the
+    /// commit gate (so its slab does not resolve) somehow reaches DRC, `check_drc` must
+    /// PANIC — never return an empty (⇒ "clean") bill for a board that never
+    /// materialised. Here we hand-build such a `Doc` directly, without committing.
+    #[test]
+    #[should_panic(expected = "committed doc")]
+    fn drc_on_unmaterialized_bad_slab_doc_panics() {
+        let doc = Doc {
+            source: vec![G::Region(RegionDecl {
+                shape: Shape2D::rect(Point::mm(1, 1), MM, MM),
+                role: Role::Conductor,
+                net: Some("GND".into()),
+                layer: "F.Cuu".into(), // never resolves
+            })],
+            ..Default::default()
+        };
+        // Must panic (world_features errors on the unresolvable slab), not return empty.
+        let _ = check_drc(
+            &doc,
+            &part_library(),
+            &BTreeMap::new(),
+            &DesignRules::default(),
         );
     }
 }

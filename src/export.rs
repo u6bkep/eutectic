@@ -256,7 +256,7 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> Result<String, String> {
     // Copper pour fills, under the components/traces: one translucent `<path>` per
     // pour (outer + hole subpaths, even-odd fill so knockouts read as voids), in the
     // pour's layer colour. Deterministic (pours iterate in source/net/layer order).
-    for pf in pour_fills_of(doc, lib) {
+    for pf in pours_of(doc, lib) {
         let d = region_svg_d(&pf.fill, &flip);
         if !d.is_empty() {
             out.push_str(&format!(
@@ -539,7 +539,7 @@ fn doc_netlist(
 /// The derived copper-pour fills, for export — the [`crate::route::pours`] view over the
 /// unified feature stream (the same `Shape2D::Area` conductor features DRC sees). Pure —
 /// same inputs, same fills.
-fn pour_fills_of(doc: &Doc, lib: &PartLib) -> Vec<crate::route::Pour> {
+fn pours_of(doc: &Doc, lib: &PartLib) -> Vec<crate::route::Pour> {
     let su = crate::elaborate::stackup(&doc.source);
     crate::route::pours(
         doc,
@@ -895,7 +895,7 @@ fn copper_layers(doc: &Doc, lib: &PartLib) -> Vec<Layer> {
         set.insert(v.from);
         set.insert(v.to);
     }
-    for pf in pour_fills_of(doc, lib) {
+    for pf in pours_of(doc, lib) {
         set.insert(pf.layer);
     }
     set.into_iter().collect()
@@ -1004,7 +1004,7 @@ pub fn gerber_layer(doc: &Doc, lib: &PartLib, layer: Layer) -> String {
     // and hole rings are emitted as contours inside one `G36`/`G37` block; the region
     // fill rule treats a contour nested in another as a hole, so the knockouts come
     // out as voids. (A pour fill is already a tessellated polygon, so no arcs needed.)
-    for pf in pour_fills_of(doc, lib).iter().filter(|p| p.layer == layer) {
+    for pf in pours_of(doc, lib).iter().filter(|p| p.layer == layer) {
         gerber_region_fill(&pf.fill, &mut out);
     }
 
@@ -1077,6 +1077,9 @@ enum DrillKind {
 fn drill_hits(doc: &Doc, lib: &PartLib) -> Vec<(bool, Nm, DrillKind)> {
     let su = crate::elaborate::stackup(&doc.source);
     let full = su.full_z();
+    // `world_features` cannot fail on a committed doc (the commit-time slab gate — see
+    // `route::check_drc`); an `Err` is a broken invariant, made loud rather than emitting
+    // an empty (⇒ no-holes) drill program for a board that never materialised.
     let world = crate::route::world_features(
         doc,
         lib,
@@ -1084,7 +1087,7 @@ fn drill_hits(doc: &Doc, lib: &PartLib) -> Vec<(bool, Nm, DrillKind)> {
         &crate::route::DesignRules::default(),
         &su,
     )
-    .unwrap_or_default();
+    .expect("world_features on a committed doc (slab gate enforced at commit)");
     let mut hits = Vec::new();
     for nf in world {
         if nf.feature.role != Role::Void {
@@ -1094,7 +1097,15 @@ fn drill_hits(doc: &Doc, lib: &PartLib) -> Vec<(bool, Nm, DrillKind)> {
         if Some(*z) != full {
             continue; // not a through-cut (mask opening / single-slab authored void)
         }
-        let plated = nf.feature.material.is_some();
+        // Plated iff the drill Void carries the copper-barrel material (Decision 16b): a
+        // pad/via plated through-hole. Gated on the material *name*, not merely
+        // `is_some()`, so a future void with some other material (e.g. a resin-filled or
+        // capped via) is not silently classified PTH — authored voids default NPTH.
+        let plated = nf
+            .feature
+            .material
+            .as_ref()
+            .is_some_and(|m| m.name == "copper");
         let dia = shape.radius() * 2;
         let pts = shape.points();
         let kind = match pts.as_slice() {
@@ -1167,7 +1178,14 @@ fn excellon_program(hits: &[(Nm, DrillKind)], label: &str) -> String {
 /// non-plated holes. Each file is emitted only when it has holes, so a board with no
 /// NPTH holes ships only the PTH file. `(filename, content)` pairs; deterministic.
 pub fn excellon_drill(doc: &Doc, lib: &PartLib) -> Vec<(String, String)> {
-    let hits = drill_hits(doc, lib);
+    excellon_files(drill_hits(doc, lib))
+}
+
+/// Split a `(plated, diameter, kind)` hit list into the PTH / NPTH drill files, emitting
+/// each only when it has holes. Factored out of [`excellon_drill`] so the split is unit-
+/// testable without an authoring path for NPTH holes (which the model cannot produce yet
+/// — a mounting-hole `Void` is future work; see 0022 / Decision 16b).
+fn excellon_files(hits: Vec<(bool, Nm, DrillKind)>) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for (plated, label, filename) in [
         (true, "plated through-holes (PTH)", "board-PTH.drl"),
@@ -1440,7 +1458,8 @@ fn marking_slabs(su: &Stackup) -> Vec<Slab> {
 /// The full deterministic fab fileset: one Gerber per copper layer (`board-F_Cu.gbr`
 /// …) in stack-up order, the two solder masks (`board-F_Mask.gbr` / `board-B_Mask.gbr`),
 /// one silk Gerber per marking slab (`board-F_SilkS.gbr` / `board-B_SilkS.gbr`, top-down),
-/// the `board-Edge_Cuts.gbr` outline, and the `board.drl` Excellon drill program.
+/// the `board-Edge_Cuts.gbr` outline, and the Excellon drill program(s), split by
+/// plating into `board-PTH.drl` / `board-NPTH.drl` (only the non-empty file(s), 0022).
 /// `(filename, content)` pairs; no timestamps, stable order. Fallible because the silk
 /// layers lower board text through the slab-name materialization gate (Decision 13).
 pub fn gerber_set(doc: &Doc, lib: &PartLib) -> Result<Vec<(String, String)>, String> {
@@ -2001,6 +2020,44 @@ psu.reg,LDO,0.000000,0.000000,0,T
         // Hit coordinates: the pad at (5,5), the via at (12,8).
         assert!(drl.contains("X5.000000Y5.000000"), "pad drill hit:\n{drl}");
         assert!(drl.contains("X12.000000Y8.000000"), "via drill hit:\n{drl}");
+    }
+
+    /// The plating split: a hit list with both a plated and a non-plated hole yields two
+    /// files, each carrying only its own class. (No source authors an NPTH through-cut
+    /// today, so the split logic is exercised on a synthesized hit list.)
+    #[test]
+    fn excellon_splits_pth_and_npth() {
+        let hits = vec![
+            (true, 800_000, DrillKind::Round(Point::mm(5, 5))), // plated pad, 0.8mm
+            (false, 900_000, DrillKind::Round(Point::mm(9, 9))), // NPTH mounting, 0.9mm
+        ];
+        let files = excellon_files(hits);
+        let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["board-PTH.drl", "board-NPTH.drl"]);
+        let pth = &files[0].1;
+        let npth = &files[1].1;
+        assert!(
+            pth.contains("C0.800000") && !pth.contains("C0.900000"),
+            "PTH:\n{pth}"
+        );
+        assert!(
+            npth.contains("C0.900000") && !npth.contains("C0.800000"),
+            "NPTH:\n{npth}"
+        );
+        assert!(pth.contains("X5.000000Y5.000000") && npth.contains("X9.000000Y9.000000"));
+    }
+
+    /// A slot (capsule) drill emits a `G85` routed hole between its endpoints.
+    #[test]
+    fn excellon_slot_emits_g85() {
+        let prog = excellon_program(
+            &[(600_000, DrillKind::Slot(Point::mm(2, 3), Point::mm(6, 3)))],
+            "slots",
+        );
+        assert!(
+            prog.contains("X2.000000Y3.000000G85X6.000000Y3.000000"),
+            "slot as G85:\n{prog}"
+        );
     }
 
     #[test]
