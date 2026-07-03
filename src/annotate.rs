@@ -22,7 +22,7 @@ use crate::elaborate::GenDirective;
 use crate::id::EntityId;
 use crate::part::{PartDef, PartLib};
 use crate::quantity;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// One class-registry entry — the conventions attached to a component class. All fields
 /// are optional: a `prefix`/`template` of `None` falls through to the query-level
@@ -87,17 +87,39 @@ fn class_from_name(name: &str) -> String {
 /// prefix from 1, formatted `{prefix}{n}`. The prefix is the class's registry `prefix`,
 /// or — for any class with none, registered or not — the class name itself.
 ///
-/// The numbering is **insertion-unstable** by accepted trade-off (adding a component
-/// renumbers its successors); the reserved stability mechanism is an `EntityId`-keyed
-/// override, deliberately not built here.
+/// **Pins win.** [`Doc::refdes_pins`](crate::doc::Doc::refdes_pins) (Decision 14's
+/// stability mechanism) is consulted first: a pinned entity takes its string verbatim,
+/// opaque — no validation against the derived class prefix (the user's prerogative). A
+/// pinned entity consumes no auto number. To keep an auto-assigned refdes from ever
+/// colliding with a pin, any pinned string of the shape `<alpha><digits>` (e.g. `C7`)
+/// **reserves** that number under that prefix, and the auto counter skips it — so the
+/// visited C-parts here would number `C1..C6, C8` around a pinned `C7`. A pin that does
+/// not parse that way (e.g. `SPARE`) reserves nothing numeric.
+///
+/// The *auto* numbering is **insertion-unstable** by accepted trade-off (adding a
+/// component renumbers its successors); pins are the stability escape hatch.
 pub fn refdes(
     doc: &Doc,
     lib: &PartLib,
     reg: &BTreeMap<String, ClassEntry>,
 ) -> BTreeMap<EntityId, String> {
+    // Reserve the number of every parseable pin under its own parsed prefix, so the
+    // auto counter below can skip it. The reservation keys off the *pinned string's*
+    // prefix, not the entity's class — the pin is opaque.
+    let mut reserved: BTreeMap<String, BTreeSet<u32>> = BTreeMap::new();
+    for s in doc.refdes_pins.values() {
+        if let Some((prefix, n)) = parse_refdes(s) {
+            reserved.entry(prefix).or_default().insert(n);
+        }
+    }
+
     let mut counters: BTreeMap<String, u32> = BTreeMap::new();
     let mut out = BTreeMap::new();
     for (id, comp) in &doc.components {
+        if let Some(pinned) = doc.refdes_pins.get(id) {
+            out.insert(id.clone(), pinned.clone());
+            continue; // verbatim; consumes no auto number
+        }
         let class = match lib.get(&comp.part) {
             Some(def) => class_of(def),
             None => class_from_name(&comp.part),
@@ -107,10 +129,50 @@ pub fn refdes(
             .and_then(|e| e.prefix.clone())
             .unwrap_or(class);
         let n = counters.entry(prefix.clone()).or_insert(0);
-        *n += 1;
+        let taken = reserved.get(&prefix);
+        loop {
+            *n += 1;
+            if !taken.is_some_and(|t| t.contains(n)) {
+                break;
+            }
+        }
         out.insert(id.clone(), format!("{prefix}{n}"));
     }
     out
+}
+
+/// Parse a refdes string as `<alpha-prefix><digits>` (the conventional shape), e.g.
+/// `C7` → `("C", 7)`. Returns `None` unless the whole string is a non-empty leading
+/// alphabetic run followed by a non-empty run of ASCII digits and nothing else — so
+/// `SPARE`, `C7A`, and `7` all reserve nothing numeric.
+fn parse_refdes(s: &str) -> Option<(String, u32)> {
+    let split = s.find(|c: char| !c.is_ascii_alphabetic())?;
+    if split == 0 {
+        return None; // no alpha prefix
+    }
+    let (prefix, digits) = s.split_at(split);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let n = digits.parse().ok()?;
+    Some((prefix.to_string(), n))
+}
+
+/// The set of colliding refdes pins: each group is the `(string, entities)` for one
+/// string pinned on more than one entity — a genuine authoring conflict (two parts
+/// cannot share `C7`). Entities within a group are in `EntityId` (path) order; groups
+/// are in string order. Empty when every pin is unique. Consumed by
+/// [`elaborate`](crate::elaborate::elaborate) into the [`ReconReport`](crate::doc::ReconReport).
+pub fn duplicate_refdes_pins(pins: &BTreeMap<EntityId, String>) -> Vec<(String, Vec<EntityId>)> {
+    let mut by_string: BTreeMap<&str, Vec<EntityId>> = BTreeMap::new();
+    for (id, s) in pins {
+        by_string.entry(s.as_str()).or_default().push(id.clone());
+    }
+    by_string
+        .into_iter()
+        .filter(|(_, ids)| ids.len() > 1)
+        .map(|(s, ids)| (s.to_string(), ids))
+        .collect()
 }
 
 /// The effective identity parameters of a component: the class `defaults` overlaid by
@@ -332,6 +394,114 @@ mod tests {
         assert_eq!(rd[&EntityId::new("c1")], "C1");
         assert_eq!(rd[&EntityId::new("led")], "LED1"); // unregistered class → name is prefix
         assert_eq!(rd[&EntityId::new("x1")], "U1"); // digit-leading name → U fallback
+    }
+
+    // ---- refdes pins (Decision 14 stability override) ----
+
+    /// A pinned entity takes its string verbatim, consumes no auto number, and the
+    /// pinned number is reserved so the auto counter skips it: pinning one of eight
+    /// C-parts to `C7` yields `C1..C6, C8` across the other seven.
+    #[test]
+    fn refdes_pin_respected_and_reserves_its_number() {
+        let mut doc = Doc::default();
+        for i in 0..8 {
+            let id = format!("c{i}");
+            doc.components
+                .insert(EntityId::new(&id), comp(&id, "C_0603", &[], None));
+        }
+        doc.refdes_pins.insert(EntityId::new("c3"), "C7".into());
+        let mut lib = PartLib::new();
+        lib.insert("C_0603".to_string(), pd("C_0603", None));
+
+        let rd = refdes(&doc, &lib, &registry(&[]));
+        assert_eq!(rd[&EntityId::new("c3")], "C7", "pinned entity verbatim");
+        // Auto assignment in path order c0,c1,c2,(c3 pinned),c4,c5,c6,c7 → 7 gets skipped.
+        assert_eq!(rd[&EntityId::new("c0")], "C1");
+        assert_eq!(rd[&EntityId::new("c2")], "C3");
+        assert_eq!(rd[&EntityId::new("c4")], "C4");
+        assert_eq!(rd[&EntityId::new("c6")], "C6");
+        assert_eq!(
+            rd[&EntityId::new("c7")],
+            "C8",
+            "C7 reserved by the pin, skipped"
+        );
+    }
+
+    /// A pin whose string is opaque to the number parser (`SPARE`) reserves nothing:
+    /// the auto counter proceeds C1, C2, C3 uninterrupted.
+    #[test]
+    fn non_numeric_pin_reserves_nothing() {
+        let mut doc = Doc::default();
+        for i in 0..4 {
+            let id = format!("c{i}");
+            doc.components
+                .insert(EntityId::new(&id), comp(&id, "C_0603", &[], None));
+        }
+        doc.refdes_pins.insert(EntityId::new("c0"), "SPARE".into());
+        let mut lib = PartLib::new();
+        lib.insert("C_0603".to_string(), pd("C_0603", None));
+
+        let rd = refdes(&doc, &lib, &registry(&[]));
+        assert_eq!(rd[&EntityId::new("c0")], "SPARE");
+        assert_eq!(rd[&EntityId::new("c1")], "C1");
+        assert_eq!(rd[&EntityId::new("c2")], "C2");
+        assert_eq!(rd[&EntityId::new("c3")], "C3");
+    }
+
+    /// The reservation keys off the *pinned string's* prefix, not the entity's class:
+    /// pinning a resistor to `C7` reserves `C7` (skipping it among C-parts) but leaves
+    /// the R counter untouched — the pin is opaque.
+    #[test]
+    fn pin_reserves_under_its_own_prefix_not_the_entitys_class() {
+        let mut doc = Doc::default();
+        doc.components
+            .insert(EntityId::new("r0"), comp("r0", "R_0402", &[], None));
+        for i in 0..8 {
+            let id = format!("c{i}");
+            doc.components
+                .insert(EntityId::new(&id), comp(&id, "C_0603", &[], None));
+        }
+        // Pin the resistor to a C-shaped string.
+        doc.refdes_pins.insert(EntityId::new("r0"), "C7".into());
+        let mut lib = PartLib::new();
+        lib.insert("R_0402".to_string(), pd("R_0402", None));
+        lib.insert("C_0603".to_string(), pd("C_0603", None));
+
+        let rd = refdes(&doc, &lib, &registry(&[]));
+        assert_eq!(rd[&EntityId::new("r0")], "C7");
+        // Eight auto C-parts (c0..c7) with 7 reserved: C1..C6, C8, C9 — the skip lands
+        // between c5 and c6. No R is auto-assigned (the sole R was pinned to a C string),
+        // so no R numbering is disturbed.
+        assert_eq!(rd[&EntityId::new("c5")], "C6");
+        assert_eq!(rd[&EntityId::new("c6")], "C8");
+        assert_eq!(rd[&EntityId::new("c7")], "C9");
+    }
+
+    #[test]
+    fn parse_refdes_shape() {
+        assert_eq!(parse_refdes("C7"), Some(("C".to_string(), 7)));
+        assert_eq!(parse_refdes("LED12"), Some(("LED".to_string(), 12)));
+        assert_eq!(parse_refdes("SPARE"), None); // no digits
+        assert_eq!(parse_refdes("C7A"), None); // trailing non-digit
+        assert_eq!(parse_refdes("7"), None); // no alpha prefix
+        assert_eq!(parse_refdes("C"), None); // no digits
+    }
+
+    /// Duplicate detection groups entities by identical pinned string, in path order.
+    #[test]
+    fn duplicate_refdes_pins_groups_collisions() {
+        let mut pins: BTreeMap<EntityId, String> = BTreeMap::new();
+        pins.insert(EntityId::new("a"), "C7".into());
+        pins.insert(EntityId::new("b"), "C7".into());
+        pins.insert(EntityId::new("c"), "R1".into()); // unique, not reported
+        let dups = duplicate_refdes_pins(&pins);
+        assert_eq!(
+            dups,
+            vec![(
+                "C7".to_string(),
+                vec![EntityId::new("a"), EntityId::new("b")]
+            )]
+        );
     }
 
     #[test]

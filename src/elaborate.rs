@@ -185,6 +185,7 @@ pub struct Elaborated {
 pub fn elaborate(
     source: &Source,
     overrides: &BTreeMap<EntityId, Override>,
+    refdes_pins: &BTreeMap<EntityId, String>,
     lib: &PartLib,
 ) -> Result<Elaborated, Vec<Diagnostic>> {
     let mut components: BTreeMap<EntityId, Component> = BTreeMap::new();
@@ -763,12 +764,23 @@ pub fn elaborate(
         };
     }
 
-    // Orphaned overrides: target no longer exists. Surfaced, never dropped.
+    // Orphaned overrides: target no longer exists. Surfaced, never dropped. Refdes
+    // pins share the orphan channel (same "override targets a dead id" semantics);
+    // dedupe so an entity with both a pos override and a refdes pin is flagged once.
     for id in overrides.keys() {
         if !components.contains_key(id) {
             report.orphaned.push(id.clone());
         }
     }
+    for id in refdes_pins.keys() {
+        if !components.contains_key(id) && !report.orphaned.contains(id) {
+            report.orphaned.push(id.clone());
+        }
+    }
+
+    // Colliding refdes pins (two entities pinned to one string): an authoring
+    // conflict surfaced loudly, non-blocking like the pos findings above.
+    report.refdes_pin_dups = crate::annotate::duplicate_refdes_pins(refdes_pins);
 
     Ok(Elaborated {
         components,
@@ -1636,5 +1648,69 @@ mod tests {
             Stackup::default_2layer(),
             "non-slab directives don't disturb the default"
         );
+    }
+
+    // ---- refdes-pin reconciliation ----
+
+    fn part_lib(name: &str) -> PartLib {
+        let mut lib = PartLib::new();
+        lib.insert(
+            name.to_string(),
+            PartDef {
+                name: name.to_string(),
+                pins: vec![],
+                interfaces: BTreeMap::new(),
+                graphics: vec![],
+                texts: vec![],
+                courtyard: None,
+                class: None,
+            },
+        );
+        lib
+    }
+
+    fn inst(path: &str, part: &str) -> GenDirective {
+        GenDirective::Instance {
+            path: path.to_string(),
+            part: part.to_string(),
+            params: BTreeMap::new(),
+            label: None,
+        }
+    }
+
+    /// Two entities pinned to one identical string surface as an `E_REFDES_PIN_DUP`
+    /// finding on an otherwise-valid elaboration (non-blocking, like pos findings).
+    #[test]
+    fn duplicate_refdes_pin_is_surfaced() {
+        let src = vec![inst("c0", "C"), inst("c1", "C")];
+        let mut pins = BTreeMap::new();
+        pins.insert(EntityId::new("c0"), "C7".to_string());
+        pins.insert(EntityId::new("c1"), "C7".to_string());
+        let elab = elaborate(&src, &BTreeMap::new(), &pins, &part_lib("C")).expect("elaborates");
+        assert_eq!(
+            elab.report.refdes_pin_dups,
+            vec![(
+                "C7".to_string(),
+                vec![EntityId::new("c0"), EntityId::new("c1")]
+            )]
+        );
+        assert!(!elab.report.is_clean());
+        // Distinct pins do not collide.
+        let mut ok = BTreeMap::new();
+        ok.insert(EntityId::new("c0"), "C7".to_string());
+        ok.insert(EntityId::new("c1"), "C8".to_string());
+        let clean = elaborate(&src, &BTreeMap::new(), &ok, &part_lib("C")).expect("elaborates");
+        assert!(clean.report.refdes_pin_dups.is_empty());
+    }
+
+    /// A refdes pin on an entity that does not exist after elaboration is orphaned —
+    /// the same channel and behavior as a stale position override.
+    #[test]
+    fn refdes_pin_on_unknown_id_is_orphaned() {
+        let src = vec![inst("c0", "C")];
+        let mut pins = BTreeMap::new();
+        pins.insert(EntityId::new("ghost"), "C9".to_string());
+        let elab = elaborate(&src, &BTreeMap::new(), &pins, &part_lib("C")).expect("elaborates");
+        assert!(elab.report.orphaned.contains(&EntityId::new("ghost")));
     }
 }

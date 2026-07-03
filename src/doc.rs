@@ -347,6 +347,11 @@ pub struct ReconReport {
     pub redundant_pins: Vec<EntityId>,
     /// Overrides whose target entity no longer exists.
     pub orphaned: Vec<EntityId>,
+    /// Refdes pins that collide: each group is the set of entities pinned to one
+    /// identical string. A genuine authoring conflict (two parts cannot both be
+    /// `C7`) — surfaced loudly as an error, kept until resolved, but non-blocking
+    /// like the other override findings (the geometry still elaborated).
+    pub refdes_pin_dups: Vec<(String, Vec<EntityId>)>,
 }
 
 impl ReconReport {
@@ -355,6 +360,7 @@ impl ReconReport {
             && self.pin_conflicts.is_empty()
             && self.redundant_pins.is_empty()
             && self.orphaned.is_empty()
+            && self.refdes_pin_dups.is_empty()
     }
 }
 
@@ -403,6 +409,20 @@ impl crate::diagnostic::Diagnose for ReconReport {
                 Location::Entity(id.clone()),
             ));
         }
+        for (refdes, ids) in &self.refdes_pin_dups {
+            // One diagnostic per collision group, anchored on the first member (ids
+            // are in path order); the message names all of them and the string.
+            let joined = ids
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push(Diagnostic::error(
+                "E_REFDES_PIN_DUP",
+                format!("refdes `{refdes}` is pinned on multiple entities: {joined}"),
+                Location::Entity(ids[0].clone()),
+            ));
+        }
         out
     }
 }
@@ -422,6 +442,12 @@ pub struct Doc {
     pub source: crate::elaborate::Source,
     /// tier 1: ID-keyed exceptions.
     pub overrides: BTreeMap<EntityId, Override>,
+    /// tier 1: ID-keyed **reference-designator pins** (Decision 14's reserved
+    /// stability mechanism). A pinned entity takes its string verbatim in the
+    /// [`annotate::refdes`](crate::annotate::refdes) query; the auto counter skips a
+    /// pinned number so it never collides. Kept separate from [`Override`] because
+    /// `strength`/decay/least-change are position concepts with no refdes analogue.
+    pub refdes_pins: BTreeMap<EntityId, String>,
     /// tier 2: materialized instances.
     pub components: BTreeMap<EntityId, Component>,
     /// tier 2: materialized connectivity.

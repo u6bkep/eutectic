@@ -49,6 +49,7 @@
 //! # ---- ID-keyed overrides (tier-1) ----
 //! hint    <path> (<x>, <y>)        # weak override (a nudge; decays if ineffective)
 //! pin     <path> (<x>, <y>)        # strong override (explicit intent; kept)
+//! refdes  <path> <string>          # pin a reference designator (opaque; verbatim)
 //! ```
 //!
 //! `<len>` and the coordinate components accept `<n>mm` (decimal ok), `<n>nm`, or a
@@ -76,10 +77,15 @@ use crate::doc::{Doc, MM, Nm, Orient, Override, Point, Strength};
 use crate::elaborate::{GenDirective, RegionDecl, Source, board_rect};
 use crate::geom::{KeepoutKind, Material, Path, Role, Seg, Shape2D, Slab, ZRange};
 use crate::id::EntityId;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-/// The parsed tier-1 state: the generative program plus the ID-keyed override map.
-pub type Parsed = (Source, BTreeMap<EntityId, Override>);
+/// The parsed tier-1 state: the generative program, the ID-keyed position-override
+/// map, and the ID-keyed refdes-pin map (kept separate, mirroring [`Doc`]).
+pub type Parsed = (
+    Source,
+    BTreeMap<EntityId, Override>,
+    BTreeMap<EntityId, String>,
+);
 
 // ----------------------------------------------------------------------------
 // Serialize
@@ -94,20 +100,32 @@ pub fn serialize(doc: &Doc) -> String {
         out.push_str(&render_directive(d));
         out.push('\n');
     }
-    // Overrides last, in deterministic id order. (Empty overrides — pos == None —
-    // are inert and carry no canonical text.)
+    // Overrides last, in deterministic id order across both kinds — an entity's pos
+    // override and refdes pin land together. (Empty pos overrides — pos == None — are
+    // inert and carry no canonical text.)
+    let ids: BTreeSet<&EntityId> = doc
+        .overrides
+        .iter()
+        .filter(|(_, ov)| ov.pos.is_some())
+        .map(|(id, _)| id)
+        .chain(doc.refdes_pins.keys())
+        .collect();
     let mut first = true;
-    for (id, ov) in &doc.overrides {
-        let Some(pos) = ov.pos else { continue };
+    for id in ids {
         if first {
             out.push_str("\n# overrides\n");
             first = false;
         }
-        let kw = match ov.strength {
-            Strength::Hint => "hint",
-            Strength::Pin => "pin",
-        };
-        out.push_str(&format!("{kw} {id} {}\n", fmt_point(pos)));
+        if let Some(pos) = doc.overrides.get(id).and_then(|ov| ov.pos) {
+            let kw = match doc.overrides[id].strength {
+                Strength::Hint => "hint",
+                Strength::Pin => "pin",
+            };
+            out.push_str(&format!("{kw} {id} {}\n", fmt_point(pos)));
+        }
+        if let Some(refdes) = doc.refdes_pins.get(id) {
+            out.push_str(&format!("refdes {id} {}\n", quote_value(refdes)));
+        }
     }
     out
 }
@@ -443,6 +461,7 @@ fn strip_comment(raw: &str) -> &str {
 pub fn parse(text: &str) -> Result<Parsed, Vec<Diagnostic>> {
     let mut source: Source = Vec::new();
     let mut overrides: BTreeMap<EntityId, Override> = BTreeMap::new();
+    let mut refdes_pins: BTreeMap<EntityId, String> = BTreeMap::new();
     let mut errors: Vec<Diagnostic> = Vec::new();
 
     for (i, raw) in text.lines().enumerate() {
@@ -460,6 +479,9 @@ pub fn parse(text: &str) -> Result<Parsed, Vec<Diagnostic>> {
             Ok(Item::Override(id, ov)) => {
                 overrides.insert(id, ov);
             }
+            Ok(Item::RefdesPin(id, refdes)) => {
+                refdes_pins.insert(id, refdes);
+            }
             Err(e) => errors.push(Diagnostic::error(
                 "E_PARSE",
                 format!("{e} (in `{line}`)"),
@@ -471,7 +493,7 @@ pub fn parse(text: &str) -> Result<Parsed, Vec<Diagnostic>> {
         }
     }
     if errors.is_empty() {
-        Ok((source, overrides))
+        Ok((source, overrides, refdes_pins))
     } else {
         Err(errors)
     }
@@ -480,6 +502,7 @@ pub fn parse(text: &str) -> Result<Parsed, Vec<Diagnostic>> {
 enum Item {
     Directive(GenDirective),
     Override(EntityId, Override),
+    RefdesPin(EntityId, String),
 }
 
 fn parse_line(line: &str) -> Result<Item, String> {
@@ -832,6 +855,20 @@ fn parse_line(line: &str) -> Result<Item, String> {
                     strength,
                 },
             )
+        }
+        "refdes" => {
+            // `refdes <path> <string>`: two tokens, the value quoted only when it must
+            // be (matching `quote_value` on the way out). The string is opaque — no
+            // validation against the derived class prefix.
+            let toks = split_ws_quoted(rest);
+            if toks.len() != 2 {
+                return Err("expected: refdes <path> <string>".into());
+            }
+            let value = unquote(&toks[1]);
+            if value.is_empty() {
+                return Err("refdes string must be non-empty".into());
+            }
+            Item::RefdesPin(EntityId::new(&toks[0]), value.to_string())
         }
         other => return Err(format!("unknown directive `{other}`")),
     })
@@ -1404,8 +1441,10 @@ mod tests {
 
     // ---- round-trip + idempotence ---------------------------------------
 
-    /// `parse(serialize(doc))` reproduces `(source, overrides)` exactly, for a
-    /// source that touches every directive variant plus both override strengths.
+    /// `parse(serialize(doc))` reproduces `(source, overrides, refdes_pins)` exactly,
+    /// for a source that touches every directive variant, both override strengths, and
+    /// refdes pins — including an entity (`mcu`) carrying both a pos pin and a refdes
+    /// pin, to exercise the interleaved override section.
     #[test]
     fn round_trip_all_variants() {
         let mut overrides = BTreeMap::new();
@@ -1426,12 +1465,16 @@ mod tests {
                 strength: Strength::Pin,
             },
         );
-        let doc = doc_of(all_variants(), overrides);
+        let mut doc = doc_of(all_variants(), overrides);
+        doc.refdes_pins
+            .insert(EntityId::new("psu.dec[0]"), "C7".into());
+        doc.refdes_pins.insert(EntityId::new("mcu"), "U3".into());
 
         let text = serialize(&doc);
-        let (src, ovr) = parse(&text).expect("parse");
+        let (src, ovr, rd) = parse(&text).expect("parse");
         assert_eq!(src, doc.source, "source must round-trip");
         assert_eq!(ovr, doc.overrides, "overrides must round-trip");
+        assert_eq!(rd, doc.refdes_pins, "refdes pins must round-trip");
     }
 
     /// A `slab` directive parses to the expected `Slab` (name, z's, role, optional
@@ -1443,7 +1486,7 @@ mod tests {
 slab B.Cu 0mm 0.035mm conductor copper
 slab core 0.035mm 1.565mm substrate
 slab F.Cu 1.565mm 1.6mm conductor copper";
-        let (src, _) = parse(text).expect("parse");
+        let (src, _, _) = parse(text).expect("parse");
         assert_eq!(
             src,
             vec![
@@ -1478,7 +1521,7 @@ slab F.Cu 1.565mm 1.6mm conductor copper";
     #[test]
     fn inst_with_params_and_label_round_trips() {
         let text = "inst r1 R_0402 label=\"{value:si:Ω}\" p:tol=5% p:value=4.7k";
-        let (src, _) = parse(text).expect("parse");
+        let (src, _, _) = parse(text).expect("parse");
         let mut params = BTreeMap::new();
         params.insert("tol".into(), "5%".into());
         params.insert("value".into(), "4.7k".into());
@@ -1497,7 +1540,7 @@ slab F.Cu 1.565mm 1.6mm conductor copper";
 
         // A quoted param value with a space and a `#` round-trips (not a comment).
         let text2 = "inst u1 MCU p:desc=\"dual # buck\"";
-        let (src2, _) = parse(text2).expect("parse2");
+        let (src2, _, _) = parse(text2).expect("parse2");
         let doc2 = doc_of(src2.clone(), BTreeMap::new());
         assert_eq!(parse(&serialize(&doc2)).unwrap().0, src2);
         if let GenDirective::Instance { params, .. } = &src2[0] {
@@ -1507,7 +1550,7 @@ slab F.Cu 1.565mm 1.6mm conductor copper";
         }
 
         // Bare `inst <path> <part>` still parses with empty/None defaults.
-        let (bare, _) = parse("inst q1 NPN").expect("bare");
+        let (bare, _, _) = parse("inst q1 NPN").expect("bare");
         assert_eq!(
             bare,
             vec![GenDirective::Instance {
@@ -1551,7 +1594,7 @@ slab F.Cu 1.565mm 1.6mm conductor copper";
     /// Elaboration copies an instance's `params`/`label` verbatim onto its `Component`.
     #[test]
     fn elaboration_copies_params_and_label_onto_component() {
-        let (src, _) = parse("inst c1 Cap label=\"{value}\" p:value=100n").expect("parse");
+        let (src, _, _) = parse("inst c1 Cap label=\"{value}\" p:value=100n").expect("parse");
         let doc = placed(src);
         let c = &doc.components[&EntityId::new("c1")];
         assert_eq!(c.label.as_deref(), Some("{value}"));
@@ -1563,7 +1606,7 @@ slab F.Cu 1.565mm 1.6mm conductor copper";
     #[test]
     fn class_directive_parses_and_round_trips() {
         let text = "class R prefix=RES template=\"{value:si:Ω}\" p:tol=5%";
-        let (src, _) = parse(text).expect("parse");
+        let (src, _, _) = parse(text).expect("parse");
         let mut defaults = BTreeMap::new();
         defaults.insert("tol".into(), "5%".into());
         assert_eq!(
@@ -1581,7 +1624,7 @@ slab F.Cu 1.565mm 1.6mm conductor copper";
         assert_eq!(parse(&serialize(&doc)).unwrap().0, src);
 
         // A bare `class <name>` (all fields defaulted) also round-trips.
-        let (bare, _) = parse("class LED").expect("bare");
+        let (bare, _, _) = parse("class LED").expect("bare");
         assert_eq!(
             bare,
             vec![GenDirective::Class {
@@ -1600,7 +1643,7 @@ slab F.Cu 1.565mm 1.6mm conductor copper";
         let text = "\
 region conductor net=GND layer=B.Cu (0mm, 0mm) (10mm, 0mm) (10mm, 10mm) (0mm, 10mm)
 region keepout-drill layer=In2.Cu (1mm, 1mm) (2mm, 1mm) (2mm, 2mm)";
-        let (src, _) = parse(text).expect("parse");
+        let (src, _, _) = parse(text).expect("parse");
         assert_eq!(
             src[0],
             GenDirective::Region(RegionDecl {
@@ -1636,7 +1679,7 @@ region keepout-drill layer=In2.Cu (1mm, 1mm) (2mm, 1mm) (2mm, 2mm)";
         let text = "\
 text \"R12\" (0mm, 0mm) h=1mm layer=F.SilkS
 text \"VAL 3V3\" (2mm, 5mm) h=0.8mm layer=B.SilkS rot=90";
-        let (src, _) = parse(text).expect("parse");
+        let (src, _, _) = parse(text).expect("parse");
         assert_eq!(
             src[0],
             GenDirective::Text {
@@ -1669,7 +1712,7 @@ text \"VAL 3V3\" (2mm, 5mm) h=0.8mm layer=B.SilkS rot=90";
     fn text_string_may_contain_a_hash() {
         // A `#` inside a quoted text label is literal, not a comment (quote-aware strip),
         // so it round-trips. (`#` outside quotes still starts a comment.)
-        let (src, _) =
+        let (src, _, _) =
             parse("text \"P#1\" (0mm, 0mm) h=1mm layer=F.SilkS  # a real comment").expect("parse");
         let GenDirective::Text { string, .. } = &src[0] else {
             panic!("expected text, got {:?}", src[0]);
@@ -1697,7 +1740,7 @@ region keepout layer=F.Fab (0mm, 0mm) (10mm, 0mm) (10mm, 10mm)
 region conductor net=GND (0mm, 0mm) (5mm, 0mm) (5mm, 5mm)
 text \"HELLO\" (1mm, 1mm) h=1mm layer=My.Custom.Layer
 text \"WORLD\" (2mm, 2mm) h=1mm";
-        let (src, _) = parse(text).expect("parse");
+        let (src, _, _) = parse(text).expect("parse");
         // Verbatim storage of the authored names, and the two defaults.
         let GenDirective::Region(r0) = &src[0] else {
             panic!("region 0");
@@ -1746,7 +1789,7 @@ text \"WORLD\" (2mm, 2mm) h=1mm";
         let text = "\
 board (-2mm, 0mm) arc (0mm, 2mm) (2mm, 0mm)
 region conductor layer=F.Cu (0mm, 0mm) (4mm, 0mm) arc (5mm, 2mm) (4mm, 4mm) (0mm, 4mm)";
-        let (src, _) = parse(text).expect("parse");
+        let (src, _, _) = parse(text).expect("parse");
         // Board: a 2-corner arc polygon (half-disc).
         assert_eq!(
             src[0],
@@ -1797,7 +1840,7 @@ region conductor layer=F.Cu (0mm, 0mm) (4mm, 0mm) arc (5mm, 2mm) (4mm, 4mm) (0mm
         // A region with one quadratic and one cubic edge, mixed with straight edges.
         let text = "\
 region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2mm) (7mm, 2mm) (8mm, 0mm) (0mm, 4mm)";
-        let (src, _) = parse(text).expect("parse");
+        let (src, _, _) = parse(text).expect("parse");
         match &src[0] {
             GenDirective::Region(r) => assert_eq!(
                 r.shape.path().segs,
@@ -1906,7 +1949,7 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
         let doc = doc_of(all_variants(), overrides);
 
         let once = serialize(&doc);
-        let (src, ovr) = parse(&once).unwrap();
+        let (src, ovr, _) = parse(&once).unwrap();
         let twice = serialize(&doc_of(src, ovr));
         assert_eq!(once, twice);
     }
@@ -1922,7 +1965,7 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
             fix   psu.reg (30000000nm, 20000000)   # mm, nm and bare all equal 30/20 mm
             near psu.reg psu.reg 0.5mm
         ";
-        let (src, _ov) = parse(text).unwrap();
+        let (src, _ov, _) = parse(text).unwrap();
         assert_eq!(
             src[1],
             GenDirective::Place {
@@ -1966,8 +2009,8 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
     /// materialized `components`, `nets`, and reconciliation `report`.
     fn assert_elaboration_equiv(doc: &Doc) {
         let lib = part_library();
-        let (src, ovr) = parse(&serialize(doc)).expect("parse");
-        let elab = elaborate(&src, &ovr, &lib).expect("elaborate");
+        let (src, ovr, rp) = parse(&serialize(doc)).expect("parse");
+        let elab = elaborate(&src, &ovr, &rp, &lib).expect("elaborate");
         assert_eq!(elab.components, doc.components, "components diverged");
         assert_eq!(elab.nets, doc.nets, "nets diverged");
         assert_eq!(elab.report, doc.report, "report diverged");
@@ -2061,7 +2104,7 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
     /// degrees normalise; mm length on the pin proximity).
     #[test]
     fn parse_rotate_and_nearpin() {
-        let (src, _ov) = parse("rotate u1 -90\nnearpin c1 u1.VOUT 1.5mm").unwrap();
+        let (src, _ov, _) = parse("rotate u1 -90\nnearpin c1 u1.VOUT 1.5mm").unwrap();
         assert_eq!(
             src[0],
             GenDirective::Rotate {
@@ -2088,7 +2131,7 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
     fn arbitrary_angle_round_trips_as_a_quaternion() {
         // A non-cardinal angle lowers to a quaternion and serialises as `quat=(…)`
         // (the angle isn't exactly representable; the quaternion is the canonical form).
-        let (src, _) = parse("rotate u1 30").unwrap();
+        let (src, _, _) = parse("rotate u1 30").unwrap();
         let GenDirective::Rotate { orient, .. } = &src[0] else {
             panic!("expected a rotate, got {:?}", src[0]);
         };
@@ -2124,7 +2167,7 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
 
     #[test]
     fn rotate_bottom_authoring_round_trips() {
-        let (src, _) = parse("rotate u1 90 bottom").unwrap();
+        let (src, _, _) = parse("rotate u1 90 bottom").unwrap();
         assert_eq!(
             src[0],
             GenDirective::Rotate {

@@ -127,9 +127,10 @@ pub fn apply(
                 next.overrides.remove(id);
             }
             Command::LoadText(text) => {
-                let (source, overrides) = crate::text::parse(text)?;
+                let (source, overrides, refdes_pins) = crate::text::parse(text)?;
                 next.source = source;
                 next.overrides = overrides;
+                next.refdes_pins = refdes_pins;
             }
             Command::Resolve(id, res) => {
                 apply_resolution(&mut next, id, res).map_err(|d| vec![d])?
@@ -211,7 +212,7 @@ pub fn apply(
     }
 
     // Re-elaborate. A structural fault aborts the whole transaction.
-    let elab = elaborate(&next.source, &next.overrides, lib)?;
+    let elab = elaborate(&next.source, &next.overrides, &next.refdes_pins, lib)?;
     next.components = elab.components;
     next.nets = elab.nets;
     next.no_connects = elab.no_connects;
