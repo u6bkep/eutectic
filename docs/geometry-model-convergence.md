@@ -69,8 +69,9 @@ migration (`route::Layer` is router-internal only). Alongside: refdes pinning
 (feat/checked-coords, **0018 resolved** — MAX_COORD ingest bound + KERNEL_SAFE_COORD
 asserts). **0011, 0018, 0019, 0022, 0023 all resolved**; issue 0024 (copper-without-
 mask lint) filed. Every branch adversarially reviewed pre-merge; all findings fixed.
-**Still open**: fab Gerber output (SVG-only today); 0024; folding this record into
-`architecture.md` §8.
+**Still open**: fab Gerber output (SVG-only today); 0024. **Folded into
+`architecture.md` §8 (2026-07-03)** — §8 now states the current model; this record
+remains the decision-by-decision history.
 
 This record captures the foundation decisions; it *realigned the implementation* with
 what §8 already stated and sharpened three points (the single primitive, the placement
@@ -888,7 +889,9 @@ Then the post-convergence steps proceed on the corrected foundation:
   pins = non-blocking `E_REFDES_PIN_DUP` (the E_PIN_CONFLICT precedent).
 - Follow-up lint: copper slab without a mask slab is silent (issue 0024, from the
   fab-svg review).
-- This record still wants folding into `architecture.md` §8 (whose "Stages 1–3" prose
-  predates the convergence — flagged by the §8 callout there).
+- ~~Folding into `architecture.md` §8~~ — **done (2026-07-03)**: §8 rewritten to the
+  current model (Decisions 13–18); the retired Stages-1–3 prose replaced; pour-kernel
+  and arc narratives kept there as marked historical records. This document remains
+  the authoritative decision-by-decision history.
 </content>
 </invoke>
