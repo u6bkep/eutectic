@@ -51,22 +51,26 @@ branch adversarially reviewed pre-merge; all findings fixed.
 **Bottom-flip convention fixed (2026-07-03, `feat/flip-axis`)**: `Orient::flipped()`
 is Ry(180) (x-negates — KiCad/fab board-turn convention; bottom silk reads upright);
 placement CSV reports the authored angle for bottom parts (KiCad `.pos` style, `0,B`).
-**Decisions 16+17 recorded (2026-07-03, not yet implemented)**: a geometry-currency
-audit found four bypasses (pours' `PourFill` side-channel, via drills as scalars,
-`excellon_drill` missing pad drills — issue 0022, and two parallel `Feature` producers
-leaving keepouts unenforced — issue 0023). Decision 16: `Shape2D::Area(Region)`
-(hole-capable shape), the hole/void rule (`Area` holes = routed contours; `Void`s =
-enumerable drills, PTH/NPTH), one unified `features()` producer consumed by both DRC
-and export, `BoardShape` superseded, and the prismatic-matter assumption named with
-its escape hatches. Decision 17: TTF outline text rides `Area` (`ttf-parser` accepted
-as the first dependency).
-**Decision 18 recorded (2026-07-03, not yet implemented)**: the autorouter is an
-*editing tool*, not a solver layer — all routes persist in the text file's state zone
-(`# routes`, slab names, `pinned`/`free` provenance); load never re-solves; the router
-is free to be stochastic; partial reroute = transactional rip-up of a selection.
-Resolves 0011's design.
-**Still open**: Decision 16/17/18 implementation; courtyard solver packing (0019).
-This record is still meant to be folded into `architecture.md` §8.
+**Decisions 16+17+18 implemented end-to-end (2026-07-03, `main` @ `a6e389d`, 385 lib
+tests, eight branches in three waves)**: a geometry-currency audit found four bypasses
+(pours' `PourFill` side-channel, via drills as scalars, `excellon_drill` missing pad
+drills — issue 0022, and two parallel `Feature` producers leaving keepouts
+unenforced — issue 0023). Decision 16 (`Shape2D::Area(Region)`, the hole/void rule,
+one `world_features` producer for DRC + export, `BoardShape` superseded, the
+prismatic-matter assumption named): branches feat/area-shape, feat/unified-features,
+feat/fab-svg. Decision 17 (TTF outline text rides `Area`; `ttf-parser` is the crate's
+first dependency; `W_FONT_LOAD` its first warning): feat/ttf-fonts. Decision 18 (the
+autorouter is an *editing tool* — routes persist in the `# routes` text state zone
+with slab names + provenance, load never re-solves, `PromoteRoutes` freeze; resolves
+0011): feat/route-serialize, which also completed the Decision 13 rule-2 slab-name
+migration (`route::Layer` is router-internal only). Alongside: refdes pinning
+(feat/refdes-pin, Decision 14's reserved mechanism), polygonal-courtyard SAT packing
+(feat/courtyard-pack, **0019 resolved**), and the i128 coordinate ceiling
+(feat/checked-coords, **0018 resolved** — MAX_COORD ingest bound + KERNEL_SAFE_COORD
+asserts). **0011, 0018, 0019, 0022, 0023 all resolved**; issue 0024 (copper-without-
+mask lint) filed. Every branch adversarially reviewed pre-merge; all findings fixed.
+**Still open**: fab Gerber output (SVG-only today); 0024; folding this record into
+`architecture.md` §8.
 
 This record captures the foundation decisions; it *realigned the implementation* with
 what §8 already stated and sharpened three points (the single primitive, the placement
@@ -822,15 +826,27 @@ Then the post-convergence steps proceed on the corrected foundation:
 - ~~Real non-copper layers (0020)~~ — **resolved (Decision 13, implemented 2026-07-02)**:
   slab-name identity, mask solids + `Void` openings, real silk/mask Gerbers,
   `z_to_layer` deleted. 0016 (footprint graphics) resolved alongside (side-relative).
-- ~~Trace/via slab-name migration / route serialization (0011)~~ — **design resolved
-  (Decision 18, recorded 2026-07-03)**: routes persist in the text state zone with
-  slab names + provenance; the autorouter is an editing tool (stochastic-capable,
-  never load-gating); `route::Layer` ordinals become router-internal only. Rides
-  Decision 16 stage 3 for implementation.
-- **Decision 16/17 implementation** (recorded 2026-07-03, not built): `Shape2D::Area`,
-  unified producer, pours→`NetFeature`, via `Void` drills + Excellon rewrite (0022),
-  keepout enforcement (0023), `BoardShape` deletion, mask-export slab iteration, TTF
-  outline fonts (`ttf-parser`).
+- ~~Trace/via slab-name migration / route serialization (0011)~~ — **resolved
+  (Decision 18, implemented 2026-07-03, branch feat/route-serialize)**: `Trace.layer`
+  is a slab name, `Via.span: Option<(String,String)>` (None = full copper extent);
+  routes persist in the `# routes` text state zone (pinned default, free/hint/fixed
+  explicit — all four provenances round-trip); `route::Layer` ordinals are
+  router-internal only; commit-time `validate_routes` gate (E_UNKNOWN_SLAB /
+  E_NON_COPPER_SLAB / E_UNKNOWN_NET, post-elaborate — re-elaboration provably
+  preserves routes); copper export = per-copper-slab forward query (byte-identical
+  default-stackup Gerbers); `PromoteRoutes{nets}` freeze command (Decision 18's
+  lockfile move, net-scoped minimal core).
+- ~~Decision 16/17 implementation~~ — **implemented end-to-end (2026-07-03, four
+  branches)**: `Shape2D::Area` + `BoardShape` deletion (feat/area-shape — plus
+  map_points winding renormalization under reflection, erosion panics, region-fill
+  G01 self-containment); unified `world_features` producer, pours→`NetFeature`,
+  via/pad drill `Void`s, Excellon forward query with PTH/NPTH split = 0022, keepout +
+  edge-clearance DRC = 0023 (feat/unified-features); mask-export slab iteration
+  (feat/fab-svg); TTF outline fonts on `Area` (feat/ttf-fonts — `ttf-parser` is the
+  first dependency, hand-assembled minimal TTF test fixture, `W_FONT_LOAD` is the
+  crate's first warning-class diagnostic). Every branch adversarially reviewed
+  pre-merge; all findings fixed (incl. one review premise refuted with evidence by
+  the implementer — the SetSource commit gate already existed).
 - ~~Auto-text~~ — **resolved (Decision 14, implemented 2026-07-03)**: `FpText` anchors
   + class registry (params/label/refdes queries), KiCad `fp_text`/`property` import
   (branches feat/class-registry, feat/auto-text). Follow-ups: refdes pinning via
@@ -856,7 +872,22 @@ Then the post-convergence steps proceed on the corrected foundation:
 - Whether component bodies get a dedicated role/material or reuse `Keepout`.
 - Relation to issue 0004 (planes / multilayer): the volumetric convergence is the
   natural home for that work.
-- Coordinate-range / i128 ceiling (0018); polygon-courtyard solver packing (0019).
+- ~~Coordinate-range / i128 ceiling (0018)~~ — **resolved (feat/checked-coords,
+  2026-07-03)**: two-ceiling model — `geom::MAX_COORD` = 1e9 nm inclusive ingest bound
+  (`E_COORD_RANGE` at text/command boundaries, `Err(String)` at kicad/svg import) and
+  `KERNEL_SAFE_COORD` = 1.276e9 (the true 64·C⁴ i128 ceiling, compile-time-guarded)
+  for the kernel debug_asserts, leaving composition headroom.
+- ~~Polygon-courtyard solver packing (0019)~~ — **resolved (feat/courtyard-pack,
+  2026-07-03)**: exact-integer convex SAT (edge normals + vertex-vertex axes, rounded
+  margins folded in as g² ≥ r²·|n|²) replaces the AABB proxy in `NoOverlap`; imported
+  courtyards flatten + hull; honest verify reports residual overlaps > 3µm as
+  `E_COURTYARD_OVERLAP`.
+- **Refdes pinning landed** (feat/refdes-pin, 2026-07-03): `refdes <path> <string>`
+  override lines → `Doc::refdes_pins`; pins consulted first (opaque), parseable pins
+  reserve their number (incl. against digit-suffixed registry prefixes), duplicate
+  pins = non-blocking `E_REFDES_PIN_DUP` (the E_PIN_CONFLICT precedent).
+- Follow-up lint: copper slab without a mask slab is silent (issue 0024, from the
+  fab-svg review).
 - This record still wants folding into `architecture.md` §8 (whose "Stages 1–3" prose
   predates the convergence — flagged by the §8 callout there).
 </content>
