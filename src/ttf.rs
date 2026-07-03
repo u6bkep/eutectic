@@ -15,7 +15,8 @@
 //! Glyphs scale so the **cap height** equals the authored `height` (not the em square,
 //! which renders ~30 % smaller). The cap height in font units is taken from, in order:
 //! the OS/2 `capHeight`; else the ink height of the `H` glyph; else `0.7 · unitsPerEm`.
-//! Horizontal advance comes from `hmtx`. [`Justify::Left`] anchors the pen origin at the
+//! Horizontal advance comes from `hmtx`, plus a legacy `kern`-table pair adjustment
+//! between adjacent glyphs (see *Kerning* below). [`Justify::Left`] anchors the pen origin at the
 //! local origin (baseline-left, like board text); [`Justify::Center`] centres the run's
 //! **ink bounding box** on the origin — the *same* convention as
 //! [`text_strokes`](crate::font::text_strokes), so swapping a footprint's font does not
@@ -32,9 +33,19 @@
 //! / [`holes`](crate::region::Region::holes) and the reflection-safe
 //! [`Shape2D::map_points`] expect.
 //!
+//! # Kerning
+//!
+//! Adjacent glyphs kern via the legacy `kern` table (OpenType format 0/2 pair values,
+//! horizontal only). The adjustment is summed across every horizontal, non-cross-stream,
+//! non-state-machine subtable and added to the pen — in **font units, before scaling** — so
+//! it flows through the same integer accumulation and single round as `hmtx` advances, and
+//! [`Justify::Center`]'s ink-bbox centring picks it up for free. A font with no `kern` table
+//! is byte-identical to the un-kerned output. GPOS pair positioning, cross-stream/vertical
+//! kerning, and AAT format-1 (state-machine) subtables are **not** covered.
+//!
 //! # Not covered (deliberate)
 //!
-//! Kerning (advances are per-glyph `hmtx` only — no `kern`/GPOS pair adjustment); font
+//! GPOS pair positioning (kerning is `kern`-table only — see above); font
 //! embedding in the document; per-text font overrides (the font is doc-wide).
 //!
 //! # Caveats
@@ -117,8 +128,17 @@ pub fn text_regions(string: &str, height: Nm, justify: Justify, font: &TtfFont) 
 
     let mut shapes: Vec<Shape2D> = Vec::new();
     let mut pen_units: i64 = 0; // pen x, in font units (advance accumulates before scaling)
+    // Previous placed glyph, for pair kerning. `None` breaks the chain (start of run, or
+    // after a fallback box, which has no glyph id).
+    let mut prev_gid: Option<ttf_parser::GlyphId> = None;
     for ch in string.chars() {
         let gid = face.glyph_index(ch);
+        // Legacy `kern` pair adjustment (font units), applied before this glyph is placed —
+        // it slots into the same accumulator as the advance, so scaling and justify follow.
+        // Only real (cmap-resolved) glyph pairs kern; a fallback box breaks the chain.
+        if let (Some(l), Some(r)) = (prev_gid, gid) {
+            pen_units += kern_pair(&face, l, r) as i64;
+        }
         let dx = scale(pen_units, height, cap);
         match gid {
             Some(g) => {
@@ -126,6 +146,7 @@ pub fn text_regions(string: &str, height: Nm, justify: Justify, font: &TtfFont) 
                     shapes.push(area);
                 }
                 pen_units += face.glyph_hor_advance(g).unwrap_or(0) as i64;
+                prev_gid = Some(g);
             }
             None => {
                 // No cmap entry: `.notdef` (glyph 0) if it carries ink, else a fallback box.
@@ -133,12 +154,14 @@ pub fn text_regions(string: &str, height: Nm, justify: Justify, font: &TtfFont) 
                 if let Some(area) = glyph_area(&face, notdef, height, cap, tol, dx) {
                     shapes.push(area);
                     pen_units += face.glyph_hor_advance(notdef).unwrap_or(0) as i64;
+                    prev_gid = Some(notdef);
                 } else {
                     let (area, adv_nm) = fallback_box(height, dx);
                     shapes.push(area);
                     // Advance is already in world nm; back it into font units so the shared
                     // accumulator stays consistent.
                     pen_units += mul_div_round(adv_nm, cap, height);
+                    prev_gid = None; // fallback box has no glyph id: break the kern chain
                 }
             }
         }
@@ -159,6 +182,32 @@ pub fn text_regions(string: &str, height: Nm, justify: Justify, font: &TtfFont) 
             .collect();
     }
     shapes
+}
+
+/// Horizontal kern adjustment (font units) for the ordered pair `(left, right)` from the
+/// legacy `kern` table, or `0` when the font has none or the pair is unlisted. Sums matching
+/// values across every horizontal, non-cross-stream, non-state-machine subtable (the spec's
+/// accumulation for stacked format-0/2 subtables); vertical, cross-stream, and format-1
+/// (AAT state machine) subtables are skipped — `glyphs_kerning` already returns `None` for
+/// the latter. GPOS pair positioning is out of scope.
+fn kern_pair(
+    face: &ttf_parser::Face,
+    left: ttf_parser::GlyphId,
+    right: ttf_parser::GlyphId,
+) -> i16 {
+    let Some(kern) = face.tables().kern else {
+        return 0;
+    };
+    let mut adj: i32 = 0;
+    for st in kern.subtables {
+        if !st.horizontal || st.has_cross_stream || st.has_state_machine {
+            continue;
+        }
+        if let Some(v) = st.glyphs_kerning(left, right) {
+            adj += v as i32;
+        }
+    }
+    adj.clamp(i16::MIN as i32, i16::MAX as i32) as i16
 }
 
 /// The cap height in font units, per the documented cascade: OS/2 `capHeight`, else the
@@ -400,10 +449,62 @@ fn mul_div_round(a: i64, b: i64, d: i64) -> Nm {
 //                  a lowercase glyph, to prove a real font stops case-folding.
 // ----------------------------------------------------------------------------
 
-/// Build the minimal test font (see the module fixture note). `pub(crate)` so lowering
-/// tests in other modules can drive real TTF text.
+/// Build the minimal test font (see the module fixture note), with **no** `kern` table —
+/// its output must stay byte-identical (many tests assert un-kerned metrics). `pub(crate)`
+/// so lowering tests in other modules can drive real TTF text.
 #[cfg(test)]
 pub(crate) fn build_test_ttf() -> Vec<u8> {
+    build_test_ttf_impl(None)
+}
+
+/// The fixture plus a legacy OpenType `kern` table (format 0) with a single distinctive
+/// pair: `H`,`o` (glyphs 1,3) → `-120` font units. Everything else is byte-identical to
+/// [`build_test_ttf`], so kerning is the only observable difference.
+#[cfg(test)]
+pub(crate) fn build_test_ttf_kerned() -> Vec<u8> {
+    build_test_ttf_impl(Some(build_kern_table()))
+}
+
+/// A minimal OpenType `kern` table: version 0, one format-0 horizontal subtable, one pair
+/// (`H`=1, `o`=3) → `-120`. Byte layout per the OpenType `kern` spec.
+#[cfg(test)]
+fn build_kern_table() -> Vec<u8> {
+    fn be16(v: u16, out: &mut Vec<u8>) {
+        out.extend_from_slice(&v.to_be_bytes());
+    }
+    fn bei16(v: i16, out: &mut Vec<u8>) {
+        out.extend_from_slice(&v.to_be_bytes());
+    }
+    let pairs: [(u16, u16, i16); 1] = [(1, 3, -120)]; // (left gid, right gid, value)
+    let n = pairs.len() as u16;
+    // Subtable = 6-byte header + format-0 body (8-byte pair header + 6 bytes/pair).
+    let subtable_len = 6 + 8 + 6 * pairs.len();
+
+    let mut out = Vec::new();
+    be16(0, &mut out); // version 0 (OpenType variant)
+    be16(1, &mut out); // nTables
+    // Subtable header (OpenType order: version, length, then format+coverage byte pair).
+    be16(0, &mut out); // subtable version
+    be16(subtable_len as u16, &mut out); // subtable length
+    out.push(0); // format = 0
+    out.push(0x01); // coverage: bit0 = horizontal
+    // Format-0 pair header: nPairs + binary-search fields (ttf-parser ignores the latter).
+    be16(n, &mut out);
+    be16(0, &mut out); // searchRange
+    be16(0, &mut out); // entrySelector
+    be16(0, &mut out); // rangeShift
+    for (l, r, v) in pairs {
+        be16(l, &mut out); // left glyph
+        be16(r, &mut out); // right glyph
+        bei16(v, &mut out); // value
+    }
+    out
+}
+
+/// Shared assembler for the test fixture; `kern` injects an optional `kern` table (sorted
+/// into the table directory). `None` reproduces the original byte-for-byte fixture.
+#[cfg(test)]
+fn build_test_ttf_impl(kern: Option<Vec<u8>>) -> Vec<u8> {
     fn be16(v: u16, out: &mut Vec<u8>) {
         out.extend_from_slice(&v.to_be_bytes());
     }
@@ -566,7 +667,8 @@ pub(crate) fn build_test_ttf() -> Vec<u8> {
     }
 
     // Assemble: offset table + directory (tags sorted ascending) + 4-byte-aligned tables.
-    let tables: [(&[u8; 4], Vec<u8>); 7] = [
+    // `kern` sorts between `hmtx` and `loca`; absent, this is the original 7-table set.
+    let mut tables: Vec<(&[u8; 4], Vec<u8>)> = vec![
         (b"cmap", cmap),
         (b"glyf", glyf),
         (b"head", head),
@@ -575,14 +677,20 @@ pub(crate) fn build_test_ttf() -> Vec<u8> {
         (b"loca", loca),
         (b"maxp", maxp),
     ];
+    if let Some(kern) = kern {
+        tables.push((b"kern", kern));
+        tables.sort_by(|a, b| a.0.cmp(b.0)); // directory must stay tag-ascending
+    }
     let num_tables = tables.len() as u16;
     let mut font = Vec::new();
     be32(0x0001_0000, &mut font); // sfntVersion (TrueType)
     be16(num_tables, &mut font);
-    // searchRange / entrySelector / rangeShift for numTables = 7 (largest pow2 ≤ 7 is 4).
-    be16(64, &mut font); // searchRange = 4 * 16
-    be16(2, &mut font); // entrySelector = log2(4)
-    be16(num_tables * 16 - 64, &mut font); // rangeShift
+    // searchRange / entrySelector / rangeShift (largest pow2 ≤ num_tables); cosmetic — the
+    // parser ignores them — but computed so both fixture variants are well-formed.
+    let pow2 = 1u16 << (15 - num_tables.leading_zeros() as u16);
+    be16(pow2 * 16, &mut font); // searchRange
+    be16(pow2.trailing_zeros() as u16, &mut font); // entrySelector = log2(pow2)
+    be16(num_tables * 16 - pow2 * 16, &mut font); // rangeShift
 
     let dir_len = 12 + tables.len() * 16;
     let mut body_offset = dir_len;
@@ -775,5 +883,95 @@ mod tests {
         let (lo, hi) = region.bbox().unwrap();
         assert_eq!(lo.x, -(hi.x), "x centred: {} vs {}", lo.x, hi.x);
         assert_eq!(lo.y, -(hi.y), "y centred: {} vs {}", lo.y, hi.y);
+    }
+
+    // ---- kerning (legacy `kern` table) ----------------------------------------------
+
+    /// Left edge (world nm) of the last glyph's ink in a left-justified run.
+    #[cfg(test)]
+    fn last_glyph_x0(shapes: &[Shape2D]) -> Nm {
+        let Shape2D::Area { region } = shapes.last().unwrap() else {
+            panic!("expected an Area");
+        };
+        region.bbox().unwrap().0.x
+    }
+
+    /// The kerned pair `Ho` advances the pen by exactly the scaled kern value less than the
+    /// un-kerned run. Fixture: `H`→`o` = -120 font units; at height 700 000 / cap 700 the
+    /// scale is 1000 nm/unit, so the `o` sits 120 000 nm to the *left* of its un-kerned spot.
+    #[test]
+    fn kerned_pair_advance_differs_by_scaled_value() {
+        let plain = TtfFont::from_bytes(build_test_ttf()).unwrap();
+        let kerned = TtfFont::from_bytes(build_test_ttf_kerned()).unwrap();
+        let x_plain = last_glyph_x0(&text_regions("Ho", 700_000, Justify::Left, &plain));
+        let x_kerned = last_glyph_x0(&text_regions("Ho", 700_000, Justify::Left, &kerned));
+        assert_eq!(
+            x_plain - x_kerned,
+            120_000,
+            "o shifted left by the scaled kern value (-120 units × 1000 nm/unit)"
+        );
+    }
+
+    /// A pair with no `kern` entry (`HH` — only `H`,`o` is listed) is unaffected: the kerned
+    /// font places it identically to the plain font.
+    #[test]
+    fn unlisted_pair_is_not_kerned() {
+        let plain = TtfFont::from_bytes(build_test_ttf()).unwrap();
+        let kerned = TtfFont::from_bytes(build_test_ttf_kerned()).unwrap();
+        let x_plain = last_glyph_x0(&text_regions("HH", 700_000, Justify::Left, &plain));
+        let x_kerned = last_glyph_x0(&text_regions("HH", 700_000, Justify::Left, &kerned));
+        assert_eq!(
+            x_plain, x_kerned,
+            "no kern pair for H,H → identical placement"
+        );
+    }
+
+    /// A font with no `kern` table produces byte-identical output to the un-kerned build,
+    /// and the two fixtures differ *only* by the added table (regression guard for the
+    /// shared assembler). Regions for a kernless run are therefore identical.
+    #[test]
+    fn no_kern_table_is_byte_identical_regions() {
+        // The plain fixture must be exactly the historical bytes (no kern table).
+        assert_eq!(
+            build_test_ttf_impl(None),
+            build_test_ttf(),
+            "plain fixture is the None path"
+        );
+        let plain = TtfFont::from_bytes(build_test_ttf()).unwrap();
+        let kerned = TtfFont::from_bytes(build_test_ttf_kerned()).unwrap();
+        // A run with no listed pair is placed identically by both fonts, glyph for glyph.
+        let a = text_regions("HH", 700_000, Justify::Left, &plain);
+        let b = text_regions("HH", 700_000, Justify::Left, &kerned);
+        let bb = |s: &[Shape2D]| {
+            s.iter()
+                .map(|s| {
+                    let Shape2D::Area { region } = s else {
+                        panic!()
+                    };
+                    region.bbox().unwrap()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bb(&a), bb(&b), "kernless pair identical under both fonts");
+    }
+
+    /// Center justification reflects the kerned ink width: its bbox is computed *after*
+    /// positioning, so pulling `o` leftward shrinks the run's total ink extent, and the
+    /// centred run is narrower than the un-kerned one.
+    #[test]
+    fn center_justify_reflects_kerned_ink_width() {
+        let plain = TtfFont::from_bytes(build_test_ttf()).unwrap();
+        let kerned = TtfFont::from_bytes(build_test_ttf_kerned()).unwrap();
+        let width = |shapes: &[Shape2D]| -> Nm {
+            let (lo, hi) = union_bbox(shapes).unwrap();
+            hi.x - lo.x
+        };
+        let w_plain = width(&text_regions("Ho", 700_000, Justify::Center, &plain));
+        let w_kerned = width(&text_regions("Ho", 700_000, Justify::Center, &kerned));
+        assert_eq!(
+            w_plain - w_kerned,
+            120_000,
+            "kerning narrows the run's ink extent by the scaled kern value"
+        );
     }
 }
