@@ -549,7 +549,10 @@ The "virtual layer" question dissolves under Decision 13 — no new machinery:
   the enum; becomes parseable). Datum is excluded from physical clash queries —
   zero-height ranges *touch* their neighbours since `ZRange::overlaps` is closed.
   Graphic lowering takes its `Role` from the resolved slab's role rather than
-  hardcoding `Marking`.
+  hardcoding `Marking`. Consequence: silk identity is **role-driven, not
+  name-driven** — a stackup that names a slab `F.SilkS` but gives it a non-Marking
+  role silently drops that silk from every output (the name is a reference, the
+  role is the meaning; Decision 13).
 
 ## 7. Convergence plan: sequential foundation → parallel fan-out → sequential spine
 
