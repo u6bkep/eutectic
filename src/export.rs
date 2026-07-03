@@ -1445,8 +1445,11 @@ psu.reg,LDO,0.000000,0.000000,0,T
         )
         .unwrap();
         let csv = placement_csv(h.doc());
+        // Flipping about the y-axis leaves an about-z projection of 180° (a pure
+        // `Ry(180)` reads as 180° in-plane), unlike the old x-axis flip which projected
+        // to 0°. The reported rotation is the quaternion's about-z angle.
         assert!(
-            csv.contains(",0,B\n"),
+            csv.contains(",180,B\n"),
             "bottom-side component marked B:\n{csv}"
         );
     }

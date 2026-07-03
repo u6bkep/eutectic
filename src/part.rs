@@ -941,11 +941,11 @@ mod tests {
 
     #[test]
     fn flip_to_bottom_is_a_rotation_not_a_mirror_flag() {
-        // 180° about the x-axis = flip-to-bottom: a pure rotation, no bool needed.
+        // 180° about the y-axis = flip-to-bottom: a pure rotation, no bool needed.
         let flip = Orient {
             w: 0,
-            x: 1,
-            y: 0,
+            x: 0,
+            y: 1,
             z: 0,
         };
         assert!(flip.is_bottom(), "local +z now points down ⇒ bottom side");
@@ -953,8 +953,27 @@ mod tests {
             !Orient::from_deg(90).unwrap().is_bottom(),
             "an about-z turn stays top side"
         );
-        // Applied to a planar point it flips y and stays in-plane (exact).
-        assert_eq!(flip.apply(Point { x: 5, y: 3 }), Point { x: 5, y: -3 });
+        // Applied to a planar point it flips x and stays in-plane (exact).
+        assert_eq!(flip.apply(Point { x: 5, y: 3 }), Point { x: -5, y: 3 });
+    }
+
+    #[test]
+    fn flip_convention_is_the_y_axis_board_turn() {
+        // The board-turn convention (KiCad/fab): flipping to the bottom negates x and
+        // preserves y in-plane, so bottom silk reads upright. `flipped()` of the identity
+        // is exactly `FLIP_y = (0,0,1,0)`, and its in-plane effect is that x-negation.
+        let flip = Orient::default().flipped();
+        assert_eq!(
+            flip,
+            Orient {
+                w: 0,
+                x: 0,
+                y: 1,
+                z: 0,
+            }
+        );
+        assert!(flip.is_bottom());
+        assert_eq!(flip.apply(Point { x: 7, y: 4 }), Point { x: -7, y: 4 });
     }
 
     #[test]
@@ -1714,17 +1733,17 @@ mod tests {
 
     /// A bottom-side component's text is mirrored and lands on the `B.*` slab — both
     /// falling out of the component quaternion (no special-case code). NOTE: this crate's
-    /// flip ([`Orient::flipped`]) is a 180° rotation about the in-plane x-axis, so the
-    /// in-plane mirror is a **y-negation** (x unchanged), not the x-flip a naive reading
-    /// of "mirror" might expect. Anchored at `+2mm` in y, the top text sits above the axis
-    /// and the bottom text below — an observable reflection.
+    /// flip ([`Orient::flipped`]) is a 180° rotation about the in-plane y-axis, so the
+    /// in-plane mirror is an **x-negation** (y unchanged), matching the KiCad/fab
+    /// board-turn convention. Anchored at `+2mm` in x, the top text sits right of the axis
+    /// and the bottom text left — an observable reflection.
     #[test]
     fn text_features_bottom_side_mirrors_and_swaps_slab() {
         let su = Stackup::default_2layer();
         let def = text_part(
             "R",
             FpTextKind::Literal("LR".into()),
-            Point { x: 0, y: 2 * MM },
+            Point { x: 2 * MM, y: 0 },
             "F.SilkS",
         );
         let top = comp("R", Point { x: 0, y: 0 }, Orient::default());
@@ -1737,16 +1756,16 @@ mod tests {
         let (tlo, thi) = text_bbox(&tf);
         let (blo, bhi) = text_bbox(&bf);
         assert_eq!(
-            (blo.x, bhi.x),
-            (tlo.x, thi.x),
-            "x unchanged by the x-axis flip"
+            (blo.y, bhi.y),
+            (tlo.y, thi.y),
+            "y unchanged by the y-axis flip"
         );
         assert_eq!(
-            (blo.y, bhi.y),
-            (-thi.y, -tlo.y),
-            "y mirrored across the x-axis"
+            (blo.x, bhi.x),
+            (-thi.x, -tlo.x),
+            "x mirrored across the y-axis"
         );
-        assert!(tlo.y > 0, "top text is above the axis (anchor +2mm)");
+        assert!(tlo.x > 0, "top text is right of the axis (anchor +2mm)");
 
         assert_eq!(prism_shape_z(&tf[0]).1, su.slab_z("F.SilkS").unwrap());
         assert_eq!(

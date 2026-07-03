@@ -135,9 +135,13 @@ impl Orient {
     }
 
     /// Flip the (already-rotated) part to the **board bottom**: compose a 180° rotation
-    /// about the in-plane x-axis on top of this orientation. This is a *rotation* (you
-    /// turn the part over), not a reflection — there is no mirror flag. Closed form of
-    /// `FLIP_x · q` where `FLIP_x = (0,1,0,0)`.
+    /// about the in-plane y-axis on top of this orientation. This is a *rotation* (you
+    /// turn the part over about the board's vertical axis), not a reflection — there is
+    /// no mirror flag. Closed form of `FLIP_y · q` where `FLIP_y = (0,0,1,0)`.
+    ///
+    /// The y-axis (not x-axis) convention matches KiCad and general fab: turning the
+    /// board over about its vertical axis negates x while preserving y, so bottom silk
+    /// text reads upright rather than upside-down.
     ///
     /// Note: `flipped().flipped()` returns the **antipode** `−q`, not `q`. As a rotation
     /// `−q ≡ q` (every method here is quadratic in the components, so the two are
@@ -147,10 +151,10 @@ impl Orient {
     /// rotation-aware compare) to avoid `−q ≠ q` surprises.
     pub fn flipped(self) -> Orient {
         Orient {
-            w: -self.x,
-            x: self.w,
-            y: -self.z,
-            z: self.y,
+            w: -self.y,
+            x: self.z,
+            y: self.w,
+            z: -self.x,
         }
     }
 
