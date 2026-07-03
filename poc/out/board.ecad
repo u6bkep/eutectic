@@ -155,18 +155,7 @@ net RUN U1.RUN SW2.1
 net LED_DIN U1.GPIO20 D1.DIN
 
 # routes
-route +DVDD F.Cu w=0.15mm (24.07mm, 19.49mm) (24.15mm, 19.65mm)
-route +DVDD B.Cu w=0.15mm (24.15mm, 19.65mm) (24.15mm, 20.55mm) (23.7mm, 20.55mm) (23.7mm, 27.75mm) (24.6mm, 27.75mm) (24.6mm, 29.1mm) (30mm, 29.1mm) (30mm, 28.65mm) (30.45mm, 28.65mm) (30.326493mm, 28.51mm)
-route +DVDD B.Cu w=0.15mm (30.45mm, 28.65mm) (30.45mm, 29.1mm) (31.8mm, 29.1mm) (31.8mm, 27.3mm) (32.25mm, 27.3mm) (32.25mm, 23.25mm) (34.05mm, 23.25mm) (33.931737mm, 23.122389mm)
-route +DVDD B.Cu w=0.15mm (24.15mm, 19.65mm) (22.8mm, 19.65mm) (22.8mm, 13.8mm) (22.675mm, 14mm)
-route +DVDD B.Cu w=0.15mm (32.25mm, 25.95mm) (28.2mm, 25.95mm) (28.2mm, 27.3mm) (28mm, 27.45mm)
-route +DVDD B.Cu w=0.15mm (32.25mm, 23.25mm) (31.35mm, 23.25mm) (31.45mm, 23.6mm)
-route +DVDD B.Cu w=0.15mm (24.15mm, 19.65mm) (24.6mm, 19.65mm) (24.6mm, 18.75mm) (28.2mm, 18.75mm) (28.2mm, 20.1mm) (29.1mm, 20.1mm) (29.2mm, 20.55mm)
-route +DVDD B.Cu w=0.15mm (23.7mm, 23.25mm) (24.15mm, 23.25mm) (24.55mm, 23.2mm)
-route CC2 F.Cu w=0.15mm (29.75mm, -1.045mm) (29.55mm, 3mm)
-route CC2 F.Cu w=0.15mm (29.55mm, 3mm) (29.55mm, 4.8mm) (33.6mm, 4.8mm) (33.49mm, 5mm)
-route D_SWDIO F.Cu w=0.15mm (4mm, 26mm) (3.9mm, 25.95mm) free
-route D_SWDIO F.Cu w=0.15mm (3.9mm, 25.95mm) (22.8mm, 25.95mm) free
-route D_SWDIO B.Cu w=0.15mm (22.8mm, 25.95mm) (23.25mm, 25.95mm) (23.25mm, 29.1mm) (24.15mm, 29.1mm) (24.15mm, 29.55mm) (32.25mm, 29.55mm) (32.25mm, 28.2mm) (33.15mm, 28.2mm) (33.15mm, 27.75mm) (34.95mm, 27.75mm) (34.95mm, 24.6mm) (35.4mm, 24.6mm) (35.4mm, 20.55mm) (32.25mm, 20.55mm) (32.25mm, 21.9mm) (31.8mm, 21.9mm) (31.8mm, 22.35mm) (27.3mm, 22.35mm) (27.3mm, 23.25mm) (25.05mm, 23.25mm) (25.05mm, 25.05mm) (24.55mm, 24.8mm) free
-via +DVDD (24.15mm, 19.65mm) drill=0.15mm pad=0.3mm
-via D_SWDIO (22.8mm, 25.95mm) drill=0.15mm pad=0.3mm free
+route A_SWDIO F.Cu w=0.15mm (4mm, 5mm) (4.8mm, 5.7mm)
+route A_SWDIO F.Cu w=0.15mm (4.8mm, 5.7mm) (4.8mm, 10.5mm) (5.1mm, 10.5mm) (5.1mm, 17.1mm) (25.2mm, 17.1mm) (25.2mm, 17.7mm) (30.9mm, 17.7mm) (30.9mm, 18mm) (31.2mm, 18mm) (31.2mm, 18.6mm) (33mm, 18.6mm) (33mm, 18.9mm) (33.3mm, 18.9mm) (33.3mm, 19.2mm) (34.8mm, 19.2mm) (34.8mm, 19.5mm) (35.1mm, 19.5mm) (35.1mm, 20.1mm) (35.4mm, 20.1mm) (35.4mm, 20.4mm) (35.7mm, 20.4mm) (35.7mm, 24.9mm) (32.4mm, 24.9mm) (32.4mm, 27.3mm) (32.1mm, 27.3mm) (32.1mm, 29.4mm) (23.4mm, 29.4mm) (23.4mm, 29.1mm) (23.1mm, 29.1mm) (23.1mm, 21.9mm) (23.7mm, 21.9mm) (24.55mm, 22mm)
+route BOOT_SW F.Cu w=0.15mm (44.51mm, 34mm) (45.3mm, 33.9mm)
+route BOOT_SW F.Cu w=0.15mm (45.3mm, 33.9mm) (45.3mm, 34.8mm) (41.7mm, 34.8mm) (41.7mm, 36.3mm) (41.8mm, 37.275mm)

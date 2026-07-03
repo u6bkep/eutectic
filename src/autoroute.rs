@@ -630,6 +630,18 @@ impl BlockMap {
                         );
                     }
                 }
+                Role::Void => {
+                    // A through-cut Void (an authored NPTH mounting/tooling hole, or a
+                    // via/pad drill) removes copper on *every* layer, so no routed copper
+                    // may run over it — a hard all-layer block (issue 0025's routing side:
+                    // `board_region` only subtracts `Cutout`, not `hole`, so holes reach
+                    // the router only through this Void arm). Keeping `clr` of room is a
+                    // conservative stand-in for a true hole edge-clearance rule.
+                    let Extent::Prism { shape, .. } = &f.extent;
+                    Self::stamp(
+                        grid, &mut trace, &mut via, nl, shape, None, clr, width, via_pad, half_edge,
+                    );
+                }
                 _ => {}
             }
         }
@@ -1761,6 +1773,58 @@ mod tests {
             "the cutout splits the board — SIG cannot route across it"
         );
         assert!(r.commands.is_empty(), "a failed net emits no copper");
+    }
+
+    /// An authored through-hole (NPTH mounting hole) blocks routing over it on every layer
+    /// (issue 0025's routing side): the hole is a full-stackup `Role::Void`, invisible to
+    /// `board_region` (which only subtracts `Cutout`), so the router sees it only via the
+    /// obstacle stream's Void arm. A big central hole spanning the board height forces any
+    /// route between two flanking pads through the hole — which is blocked — so SIG fails.
+    #[test]
+    fn route_cannot_cross_a_mounting_hole() {
+        let mut lib = part_library();
+        lib.insert("SP".into(), smd_pad("F.Cu"));
+        let src = vec![
+            board_rect(Point::mm(0, 0), Point::mm(20, 10)),
+            // A large central NPTH hole (12mm dia at (10,5)) — taller than the 10mm board,
+            // so it fully spans the height and leaves no channel above or below it.
+            G::Hole {
+                center: Point::mm(10, 5),
+                dia: 12 * MM,
+            },
+            G::Instance {
+                path: "l".into(),
+                part: "SP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Instance {
+                path: "r".into(),
+                part: "SP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Place {
+                path: "l".into(),
+                pos: Point::mm(3, 5),
+            },
+            G::Place {
+                path: "r".into(),
+                pos: Point::mm(17, 5),
+            },
+            G::ConnectPins {
+                net: "SIG".into(),
+                pins: vec![("l".into(), "1".into()), ("r".into(), "1".into())],
+            },
+        ];
+        let h = doc_of_lib(src, &lib);
+        let r = autoroute(h.doc(), &lib, &DesignRules::default());
+        assert_eq!(
+            r.unrouted,
+            vec![NetId::new("SIG")],
+            "an 8mm hole spanning the board height blocks the only channel between the pads"
+        );
+        assert!(r.commands.is_empty(), "a blocked net emits no copper");
     }
 
     /// A copper pour of a *foreign* net blocks routing: a board-covering GND pour on F.Cu
