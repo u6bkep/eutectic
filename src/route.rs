@@ -746,7 +746,7 @@ mod pour_tests {
     use crate::command::{Command, Transaction};
     use crate::doc::{MM, Point};
     use crate::elaborate::{GenDirective as G, RegionDecl, board_rect};
-    use crate::geom::{Role, Shape2D};
+    use crate::geom::{Material, Role, Shape2D, Slab, ZRange};
     use crate::history::History;
     use crate::part::part_library;
 
@@ -1328,6 +1328,110 @@ mod pour_tests {
         assert!(
             !feats.is_empty(),
             "the scene has copper features (the check is non-trivial)"
+        );
+    }
+
+    /// A fab graphic on a zero-height `Role::Datum` slab (Decision 15) must never
+    /// register a physical clash, even where it lies directly over foreign copper and
+    /// z-*touches* it (`ZRange::overlaps` is closed). This is the Datum analogue of
+    /// `mask_generation_does_not_perturb_drc`: DRC's copper producer (`net_features`)
+    /// filters to `Role::Conductor`, and footprint graphics never enter DRC at all, so
+    /// a Datum graphic sitting on foreign copper is not a short.
+    #[test]
+    fn datum_graphic_over_copper_is_not_a_clash() {
+        let mut lib = part_library();
+        // A plain SIG pad at the origin, and a GND part whose F.Fab graphic runs from
+        // its own pad back across the origin — so the fab line lands on the SIG copper.
+        lib.insert("SIG".into(), one_pad("F.Cu"));
+        lib.insert(
+            "GDFAB".into(),
+            crate::kicad::import_footprint(
+                r#"(footprint "GDFAB"
+                    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu"))
+                    (fp_line (start 0 0) (end -10 0) (layer "F.Fab") (stroke (width 0.5))))"#,
+            )
+            .unwrap(),
+        );
+        // An authored stackup whose zero-height F.Fab datum slab sits at the F.Cu top
+        // face, so a fab graphic z-*touches* copper (`lo == hi == 1_600_000`).
+        let c = 35_000;
+        let t = 1_600_000;
+        let stack = |name: &str, lo: Nm, hi: Nm, role: Role, mat: Option<&str>| {
+            G::Slab(Slab {
+                name: name.into(),
+                z: ZRange::new(lo, hi),
+                role,
+                material: mat.map(Material::named),
+            })
+        };
+        let src = vec![
+            board_rect(Point::mm(0, 0), Point::mm(20, 20)),
+            stack("B.Cu", 0, c, Role::Conductor, Some("copper")),
+            stack("core", c, t - c, Role::Substrate, Some("FR4")),
+            stack("F.Cu", t - c, t, Role::Conductor, Some("copper")),
+            stack("F.Fab", t, t, Role::Datum, None),
+            G::Instance {
+                path: "sig".into(),
+                part: "SIG".into(),
+            },
+            G::Instance {
+                path: "gd".into(),
+                part: "GDFAB".into(),
+            },
+            G::Place {
+                path: "sig".into(),
+                pos: Point::mm(0, 0),
+            },
+            G::Place {
+                path: "gd".into(),
+                pos: Point::mm(10, 0),
+            },
+            G::ConnectPins {
+                net: "SIG".into(),
+                pins: vec![("sig".into(), "1".into())],
+            },
+            G::ConnectPins {
+                net: "GND".into(),
+                pins: vec![("gd".into(), "1".into())],
+            },
+        ];
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "datum")
+            .expect("elaborates");
+        let doc = h.doc();
+        let su = stackup(&doc.source);
+
+        // Sanity (non-vacuous): the fab graphic really does lower to a single
+        // `Role::Datum` feature that z-touches AND x/y-overlaps the SIG copper — so if
+        // Datum were treated as copper this pair *would* clash geometrically.
+        let gd = doc.components.values().find(|c| c.part == "GDFAB").unwrap();
+        let gd_def = lib.get(&gd.part).unwrap();
+        let datum: Vec<_> = crate::part::graphic_features(gd_def, gd, &su);
+        assert_eq!(datum.len(), 1, "one fab graphic → one feature");
+        assert_eq!(datum[0].role, Role::Datum, "role comes from the F.Fab slab");
+        let sig = doc.components.values().find(|c| c.part == "SIG").unwrap();
+        let sig_cu = lib.get(&sig.part).unwrap().pins[0]
+            .pad_features(sig, &su)
+            .into_iter()
+            .find(|f| f.role == Role::Conductor)
+            .unwrap();
+        assert!(
+            !datum[0].clears(&sig_cu, DesignRules::default().min_clearance),
+            "the datum graphic geometrically clashes the SIG copper (touch in z, \
+             overlap in x/y) — the exclusion below is a real guard"
+        );
+
+        // The guard: no SIG/GND clearance violation, because the Datum graphic is
+        // netless non-copper and never enters the clearance check.
+        assert!(
+            !drc(doc, &lib).iter().any(|v| matches!(
+                v,
+                Violation::Clearance { a, b, .. }
+                    if [a, b].contains(&&NetId::new("SIG"))
+                        && [a, b].contains(&&NetId::new("GND"))
+            )),
+            "datum graphic over foreign copper is not a clash: {:?}",
+            drc(doc, &lib)
         );
     }
 

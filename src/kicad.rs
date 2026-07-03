@@ -15,15 +15,20 @@
 //! What we *do* import is the pad-to-pin geometry: one [`PinDef`] per pad, named
 //! by the pad's number/name, positioned at the pad's `(at x y)` converted mm→nm —
 //! plus the footprint's non-copper **graphics** (issue 0016):
-//! - `fp_line`/`fp_arc`/`fp_circle`/`fp_poly`/`fp_rect` on `F.SilkS`/`B.SilkS` →
-//!   [`PartDef::graphics`] (lowered to [`Role::Marking`](geom::Role) by
-//!   [`part::graphic_features`](crate::part::graphic_features)).
+//! - `fp_line`/`fp_arc`/`fp_circle`/`fp_poly`/`fp_rect` on `F.SilkS`/`B.SilkS` and
+//!   `F.Fab`/`B.Fab` → [`PartDef::graphics`]. Their [`Role`](geom::Role) is taken from
+//!   the resolved slab by [`part::graphic_features`](crate::part::graphic_features):
+//!   silk slabs are [`Role::Marking`](geom::Role); a fab slab is
+//!   [`Role::Datum`](geom::Role) (Decision 15). Because `graphic_features` skips a slab
+//!   absent from the stackup, fab graphics materialize into features **only** if the
+//!   user authors an `F.Fab`/`B.Fab` slab — the default stackup has none.
 //! - A courtyard polygon (`fp_poly`/`fp_rect` on `F.CrtYd`/`B.CrtYd`) →
 //!   [`PartDef::courtyard`], the authoritative courtyard (Decision 10). Loose
 //!   `fp_line`/`fp_arc` courtyard *segments* are not yet stitched into a loop.
 //!
 //! Still **skipped**: `fp_text`/reference-designator auto-text (a separate branch),
-//! and graphics on `F.Fab`/`F.Paste`/`*.Fab`/… (they await a virtual-layer decision).
+//! and paste (`F.Paste`/`B.Paste`) — paste is *derived* at export from pad geometry,
+//! never authored (Decision 15).
 //! Layer references are **side-relative**: a footprint is authored top-side, so its
 //! `F.*` graphics swap to `B.*` when the component is placed bottom-side (see
 //! [`part::swap_side`](crate::part::swap_side)).
@@ -307,9 +312,11 @@ pub fn import_footprint(text: &str) -> Result<PartDef, String> {
         });
     }
 
-    // Footprint graphics: silkscreen → `graphics` (lowered to `Role::Marking`), and a
-    // courtyard outline → the authoritative `courtyard` (Decision 10). Everything else
-    // (`F.Fab`, `F.Paste`, `fp_text`, …) is deliberately skipped — see the module doc.
+    // Footprint graphics: silkscreen + fab → `graphics` (side-relative slab names; the
+    // role is taken from the resolved slab at lowering, so fab graphics materialize only
+    // if the stackup carries a fab slab — Decision 15), and a courtyard outline → the
+    // authoritative `courtyard` (Decision 10). Still skipped: `fp_text`/auto-text (a
+    // separate branch) and paste (Decision 15: derived at export) — see the module doc.
     let mut graphics: Vec<FpGraphic> = Vec::new();
     let mut courtyard: Option<Shape2D> = None;
     for item in items {
@@ -317,7 +324,7 @@ pub fn import_footprint(text: &str) -> Result<PartDef, String> {
             continue;
         };
         match layer.as_str() {
-            "F.SilkS" | "B.SilkS" => graphics.push(FpGraphic { shape, layer }),
+            "F.SilkS" | "B.SilkS" | "F.Fab" | "B.Fab" => graphics.push(FpGraphic { shape, layer }),
             // A courtyard is a single closed outline. We take a `fp_poly`/`fp_rect`
             // (a `Shape2D::Polygon`); loose `fp_line`/`fp_arc` courtyard segments are
             // not stitched into a loop yet, so they are ignored (noted). Last one wins.
@@ -1710,7 +1717,8 @@ mod tests {
 
     /// Footprint graphics (issue 0016): silk `fp_line`s + an `fp_arc` land in
     /// `graphics` with width baked into the shape radius; a courtyard `fp_poly` becomes
-    /// the authoritative `courtyard`; an `fp_line` on `F.Fab` is skipped.
+    /// the authoritative `courtyard`; an `fp_line` on `F.Fab` is lifted too (Decision 15
+    /// — side-relative layer name kept; its role is resolved from the slab at lowering).
     #[test]
     fn imports_footprint_graphics_silk_and_courtyard() {
         let src = r#"
@@ -1723,13 +1731,23 @@ mod tests {
   (fp_poly (pts (xy -2 -2) (xy 2 -2) (xy 2 2) (xy -2 2)) (width 0.05) (layer "F.CrtYd"))
 )"#;
         let p = import_footprint(src).unwrap();
-        // Two silk lines + one silk arc; the F.Fab line is skipped.
+        // Two silk lines + one silk arc + one fab line (the courtyard poly is not a
+        // graphic — it becomes `courtyard`).
         assert_eq!(
             p.graphics.len(),
-            3,
-            "2 silk lines + 1 silk arc, F.Fab skipped"
+            4,
+            "2 silk lines + 1 silk arc + 1 fab line"
         );
-        assert!(p.graphics.iter().all(|g| g.layer == "F.SilkS"));
+        assert_eq!(
+            p.graphics.iter().filter(|g| g.layer == "F.SilkS").count(),
+            3,
+            "three silk graphics"
+        );
+        assert_eq!(
+            p.graphics.iter().filter(|g| g.layer == "F.Fab").count(),
+            1,
+            "one fab graphic, layer name preserved (role resolved at lowering)"
+        );
         // A 0.12mm line → capsule with radius width/2 = 60_000 nm.
         let line = p
             .graphics

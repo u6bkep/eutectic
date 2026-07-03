@@ -156,9 +156,11 @@ pub struct PartDef {
     pub name: String,
     pub pins: Vec<PinDef>,
     pub interfaces: BTreeMap<String, InterfaceDef>,
-    /// Footprint silkscreen/marking graphics ([`FpGraphic`]), lowered to
-    /// [`Role::Marking`](geom::Role) features by [`graphic_features`]. Empty for the
-    /// toy `part_library` and symbol-only parts.
+    /// Footprint graphics ([`FpGraphic`]) — silkscreen and fab outlines — lowered to
+    /// features by [`graphic_features`], each taking its [`Role`](geom::Role) from the
+    /// resolved slab (silk → [`Role::Marking`](geom::Role); an authored fab slab →
+    /// [`Role::Datum`](geom::Role)). Empty for the toy `part_library` and symbol-only
+    /// parts.
     pub graphics: Vec<FpGraphic>,
     /// An imported **courtyard** outline in component-local coordinates, if the
     /// footprint declared one (a `F.CrtYd`/`B.CrtYd` polygon). Per Decision 10 an
@@ -399,8 +401,10 @@ pub fn swap_side(layer: &str) -> String {
 }
 
 /// World-frame physical features for a placed component's footprint [`graphics`]:
-/// each [`FpGraphic`] as a [`Role::Marking`](geom::Role) prism on its side-resolved
-/// slab z. The `graphic_features` sibling to [`PinDef::pad_features`] — the geometry
+/// each [`FpGraphic`] as a prism on its side-resolved slab z, taking its
+/// [`Role`](geom::Role) from that slab (silk slabs are [`Role::Marking`](geom::Role),
+/// so silk is unchanged; an authored fab slab is [`Role::Datum`](geom::Role), Decision
+/// 15). The `graphic_features` sibling to [`PinDef::pad_features`] — the geometry
 /// takes the *same* placement path (mapped through [`to_world`], so it rotates/flips
 /// with the component), and a bottom-side component swaps each graphic's leading
 /// `F.`↔`B.` slab prefix ([`swap_side`], derived from `orient.is_bottom()` exactly as
@@ -424,11 +428,11 @@ pub fn graphic_features(
         } else {
             g.layer.clone()
         };
-        let Some(z) = stackup.slab_z(&layer) else {
+        let Some(slab) = stackup.slab(&layer) else {
             continue;
         };
         let world = g.shape.map_points(|p| to_world(comp, p));
-        features.push(geom::Feature::prism(geom::Role::Marking, world, z));
+        features.push(geom::Feature::prism(slab.role.clone(), world, slab.z));
     }
     features
 }
@@ -1325,6 +1329,71 @@ mod tests {
         };
         let c = comp("G", Point { x: 0, y: 0 }, Orient::default());
         assert!(graphic_features(&def, &c, &su).is_empty());
+    }
+
+    /// A graphic's `Role` comes from its resolved slab, not a hardcoded `Marking`
+    /// (Decision 15): a graphic on a `Role::Datum` fab slab lowers to a `Role::Datum`
+    /// feature, while silk stays `Role::Marking`. Same lowering, role forward-queried.
+    #[test]
+    fn graphic_features_take_role_from_slab() {
+        // Default stackup plus a zero-height F.Fab datum slab at the F.Cu top face.
+        let mut slabs = Stackup::default_2layer().slabs;
+        let top = slabs.iter().find(|s| s.name == "F.Cu").unwrap().z.hi;
+        slabs.push(geom::Slab {
+            name: "F.Fab".into(),
+            z: geom::ZRange::new(top, top),
+            role: Role::Datum,
+            material: None,
+        });
+        let su = Stackup { slabs };
+        let line = || Shape2D::capsule(Point { x: 0, y: 0 }, Point { x: MM, y: 0 }, 60_000);
+        let def = PartDef {
+            name: "G".into(),
+            pins: vec![],
+            interfaces: BTreeMap::new(),
+            graphics: vec![
+                FpGraphic {
+                    shape: line(),
+                    layer: "F.Fab".into(),
+                },
+                FpGraphic {
+                    shape: line(),
+                    layer: "F.SilkS".into(),
+                },
+            ],
+            courtyard: None,
+        };
+        let c = comp("G", Point { x: 0, y: 0 }, Orient::default());
+        let feats = graphic_features(&def, &c, &su);
+        assert_eq!(feats[0].role, Role::Datum, "fab slab → Datum feature");
+        assert_eq!(prism_shape_z(&feats[0]).1, su.slab_z("F.Fab").unwrap());
+        assert_eq!(
+            feats[1].role,
+            Role::Marking,
+            "silk slab → Marking, unchanged"
+        );
+    }
+
+    /// A KiCad-imported F.Fab graphic materializes into a feature only when the stackup
+    /// carries a fab slab (Decision 15): under the default stackup — which has none — it
+    /// produces nothing, exactly as the manually-built case above.
+    #[test]
+    fn imported_fab_graphic_is_inert_without_a_fab_slab() {
+        let def = crate::kicad::import_footprint(
+            r#"(footprint "F"
+                (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu"))
+                (fp_line (start 0 0) (end 1 0) (width 0.1) (layer "F.Fab")))"#,
+        )
+        .unwrap();
+        assert!(
+            def.graphics.iter().any(|g| g.layer == "F.Fab"),
+            "the fab graphic imported"
+        );
+        let c = comp("F", Point { x: 0, y: 0 }, Orient::default());
+        assert!(
+            graphic_features(&def, &c, &Stackup::default_2layer()).is_empty(),
+            "no fab slab in the default stackup ⇒ the fab graphic emits no feature"
+        );
     }
 
     /// An imported courtyard overrides both the polygon `courtyard_shape` and the AABB

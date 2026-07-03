@@ -545,6 +545,7 @@ fn parse_line(line: &str) -> Result<Item, String> {
                 "substrate" => Role::Substrate,
                 "marking" => Role::Marking,
                 "mask" => Role::Mask,
+                "datum" => Role::Datum,
                 other => parse_role(other)?,
             };
             let material = toks.get(4).map(|m| Material::named(m));
@@ -1152,6 +1153,14 @@ mod tests {
                 z: ZRange::new(1_565_000, 1_600_000),
                 role: Role::Conductor,
                 material: Some(Material::named("copper")),
+            }),
+            // A zero-height fab datum slab: `datum` role authorable, `lo == hi` z
+            // (Decision 15). Round-trips and flows through the stackup like any slab.
+            GenDirective::Slab(Slab {
+                name: "F.Fab".into(),
+                z: ZRange::new(1_600_000, 1_600_000),
+                role: Role::Datum,
+                material: None,
             }),
             GenDirective::Near {
                 a: "psu.dec[0]".into(),

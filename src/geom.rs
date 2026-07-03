@@ -1043,7 +1043,14 @@ impl Stackup {
 
     /// The z-range of a named slab (the bridge a 2.5D "place this on F.Cu" uses).
     pub fn slab_z(&self, name: &str) -> Option<ZRange> {
-        self.slabs.iter().find(|s| s.name == name).map(|s| s.z)
+        self.slab(name).map(|s| s.z)
+    }
+
+    /// The named slab itself (z **and** role/material). A graphic's role comes from
+    /// its slab — silk slabs are `Role::Marking`, a fab slab is `Role::Datum`
+    /// (Decision 15) — so lowering forward-queries the slab rather than hardcoding.
+    pub fn slab(&self, name: &str) -> Option<&Slab> {
+        self.slabs.iter().find(|s| s.name == name)
     }
 
     /// The conductor slabs, ordered **top-most first** (descending z). This is the
@@ -1319,6 +1326,38 @@ mod tests {
             (bz.lo, bz.hi),
             (0, BOARD_THICKNESS),
             "board_z spans the copper+substrate body, not the surface mask/silk"
+        );
+    }
+
+    /// A zero-height slab (`lo == hi`, permitted by `ZRange::new`) flows through the
+    /// stackup like any other: `slab_z`/`slab` resolve it, its range is degenerate but
+    /// well-formed, and it z-*touches* an adjacent slab (closed `overlaps`) — the
+    /// property a fab `Role::Datum` slab relies on (Decision 15).
+    #[test]
+    fn zero_height_slab_resolves_through_stackup() {
+        let su = Stackup {
+            slabs: vec![
+                Slab {
+                    name: "F.Cu".into(),
+                    z: ZRange::new(0, 35_000),
+                    role: Role::Conductor,
+                    material: None,
+                },
+                Slab {
+                    name: "F.Fab".into(),
+                    z: ZRange::new(35_000, 35_000),
+                    role: Role::Datum,
+                    material: None,
+                },
+            ],
+        };
+        let fab = su.slab("F.Fab").expect("datum slab resolves");
+        assert_eq!(fab.role, Role::Datum);
+        assert_eq!(fab.z.lo, fab.z.hi, "zero-height: lo == hi");
+        assert_eq!(su.slab_z("F.Fab"), Some(fab.z));
+        assert!(
+            fab.z.overlaps(&su.slab_z("F.Cu").unwrap()),
+            "zero-height datum z-touches the copper it sits on"
         );
     }
 
