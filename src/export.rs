@@ -1109,16 +1109,18 @@ enum DrillKind {
 }
 
 /// The board's drilled holes, read **forward** from the unified feature stream
-/// ([`crate::route::world_features`]): every full-stackup through-cut `Role::Void` (a
-/// pad drill or a via drill), as `(plated, diameter, kind)`. This is the fix for issue
-/// 0022 — the drill file is now a query over the same `Void` features the solder-mask
-/// export sees, so pad drills (previously omitted) and via drills both appear.
+/// ([`crate::route::world_features`]): every full-stackup through-cut `Role::Void`, as
+/// `(plated, diameter, kind)`. Three producers reach here — a pad drill, a via drill, and
+/// an authored `hole` NPTH (Decision 16b, full-z by construction). This is the fix for
+/// issue 0022 — the drill file is a query over the same `Void` features the solder-mask
+/// export sees, so pad drills (previously omitted), via drills, and mounting holes appear.
 ///
-/// A mask opening is a *partial-z* `Void` (at the mask slab) and a board-authored void
-/// is single-slab, so neither is a through-cut — both are excluded by the full-z gate. A
-/// void's **plating** is carried by its material (Decision 16b): pad/via drills are
-/// plated (a copper barrel), a material-less void is NPTH. A disc void is a `Round` hit;
-/// a capsule (slot) void a `Slot`. Any other drill-void shape is an un-handled seam.
+/// A mask opening is a *partial-z* `Void` (at the mask slab), and a `region void` is
+/// single-slab (at its slab's z) — neither is a through-cut, so both are excluded by the
+/// full-z gate. An authored `hole`, by contrast, IS full-z and admitted. A void's
+/// **plating** is carried by its material (Decision 16b): pad/via drills are plated (a
+/// copper barrel), a material-less void (the `hole`) is NPTH. A disc void is a `Round`
+/// hit; a capsule (slot) void a `Slot`. Any other drill-void shape is an un-handled seam.
 fn drill_hits(doc: &Doc, lib: &PartLib) -> Vec<(bool, Nm, DrillKind)> {
     let su = crate::elaborate::stackup(&doc.source);
     let full = su.full_z();

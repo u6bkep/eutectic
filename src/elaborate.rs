@@ -1212,8 +1212,10 @@ pub fn features(source: &Source) -> Result<Vec<crate::geom::NetFeature>, String>
     // Holes: every authored NPTH `hole` lowers to a full-stackup `Role::Void` disc with
     // **no material** (Decision 16b — a mounting hole is an authored non-plated `Void`).
     // Full-z so `excellon_drill`'s through-cut query picks it up; material-less so its
-    // plating classification is NPTH. An empty stackup has no full-z; the hole then
-    // contributes no geometry (there is no board to drill through).
+    // plating classification is NPTH. The `Some(full)` guard matches the via-drill
+    // sibling above: `full_z()` is `None` only for a slab-less stackup, which `stackup()`
+    // never yields (it falls back to `default_2layer`), so the drop is unreachable via the
+    // normal reader — a hole with no board to drill through contributes no geometry.
     if let Some(full) = su.full_z() {
         for d in source {
             if let GenDirective::Hole { center, dia } = d {
