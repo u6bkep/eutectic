@@ -1,0 +1,172 @@
+slab B.SilkS -0.035mm -0.025mm marking ink
+slab B.Mask -0.025mm 0mm mask soldermask
+slab B.Cu 0mm 0.035mm conductor copper
+slab core1 0.035mm 0.533333mm substrate FR4
+slab In1.Cu 0.533333mm 0.568333mm conductor copper
+slab core2 0.568333mm 1.066666mm substrate FR4
+slab In2.Cu 1.066666mm 1.101666mm conductor copper
+slab core3 1.101666mm 1.565mm substrate FR4
+slab F.Cu 1.565mm 1.6mm conductor copper
+slab F.Mask 1.6mm 1.625mm mask soldermask
+slab F.SilkS 1.625mm 1.635mm marking ink
+slab F.Fab 1.635mm 1.635mm datum
+slab B.Fab -0.035mm -0.035mm datum
+board (3mm, 3mm) (53mm, 3mm) (53mm, 41mm) (3mm, 41mm)
+region conductor net=GND layer=In1.Cu (1mm, 1mm) (55mm, 1mm) (55mm, 43mm) (1mm, 43mm)
+region conductor net=+3V3 layer=In2.Cu (1mm, 1mm) (55mm, 1mm) (55mm, 43mm) (1mm, 43mm)
+inst U1 RP2350A
+fix U1 (28mm, 24mm)
+inst U2 W25Q
+place U2 (38mm, 30mm)
+inst Y1 XTAL
+place Y1 (18mm, 30mm)
+inst U3 REG
+place U3 (14mm, 14mm)
+inst L1 IND
+place L1 (22mm, 14mm)
+inst J11 USBC
+fix J11 (28mm, 3mm)
+inst D1 LED
+place D1 (40mm, 14mm)
+inst SW1 BTN
+place SW1 (40mm, 38mm)
+inst SW2 BTN
+place SW2 (16mm, 38mm)
+inst J1 JST_SH
+fix J1 (3mm, 7mm)
+inst J2 JST_SH
+fix J2 (3mm, 14mm)
+inst J3 JST_SH
+fix J3 (3mm, 21mm)
+inst J4 JST_SH
+fix J4 (3mm, 28mm)
+inst J5 JST_SH
+fix J5 (3mm, 35mm)
+inst J6 JST_SH
+fix J6 (53mm, 7mm)
+inst J7 JST_SH
+fix J7 (53mm, 14mm)
+inst J8 JST_SH
+fix J8 (53mm, 21mm)
+inst J9 JST_SH
+fix J9 (53mm, 28mm)
+inst J10 JST_SH
+fix J10 (53mm, 35mm)
+inst R_AVDD R p:value=33
+place R_AVDD (24mm, 18mm)
+inst R_X R p:value=1k
+place R_X (16mm, 27mm)
+inst C_X1 C p:value=15pF
+place C_X1 (15mm, 33mm)
+inst C_X2 C p:value=15pF
+place C_X2 (21mm, 33mm)
+inst R_DP R p:value=27
+place R_DP (25mm, 8mm)
+inst R_DM R p:value=27
+place R_DM (31mm, 8mm)
+inst R_CC1 R p:value=5.1k
+place R_CC1 (22mm, 5mm)
+inst R_CC2 R p:value=5.1k
+place R_CC2 (34mm, 5mm)
+inst R_BOOT R p:value=1k
+place R_BOOT (44mm, 34mm)
+inst C0 C p:value=100nF
+nearpin C0 U1.1 3mm
+inst C1 C p:value=100nF
+nearpin C1 U1.11 3mm
+inst C2 C p:value=100nF
+nearpin C2 U1.20 3mm
+inst C3 C p:value=100nF
+nearpin C3 U1.30 3mm
+inst C4 C p:value=100nF
+nearpin C4 U1.38 3mm
+inst C5 C p:value=100nF
+nearpin C5 U1.45 3mm
+inst C6 C p:value=100nF
+nearpin C6 U1.QSPI_IOVDD 3mm
+inst C7 C p:value=100nF
+nearpin C7 U1.USB_OTP_VDD 3mm
+inst C8 C p:value=100nF
+nearpin C8 U1.ADC_AVDD 3mm
+inst C9 C p:value=100nF
+nearpin C9 U1.VREG_VIN 3mm
+inst C10 C p:value=100nF
+nearpin C10 U1.6 3mm
+inst C11 C p:value=100nF
+nearpin C11 U1.23 3mm
+inst C12 C p:value=100nF
+nearpin C12 U1.39 3mm
+inst C13 C p:value=100nF
+nearpin C13 U1.VREG_AVDD 3mm
+inst C_IN C p:value=1uF
+place C_IN (10mm, 18mm)
+inst C_OUT C p:value=1uF
+place C_OUT (18mm, 18mm)
+nc U1.SWCLK U1.SWDIO U1.GPIO21 U1.GPIO22 U1.GPIO23 U1.GPIO24 U1.GPIO25 U1.GPIO26/ADC0 U1.GPIO27/ADC1 U1.GPIO28/ADC2 U1.GPIO29/ADC3 D1.DOUT J11.SBU1 J11.SBU2 U3.NC
+hole (4mm, 4mm) dia=2.7mm
+hole (52mm, 4mm) dia=2.7mm
+hole (4mm, 40mm) dia=2.7mm
+hole (52mm, 40mm) dia=2.7mm
+text "RP2350A MULTI-SWD PROBE" (16mm, 20mm) h=2mm layer=F.SilkS
+text "REV B  4-LAYER" (20mm, 24mm) h=1.5mm layer=F.SilkS
+net A_SWCLK U1.GPIO0 J1.1
+net A_SWDIO U1.GPIO1 J1.3
+net GND J1.2 J1.MP J2.2 J2.MP J3.2 J3.MP J4.2 J4.MP J5.2 J5.MP J6.2 J6.MP J7.2 J7.MP J8.2 J8.MP J9.2 J9.MP J10.2 J10.MP U1.GND U1.VREG_PGND U2.GND Y1.GNDa Y1.GNDb C_X1.2 C_X2.2 R_CC1.2 R_CC2.2 J11.GND J11.SHIELD U3.GND D1.GND SW1.2 SW2.2 C0.2 C1.2 C2.2 C3.2 C4.2 C5.2 C6.2 C7.2 C8.2 C9.2 C10.2 C11.2 C12.2 C13.2 C_IN.2 C_OUT.2
+net B_SWCLK U1.GPIO2 J2.1
+net B_SWDIO U1.GPIO3 J2.3
+net C_SWCLK U1.GPIO4 J3.1
+net C_SWDIO U1.GPIO5 J3.3
+net D_SWCLK U1.GPIO6 J4.1
+net D_SWDIO U1.GPIO7 J4.3
+net E_SWCLK U1.GPIO8 J5.1
+net E_SWDIO U1.GPIO9 J5.3
+net F_SWCLK U1.GPIO10 J6.1
+net F_SWDIO U1.GPIO11 J6.3
+net G_SWCLK U1.GPIO12 J7.1
+net G_SWDIO U1.GPIO13 J7.3
+net H_SWCLK U1.GPIO14 J8.1
+net H_SWDIO U1.GPIO15 J8.3
+net I_SWCLK U1.GPIO16 J9.1
+net I_SWDIO U1.GPIO17 J9.3
+net J_SWCLK U1.GPIO18 J10.1
+net J_SWDIO U1.GPIO19 J10.3
+net VBUS J11.VBUS U3.VIN U3.EN C_IN.1
+net +3V3 U3.VOUT U1.IOVDD U1.QSPI_IOVDD U1.USB_OTP_VDD U1.ADC_AVDD U1.VREG_VIN U2.VCC D1.VDD R_AVDD.1 C0.1 C1.1 C2.1 C3.1 C4.1 C5.1 C6.1 C7.1 C8.1 C9.1 C_OUT.1
+net VREG_LX U1.VREG_LX L1.1
+net +DVDD L1.2 U1.VREG_FB U1.DVDD C10.1 C11.1 C12.1
+net VREG_AVDD R_AVDD.2 U1.VREG_AVDD C13.1
+net QSPI_SCLK U1.QSPI_SCLK U2.CLK
+net QSPI_CS_N U1.~{QSPI_SS} U2.CS_N R_BOOT.1
+net QSPI_SD0 U1.QSPI_SD0 U2.IO0
+net QSPI_SD1 U1.QSPI_SD1 U2.IO1
+net QSPI_SD2 U1.QSPI_SD2 U2.IO2
+net QSPI_SD3 U1.QSPI_SD3 U2.IO3
+net XIN U1.XIN Y1.X1 C_X1.1
+net XOUT U1.XOUT R_X.1
+net XTAL2 R_X.2 Y1.X2 C_X2.1
+net USB_DP U1.USB_DP R_DP.1
+net USB_DM U1.USB_DM R_DM.1
+net DP_CONN R_DP.2 J11.DP
+net DM_CONN R_DM.2 J11.DM
+net CC1 J11.CC1 R_CC1.1
+net CC2 J11.CC2 R_CC2.1
+net BOOT_SW R_BOOT.2 SW1.1
+net RUN U1.RUN SW2.1
+net LED_DIN U1.GPIO20 D1.DIN
+
+# routes
+route +DVDD F.Cu w=0.15mm (24.07mm, 19.49mm) (24.15mm, 19.65mm)
+route +DVDD B.Cu w=0.15mm (24.15mm, 19.65mm) (24.15mm, 20.55mm) (23.7mm, 20.55mm) (23.7mm, 27.75mm) (24.6mm, 27.75mm) (24.6mm, 29.1mm) (30mm, 29.1mm) (30mm, 28.65mm) (30.45mm, 28.65mm) (30.326493mm, 28.51mm)
+route +DVDD B.Cu w=0.15mm (30.45mm, 28.65mm) (30.45mm, 29.1mm) (31.8mm, 29.1mm) (31.8mm, 27.3mm) (32.25mm, 27.3mm) (32.25mm, 23.25mm) (34.05mm, 23.25mm) (33.931737mm, 23.122389mm)
+route +DVDD B.Cu w=0.15mm (24.15mm, 19.65mm) (22.8mm, 19.65mm) (22.8mm, 13.8mm) (22.675mm, 14mm)
+route +DVDD B.Cu w=0.15mm (32.25mm, 25.95mm) (28.2mm, 25.95mm) (28.2mm, 27.3mm) (28mm, 27.45mm)
+route +DVDD B.Cu w=0.15mm (32.25mm, 23.25mm) (31.35mm, 23.25mm) (31.45mm, 23.6mm)
+route +DVDD B.Cu w=0.15mm (24.15mm, 19.65mm) (24.6mm, 19.65mm) (24.6mm, 18.75mm) (28.2mm, 18.75mm) (28.2mm, 20.1mm) (29.1mm, 20.1mm) (29.2mm, 20.55mm)
+route +DVDD B.Cu w=0.15mm (23.7mm, 23.25mm) (24.15mm, 23.25mm) (24.55mm, 23.2mm)
+route CC2 F.Cu w=0.15mm (29.75mm, -1.045mm) (29.55mm, 3mm)
+route CC2 F.Cu w=0.15mm (29.55mm, 3mm) (29.55mm, 4.8mm) (33.6mm, 4.8mm) (33.49mm, 5mm)
+route D_SWDIO F.Cu w=0.15mm (4mm, 26mm) (3.9mm, 25.95mm) free
+route D_SWDIO F.Cu w=0.15mm (3.9mm, 25.95mm) (22.8mm, 25.95mm) free
+route D_SWDIO B.Cu w=0.15mm (22.8mm, 25.95mm) (23.25mm, 25.95mm) (23.25mm, 29.1mm) (24.15mm, 29.1mm) (24.15mm, 29.55mm) (32.25mm, 29.55mm) (32.25mm, 28.2mm) (33.15mm, 28.2mm) (33.15mm, 27.75mm) (34.95mm, 27.75mm) (34.95mm, 24.6mm) (35.4mm, 24.6mm) (35.4mm, 20.55mm) (32.25mm, 20.55mm) (32.25mm, 21.9mm) (31.8mm, 21.9mm) (31.8mm, 22.35mm) (27.3mm, 22.35mm) (27.3mm, 23.25mm) (25.05mm, 23.25mm) (25.05mm, 25.05mm) (24.55mm, 24.8mm) free
+via +DVDD (24.15mm, 19.65mm) drill=0.15mm pad=0.3mm
+via D_SWDIO (22.8mm, 25.95mm) drill=0.15mm pad=0.3mm free

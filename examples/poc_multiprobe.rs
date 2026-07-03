@@ -1,6 +1,6 @@
-//! PoC: chip-down RP2350A (QFN-60) multi-SWD debug probe board, authored entirely
-//! through the ecad-core framework (parts -> netlist -> placement -> autoroute ->
-//! DRC -> fab export). Run with `cargo run --example poc_multiprobe`.
+//! PoC round 2: chip-down RP2350A (QFN-60) multi-SWD debug probe board, authored
+//! entirely through the ecad-core framework and rebuilt as a real **4-layer** design.
+//! Run with `cargo run --example poc_multiprobe`.
 //!
 //! Design = a bare RP2350A acting as 10 independent SWD probes, each on a 3-pin
 //! JST-SH header (pin1=SWCLK, pin2=GND, pin3=SWDIO), USB-powered, UF2/BOOTSEL.
@@ -8,26 +8,49 @@
 //! circuitry (3V3 reg, core buck L+C, 12 MHz crystal, QSPI flash, USB front-end,
 //! buttons, status LED) made explicit on-board.
 //!
+//! Round 2 exercises the *current* pipeline end to end — the round-1 netlist/topology
+//! is kept verbatim (it was good); what is new is everything the geometry-model
+//! convergence added since:
+//!  - a real **4-layer stackup** authored as `Slab` directives (F.Cu / In1.Cu /
+//!    In2.Cu / B.Cu + F/B mask + F/B silk + F/B fab), so fab SVGs + real per-slab
+//!    Gerbers materialise;
+//!  - **inner-layer copper planes**: GND poured full-board on In1.Cu, +3V3 on In2.Cu;
+//!  - a **text round-trip through `LoadText`** as the pipeline (serialize the doc,
+//!    parse it back, re-elaborate, and run place/route on the *parsed* doc) — the
+//!    code+lockfile model applied to the capstone;
+//!  - authored **NPTH mounting holes**, board **title/rev silk text**, R/C **value
+//!    labels** via the class registry, and a **rounded board outline**;
+//!  - a **PromoteRoutes** step so the `# routes` state zone carries mixed
+//!    pinned/free provenance.
+//!
 //! USER DECISIONS honoured here:
 //!  1. RP2350A / QFN-60 (GPIO0-29), sourced from KiCad's official library.
 //!  2. Clean SEQUENTIAL GPIO map: chN -> GP(2N-2)/GP(2N-1); J1=GP0/1 ... J10=GP18/19.
-//!  3. 4-layer stack-up *intent* (signal/GND/PWR/signal). NOTE: the autorouter is a
-//!     2-layer grid router, so inner planes are documented intent, not routed copper.
+//!  3. A real 4-layer stack (signal / GND / PWR / signal) — inner planes are now poured
+//!     copper, not documentary intent. (The router is still a 2-layer grid — it routes
+//!     on the outer layers and drops a via to a plane; the plane connectivity is honest
+//!     copper the ratsnest checks.)
 //!  4. No probe-self-debug header; USB UF2 + BOOTSEL (+ RUN reset) only.
 
 use ecad_core::autoroute::autoroute;
 use ecad_core::command::{Command, Transaction};
 use ecad_core::diagnostic::render;
 use ecad_core::doc::{MM, Point};
-use ecad_core::elaborate::{GenDirective as G, Source, board_rect};
+use ecad_core::elaborate::{GenDirective as G, RegionDecl, Source};
 use ecad_core::export::{excellon_drill, fab_svg_set, gerber_set, netlist, placement_csv, svg};
+use ecad_core::geom::{
+    BOARD_THICKNESS, COPPER_THICKNESS, MASK_THICKNESS, Material, Role, SILK_THICKNESS, Shape2D,
+    Slab, ZRange,
+};
 use ecad_core::history::History;
+use ecad_core::id::NetId;
 use ecad_core::kicad::{
     apply_role_map, import_footprint_file, import_symbol_named, join_symbol_footprint,
 };
 use ecad_core::part::{PartDef, PartLib, PinRole};
 use ecad_core::query::{Engine, Key};
 use ecad_core::route::DesignRules;
+use ecad_core::text::serialize;
 use std::collections::BTreeMap;
 
 const PARTS: &str = "poc/parts";
@@ -209,6 +232,59 @@ impl Builder {
             label: None,
         });
     }
+    /// Instantiate a passive carrying a `value` param — the class registry's seeded
+    /// `{value}` template renders it as the silk label (Decision 14). Same as `inst`
+    /// but with `p:value=<v>` set.
+    fn inst_val(&mut self, path: &str, part: &str, value: &str) {
+        let mut params = std::collections::BTreeMap::new();
+        params.insert("value".to_string(), value.to_string());
+        self.s.push(G::Instance {
+            path: path.into(),
+            part: part.into(),
+            params,
+            label: None,
+        });
+    }
+    /// One board-stackup slab (a named z-interval + role + material).
+    fn slab(&mut self, name: &str, z: ZRange, role: Role, material: Option<&str>) {
+        self.s.push(G::Slab(Slab {
+            name: name.into(),
+            z,
+            role,
+            material: material.map(Material::named),
+        }));
+    }
+    /// A full-board copper pour on a named copper slab, carrying a net (an inner plane).
+    fn plane(&mut self, net: &str, layer: &str, min: Point, max: Point) {
+        self.s.push(G::Region(RegionDecl {
+            shape: Shape2D::polygon(vec![
+                Point { x: min.x, y: min.y },
+                Point { x: max.x, y: min.y },
+                Point { x: max.x, y: max.y },
+                Point { x: min.x, y: max.y },
+            ]),
+            role: Role::Conductor,
+            net: Some(net.into()),
+            layer: layer.into(),
+        }));
+    }
+    /// An authored NPTH mounting hole (Decision 16b).
+    fn hole(&mut self, x: i64, y: i64, dia_mm_x10: i64) {
+        self.s.push(G::Hole {
+            center: Point::mm(x, y),
+            dia: dia_mm_x10 * MM / 10,
+        });
+    }
+    /// Board-level silk text (title, revision, etc.) at `at`, cap-height `h_mm_x10`.
+    fn text(&mut self, string: &str, x: i64, y: i64, h_mm_x10: i64, layer: &str) {
+        self.s.push(G::Text {
+            string: string.into(),
+            at: Point::mm(x, y),
+            height: h_mm_x10 * MM / 10,
+            layer: layer.into(),
+            orient: ecad_core::doc::Orient::IDENTITY,
+        });
+    }
     fn place(&mut self, path: &str, x: i64, y: i64) {
         self.s.push(G::Place {
             path: path.into(),
@@ -253,8 +329,99 @@ impl Builder {
 fn build_source() -> Source {
     let mut b = Builder::new();
 
-    // 4-layer-intent board outline (signal / GND / PWR / signal). 56 x 44 mm.
-    b.s.push(board_rect(Point::mm(0, 0), Point::mm(56, 44)));
+    // --- 4-layer stackup (Decision 13) --------------------------------------
+    // Honest z per side: bottom copper at [0,C]; two inner copper planes in the core;
+    // top copper at [T-C, T]; mask + silk + fab extend contiguously outward each side.
+    // The two dielectric cores/prepreg between the copper layers are Substrate slabs.
+    // (Named z-intervals resolved away at elaboration; the same machinery as the
+    // built-in default_2layer, extended to 4 copper layers + fab.)
+    let (t, c) = (BOARD_THICKNESS, COPPER_THICKNESS);
+    let (mask, silk) = (MASK_THICKNESS, SILK_THICKNESS);
+    // Split the core into three dielectric bands with the two inner planes between.
+    // Inner planes sit ~1/3 and ~2/3 through the board body.
+    let in1_lo = t / 3;
+    let in2_lo = 2 * t / 3;
+    b.slab(
+        "B.SilkS",
+        ZRange::new(-mask - silk, -mask),
+        Role::Marking,
+        Some("ink"),
+    );
+    b.slab(
+        "B.Mask",
+        ZRange::new(-mask, 0),
+        Role::Mask,
+        Some("soldermask"),
+    );
+    b.slab("B.Cu", ZRange::new(0, c), Role::Conductor, Some("copper"));
+    b.slab(
+        "core1",
+        ZRange::new(c, in1_lo),
+        Role::Substrate,
+        Some("FR4"),
+    );
+    b.slab(
+        "In1.Cu",
+        ZRange::new(in1_lo, in1_lo + c),
+        Role::Conductor,
+        Some("copper"),
+    );
+    b.slab(
+        "core2",
+        ZRange::new(in1_lo + c, in2_lo),
+        Role::Substrate,
+        Some("FR4"),
+    );
+    b.slab(
+        "In2.Cu",
+        ZRange::new(in2_lo, in2_lo + c),
+        Role::Conductor,
+        Some("copper"),
+    );
+    b.slab(
+        "core3",
+        ZRange::new(in2_lo + c, t - c),
+        Role::Substrate,
+        Some("FR4"),
+    );
+    b.slab(
+        "F.Cu",
+        ZRange::new(t - c, t),
+        Role::Conductor,
+        Some("copper"),
+    );
+    b.slab(
+        "F.Mask",
+        ZRange::new(t, t + mask),
+        Role::Mask,
+        Some("soldermask"),
+    );
+    b.slab(
+        "F.SilkS",
+        ZRange::new(t + mask, t + mask + silk),
+        Role::Marking,
+        Some("ink"),
+    );
+    // Fab drawing layers (Decision 15): zero-height Datum slabs just outboard of silk.
+    // Their presence is what makes footprint fab graphics + fab SVGs materialise.
+    let fab_top = t + mask + silk;
+    let fab_bot = -mask - silk;
+    b.slab("F.Fab", ZRange::new(fab_top, fab_top), Role::Datum, None);
+    b.slab("B.Fab", ZRange::new(fab_bot, fab_bot), Role::Datum, None);
+
+    // --- rounded-corner board outline, 56 x 44 mm, 3 mm corner radius -------
+    // (Round-2 finding: the corner radius does NOT survive text serialization — see the
+    // findings ledger; the outline is still authored honestly here.)
+    b.s.push(G::Board {
+        outline: Shape2D::round_rect(Point::mm(28, 22), 56 * MM, 44 * MM, 3 * MM),
+    });
+
+    // --- inner-layer planes (Task 2) ----------------------------------------
+    // GND on In1.Cu, +3V3 on In2.Cu, each a full-board pour. The pour fill knocks out
+    // foreign copper at clearance; a via that drops onto the plane joins the net's
+    // island (ratsnest connectivity through the plane). Inset 0.5 mm from the edge.
+    b.plane("GND", "In1.Cu", Point::mm(1, 1), Point::mm(55, 43));
+    b.plane("+3V3", "In2.Cu", Point::mm(1, 1), Point::mm(55, 43));
 
     // --- core instances + coarse placement ---------------------------------
     b.inst("U1", "RP2350A");
@@ -337,7 +504,7 @@ fn build_source() -> Source {
     b.net("GND", &[p("U1", "GND"), p("U1", "VREG_PGND")]);
 
     // VREG_AVDD: 33R from +3V3 + 4.7uF to GND (RC filter).
-    b.inst("R_AVDD", "R");
+    b.inst_val("R_AVDD", "R", "33");
     b.place("R_AVDD", 24, 18);
     b.net("+3V3", &[p("R_AVDD", "1")]);
     b.net("VREG_AVDD", &[p("R_AVDD", "2"), p("U1", "VREG_AVDD")]);
@@ -352,11 +519,11 @@ fn build_source() -> Source {
     b.net("GND", &[p("U2", "GND")]);
 
     // --- crystal: XIN-Y1-XOUT, 1k series on XOUT side, 15pF load caps -------
-    b.inst("R_X", "R");
+    b.inst_val("R_X", "R", "1k");
     b.place("R_X", 16, 27);
-    b.inst("C_X1", "C");
+    b.inst_val("C_X1", "C", "15pF");
     b.place("C_X1", 15, 33);
-    b.inst("C_X2", "C");
+    b.inst_val("C_X2", "C", "15pF");
     b.place("C_X2", 21, 33);
     b.net("XIN", &[p("U1", "XIN"), p("Y1", "X1"), p("C_X1", "1")]);
     b.net("XOUT", &[p("U1", "XOUT"), p("R_X", "1")]);
@@ -372,13 +539,13 @@ fn build_source() -> Source {
     );
 
     // --- USB front-end: 27R series on DP/DM, CC 5.1k pulldowns --------------
-    b.inst("R_DP", "R");
+    b.inst_val("R_DP", "R", "27");
     b.place("R_DP", 25, 8);
-    b.inst("R_DM", "R");
+    b.inst_val("R_DM", "R", "27");
     b.place("R_DM", 31, 8);
-    b.inst("R_CC1", "R");
+    b.inst_val("R_CC1", "R", "5.1k");
     b.place("R_CC1", 22, 5);
-    b.inst("R_CC2", "R");
+    b.inst_val("R_CC2", "R", "5.1k");
     b.place("R_CC2", 34, 5);
     b.net("USB_DP", &[p("U1", "USB_DP"), p("R_DP", "1")]);
     b.net("USB_DM", &[p("U1", "USB_DM"), p("R_DM", "1")]);
@@ -399,7 +566,7 @@ fn build_source() -> Source {
     );
 
     // --- BOOTSEL: 1k from QSPI_CS_N -> SW1 -> GND. RUN: SW2 RUN -> GND. ------
-    b.inst("R_BOOT", "R");
+    b.inst_val("R_BOOT", "R", "1k");
     b.place("R_BOOT", 44, 34);
     b.net("QSPI_CS_N", &[p("R_BOOT", "1")]);
     b.net("BOOT_SW", &[p("R_BOOT", "2"), p("SW1", "1")]);
@@ -434,15 +601,15 @@ fn build_source() -> Source {
     ];
     for (i, (rail, pad)) in decaps.iter().enumerate() {
         let c = format!("C{i}");
-        b.inst(&c, "C");
+        b.inst_val(&c, "C", "100nF");
         b.near_pin(&c, "U1", pad, 3); // pull each decoupler within 3 mm of its pad
         b.net(rail, &[p(&c, "1")]);
         b.net("GND", &[p(&c, "2")]);
     }
     // Regulator in/out bulk caps.
-    b.inst("C_IN", "C");
+    b.inst_val("C_IN", "C", "1uF");
     b.place("C_IN", 10, 18);
-    b.inst("C_OUT", "C");
+    b.inst_val("C_OUT", "C", "1uF");
     b.place("C_OUT", 18, 18);
     b.net("VBUS", &[p("C_IN", "1")]);
     b.net("GND", &[p("C_IN", "2")]);
@@ -474,6 +641,23 @@ fn build_source() -> Source {
             p("U3", "NC"),
         ],
     });
+
+    // --- mechanical: 4x M2.5 NPTH mounting holes near the corners (Task 4) --
+    // 2.7 mm clearance holes, inset 4 mm from each corner. Authored `hole` directives
+    // (Decision 16b) → full-stackup non-plated `Void` → board-NPTH.drl. (Round-2
+    // finding: these do NOT yet knock out the mask or the inner-layer planes, and DRC
+    // does not flag copper intruding on them — see the findings ledger. The plane pours
+    // above therefore fill over the holes; honest, and surfaced.)
+    b.hole(4, 4, 27);
+    b.hole(52, 4, 27);
+    b.hole(4, 40, 27);
+    b.hole(52, 40, 27);
+
+    // --- silk title block (Task 4) ------------------------------------------
+    // Board title + revision as authored F.SilkS text (Decision 9). Placed in the open
+    // area below the QFN. Cap-height 2.0 / 1.5 mm.
+    b.text("RP2350A MULTI-SWD PROBE", 16, 20, 20, "F.SilkS");
+    b.text("REV B  4-LAYER", 20, 24, 15, "F.SilkS");
 
     b.finish()
 }
@@ -513,6 +697,56 @@ fn main() {
             rep.pin_conflicts, rep.orphaned
         );
     }
+
+    // == Stage 3b: text round-trip is the pipeline (Decision 13/18) ==========
+    // Serialize the whole authored doc to canonical text, LoadText it back into a fresh
+    // History (re-parse + re-elaborate), and confirm the round-trip is lossless by
+    // re-serializing and byte-comparing. THEN run place/route/DRC/export on the *parsed*
+    // doc — this is the code+lockfile model applied to the capstone: the text file is
+    // the authoritative artifact, and everything downstream consumes what parsed back.
+    println!("\n== Stage 3b: text round-trip (serialize -> parse -> re-serialize) ==");
+    let text1 = serialize(doc);
+    let mut h2 = History::new(Default::default());
+    h2.commit(
+        Transaction::one(Command::LoadText(text1.clone())),
+        &lib,
+        "load",
+    )
+    .unwrap();
+    let text2 = serialize(h2.doc());
+    if text1 == text2 {
+        println!(
+            "  LOSSLESS: re-serialized text is byte-identical ({} bytes)",
+            text1.len()
+        );
+    } else {
+        // Surface the divergence honestly rather than panicking — a lossy round-trip is a
+        // finding, not a demo failure. Report the first differing line.
+        let (mut ln, mut shown) = (0usize, 0usize);
+        for (a, b) in text1.lines().zip(text2.lines()) {
+            ln += 1;
+            if a != b && shown < 3 {
+                println!("  LOSSY at line {ln}:\n    was: {a}\n    now: {b}");
+                shown += 1;
+            }
+        }
+        println!(
+            "  LOSSY: {} vs {} bytes, {} vs {} lines",
+            text1.len(),
+            text2.len(),
+            text1.lines().count(),
+            text2.lines().count()
+        );
+    }
+    // Continue the pipeline on the *parsed* doc (h2), not the original — the text file is
+    // truth. Re-check elaboration held.
+    let mut h = h2;
+    let doc = h.doc();
+    println!(
+        "  parsed doc: {} components, {} nets",
+        doc.components.len(),
+        doc.nets.len()
+    );
 
     // ERC
     let mut eng = Engine::new();
@@ -563,6 +797,54 @@ fn main() {
         h.commit(Transaction(result.commands), &lib, "autoroute")
             .unwrap();
     }
+
+    // == Stage 4b: PromoteRoutes — freeze a couple of nets (Decision 18) =====
+    // The autorouter's traces land as `free` (router-owned, rip-up-able). Promoting a
+    // net flips its traces/vias to `pinned` (hand-blessed, immovable) — the "freeze"
+    // move that makes partial reroute low-friction. We promote up to the first two
+    // routed nets, then show the `# routes` zone carries MIXED provenance.
+    let promote: Vec<NetId> = result.routed.iter().take(2).cloned().collect();
+    if !promote.is_empty() {
+        h.commit(
+            Transaction::one(Command::PromoteRoutes {
+                nets: promote.clone(),
+            }),
+            &lib,
+            "promote",
+        )
+        .unwrap();
+        println!("\n== Stage 4b: PromoteRoutes (freeze {:?}) ==", promote);
+        let d = h.doc();
+        use ecad_core::doc::Provenance;
+        let pinned = d
+            .traces
+            .values()
+            .filter(|t| t.prov == Provenance::Pinned)
+            .count();
+        let free = d
+            .traces
+            .values()
+            .filter(|t| t.prov == Provenance::Free)
+            .count();
+        println!("  traces: {pinned} pinned (promoted), {free} free (router-owned)");
+        // Prove the provenance survives serialization: the `# routes` zone shows both
+        // `free`-tagged and bare (pinned-default) lines.
+        let txt = serialize(d);
+        let route_lines: Vec<&str> = txt
+            .lines()
+            .skip_while(|l| *l != "# routes")
+            .filter(|l| l.starts_with("route ") || l.starts_with("via "))
+            .collect();
+        let n_free = route_lines.iter().filter(|l| l.ends_with(" free")).count();
+        let n_pinned = route_lines.len() - n_free;
+        println!(
+            "  # routes zone: {} lines -> {} pinned (bare), {} free (tagged)",
+            route_lines.len(),
+            n_pinned,
+            n_free
+        );
+    }
+
     let doc = h.doc();
     let after = eng.query(doc, &lib, Key::Drc).as_drc().to_vec();
     let (clr, mw, un): (Vec<_>, Vec<_>, Vec<_>) = {
@@ -592,6 +874,32 @@ fn main() {
     for v in &clr {
         println!("    {v:?}");
     }
+    // Plane connectivity (Task 2 focus): the GND / +3V3 planes are real copper on the
+    // inner layers, but the router is a 2-layer grid that does not drop stitching vias
+    // from outer-layer pads down to an inner plane. So the plane sits as one big island
+    // and the pads that should tie to it remain on their own islands — the net reports
+    // as many islands (unrouted) despite the plane existing. Surface the island counts.
+    // Whether each plane net is DRC-connected (1 island ⇒ absent from `un`) or still
+    // fragmented. A pad geometrically over its own net's pour joins that island even with
+    // no explicit stitching via (the pad-under-pour incidence), so a plane *does* provide
+    // connectivity for overlapping pads — but pads outside the (knocked-out) fill, or a
+    // fill fragmented by knockouts, leave islands. Honest per-plane status.
+    for plane in ["GND", "+3V3"] {
+        let islands = un.iter().find_map(|v| match v {
+            ecad_core::route::Violation::Unrouted { net, islands } if net.to_string() == plane => {
+                Some(*islands)
+            }
+            _ => None,
+        });
+        match islands {
+            Some(n) => println!(
+                "    plane {plane}: {n} islands (fragmented — some pads not over the fill / fill split by knockouts)"
+            ),
+            None => println!(
+                "    plane {plane}: connected (1 island — pads-over-pour incidence tied them without stitching vias)"
+            ),
+        }
+    }
 
     // Stage 5: export fab artifacts to poc/out/
     println!("\n== Stage 5: export fab artifacts -> poc/out/ ==");
@@ -601,6 +909,9 @@ fn main() {
         std::fs::write(format!("poc/out/{name}"), content).unwrap();
         wrote.push(name.to_string());
     };
+    // The canonical text projection of the final routed doc (the authoritative artifact
+    // — the "source file"). Includes the `# routes` zone with mixed provenance.
+    write("board.ecad", &serialize(doc), &mut wrote);
     write("netlist.txt", &netlist(doc), &mut wrote);
     write("placement.csv", &placement_csv(doc), &mut wrote);
     write("board.svg", &svg(doc, &lib).unwrap(), &mut wrote);
