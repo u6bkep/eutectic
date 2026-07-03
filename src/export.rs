@@ -1501,9 +1501,9 @@ fn datum_slabs(su: &Stackup) -> Vec<Slab> {
 ///
 /// Fallible because the underlying feature lowering resolves slab names (Decision 13).
 ///
-/// A gerber_fab would slot beside [`gerber_silk`] the same way (iterate the same
-/// [`datum_slabs`], emit RS-274X instead of SVG) if fab Gerber output is wanted later;
-/// this slice is SVG-only.
+/// [`gerber_fab`] is the RS-274X sibling of this pass — same [`datum_slabs`] iteration,
+/// Gerber instead of SVG (board-frame, so it does not mirror a bottom sheet the way this
+/// one does).
 pub fn svg_fab(doc: &Doc, lib: &PartLib, slab: &Slab) -> Result<String, String> {
     const MARGIN: Nm = 2 * MM;
     let su = crate::elaborate::stackup(&doc.source);
