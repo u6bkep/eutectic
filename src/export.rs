@@ -1363,15 +1363,25 @@ fn role_features(
     Ok(out)
 }
 
-/// One silkscreen Gerber for a marking [`Slab`], drawing the [`Role::Marking`] features
+/// One derived-surface Gerber for a `role`'s [`Slab`], drawing the features of that role
 /// whose z intersects the slab (forward query per slab — Decision 13). A
 /// [`Shape2D::Stroke`] (`fp_line`/`fp_arc`/text) draws as its centreline with a round
 /// aperture of the stroke's pen diameter (`radius * 2`); a [`Shape2D::Polygon`]
-/// (`fp_poly`/`fp_rect`) is a filled area, drawn as a `G36`/`G37` region. Aperture codes
-/// run from 10 in `Ord` order; object order follows [`role_features`] — deterministic.
-pub fn gerber_silk(doc: &Doc, lib: &PartLib, slab: &Slab) -> Result<String, String> {
+/// (`fp_poly`/`fp_rect`) is a filled area, drawn as a `G36`/`G37` region; a
+/// [`Shape2D::Area`] (TTF outline text) is a `G36`/`G37` region fill. Aperture codes run
+/// from 10 in `Ord` order; object order follows [`role_features`] — deterministic. Shared
+/// by [`gerber_silk`] (silk markings) and [`gerber_fab`] (fab drawing) — only the queried
+/// role differs, exactly as the SVG side shares [`svg_surface`]. Coordinates are
+/// board-frame with no side mirroring (a bottom slab is not flipped — the fab viewer
+/// flips it), matching the copper/mask/silk Gerber convention.
+fn gerber_role_surface(
+    doc: &Doc,
+    lib: &PartLib,
+    slab: &Slab,
+    role: Role,
+) -> Result<String, String> {
     let su = crate::elaborate::stackup(&doc.source);
-    let feats: Vec<Shape2D> = role_features(doc, lib, &su, Role::Marking)?
+    let feats: Vec<Shape2D> = role_features(doc, lib, &su, role)?
         .into_iter()
         .filter(|f| {
             let Extent::Prism { z, .. } = &f.extent;
@@ -1433,6 +1443,22 @@ pub fn gerber_silk(doc: &Doc, lib: &PartLib, slab: &Slab) -> Result<String, Stri
     }
     out.push_str("M02*\n");
     Ok(out)
+}
+
+/// One silkscreen Gerber for a marking [`Slab`]: the [`Role::Marking`] surface features
+/// intersecting the slab. See [`gerber_role_surface`].
+pub fn gerber_silk(doc: &Doc, lib: &PartLib, slab: &Slab) -> Result<String, String> {
+    gerber_role_surface(doc, lib, slab, Role::Marking)
+}
+
+/// One fab-drawing Gerber for a [`Role::Datum`] `slab` (Decision 15): the fab surface
+/// features intersecting the slab, emitted board-frame with no side mirroring (a `B.Fab`
+/// Gerber is a document layer the viewer flips, matching bottom silk). The Gerber sibling
+/// of [`svg_fab`] — same [`datum_slabs`] iteration, RS-274X instead of SVG. Empty unless a
+/// fab slab is authored, so the default stackup ships no fab Gerber (Decision 15
+/// contract). See [`gerber_role_surface`].
+pub fn gerber_fab(doc: &Doc, lib: &PartLib, slab: &Slab) -> Result<String, String> {
+    gerber_role_surface(doc, lib, slab, Role::Datum)
 }
 
 /// The stackup's slabs of a given `role`, ordered **top-down** (highest z first) so a
@@ -1615,10 +1641,12 @@ pub fn fab_svg_set(doc: &Doc, lib: &PartLib) -> Result<Vec<(String, String)>, St
 /// The full deterministic fab fileset: one Gerber per copper layer (`board-F_Cu.gbr`
 /// …) in stack-up order, the two solder masks (`board-F_Mask.gbr` / `board-B_Mask.gbr`),
 /// one silk Gerber per marking slab (`board-F_SilkS.gbr` / `board-B_SilkS.gbr`, top-down),
-/// the `board-Edge_Cuts.gbr` outline, and the Excellon drill program(s), split by
-/// plating into `board-PTH.drl` / `board-NPTH.drl` (only the non-empty file(s), 0022).
-/// `(filename, content)` pairs; no timestamps, stable order. Fallible because the silk
-/// layers lower board text through the slab-name materialization gate (Decision 13).
+/// one fab Gerber per authored [`Role::Datum`] slab (`board-F_Fab.gbr` / `board-B_Fab.gbr`,
+/// top-down — none on the default stackup, Decision 15), the `board-Edge_Cuts.gbr` outline,
+/// and the Excellon drill program(s), split by plating into `board-PTH.drl` /
+/// `board-NPTH.drl` (only the non-empty file(s), 0022). `(filename, content)` pairs; no
+/// timestamps, stable order. Fallible because the silk/fab layers lower board text through
+/// the slab-name materialization gate (Decision 13).
 pub fn gerber_set(doc: &Doc, lib: &PartLib) -> Result<Vec<(String, String)>, String> {
     let mut out = Vec::new();
     for slab in copper_layers(doc) {
@@ -1641,6 +1669,15 @@ pub fn gerber_set(doc: &Doc, lib: &PartLib) -> Result<Vec<(String, String)>, Str
         out.push((
             format!("board-{}.gbr", slab_file(&slab.name)),
             gerber_silk(doc, lib, &slab)?,
+        ));
+    }
+    // One fab Gerber per authored fab slab (top-down; F.Fab before B.Fab), exactly as the
+    // silk loop above iterates its marking slabs. Empty on the default stackup (no fab
+    // slab), so a default board's fileset is byte-identical to before (Decision 15).
+    for slab in datum_slabs(&su) {
+        out.push((
+            format!("board-{}.gbr", slab_file(&slab.name)),
+            gerber_fab(doc, lib, &slab)?,
         ));
     }
     out.push((
@@ -3212,6 +3249,181 @@ psu.reg,LDO,0.000000,0.000000,0,T
             set[0].1.contains("class=\"fab-bottom\""),
             "bottom fab gets its own class:\n{}",
             set[0].1
+        );
+    }
+
+    // --- fab Gerber (Decision 15/16) --------------------------------------
+
+    /// An authored `F.Fab` slab plus a footprint with a fab graphic line and a fab text
+    /// anchor emits a fab Gerber carrying real stroke draws (the graphic + glyph strokes),
+    /// and the fileset lists `board-F_Fab.gbr` — the Gerber sibling of the fab SVG.
+    #[test]
+    fn fab_gerber_emitted_with_strokes() {
+        use crate::elaborate::GenDirective as G;
+        let mut lib = part_library();
+        lib.insert("FAB".into(), fab_footprint());
+        let mut source = stackup_with_fab();
+        source.push(board_rect(Point::mm(0, 0), Point::mm(20, 20)));
+        source.push(G::Instance {
+            path: "u".into(),
+            part: "FAB".into(),
+            params: std::collections::BTreeMap::new(),
+            label: None,
+        });
+        source.push(G::Place {
+            path: "u".into(),
+            pos: Point::mm(5, 5),
+        });
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(source)), &lib, "fab")
+            .unwrap();
+        let doc = h.doc();
+
+        // The fileset exposes the fab Gerber.
+        let set = gerber_set(doc, &lib).unwrap();
+        let names: Vec<&str> = set.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"board-F_Fab.gbr"),
+            "fab Gerber in the fileset: {names:?}"
+        );
+
+        let su = crate::elaborate::stackup(&doc.source);
+        let fab = su.slab("F.Fab").unwrap();
+        let g = gerber_fab(doc, &lib, fab).unwrap();
+        // A round pen aperture (the text stroke width = height/8 = 0.125mm) and real draws
+        // (the graphic line + the glyph strokes).
+        assert!(g.contains("C,0.125000*%"), "round fab pen aperture:\n{g}");
+        assert!(g.matches("D01*").count() > 2, "fab strokes draw:\n{g}");
+        assert_eq!(g, gerber_fab(doc, &lib, fab).unwrap(), "deterministic");
+    }
+
+    /// A fab `fp_poly` is a filled area, so it comes out as a `G36`/`G37` region fill on the
+    /// fab Gerber (the same area path silk uses) — exercising the region-fill arm.
+    #[test]
+    fn fab_gerber_fp_poly_is_a_region() {
+        use crate::elaborate::GenDirective as G;
+        let mut lib = part_library();
+        lib.insert(
+            "FABTRI".into(),
+            crate::kicad::import_footprint(
+                r#"(footprint "FABTRI"
+                    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu"))
+                    (fp_poly (pts (xy -1 -1) (xy 1 -1) (xy 0 1)) (width 0) (layer "F.Fab")))"#,
+            )
+            .unwrap(),
+        );
+        let mut source = stackup_with_fab();
+        source.push(G::Instance {
+            path: "u".into(),
+            part: "FABTRI".into(),
+            params: std::collections::BTreeMap::new(),
+            label: None,
+        });
+        source.push(G::Place {
+            path: "u".into(),
+            pos: Point::mm(5, 5),
+        });
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(source)), &lib, "fabtri")
+            .unwrap();
+        let doc = h.doc();
+        let su = crate::elaborate::stackup(&doc.source);
+        let fab = su.slab("F.Fab").unwrap();
+        let g = gerber_fab(doc, &lib, fab).unwrap();
+        assert!(
+            g.contains("G36*") && g.contains("G37*"),
+            "fab fp_poly is a region:\n{g}"
+        );
+    }
+
+    /// A bottom fab Gerber is **not** mirrored: coordinates are board-frame (the viewer
+    /// flips a `B.Fab` document layer), matching the bottom-silk Gerber convention — unlike
+    /// the per-side fab *SVG*, which mirrors x. Drive it with a `B.Fab` graphic whose end
+    /// point (world x) must appear verbatim in the Gerber.
+    #[test]
+    fn bottom_fab_gerber_is_not_mirrored() {
+        use crate::elaborate::GenDirective as G;
+        let mut lib = part_library();
+        lib.insert(
+            "BFAB".into(),
+            crate::kicad::import_footprint(
+                r#"(footprint "BFAB"
+                    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu"))
+                    (fp_line (start 0 0) (end 1 0) (width 0.12) (layer "B.Fab")))"#,
+            )
+            .unwrap(),
+        );
+        let mut slabs = Stackup::default_2layer().slabs;
+        let bot = slabs.iter().find(|s| s.name == "B.Cu").unwrap().z.lo;
+        slabs.push(Slab {
+            name: "B.Fab".into(),
+            z: ZRange::new(bot, bot),
+            role: Role::Datum,
+            material: None,
+        });
+        let mut source: Vec<G> = slabs.into_iter().map(G::Slab).collect();
+        source.push(board_rect(Point::mm(0, 0), Point::mm(20, 20)));
+        source.push(G::Instance {
+            path: "u".into(),
+            part: "BFAB".into(),
+            params: std::collections::BTreeMap::new(),
+            label: None,
+        });
+        source.push(G::Place {
+            path: "u".into(),
+            pos: Point::mm(5, 5),
+        });
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(source)), &lib, "bfab")
+            .unwrap();
+        let doc = h.doc();
+        let su = crate::elaborate::stackup(&doc.source);
+        let fab = su.slab("B.Fab").unwrap();
+        let g = gerber_fab(doc, &lib, fab).unwrap();
+        // The line runs from x=5mm to x=6mm (place at 5, end offset +1mm), both in the raw
+        // board frame — a mirrored export would place them elsewhere. `%FSLAX46Y46*%` mm =
+        // nm, so 6mm is the integer 6000000.
+        assert!(g.contains("X6000000"), "unmirrored world x for B.Fab:\n{g}");
+        // The fileset names it board-B_Fab.gbr.
+        let set = gerber_set(doc, &lib).unwrap();
+        assert!(
+            set.iter().any(|(n, _)| n == "board-B_Fab.gbr"),
+            "bottom fab Gerber named board-B_Fab.gbr"
+        );
+    }
+
+    /// No fab slab authored (default stackup) ⇒ no fab Gerber in the fileset, and a
+    /// fab-layer footprint graphic stays inert — the Decision 15 contract on the Gerber
+    /// side (the SVG side is covered by `no_fab_slab_means_no_fab_output_and_invisible_graphics`).
+    #[test]
+    fn no_fab_slab_means_no_fab_gerber() {
+        use crate::elaborate::GenDirective as G;
+        let mut lib = part_library();
+        lib.insert("FAB".into(), fab_footprint());
+        let mut h = History::new(Default::default());
+        h.commit(
+            Transaction::one(Command::SetSource(vec![
+                board_rect(Point::mm(0, 0), Point::mm(20, 20)),
+                G::Instance {
+                    path: "u".into(),
+                    part: "FAB".into(),
+                    params: std::collections::BTreeMap::new(),
+                    label: None,
+                },
+                G::Place {
+                    path: "u".into(),
+                    pos: Point::mm(5, 5),
+                },
+            ])),
+            &lib,
+            "no-fab",
+        )
+        .unwrap();
+        let gset = gerber_set(h.doc(), &lib).unwrap();
+        assert!(
+            gset.iter().all(|(n, _)| !n.contains("Fab")),
+            "no fab Gerber in the fileset: {:?}",
+            gset.iter().map(|(n, _)| n).collect::<Vec<_>>()
         );
     }
 
