@@ -578,9 +578,34 @@ mod tests {
             courtyard: None,
             class: None,
         };
+        // RND is a lone round pad: its copper hull is a single point (no 2-D hull), so
+        // `courtyard_shape` is None and it takes the axis-aligned box fallback with a
+        // radius-0 courtyard (half-extent 0.25 mm pad + 0.25 mm margin = 0.5 mm).
+        let rnd = PartDef {
+            name: "RND".into(),
+            pins: vec![PinDef {
+                name: "1".into(),
+                number: "1".into(),
+                role: PinRole::Passive,
+                offset: Point { x: 0, y: 0 },
+                pad: Some(PadGeo {
+                    copper: vec![PadCopper {
+                        shape: Shape2D::disc(Point { x: 0, y: 0 }, 250_000),
+                        layers: PadLayers::Top,
+                    }],
+                    drill: None,
+                }),
+            }],
+            interfaces: BTreeMap::new(),
+            graphics: Vec::new(),
+            texts: Vec::new(),
+            courtyard: None,
+            class: None,
+        };
         let mut lib = super::part::PartLib::new();
         lib.insert("BAR".into(), mk("BAR", 6 * MM, MM));
         lib.insert("DOT".into(), mk("DOT", 500_000, 500_000));
+        lib.insert("RND".into(), rnd);
         lib
     }
 
@@ -723,6 +748,49 @@ mod tests {
             vec![(EntityId::new("d1"), EntityId::new("d2"))],
             "the fixed overlap must be reported honestly"
         );
+    }
+
+    /// Honest verify catches a *small* fixed/fixed overlap, not just a gross one. Two
+    /// RND parts (radius-0 courtyards, 0.5 mm half-extent boxes) hard-fixed so their
+    /// boxes overlap by 50 µm — below the old `PLACE_TOL` (0.1 mm) gate that would have
+    /// silently swallowed it, above the tightened `COURTYARD_VERIFY_TOL` (3 µm). is_clean
+    /// must be false.
+    #[test]
+    fn honest_verify_catches_small_fixed_overlap() {
+        let lib = bar_lib();
+        // Box half-extent 0.5 mm ⇒ edges touch at 1.0 mm centre spacing; 0.95 mm ⇒ 50 µm
+        // overlap.
+        let src = vec![
+            GenDirective::Instance {
+                path: "r1".into(),
+                part: "RND".into(),
+                params: BTreeMap::new(),
+                label: None,
+            },
+            GenDirective::Instance {
+                path: "r2".into(),
+                part: "RND".into(),
+                params: BTreeMap::new(),
+                label: None,
+            },
+            GenDirective::Fix {
+                path: "r1".into(),
+                pos: Point { x: 0, y: 0 },
+            },
+            GenDirective::Fix {
+                path: "r2".into(),
+                pos: Point { x: 950_000, y: 0 },
+            },
+        ];
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "s")
+            .unwrap();
+        assert_eq!(
+            h.doc().report.courtyard_overlaps,
+            vec![(EntityId::new("r1"), EntityId::new("r2"))],
+            "a 50 µm fixed overlap must be reported, not swallowed"
+        );
+        assert!(!h.doc().report.is_clean());
     }
 
     /// Stage-3 / issue 0006: DRC clearance is pad-aware — it sees the real copper

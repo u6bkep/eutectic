@@ -13,10 +13,15 @@
 
 use crate::diagnostic::{Diagnostic, Location};
 use crate::doc::*;
-use crate::geom::{BoardShape, Feature, NetFeature, Role, Shape2D, Slab, Stackup, ZRange};
+use crate::geom::{
+    BoardShape, DEFAULT_CHORD_TOL, Feature, NetFeature, Role, Shape2D, Slab, Stackup, ZRange,
+    convex_hull,
+};
 use crate::id::{EntityId, NetId};
 use crate::part::{Dir, PartDef, PartLib, courtyard_half_extents, courtyard_shape};
-use crate::solve::{Constraint, PLACE_TOL, Problem, courtyard_overlap_depth, dist, solve};
+use crate::solve::{
+    COURTYARD_VERIFY_TOL, Constraint, PLACE_TOL, Problem, courtyard_overlap_depth, dist, solve,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// An authored **filled region**: a `Shape2D` area carrying a [`Role`] — a copper
@@ -815,12 +820,12 @@ pub fn elaborate(
                     })
                     .collect()
             };
-            // Report only overlaps deeper than the placement tolerance: a converged
-            // movable pair carries at most the solver's sub-µm residual, which is slop,
-            // not a collision. A genuine unresolvable overlap (two fixed parts pinned
-            // into each other) penetrates by far more.
+            // Report only overlaps beyond the verify tolerance: a converged movable pair
+            // carries at most the solver's ~µm residual (convergence slop), which is not
+            // a collision. A genuine unresolvable overlap (two fixed parts pinned into
+            // each other) penetrates by tens of µm or more. See [`COURTYARD_VERIFY_TOL`].
             let depth = courtyard_overlap_depth(&world(a_poly, pa), *a_r, &world(b_poly, pb), *b_r);
-            if depth > PLACE_TOL as f64 {
+            if depth > COURTYARD_VERIFY_TOL as f64 {
                 report.courtyard_overlaps.push((a.clone(), b.clone()));
             }
         }
@@ -872,14 +877,24 @@ fn note_missing(
 /// courtyard; it falls back to the axis-aligned box proxy from [`courtyard_half_extents`]
 /// (via [`oriented_courtyard`]), lowered as a 4-vertex radius-0 polygon so the identical
 /// SAT path serves it and its behaviour is unchanged from the pre-0019 AABB push.
+///
+/// The SAT push treats the courtyard as convex, so we make that real here rather than
+/// assuming it: the courtyard skeleton is **flattened** (arcs → chords within
+/// [`DEFAULT_CHORD_TOL`], the same seam `bbox` uses) and run through [`convex_hull`].
+/// This matters for an *imported* courtyard, which may be non-convex or have an
+/// outward-bowing arc edge — walking corners alone ([`Shape2D::points`]) would drop the
+/// arc bulge and under-cover it (the one true under-report path). Hulling the flattened
+/// skeleton is arc-safe (the bulge's subdivided points are inside the hull) and
+/// idempotent on the already-convex derived pad hull.
 fn component_courtyard(def: &PartDef, orient: Orient) -> Option<(Vec<Point>, Nm)> {
     if let Some(shape) = courtyard_shape(def) {
-        let verts = shape
-            .points()
-            .into_iter()
-            .map(|p| orient.apply(p))
-            .collect();
-        return Some((verts, shape.radius()));
+        let hull = convex_hull(&shape.path().flatten(DEFAULT_CHORD_TOL));
+        if hull.len() >= 3 {
+            let verts = hull.into_iter().map(|p| orient.apply(p)).collect();
+            return Some((verts, shape.radius()));
+        }
+        // A degenerate imported courtyard (collinear / <3 distinct points) has no 2-D
+        // hull; fall through to the axis-aligned box proxy below.
     }
     let (hw, hh) = oriented_courtyard(def, orient);
     if (hw, hh) == (0, 0) {
@@ -1820,6 +1835,46 @@ mod tests {
                 .count(),
             1,
             "orphan reported once despite two override kinds"
+        );
+    }
+
+    /// Issue 0019 (review): an imported courtyard with an outward-bowing arc edge must
+    /// be covered by the convex hull the solver reserves. The arc apex is not a corner,
+    /// so a corners-only lowering ([`Shape2D::points`]) would drop the bulge and
+    /// under-reserve; `component_courtyard` flattens the arc to chords and hulls that, so
+    /// the bulge lands inside the reserved polygon.
+    #[test]
+    fn component_courtyard_covers_an_arc_bulge() {
+        use crate::geom::{Path, Seg, Shape2D};
+        // Bottom edge (−1,0)→(1,0), then an arc bowing up through (0, 2 mm) back to the
+        // start. (0, 2 mm) is the arc mid, not a corner: corners give max-y 0.
+        let path = Path {
+            start: pt(-1_000_000, 0),
+            segs: vec![
+                Seg::Line {
+                    end: pt(1_000_000, 0),
+                },
+                Seg::Arc {
+                    mid: pt(0, 2_000_000),
+                    end: pt(-1_000_000, 0),
+                },
+            ],
+        };
+        let def = PartDef {
+            name: "ARC".into(),
+            pins: Vec::new(),
+            interfaces: BTreeMap::new(),
+            graphics: Vec::new(),
+            texts: Vec::new(),
+            courtyard: Some(Shape2D::polygon_path(path, 0)),
+            class: None,
+        };
+        let (verts, _r) =
+            component_courtyard(&def, Orient::IDENTITY).expect("arc courtyard has a hull");
+        let max_y = verts.iter().map(|p| p.y).max().unwrap();
+        assert!(
+            max_y > 1_500_000,
+            "the arc bulge (~2 mm) must be inside the reserved hull, got max-y {max_y}"
         );
     }
 }

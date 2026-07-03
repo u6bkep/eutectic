@@ -156,6 +156,16 @@ const MOVE_TOL: f64 = 1.0;
 /// Two placements within this distance are "the same" for effectiveness checks.
 pub const PLACE_TOL: Nm = 100_000; // 0.1 mm
 
+/// Tolerance (nm) for the honest courtyard-overlap verify. The solver drives every
+/// `NoOverlap` residual — the courtyard penetration depth — below `RES_TOL` (1 µm) at
+/// convergence, so a converged *movable* pair carries at most that, plus sub-nm
+/// integer-rounding of the final positions. This threshold is a small multiple of
+/// `RES_TOL` (3 µm) so that convergence slop is not reported as a collision, while a
+/// genuine unresolvable overlap — two fixed parts pinned into each other — is caught: it
+/// penetrates by tens of µm or more, never a few. Using `PLACE_TOL` (0.1 mm) here would
+/// silently swallow a 50 µm fixed/fixed collision, so this is deliberately tighter.
+pub const COURTYARD_VERIFY_TOL: Nm = 3 * RES_TOL as Nm; // 3 µm ≈ 3·RES_TOL
+
 pub fn dist(a: Point, b: Point) -> f64 {
     let dx = (a.x - b.x) as f64;
     let dy = (a.y - b.y) as f64;
@@ -349,6 +359,18 @@ fn world_poly(local: &[Point], pos: (f64, f64)) -> Vec<Point> {
 /// pairs in nested order); the disjoint test short-circuits on the first separating
 /// axis; the penetration axis is chosen by strict `<`, so the first minimiser wins.
 fn poly_push(a: &[Point], ar: Nm, b: &[Point], br: Nm) -> Option<(f64, f64, f64)> {
+    // Coordinate-magnitude bound. The exact overlap test squares a scaled projection
+    // gap in i128; that stays in range while vertex coordinates satisfy |x|,|y| ≲ 1.28e9
+    // nm (≈ 1.28 m — far beyond any real board). Beyond that the i128 products can
+    // overflow. Mirroring `Orient::apply`, the invariant is documented and asserted in
+    // debug rather than range-checked here; the global coordinate-ceiling story with real
+    // diagnostics is issue 0018's remit (feat/checked-coords), not this push's.
+    debug_assert!(
+        a.iter()
+            .chain(b)
+            .all(|p| p.x.unsigned_abs() <= 1 << 30 && p.y.unsigned_abs() <= 1 << 30),
+        "poly_push vertex magnitude exceeds the i128-safe bound (see issue 0018)"
+    );
     let r = (ar + br) as i128; // combined disc radius (nm); the rounded margin
     let r2 = r * r;
 
@@ -740,6 +762,24 @@ mod tests {
         );
         // Sanity: the same square at the diamond's centre does overlap.
         assert!(poly_push(&diamond, 0, &square(0, 0, 100), 0).is_some());
+    }
+
+    #[test]
+    fn sat_corner_corner_separates_where_edge_normals_would_not() {
+        // Two 1000-half squares at (0,0) and (2500,2500), radii 300 + 300 = 600. On the
+        // x and y edge normals the hull gap is only 1500 − 1000 = 500 < 600, so those
+        // axes alone report overlap. The true separating axis is the corner-to-corner
+        // diagonal: nearest corners (1000,1000) and (1500,1500) are √(500²+500²) ≈ 707
+        // apart ≥ 600, so the rounded shapes clear. The vertex-vertex axes catch this.
+        let a = square(0, 0, 1000);
+        let b = square(2500, 2500, 1000);
+        assert!(
+            poly_push(&a, 300, &b, 300).is_none(),
+            "corner-corner must separate"
+        );
+        // A hair closer: at (2400,2400) the nearest corners (1000,1000)/(1400,1400) are
+        // √(400²+400²) ≈ 566 apart < 600 ⇒ the rounded shapes overlap.
+        assert!(poly_push(&a, 300, &square(2400, 2400, 1000), 300).is_some());
     }
 
     #[test]
