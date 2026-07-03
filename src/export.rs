@@ -1973,7 +1973,7 @@ psu.reg,LDO,0.000000,0.000000,0,T
         // End-to-end, closing stage 3's "dormant" gap: a half-disc board authored in
         // the text front-end flows source → BoardShape → fab export as a true curve.
         let lib = part_library();
-        let (src, _, _) =
+        let crate::text::Parsed { source: src, .. } =
             crate::text::parse("board (-2mm, 0mm) arc (0mm, 2mm) (2mm, 0mm)").unwrap();
         let mut h = History::new(Default::default());
         h.commit(Transaction::one(Command::SetSource(src)), &lib, "arc board")

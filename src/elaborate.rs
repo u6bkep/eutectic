@@ -1713,4 +1713,32 @@ mod tests {
         let elab = elaborate(&src, &BTreeMap::new(), &pins, &part_lib("C")).expect("elaborates");
         assert!(elab.report.orphaned.contains(&EntityId::new("ghost")));
     }
+
+    /// An entity carrying BOTH a pos override and a refdes pin, orphaned, is flagged
+    /// exactly once (the refdes-orphan loop dedups against the pos-orphan loop).
+    #[test]
+    fn orphan_with_both_pos_override_and_refdes_pin_is_flagged_once() {
+        let src = vec![inst("c0", "C")];
+        let ghost = EntityId::new("ghost");
+        let mut overrides = BTreeMap::new();
+        overrides.insert(
+            ghost.clone(),
+            Override {
+                pos: Some(Point { x: 1, y: 2 }),
+                strength: Strength::Pin,
+            },
+        );
+        let mut pins = BTreeMap::new();
+        pins.insert(ghost.clone(), "C9".to_string());
+        let elab = elaborate(&src, &overrides, &pins, &part_lib("C")).expect("elaborates");
+        assert_eq!(
+            elab.report
+                .orphaned
+                .iter()
+                .filter(|&id| *id == ghost)
+                .count(),
+            1,
+            "orphan reported once despite two override kinds"
+        );
+    }
 }

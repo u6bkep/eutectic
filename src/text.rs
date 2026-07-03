@@ -79,13 +79,16 @@ use crate::geom::{KeepoutKind, Material, Path, Role, Seg, Shape2D, Slab, ZRange}
 use crate::id::EntityId;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The parsed tier-1 state: the generative program, the ID-keyed position-override
-/// map, and the ID-keyed refdes-pin map (kept separate, mirroring [`Doc`]).
-pub type Parsed = (
-    Source,
-    BTreeMap<EntityId, Override>,
-    BTreeMap<EntityId, String>,
-);
+/// The parsed tier-1 state: the generative program plus the ID-keyed override maps,
+/// mirroring [`Doc`]'s tier-1 fields. A named struct (not a positional tuple) so a
+/// later section (e.g. a routes state-zone) can add a field without churning every
+/// destructuring site.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Parsed {
+    pub source: Source,
+    pub overrides: BTreeMap<EntityId, Override>,
+    pub refdes_pins: BTreeMap<EntityId, String>,
+}
 
 // ----------------------------------------------------------------------------
 // Serialize
@@ -493,7 +496,11 @@ pub fn parse(text: &str) -> Result<Parsed, Vec<Diagnostic>> {
         }
     }
     if errors.is_empty() {
-        Ok((source, overrides, refdes_pins))
+        Ok(Parsed {
+            source,
+            overrides,
+            refdes_pins,
+        })
     } else {
         Err(errors)
     }
@@ -1471,10 +1478,29 @@ mod tests {
         doc.refdes_pins.insert(EntityId::new("mcu"), "U3".into());
 
         let text = serialize(&doc);
-        let (src, ovr, rd) = parse(&text).expect("parse");
+        let Parsed {
+            source: src,
+            overrides: ovr,
+            refdes_pins: rd,
+        } = parse(&text).expect("parse");
         assert_eq!(src, doc.source, "source must round-trip");
         assert_eq!(ovr, doc.overrides, "overrides must round-trip");
         assert_eq!(rd, doc.refdes_pins, "refdes pins must round-trip");
+    }
+
+    /// A refdes value is opaque (Decision 14), so it may hold whitespace or a `#`; both
+    /// must survive serialize→parse via the quote-aware machinery (`quote_value` wraps,
+    /// the quote-aware comment strip keeps a quoted `#` literal).
+    #[test]
+    fn refdes_value_with_whitespace_and_hash_round_trips() {
+        let mut doc = doc_of(Vec::new(), BTreeMap::new());
+        doc.refdes_pins
+            .insert(EntityId::new("a"), "TEST POINT".into());
+        doc.refdes_pins.insert(EntityId::new("b"), "X#1".into());
+        let Parsed {
+            refdes_pins: rd, ..
+        } = parse(&serialize(&doc)).expect("parse");
+        assert_eq!(rd, doc.refdes_pins);
     }
 
     /// A `slab` directive parses to the expected `Slab` (name, z's, role, optional
@@ -1486,7 +1512,7 @@ mod tests {
 slab B.Cu 0mm 0.035mm conductor copper
 slab core 0.035mm 1.565mm substrate
 slab F.Cu 1.565mm 1.6mm conductor copper";
-        let (src, _, _) = parse(text).expect("parse");
+        let Parsed { source: src, .. } = parse(text).expect("parse");
         assert_eq!(
             src,
             vec![
@@ -1512,7 +1538,7 @@ slab F.Cu 1.565mm 1.6mm conductor copper";
         );
         // Canonical serialization re-parses to the same source.
         let doc = doc_of(src.clone(), BTreeMap::new());
-        assert_eq!(parse(&serialize(&doc)).unwrap().0, src);
+        assert_eq!(parse(&serialize(&doc)).unwrap().source, src);
     }
 
     /// An `inst` directive carrying a display label and identity params parses to the
@@ -1521,7 +1547,7 @@ slab F.Cu 1.565mm 1.6mm conductor copper";
     #[test]
     fn inst_with_params_and_label_round_trips() {
         let text = "inst r1 R_0402 label=\"{value:si:Ω}\" p:tol=5% p:value=4.7k";
-        let (src, _, _) = parse(text).expect("parse");
+        let Parsed { source: src, .. } = parse(text).expect("parse");
         let mut params = BTreeMap::new();
         params.insert("tol".into(), "5%".into());
         params.insert("value".into(), "4.7k".into());
@@ -1536,13 +1562,13 @@ slab F.Cu 1.565mm 1.6mm conductor copper";
         );
         // Canonical serialization re-parses to the same source.
         let doc = doc_of(src.clone(), BTreeMap::new());
-        assert_eq!(parse(&serialize(&doc)).unwrap().0, src);
+        assert_eq!(parse(&serialize(&doc)).unwrap().source, src);
 
         // A quoted param value with a space and a `#` round-trips (not a comment).
         let text2 = "inst u1 MCU p:desc=\"dual # buck\"";
-        let (src2, _, _) = parse(text2).expect("parse2");
+        let Parsed { source: src2, .. } = parse(text2).expect("parse2");
         let doc2 = doc_of(src2.clone(), BTreeMap::new());
-        assert_eq!(parse(&serialize(&doc2)).unwrap().0, src2);
+        assert_eq!(parse(&serialize(&doc2)).unwrap().source, src2);
         if let GenDirective::Instance { params, .. } = &src2[0] {
             assert_eq!(params["desc"], "dual # buck");
         } else {
@@ -1550,7 +1576,7 @@ slab F.Cu 1.565mm 1.6mm conductor copper";
         }
 
         // Bare `inst <path> <part>` still parses with empty/None defaults.
-        let (bare, _, _) = parse("inst q1 NPN").expect("bare");
+        let Parsed { source: bare, .. } = parse("inst q1 NPN").expect("bare");
         assert_eq!(
             bare,
             vec![GenDirective::Instance {
@@ -1594,7 +1620,8 @@ slab F.Cu 1.565mm 1.6mm conductor copper";
     /// Elaboration copies an instance's `params`/`label` verbatim onto its `Component`.
     #[test]
     fn elaboration_copies_params_and_label_onto_component() {
-        let (src, _, _) = parse("inst c1 Cap label=\"{value}\" p:value=100n").expect("parse");
+        let Parsed { source: src, .. } =
+            parse("inst c1 Cap label=\"{value}\" p:value=100n").expect("parse");
         let doc = placed(src);
         let c = &doc.components[&EntityId::new("c1")];
         assert_eq!(c.label.as_deref(), Some("{value}"));
@@ -1606,7 +1633,7 @@ slab F.Cu 1.565mm 1.6mm conductor copper";
     #[test]
     fn class_directive_parses_and_round_trips() {
         let text = "class R prefix=RES template=\"{value:si:Ω}\" p:tol=5%";
-        let (src, _, _) = parse(text).expect("parse");
+        let Parsed { source: src, .. } = parse(text).expect("parse");
         let mut defaults = BTreeMap::new();
         defaults.insert("tol".into(), "5%".into());
         assert_eq!(
@@ -1621,10 +1648,10 @@ slab F.Cu 1.565mm 1.6mm conductor copper";
             }]
         );
         let doc = doc_of(src.clone(), BTreeMap::new());
-        assert_eq!(parse(&serialize(&doc)).unwrap().0, src);
+        assert_eq!(parse(&serialize(&doc)).unwrap().source, src);
 
         // A bare `class <name>` (all fields defaulted) also round-trips.
-        let (bare, _, _) = parse("class LED").expect("bare");
+        let Parsed { source: bare, .. } = parse("class LED").expect("bare");
         assert_eq!(
             bare,
             vec![GenDirective::Class {
@@ -1633,7 +1660,7 @@ slab F.Cu 1.565mm 1.6mm conductor copper";
             }]
         );
         let doc2 = doc_of(bare.clone(), BTreeMap::new());
-        assert_eq!(parse(&serialize(&doc2)).unwrap().0, bare);
+        assert_eq!(parse(&serialize(&doc2)).unwrap().source, bare);
     }
 
     /// A region directive parses to the expected `RegionDecl` (role, net, layer, and
@@ -1643,7 +1670,7 @@ slab F.Cu 1.565mm 1.6mm conductor copper";
         let text = "\
 region conductor net=GND layer=B.Cu (0mm, 0mm) (10mm, 0mm) (10mm, 10mm) (0mm, 10mm)
 region keepout-drill layer=In2.Cu (1mm, 1mm) (2mm, 1mm) (2mm, 2mm)";
-        let (src, _, _) = parse(text).expect("parse");
+        let Parsed { source: src, .. } = parse(text).expect("parse");
         assert_eq!(
             src[0],
             GenDirective::Region(RegionDecl {
@@ -1669,7 +1696,7 @@ region keepout-drill layer=In2.Cu (1mm, 1mm) (2mm, 1mm) (2mm, 2mm)";
         );
         // Canonical serialization re-parses to the same source.
         let doc = doc_of(src.clone(), BTreeMap::new());
-        assert_eq!(parse(&serialize(&doc)).unwrap().0, src);
+        assert_eq!(parse(&serialize(&doc)).unwrap().source, src);
     }
 
     /// A `text` directive parses to the expected `GenDirective::Text` and round-trips,
@@ -1679,7 +1706,7 @@ region keepout-drill layer=In2.Cu (1mm, 1mm) (2mm, 1mm) (2mm, 2mm)";
         let text = "\
 text \"R12\" (0mm, 0mm) h=1mm layer=F.SilkS
 text \"VAL 3V3\" (2mm, 5mm) h=0.8mm layer=B.SilkS rot=90";
-        let (src, _, _) = parse(text).expect("parse");
+        let Parsed { source: src, .. } = parse(text).expect("parse");
         assert_eq!(
             src[0],
             GenDirective::Text {
@@ -1705,14 +1732,14 @@ text \"VAL 3V3\" (2mm, 5mm) h=0.8mm layer=B.SilkS rot=90";
         let canon = serialize(&doc);
         assert!(canon.contains("layer=F.SilkS"), "silk token:\n{canon}");
         assert!(canon.contains("rot=90"), "cardinal rot token:\n{canon}");
-        assert_eq!(parse(&canon).unwrap().0, src);
+        assert_eq!(parse(&canon).unwrap().source, src);
     }
 
     #[test]
     fn text_string_may_contain_a_hash() {
         // A `#` inside a quoted text label is literal, not a comment (quote-aware strip),
         // so it round-trips. (`#` outside quotes still starts a comment.)
-        let (src, _, _) =
+        let Parsed { source: src, .. } =
             parse("text \"P#1\" (0mm, 0mm) h=1mm layer=F.SilkS  # a real comment").expect("parse");
         let GenDirective::Text { string, .. } = &src[0] else {
             panic!("expected text, got {:?}", src[0]);
@@ -1723,7 +1750,7 @@ text \"VAL 3V3\" (2mm, 5mm) h=0.8mm layer=B.SilkS rot=90";
         );
         let canon = serialize(&doc_of(src.clone(), BTreeMap::new()));
         assert_eq!(
-            parse(&canon).unwrap().0,
+            parse(&canon).unwrap().source,
             src,
             "round-trips with the # intact"
         );
@@ -1740,7 +1767,7 @@ region keepout layer=F.Fab (0mm, 0mm) (10mm, 0mm) (10mm, 10mm)
 region conductor net=GND (0mm, 0mm) (5mm, 0mm) (5mm, 5mm)
 text \"HELLO\" (1mm, 1mm) h=1mm layer=My.Custom.Layer
 text \"WORLD\" (2mm, 2mm) h=1mm";
-        let (src, _, _) = parse(text).expect("parse");
+        let Parsed { source: src, .. } = parse(text).expect("parse");
         // Verbatim storage of the authored names, and the two defaults.
         let GenDirective::Region(r0) = &src[0] else {
             panic!("region 0");
@@ -1775,7 +1802,7 @@ text \"WORLD\" (2mm, 2mm) h=1mm";
             "verbatim:\n{canon}"
         );
         assert_eq!(
-            parse(&canon).unwrap().0,
+            parse(&canon).unwrap().source,
             src,
             "arbitrary slab names round-trip"
         );
@@ -1789,7 +1816,7 @@ text \"WORLD\" (2mm, 2mm) h=1mm";
         let text = "\
 board (-2mm, 0mm) arc (0mm, 2mm) (2mm, 0mm)
 region conductor layer=F.Cu (0mm, 0mm) (4mm, 0mm) arc (5mm, 2mm) (4mm, 4mm) (0mm, 4mm)";
-        let (src, _, _) = parse(text).expect("parse");
+        let Parsed { source: src, .. } = parse(text).expect("parse");
         // Board: a 2-corner arc polygon (half-disc).
         assert_eq!(
             src[0],
@@ -1832,7 +1859,7 @@ region conductor layer=F.Cu (0mm, 0mm) (4mm, 0mm) arc (5mm, 2mm) (4mm, 4mm) (0mm
             canon.contains("arc ("),
             "serialized form carries `arc` markers:\n{canon}"
         );
-        assert_eq!(parse(&canon).unwrap().0, src);
+        assert_eq!(parse(&canon).unwrap().source, src);
     }
 
     #[test]
@@ -1840,7 +1867,7 @@ region conductor layer=F.Cu (0mm, 0mm) (4mm, 0mm) arc (5mm, 2mm) (4mm, 4mm) (0mm
         // A region with one quadratic and one cubic edge, mixed with straight edges.
         let text = "\
 region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2mm) (7mm, 2mm) (8mm, 0mm) (0mm, 4mm)";
-        let (src, _, _) = parse(text).expect("parse");
+        let Parsed { source: src, .. } = parse(text).expect("parse");
         match &src[0] {
             GenDirective::Region(r) => assert_eq!(
                 r.shape.path().segs,
@@ -1868,7 +1895,7 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
             canon.contains("quad (") && canon.contains("cubic ("),
             "markers:\n{canon}"
         );
-        assert_eq!(parse(&canon).unwrap().0, src);
+        assert_eq!(parse(&canon).unwrap().source, src);
     }
 
     #[test]
@@ -1949,7 +1976,11 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
         let doc = doc_of(all_variants(), overrides);
 
         let once = serialize(&doc);
-        let (src, ovr, _) = parse(&once).unwrap();
+        let Parsed {
+            source: src,
+            overrides: ovr,
+            ..
+        } = parse(&once).unwrap();
         let twice = serialize(&doc_of(src, ovr));
         assert_eq!(once, twice);
     }
@@ -1965,7 +1996,7 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
             fix   psu.reg (30000000nm, 20000000)   # mm, nm and bare all equal 30/20 mm
             near psu.reg psu.reg 0.5mm
         ";
-        let (src, _ov, _) = parse(text).unwrap();
+        let Parsed { source: src, .. } = parse(text).unwrap();
         assert_eq!(
             src[1],
             GenDirective::Place {
@@ -2009,7 +2040,11 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
     /// materialized `components`, `nets`, and reconciliation `report`.
     fn assert_elaboration_equiv(doc: &Doc) {
         let lib = part_library();
-        let (src, ovr, rp) = parse(&serialize(doc)).expect("parse");
+        let Parsed {
+            source: src,
+            overrides: ovr,
+            refdes_pins: rp,
+        } = parse(&serialize(doc)).expect("parse");
         let elab = elaborate(&src, &ovr, &rp, &lib).expect("elaborate");
         assert_eq!(elab.components, doc.components, "components diverged");
         assert_eq!(elab.nets, doc.nets, "nets diverged");
@@ -2104,7 +2139,7 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
     /// degrees normalise; mm length on the pin proximity).
     #[test]
     fn parse_rotate_and_nearpin() {
-        let (src, _ov, _) = parse("rotate u1 -90\nnearpin c1 u1.VOUT 1.5mm").unwrap();
+        let Parsed { source: src, .. } = parse("rotate u1 -90\nnearpin c1 u1.VOUT 1.5mm").unwrap();
         assert_eq!(
             src[0],
             GenDirective::Rotate {
@@ -2131,7 +2166,7 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
     fn arbitrary_angle_round_trips_as_a_quaternion() {
         // A non-cardinal angle lowers to a quaternion and serialises as `quat=(…)`
         // (the angle isn't exactly representable; the quaternion is the canonical form).
-        let (src, _, _) = parse("rotate u1 30").unwrap();
+        let Parsed { source: src, .. } = parse("rotate u1 30").unwrap();
         let GenDirective::Rotate { orient, .. } = &src[0] else {
             panic!("expected a rotate, got {:?}", src[0]);
         };
@@ -2143,10 +2178,10 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
             canon.starts_with("rotate u1 quat=("),
             "non-cardinal serialises as quat: {canon}"
         );
-        assert_eq!(parse(&canon).unwrap().0, src);
+        assert_eq!(parse(&canon).unwrap().source, src);
         // A cardinal still serialises readably (and `bottom` survives).
         assert_eq!(
-            render_directive(&parse("rotate u1 90 bottom").unwrap().0[0]),
+            render_directive(&parse("rotate u1 90 bottom").unwrap().source[0]),
             "rotate u1 90 bottom"
         );
     }
@@ -2159,15 +2194,15 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
         assert!(parse("rotate u1 -inf").is_err());
         assert!(parse("rotate u1 1e309").is_err()); // overflows f64 to +inf
         // `quat=` tolerates whitespace after commas (same as the no-space canonical form).
-        let spaced = parse("rotate u1 quat=(1, 0, 0, 1)").unwrap().0;
-        let tight = parse("rotate u1 quat=(1,0,0,1)").unwrap().0;
+        let spaced = parse("rotate u1 quat=(1, 0, 0, 1)").unwrap().source;
+        let tight = parse("rotate u1 quat=(1,0,0,1)").unwrap().source;
         assert_eq!(spaced, tight);
         assert!(parse("rotate u1 quat=(0,0,0,0)").is_err());
     }
 
     #[test]
     fn rotate_bottom_authoring_round_trips() {
-        let (src, _, _) = parse("rotate u1 90 bottom").unwrap();
+        let Parsed { source: src, .. } = parse("rotate u1 90 bottom").unwrap();
         assert_eq!(
             src[0],
             GenDirective::Rotate {
@@ -2177,7 +2212,7 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
         );
         // Canonical serialization carries the `bottom` flag and re-parses identically.
         assert_eq!(render_directive(&src[0]), "rotate u1 90 bottom");
-        assert_eq!(parse("rotate u1 90").unwrap().0[0], {
+        assert_eq!(parse("rotate u1 90").unwrap().source[0], {
             GenDirective::Rotate {
                 path: "u1".into(),
                 orient: Orient::from_deg(90).unwrap(),

@@ -127,10 +127,10 @@ pub fn apply(
                 next.overrides.remove(id);
             }
             Command::LoadText(text) => {
-                let (source, overrides, refdes_pins) = crate::text::parse(text)?;
-                next.source = source;
-                next.overrides = overrides;
-                next.refdes_pins = refdes_pins;
+                let parsed = crate::text::parse(text)?;
+                next.source = parsed.source;
+                next.overrides = parsed.overrides;
+                next.refdes_pins = parsed.refdes_pins;
             }
             Command::Resolve(id, res) => {
                 apply_resolution(&mut next, id, res).map_err(|d| vec![d])?

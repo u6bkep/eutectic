@@ -96,6 +96,14 @@ fn class_from_name(name: &str) -> String {
 /// visited C-parts here would number `C1..C6, C8` around a pinned `C7`. A pin that does
 /// not parse that way (e.g. `SPARE`) reserves nothing numeric.
 ///
+/// A registry `prefix` may itself end in a digit (`class C prefix=X9`), in which case
+/// the leading-alpha parse of a pin like `X91` would key the wrong prefix; so the
+/// reservation *also* tests each pin against every registry-declared prefix and
+/// reserves under that key too. The invariant holds regardless: an auto refdes never
+/// equals a pin. Reservation matching is **case-sensitive** — a pin `r7` reserves
+/// nothing against the auto `R7` prefix (pins are opaque per Decision 14, so `r7` and
+/// `R7` are simply different strings).
+///
 /// The *auto* numbering is **insertion-unstable** by accepted trade-off (adding a
 /// component renumbers its successors); pins are the stability escape hatch.
 pub fn refdes(
@@ -103,13 +111,21 @@ pub fn refdes(
     lib: &PartLib,
     reg: &BTreeMap<String, ClassEntry>,
 ) -> BTreeMap<EntityId, String> {
-    // Reserve the number of every parseable pin under its own parsed prefix, so the
-    // auto counter below can skip it. The reservation keys off the *pinned string's*
-    // prefix, not the entity's class — the pin is opaque.
+    // Reserve every pin's number so the auto counter can skip it. Two keys per pin:
+    // its own leading-alpha prefix (`C7` → C), and — for a registry prefix that may end
+    // in a digit (`X9`) — that prefix directly (`X91` → X9), which the leading-alpha
+    // parse would otherwise miskey as `X`. The pin is opaque; reservation is case-
+    // sensitive string matching.
     let mut reserved: BTreeMap<String, BTreeSet<u32>> = BTreeMap::new();
     for s in doc.refdes_pins.values() {
         if let Some((prefix, n)) = parse_refdes(s) {
             reserved.entry(prefix).or_default().insert(n);
+        }
+        for (class, e) in reg {
+            let p = e.prefix.as_deref().unwrap_or(class);
+            if let Some(n) = digits_after_prefix(s, p) {
+                reserved.entry(p.to_string()).or_default().insert(n);
+            }
         }
     }
 
@@ -156,6 +172,17 @@ fn parse_refdes(s: &str) -> Option<(String, u32)> {
     }
     let n = digits.parse().ok()?;
     Some((prefix.to_string(), n))
+}
+
+/// If `s` is `prefix` followed by a non-empty run of ASCII digits and nothing else,
+/// return the number — used to reserve a pin against a *known* (possibly digit-suffixed)
+/// registry prefix, where the leading-alpha parse of [`parse_refdes`] would miskey.
+fn digits_after_prefix(s: &str, prefix: &str) -> Option<u32> {
+    let rest = s.strip_prefix(prefix)?;
+    if rest.is_empty() || !rest.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    rest.parse().ok()
 }
 
 /// The set of colliding refdes pins: each group is the `(string, entities)` for one
@@ -475,6 +502,38 @@ mod tests {
         assert_eq!(rd[&EntityId::new("c5")], "C6");
         assert_eq!(rd[&EntityId::new("c6")], "C8");
         assert_eq!(rd[&EntityId::new("c7")], "C9");
+    }
+
+    /// The reviewer's scenario: a registry prefix ending in a digit (`class C
+    /// prefix=X9`) plus a pin `X91`. The auto counter for prefix `X9` must NOT also
+    /// emit `X91` — the pin reserves `1` under `X9` even though its leading-alpha run
+    /// is `X`, so the auto parts skip to `X92`.
+    #[test]
+    fn digit_suffixed_registry_prefix_reservation() {
+        let src = vec![GenDirective::Class {
+            name: "C".to_string(),
+            entry: ClassEntry {
+                prefix: Some("X9".to_string()),
+                template: None,
+                defaults: BTreeMap::new(),
+            },
+        }];
+        let mut doc = Doc::default();
+        // c0 pinned to X91 (verbatim); c1, c2 auto under the X9 prefix.
+        for i in 0..3 {
+            let id = format!("c{i}");
+            doc.components
+                .insert(EntityId::new(&id), comp(&id, "C_0603", &[], None));
+        }
+        doc.refdes_pins.insert(EntityId::new("c0"), "X91".into());
+        let mut lib = PartLib::new();
+        lib.insert("C_0603".to_string(), pd("C_0603", Some("C")));
+
+        let rd = refdes(&doc, &lib, &registry(&src));
+        assert_eq!(rd[&EntityId::new("c0")], "X91");
+        // Without the digit-suffixed-prefix reservation, c1 would collide at X91.
+        assert_eq!(rd[&EntityId::new("c1")], "X92");
+        assert_eq!(rd[&EntityId::new("c2")], "X93");
     }
 
     #[test]
