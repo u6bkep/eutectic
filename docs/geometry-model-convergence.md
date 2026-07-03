@@ -69,9 +69,14 @@ migration (`route::Layer` is router-internal only). Alongside: refdes pinning
 (feat/checked-coords, **0018 resolved** — MAX_COORD ingest bound + KERNEL_SAFE_COORD
 asserts). **0011, 0018, 0019, 0022, 0023 all resolved**; issue 0024 (copper-without-
 mask lint) filed. Every branch adversarially reviewed pre-merge; all findings fixed.
-**Still open**: fab Gerber output (SVG-only today); 0024. **Folded into
-`architecture.md` §8 (2026-07-03)** — §8 now states the current model; this record
-remains the decision-by-decision history.
+**Mechanical batch (2026-07-03, `main` @ `e4996ae`, 395 lib tests)**: fab Gerber
+output (`gerber_fab` via a shared `gerber_role_surface`, board-frame/no-mirror,
+branch feat/fab-gerber); `W_COPPER_NO_MASK` lint on the shared `top_mask`/
+`bottom_mask` resolution, zero-mask stackups exempt (**0024 resolved**, branch
+feat/mask-lint); TTF kerning from the legacy `kern` table, integer font-unit
+accumulation (branch feat/kerning). **Folded into `architecture.md` §8
+(2026-07-03)** — §8 now states the current model; this record remains the
+decision-by-decision history.
 
 This record captures the foundation decisions; it *realigned the implementation* with
 what §8 already stated and sharpened three points (the single primitive, the placement
