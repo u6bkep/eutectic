@@ -77,13 +77,23 @@ pub fn placement_csv(doc: &Doc) -> String {
     let mut out = String::new();
     out.push_str("ref,part,x_mm,y_mm,rotation_deg,side\n");
     for c in doc.components.values() {
+        // KiCad .pos convention: report the *authored* about-z angle with the side
+        // marked separately, so a plain bottom flip is `0,B` (not `180,B`). Raw
+        // `to_deg()` would couple the flip axis into the angle and misrotate parts on a
+        // P&P line, so un-flip bottom parts first. `flipped()∘flipped() = −q` and
+        // `to_deg` is negation-invariant, so this recovers the authored angle exactly.
+        let base = if c.orient.is_bottom() {
+            c.orient.flipped()
+        } else {
+            c.orient
+        };
         out.push_str(&format!(
             "{},{},{},{},{},{}\n",
             c.id,
             c.part,
             fmt_mm(c.pos.value.x),
             fmt_mm(c.pos.value.y),
-            c.orient.to_deg(),
+            base.to_deg(),
             if c.orient.is_bottom() { "B" } else { "T" },
         ));
     }
@@ -1439,18 +1449,32 @@ psu.reg,LDO,0.000000,0.000000,0,T
                     path: "u1".into(),
                     orient: Orient::from_deg(0).unwrap().flipped(),
                 },
+                G::Instance {
+                    path: "u2".into(),
+                    part: "MCU".into(),
+                    params: std::collections::BTreeMap::new(),
+                    label: None,
+                },
+                G::Rotate {
+                    path: "u2".into(),
+                    orient: Orient::from_deg(90).unwrap().flipped(),
+                },
             ])),
             &lib,
             "flip",
         )
         .unwrap();
         let csv = placement_csv(h.doc());
-        // Flipping about the y-axis leaves an about-z projection of 180° (a pure
-        // `Ry(180)` reads as 180° in-plane), unlike the old x-axis flip which projected
-        // to 0°. The reported rotation is the quaternion's about-z angle.
+        // KiCad .pos convention: rotation is the *authored* about-z angle, side marked
+        // separately — a plain bottom flip is `0,B`, and an authored 90° bottom part is
+        // `90,B` (the flip axis is not folded into the reported angle).
         assert!(
-            csv.contains(",180,B\n"),
-            "bottom-side component marked B:\n{csv}"
+            csv.contains(",0,B\n"),
+            "bottom-side component at 0° marked B:\n{csv}"
+        );
+        assert!(
+            csv.contains(",90,B\n"),
+            "authored 90° bottom part reports 90,B:\n{csv}"
         );
     }
 
