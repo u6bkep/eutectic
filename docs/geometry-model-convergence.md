@@ -37,9 +37,20 @@ per-Marking-slab silk Gerbers, `z_to_layer` + dead `DesignRules.mask_expansion`
 DELETED, side-aware SVG silk). **0020 resolved.** Every branch got an adversarial
 sub-agent review; findings (mask-side-by-name asymmetry, invisible silk polygons, a
 Gerber modal-state blocker, cutout-sourcing purity, mask filenames) all fixed pre-merge.
-**Still open**: auto-text (refdes/value + fp_text, builds on 0016's graphics home);
-courtyard solver packing (0019); text follow-ups (lowercase/TTF outline); paste/fab
-virtual-layer question; trace/via slab-name migration rides with 0011. This record is
+**Decisions 14+15 implemented end-to-end (2026-07-03, `main` @ `659d82a`, 296 lib
+tests):** `feat/datum-slabs` (authorable `datum` role, zero-height slabs, Datum
+excluded from DRC structurally, graphic `Role` from the resolved slab, KiCad fab-graphic
+import); `feat/class-registry` (`Component.params`/`label` + `inst`/`class` grammar,
+`src/quantity.rs` decimal-exact SI/IEC parse+format, `src/annotate.rs` class registry +
+derived refdes/effective-params/label queries); `feat/auto-text` (`FpText`
+Reference/Label/Literal anchors on `PartDef`, shared `font::text_strokes` lowering with
+ink-box Center justification, footprint text through `to_world` — mirroring from the
+quaternion — into both silk export paths, KiCad `fp_text` + v7 `property` import incl.
+`${REFERENCE}`/`${VALUE}` → live anchors, lowercase case-fold + Ω/µ glyphs). Every
+branch adversarially reviewed pre-merge; all findings fixed.
+**Still open**: bottom-flip axis convention (`Orient::flipped()` is Rx(180); KiCad/fab
+convention is Ry(180) — fix dispatched); courtyard solver packing (0019); TTF outline
+fonts; trace/via slab-name migration rides with 0011. This record is
 still meant to be folded into `architecture.md` §8.
 
 This record captures the foundation decisions; it *realigned the implementation* with
@@ -601,11 +612,19 @@ Then the post-convergence steps proceed on the corrected foundation:
 - **Trace/via slab-name migration** rides with 0011 (route serialization): serialized
   routes reference slab names; `route::Layer` ordinals become router-internal only
   (Decision 13 rule 2).
-- **Auto-text** (refdes/label live text + KiCad `fp_text`) — **designed (Decision 14,
-  2026-07-02)**: text anchors + class registry (params/label/refdes queries);
-  implementation in progress (branches feat/class-registry, feat/auto-text).
-- ~~Paste/fab virtual layers~~ — **resolved (Decision 15)**: paste derived at export,
-  fab an ordinary authorable zero-height `Datum` slab (branch feat/datum-slabs).
+- ~~Auto-text~~ — **resolved (Decision 14, implemented 2026-07-03)**: `FpText` anchors
+  + class registry (params/label/refdes queries), KiCad `fp_text`/`property` import
+  (branches feat/class-registry, feat/auto-text). Follow-ups: refdes pinning via
+  EntityId overrides (reserved); typed quantities at the simulation boundary.
+- ~~Paste/fab virtual layers~~ — **resolved (Decision 15, implemented 2026-07-03)**:
+  paste derived at export, fab an ordinary authorable zero-height `Datum` slab
+  (branch feat/datum-slabs). No fab output consumer yet — an authored fab slab
+  renders nowhere (documented).
+- **Bottom-flip axis convention**: `Orient::flipped()` rotates about in-plane X
+  (y-negates); KiCad/fab convention flips about Y — bottom silk reads upside-down
+  under conventional board handling, and future `.kicad_pcb` *placement* import must
+  map side=back to a Ry(180)-based orient (Rx(180) = Ry(180)∘Rz(180); quaternions are
+  what's serialized, so no data migration either way). Fix to Ry(180) dispatched.
 - Whether component bodies get a dedicated role/material or reuse `Keepout`.
 - Relation to issue 0004 (planes / multilayer): the volumetric convergence is the
   natural home for that work.
