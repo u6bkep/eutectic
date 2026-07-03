@@ -380,7 +380,13 @@ Implemented across the mutation/query path: `command`/`history`/`elaborate`/`tex
 channel, collect-all), `query` ERC + floating + DRC-via-`Diagnose`, and `ReconReport`/`Violation`
 `Diagnose` impls. The production panic surface is down to a handful of *invariant/misuse* asserts
 (the `QueryValue::as_*` accessors, two solver "exists by construction" unwraps) — none reachable by
-user/agent input. **Follow-ups:** (1) the `kicad` import layer still returns `Result<_, String>` —
+user/agent input. The severity ladder now has a live **warning class** (`W_FONT_LOAD` first):
+warnings ride `ReconReport`/`Diagnose` like errors but are deliberately excluded from `is_clean()` —
+degradations the doc survives (a missing font falls back to strokes) are surfaced without blocking.
+The rustc-shaped split is a stated rule: *panic/ICE when the caller is our code; `E_` diagnostic
+when the cause is the user's input; `W_` when the doc degrades but stays valid.* Coordinate-range
+ingest validation (`E_COORD_RANGE`, `geom::MAX_COORD`) guards every Nm entry point (text, commands,
+imports — imports via their existing `Err(String)` channel). **Follow-ups:** (1) the `kicad` import layer still returns `Result<_, String>` —
 a natural next application of the pattern (data-ingestion surface, not the runtime mutation path);
 (2) real text spans (column tracking) in the parser; (3) fuzzy "did you mean" suggestions (the
 `help:` line currently lists candidate names verbatim); (4) designing out the `as_*` accessor panics
@@ -408,7 +414,24 @@ Extent  = Prism { shape: Shape2D, z: ZRange }   // the 2.5D common case
   rect⊕r = rounded rect, arbitrary filled). One shape type subsumes every pad primitive *and* traces
   *and* via annuli — clearance is uniform: `skeleton_distance(a,b) − rₐ − r_b ≥ clearance`, computed
   in exact i128 (the segment-distance kernel already used for traces). Compound pads (BMP581) are a
-  *union of features*; clearance is the min over the union.
+  *union of features*; clearance is the min over the union. The third variant, **`Area(Region)`**
+  (Decision 16), is a filled area *with holes* — a set of oriented rings under the non-zero winding
+  rule. It carries what a simple polygon cannot: the board substrate (outline ∖ cutouts), pour fills
+  with knockouts, TTF glyphs with counters. Clearance generalizes (ring edge-distance + containment);
+  the exact-integer region kernel (`region.rs`) provides its booleans and offsets.
+- **Two kinds of negative space, deliberately not interchangeable** (Decision 16b): a hole in an
+  `Area` is *what the entity is* — intrinsic, in-plane, full-z for that feature (board cutouts, glyph
+  counters, pour knockouts) — and reaches fab output as a **routed contour** (Edge.Cuts rings). A
+  `Role::Void` feature is *what one entity does to the rest of the board* — cross-entity, individually
+  enumerable, or z-partial (pad/via drills, mask openings, blind cuts) — and reaches fab output as
+  **drill data** (exact center + diameter; plated = copper material → PTH file, else NPTH; capsules =
+  G85 slots). Extracting drill data from `Area` holes is banned permanently: the region kernel
+  polygonizes at construction, so the diameter is already gone — recovering it would be an inverse
+  projection (Decision 13). The representation *is* the manufacturing intent.
+- **Evaluation is two-level 2.5D CSG**: union of solid prisms, minus void prisms, done. No solids
+  nested inside voids, no re-additions, no curved z. Every consumer evaluates it the same way
+  (filter by role/slab, subtract voids at its own boundary); anything fancier must argue its way in
+  as a new decision.
 - **z is real**, backed by a **stackup** (named slabs with thickness + material; sensible defaults —
   1.6 mm board, 1 oz copper). **A "layer" is just a named z-slab**, never a primitive. Clearance is
   "roles have a rule ∧ z-ranges overlap ∧ 2D shapes within distance"; with discrete slabs "z overlaps"
@@ -435,11 +458,20 @@ the base set, not a new kind.
 
 ### Why this is the right foundation
 
-- **2.5D is the default *view*, not the storage.** A normal project uses stackup defaults and edits
-  in the familiar layer view; z is filled in automatically. A future 3D router/editor reads the same
-  model without the 2.5D lens. **3D-printed (polymer/metal) boards become representable** via
-  `Extent::Solid` — *reserved, not built*: the data model won't have to be thrown away, but the
-  solvers (router/placement/DRC) stay 2.5D for now (true-3D solving is a research project).
+- **The prismatic-matter assumption is named, justified, and fenced** (Decision 16d). The *spatial*
+  vocabulary is fully 3D — poses are integer quaternions (Decision 6), z is authoritative `Nm`
+  (Decision 2), slabs are z-intervals — but *matter occupancy* is deliberately prismatic (extrusions
+  along the board normal). Two justifications: (1) the manufacturing process only makes prisms —
+  etching, lamination, plating, drilling are extrusions along one axis, and Gerber/Excellon cannot
+  express anything else, so prisms are **exact** for everything a fab can build; (2) exact integer
+  booleans are achievable in 2D (the region kernel) and are a research problem in 3D — a 3D-matter
+  model would cost the zero-dependency exactness the DRC's honesty is built on. Named escape
+  hatches, so lifting the ceiling is additive rather than a migration: rigid-flex/folded boards
+  become an *assembly* level above features (rigid sections, each locally prismatic, posed in 3D by
+  the existing quaternion machinery); tilted component bodies become a separate posed body-volume
+  feature kind (visualization/interference, never in the exact-DRC path). `Extent::Solid` stays
+  *reserved, not built*; data accumulated under this assumption (quaternions, Nm z-ranges) remains
+  valid in a true-3D future.
 - **Simulation falls out of honest geometry.** A `Conductor` carries real cross-section (width ×
   *thickness*, from the stackup z-range) and a `Material` (resistivity, permittivity, thermal), so
   trace resistance `R = ρ·L/A`, impedance, and thermal become computable later *from the same
@@ -451,66 +483,95 @@ the base set, not a new kind.
   obstacle model and DRC share honest feature clearance; courtyard/overlap avoidance (0005) is the
   `Keepout` role.
 
-### Status / plan
+### The convergence — current model (Decisions 13–18, implemented 2026-07-03)
 
-> **Update (2026-06-30) — geometry-model convergence, Phases 0–2 done.** `Feature`
-> (role + material + `Shape2D`×`ZRange`) is now the **single live clearance model**:
-> DRC, copper pours, Gerber pad flashing, and the autorouter all reduce copper to
-> `Feature`s and gate on `Feature::clears` (z-overlap ∧ distance). The parallel
-> `route::Layer` copper-piece model (`CopperPiece`/`PieceLayers`/`net_copper`) has been
-> deleted; `route::Layer` survives only as the trace/via routing tier + violation
-> granularity. Board outline / cutouts / regions / pads lower to `Feature`s via
-> `elaborate::features` and `PinDef::pad_features`, threaded through a stored `Stackup`.
-> See `docs/geometry-model-convergence.md` for the full decision record (this section
-> will be folded into it). The "Stages 1–3" prose below predates the convergence and
-> describes the now-retired `route::Layer`/`PadGeo`-direct clearance path.
+This section *is* the design of record for geometry; the full decision-by-decision
+narrative (findings, rejected alternatives, staging, review history) lives in
+`docs/geometry-model-convergence.md` (Decisions 1–18). The model as it stands:
 
-Design of record (this section). **Stages 1–3 implemented.** (1) the `geom` core;
-(2) pads are real `PadGeo` copper + drill geometry, imported from KiCad
-(circle/rect/roundrect/oval exactly, custom→bounding-box, with pad
-rotation/drill/layers) and rendered to Gerber via bounding apertures; (3) **DRC
-clearance is pad-aware** — all copper (traces, vias, pads) reduces to a world-frame
-`geom::Shape2D` and a different-net pair sharing a layer is checked edge-to-edge by
-`geom::clearance_violated` (**resolves 0006**; trace-near-pad-edge and pad-vs-pad
-fine-pitch clearance are now visible, gated by the 2.5D `Layer` model). **Router
-self-honesty done (resolves 0003):** the autorouter no longer trusts its
-clean-by-construction invariant (which fails at sub-grid pitch / off-grid pad
-stubs) — it verifies its proposed copper against the same pad-aware clearance and
-drops any net that actually clashes, so `routed` means *verified clean*. (On the
-PoC this honestly drops from a lying "19 routed / 5 violations" to "4 routed / 0
-router-introduced violations"; the remaining clearances are all pre-routing
-pad-pad placement issues — 0005.) **Placement overlap-avoidance done (resolves 0005):** each part has a **courtyard**
-(`part::courtyard_half_extents` — the origin-centred bbox of its pad copper + a
-margin; footprint-less parts have none and are exempt), and elaboration emits a
-`solve::Constraint::NoOverlap` for every component pair so the solver pushes
-overlapping courtyards apart (AABB min-translation, fixed parts immovable →
-unresolvable overlaps reported). On the PoC this cuts the pre-routing pad-pad
-clashes the honest DRC surfaced from **16 → 1** (the residual is a +3V3/GND pair the
-*approximate* solver (0007) can't fully separate on a dense board, not an
-overlap-avoidance gap). Courtyards are origin-centred symmetric boxes (tight for
-origin-centred footprints, conservative otherwise) and the pass is O(N²) — noted
-limits. **Board outline + cutouts done (Stage B2 — the MCAD-fit representation):** the board
-is one `geom::BoardShape { outline: Shape2D, cutouts: Vec<Shape2D> }` — a `Substrate`
-outline (rounded/concave/CAD-imported all expressible) with `Void` cutouts;
-`board_rect(min,max)` is a constructor over it, not a parallel rectangle. Authored via
-`GenDirective::Board { outline }` + `Cutout { shape }`, assembled by the shared
-`elaborate::board_shape(&Source)` that the solver, autorouter, and export all read.
-The solver containment is now polygon-aware (movable parts pulled inside the outline,
-pushed out of cutouts — `BoardShape::contain`, approximate boundary projection); fab
-export draws the real outline + cutout contours (Gerber `Edge.Cuts` + SVG); text
-round-trips `board`/`cutout` (corner-radius serialization is a noted follow-up).
-**Still pending:** the routing grid still spans the outline *bbox* (cells outside the
-outline / inside cutouts are not yet masked — a small follow-up); the router's obstacle
-model still blocks on pad *points* (so it drops more than a pad-extent-aware or
-rip-up router would keep — 0008); full `ZRange`-stackup gating; `Solid`/true-3D. Implementation is staged: **(1)** the `geom` core — `Shape2D`,
-`ZRange`, `Extent::Prism`, `Role`, `Material`, `Feature`, the stackup + defaults, and the 2.5D
-clearance kernel (additive, self-contained); **(2)** pads → `Conductor` features + KiCad pad import
-(smd/thru-hole/custom-primitives/drill/layers) + render; **(3)** unified feature clearance in DRC
-(0006); **(4)** board outline / cutouts / keep-outs as features + router obstacle model (0005);
-**(5)** router honesty as the downstream consequence (0003). `Solid` and true-3D solving are out of
-scope; the representation merely keeps the door open.
+**Identity and vocabulary (Decision 13).** A "layer" is a **slab name** — a named
+z-interval in the authored `Stackup`, carrying a `Role`. Slab names are the universal
+layer vocabulary: regions, text, footprint graphics, and routed copper all reference
+slabs by name; the name is a reference, the role is the meaning (a slab named
+`F.SilkS` with a non-Marking role silently drops from every output, by design).
+Projections (which slab is "top mask", which copper is "layer 2") are **queries,
+never inputs**; there are no inverse projections. Unknown/mis-roled slab references
+are hard commit diagnostics (`E_UNKNOWN_SLAB` family) — `command::apply`
+re-elaborates on every transaction, so a committed doc always resolves.
 
-### Copper pours / solder mask: the region kernel (0004)
+**One producer, two consumers (Decision 16c).** `route::world_features` is the single
+producer of world-frame features — substrate, mask solids, voids, keepouts, graphics,
+text, and *all* copper (pads, traces, vias, pours). DRC and every exporter are
+filters over that one stream by role/net/slab. Pours are ordinary `NetFeature`s with
+`Area` fills (the former `PourFill` side-channel is deleted); a via lowers to a
+conductor prism **plus** a `Void` drill prism; the board is one `Substrate` feature
+carrying `Area(outline ∖ cutouts)` (the former `BoardShape` struct is deleted —
+`board_region()` is the accessor). Consequences that used to be bugs: the drill file
+is a forward query over through-cut `Void`s (pad **and** via drills, PTH/NPTH split —
+issue 0022), and keepout + board-edge clearance are DRC-enforced (issue 0023).
+Materialization failures are **fail-loud** (`expect`, never empty-clean).
+
+**Placement honesty.** Courtyards are convex polygons in the solver, not AABB
+proxies: exact-integer SAT (edge normals + vertex-vertex axes, rounded margins folded
+in as `g² ≥ r²·|n|²`) drives `NoOverlap`, and an **honest verify** re-checks final
+placements against the true polygons, reporting residuals > 3 µm as
+`E_COURTYARD_OVERLAP` (Decision 10's third leg; resolves 0019).
+
+**Routes are persisted state; the autorouter is an editing tool (Decision 18).**
+`Trace.layer` is a slab name; `Via.span` is `Option<(String,String)>` (None = full
+copper extent). All routes serialize in the text file's **state zone** (`# routes`,
+beside `# overrides`): `pinned` is the keyword-less default, `free`/`hint`/`fixed`
+explicit, so all four provenance values round-trip. Load = parse, never re-solve —
+the router may be stochastic, anytime-improving, or replaced without touching a doc;
+the serializer contract is "**re-derivable** state is not emitted" (routes are
+materialized but *not derivable*: expensive, stochastic, user-blessed). Staleness is
+handled by checking (DRC/ratsnest), not re-deriving. `PromoteRoutes{nets}` flips
+Free→Pinned (the lockfile move); partial reroute = transactional rip-up of a
+selection with pinned copper as obstacles (machinery future). `route::Layer` ordinals
+survive **only inside the router grid**; commit-time `validate_routes` gates
+slab/net references on every mutation path. Resolves 0011.
+
+**Coordinate exactness has a named ceiling (issue 0018).** Two constants:
+`geom::MAX_COORD` = 1e9 nm (±1 m) is the inclusive **ingest** bound — `E_COORD_RANGE`
+diagnostics at text/command boundaries, `Err` at the import boundaries — and
+`KERNEL_SAFE_COORD` ≈ 1.276e9 is the true i128 ceiling (worst chain 64·C⁴,
+compile-time-guarded) that kernel `debug_assert!`s check, leaving headroom for
+world-frame composition. The diagnostics split follows rustc: **panic/ICE when the
+caller is our code; `E_` diagnostic when the cause is the user's input; `W_`
+warnings degrade without gating `is_clean()`** (first instances: `W_FONT_LOAD`).
+
+**Annotation and text (Decisions 14, 17).** Part identity = (part, effective
+params); params are authored *strings* at rest, parsed by consumers at their own
+boundary (`quantity.rs` decimal-exact SI/IEC first). Refdes is **derived** (a query
+with per-prefix counters), pinnable via EntityId-keyed `refdes` override lines;
+labels are template cascades with display-format specs (`{value:si:Ω}`, `{value:iec}`)
+that degrade verbatim on parse failure. Footprint text anchors
+(Reference/Label/Literal) resolve live at lowering. Text renders through the built-in
+stroke font by default, or a user-supplied TTF (`font "<path>"` directive) whose
+glyphs flatten to `Area` regions — `ttf-parser` is the crate's first and only
+dependency, confined to `src/ttf.rs`; load failure degrades to strokes with
+`W_FONT_LOAD`. Paste is derived at export; fab is an ordinary authorable zero-height
+`Datum` slab with per-slab SVG output (Gerber fab deferred).
+
+**Bottom-side convention.** `Orient::flipped()` is Ry(180) — x-negates, y preserved
+(the KiCad/fab board-turn convention; bottom silk reads upright); placement CSV
+reports the authored angle for bottom parts. Orientations serialize as quaternions,
+so the convention lives in one constructor.
+
+**Still open here:** multilayer *routing* (stackup-driven layer count, via-span
+selection — 0004-remainder/0008, a deliberate future design cycle); the placement
+solver's approximation (0007); `Solid`/true-3D per the fenced assumption above;
+copper-without-mask lint (0024); Gerber viewer validation (0009).
+
+### Copper pours / solder mask: the region kernel (0004) — historical record
+
+> The staged narrative below is retained as the *record of how the region kernel was
+> built and proven*; names it mentions have since moved under Decision 16 (pours flow
+> as `NetFeature` `Area`s from `route::world_features`; `route::pours` is the view;
+> mask export iterates `Role::Mask` slabs by name via `gerber_mask(&Slab)`; region
+> declarations reference slab *names*, not `Layer` ordinals). The kernel itself —
+> `Region`, the exact-integer booleans, the dilation offset — is unchanged and is now
+> also the backbone of `Shape2D::Area`.
 
 A copper pour, a solder-mask layer, a paste stencil, and a keep-out-aware fill are **one operation**:
 *offset some shapes, then boolean-combine regions*. A pour is `zone − ⋃(foreign_copper ⊕ clearance)`
@@ -604,7 +665,7 @@ arc-*exact* boolean (vs. the current flatten-at-the-seam) and the 3D-`Solid` boo
 representable. (Noted limits: floating/unnetted pads not yet knocked out of a pour; SMD-pad↔pour
 incidence is all-layer like the rest of the pin model; Gerber not yet viewer-validated — 0009.)
 
-### Arc support — `Shape2D` carries circular arcs (5 stages, done)
+### Arc support — `Shape2D` carries circular arcs (5 stages, done) — historical record
 
 The `Shape2D` skeleton became a `Path { start, segs: Vec<Seg> }` where `Seg = Line | Arc{mid,end}` —
 a **3-point** circular arc (three lattice points: no over-determination, centre/radius derived as
@@ -637,7 +698,10 @@ importer (0017), and the `Cubic`/NURBS curve primitive for MCAD bodies.
   levels.
 - **Constraint-solver UX at board scale** — over/under-constrained diagnostics, locality (solve
   regions independently), no-solution explanations.
-- **Routing** — the genuinely unsolved part; interactive-first, autoroute aspirational.
+- **Routing** — the genuinely unsolved part; interactive-first, autoroute aspirational. Decision 18
+  cleared the ground: routes persist (load never re-solves), so the router is free to be stochastic
+  and anytime-improving; the open design is the router *itself* — stackup-driven multilayer
+  (0004/0008), via-span selection, rip-up/partial-reroute machinery.
 - **Part library** — hard because of *scale*, not difficulty. Plan: import KiCad's existing
   detailed libraries, add type information via good import tools + agent-in-the-loop editing.
 
