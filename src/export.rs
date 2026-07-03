@@ -2245,9 +2245,48 @@ psu.reg,LDO,0.000000,0.000000,0,T
         assert!(drl.contains("X12.000000Y8.000000"), "via drill hit:\n{drl}");
     }
 
+    /// An authored `hole` directive (Decision 16b NPTH) reaches `board-NPTH.drl`: the
+    /// full-stackup material-less `Role::Void` it lowers to is classified non-plated by
+    /// `drill_hits` and lands in the NPTH file at its exact center + diameter.
+    #[test]
+    fn authored_hole_reaches_npth_drill() {
+        use crate::elaborate::GenDirective as G;
+        let lib = part_library();
+        let mut h = History::new(Default::default());
+        h.commit(
+            Transaction::one(Command::SetSource(vec![
+                board_rect(Point::mm(0, 0), Point::mm(20, 20)),
+                G::Hole {
+                    center: Point::mm(3, 17),
+                    dia: 2_700_000, // M2.5 clearance
+                },
+            ])),
+            &lib,
+            "hole",
+        )
+        .unwrap();
+        let files = excellon_drill(h.doc(), &lib);
+        let npth = files
+            .iter()
+            .find(|(n, _)| n == "board-NPTH.drl")
+            .map(|(_, c)| c.as_str())
+            .unwrap_or_else(|| panic!("expected board-NPTH.drl, got {:?}", files));
+        assert!(npth.contains("C2.700000"), "2.7mm NPTH tool:\n{npth}");
+        assert!(
+            npth.contains("X3.000000Y17.000000"),
+            "hole at (3,17):\n{npth}"
+        );
+        // And it is NOT in a PTH file (no plated barrel).
+        assert!(
+            !files.iter().any(|(n, _)| n == "board-PTH.drl"),
+            "a lone NPTH hole ships no PTH file"
+        );
+    }
+
     /// The plating split: a hit list with both a plated and a non-plated hole yields two
-    /// files, each carrying only its own class. (No source authors an NPTH through-cut
-    /// today, so the split logic is exercised on a synthesized hit list.)
+    /// files, each carrying only its own class. (Exercised on a synthesized hit list so
+    /// the split logic is unit-testable without a full authored board — the end-to-end
+    /// authoring path is `authored_hole_reaches_npth_drill`.)
     #[test]
     fn excellon_splits_pth_and_npth() {
         let hits = vec![

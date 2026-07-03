@@ -35,6 +35,7 @@
 //! place   <path> (<x>, <y>)        # source default placement (a free DOF)
 //! fix     <path> (<x>, <y>)        # hard placement constraint (mechanical datum)
 //! board   (<x>, <y>) (<x>, <y>)    # board outline (min corner, max corner)
+//! hole    (<x>, <y>) dia=<len>     # authored NPTH through-hole (mounting hole)
 //! near    <a> <b> <len>            # keep a within <len> of b
 //! minsep  <a> <b> <len>            # keep a and b at least <len> apart
 //! alignx  <node> <node> ...        # share an x coordinate (vertical line)
@@ -242,6 +243,10 @@ fn render_directive(d: &GenDirective) -> String {
         }
         GenDirective::Cutout { shape } => {
             format!("cutout {}", fmt_path(shape.path()))
+        }
+        GenDirective::Hole { center, dia } => {
+            // `hole <center> dia=<len>` — an authored NPTH through-hole (Decision 16b).
+            format!("hole {} dia={}", fmt_point(*center), fmt_len(*dia))
         }
         GenDirective::Region(r) => {
             // `region <role> [net=<n>] layer=<slab> <p> [arc <mid> <end>] <p> ...`.
@@ -722,6 +727,32 @@ fn parse_line(line: &str) -> Result<Item, String> {
             }
             Item::Directive(GenDirective::Cutout {
                 shape: Shape2D::polygon_path(path, 0),
+            })
+        }
+        "hole" => {
+            // `hole (x,y) dia=<len>` — an authored NPTH through-hole (Decision 16b). The
+            // center is the one point; `dia` is a required length (mm/nm), written after
+            // the point (as it serializes). Lowers to a full-stackup, non-plated
+            // `Role::Void` → `board-NPTH.drl`. The `dia=` token is stripped before the
+            // point is parsed, so its position around the coordinate does not matter.
+            let mut dia: Option<Nm> = None;
+            let mut ptspart = String::new();
+            for tok in rest.split_whitespace() {
+                if let Some(d) = tok.strip_prefix("dia=") {
+                    dia = Some(parse_len(d)?);
+                } else {
+                    ptspart.push_str(tok);
+                    ptspart.push(' ');
+                }
+            }
+            let pts = extract_points(&ptspart)?;
+            if pts.len() != 1 {
+                return Err("hole needs exactly one center point: hole (x,y) dia=<len>".into());
+            }
+            let dia = dia.ok_or("hole needs a diameter: hole (x,y) dia=<len>")?;
+            Item::Directive(GenDirective::Hole {
+                center: pts[0],
+                dia,
             })
         }
         "region" => {
@@ -1565,6 +1596,11 @@ mod tests {
                     Point::mm(30, 20),
                     Point::mm(25, 30),
                 ]),
+            },
+            // An authored NPTH mounting hole (Decision 16b) — center + diameter round-trip.
+            GenDirective::Hole {
+                center: Point::mm(5, 45),
+                dia: 2_700_000,
             },
             // A net-bound copper pour on the bottom layer, and a component keep-out.
             GenDirective::Region(RegionDecl {

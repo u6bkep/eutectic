@@ -77,6 +77,22 @@ pub enum GenDirective {
     Cutout {
         shape: Shape2D,
     },
+    /// An authored **non-plated through-hole** (NPTH) — a mounting hole, tooling hole,
+    /// etc. (Decision 16b: "a mounting hole is an authored NPTH `Void`, not a board
+    /// cutout"). Lowers to a full-stackup [`Role::Void`] disc with **no material**, so
+    /// [`crate::export::excellon_drill`] classifies it into `board-NPTH.drl`. Distinct
+    /// from a [`Cutout`](Self::Cutout) (a milled contour that reaches Edge.Cuts + the
+    /// mask via the substrate `Area`'s holes) and from a `region void` (single-slab,
+    /// never a through-cut). The [`center`]/`dia` are the drilled hole; the drill file
+    /// gets exact center + diameter. NOTE (round-2 finding): the void does **not** yet
+    /// knock out the solder mask or an overlapping copper pour, nor does DRC flag copper
+    /// intruding on it — those are unenforced for authored `Role::Void`s (see the
+    /// findings ledger). It reaches the NPTH drill file, which is the one machinery that
+    /// already forward-queries `Role::Void` through-cuts.
+    Hole {
+        center: Point,
+        dia: Nm,
+    },
     /// An authored filled region — a copper pour, keep-out, or filled void. See
     /// [`RegionDecl`]. Read by [`regions`]; the knockout fill is derived downstream.
     Region(RegionDecl),
@@ -199,6 +215,7 @@ pub fn directive_coords(d: &GenDirective) -> Vec<Nm> {
         GenDirective::Cutout { shape } | GenDirective::Region(RegionDecl { shape, .. }) => {
             shape_coords(shape)
         }
+        GenDirective::Hole { center, dia } => vec![center.x, center.y, *dia],
         GenDirective::Text { at, height, .. } => vec![at.x, at.y, *height],
         GenDirective::Near { within, .. } | GenDirective::NearPin { within, .. } => vec![*within],
         GenDirective::MinSep { gap, .. } => vec![*gap],
@@ -1189,6 +1206,23 @@ pub fn features(source: &Source) -> Result<Vec<crate::geom::NetFeature>, String>
                 net_opt,
                 Feature::prism(role.clone(), shape.clone(), slab.z),
             ));
+        }
+    }
+
+    // Holes: every authored NPTH `hole` lowers to a full-stackup `Role::Void` disc with
+    // **no material** (Decision 16b — a mounting hole is an authored non-plated `Void`).
+    // Full-z so `excellon_drill`'s through-cut query picks it up; material-less so its
+    // plating classification is NPTH. An empty stackup has no full-z; the hole then
+    // contributes no geometry (there is no board to drill through).
+    if let Some(full) = su.full_z() {
+        for d in source {
+            if let GenDirective::Hole { center, dia } = d {
+                out.push(NetFeature::netless(Feature::prism(
+                    Role::Void,
+                    Shape2D::disc(*center, dia / 2),
+                    full,
+                )));
+            }
         }
     }
 
