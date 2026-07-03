@@ -842,11 +842,11 @@ Then the post-convergence steps proceed on the corrected foundation:
   by name (a `datum_slabs` sibling of `marking_slabs`) and renders each fab slab's
   `Role::Datum` features + board outline like silk — closing the "renders nowhere" gap.
   Fab *Gerber* output is still deferred: a `gerber_fab` would slot beside `gerber_silk`
-  over the same `datum_slabs` (noted at `svg_fab`). Known limitation carried by this
-  branch: **board-level** `text` on a fab slab still lowers to `Role::Marking`
-  (hardcoded in `elaborate::features`' text path), so it lands on silk, not fab — only
-  the footprint graphic/text path is role-driven off the slab today; making board text
-  role-driven is the follow-up (out of this branch's scope).
+  over the same `datum_slabs` (noted at `svg_fab`). Board-level `text` lowering is now
+  **role-driven off the resolved slab** too (`elaborate::features`' text path forward-
+  queries `Stackup::slab`, paralleling `part::graphic_features`), so `text layer=F.Fab`
+  lands on fab, not silk — fixing a latent wrong-output bug where fab-slab board text
+  shipped visibly on `F_SilkS`; silk output is byte-identical for the default stackup.
 - ~~Bottom-flip axis convention~~ — **resolved (2026-07-03, branch feat/flip-axis)**:
   `Orient::flipped()` is Ry(180) (x-negates, y preserved — KiCad/fab board-turn
   convention, bottom silk upright); placement CSV decomposes the flip and reports the

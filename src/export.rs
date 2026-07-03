@@ -3236,4 +3236,188 @@ psu.reg,LDO,0.000000,0.000000,0,T
             .collect();
         assert_eq!(masks, vec!["board-F_Mask.gbr"], "exactly one mask Gerber");
     }
+
+    /// Board-level `text` on a fab slab renders on the fab SVG and is **absent** from silk
+    /// (F1): the text lowering forward-queries the resolved slab's role rather than
+    /// hardcoding `Role::Marking`, so `layer=F.Fab` (a `Role::Datum` slab) lands on fab,
+    /// not silk. Before the fix this text shipped visibly on `F_SilkS`.
+    #[test]
+    fn board_text_on_fab_slab_renders_fab_not_silk() {
+        use crate::elaborate::GenDirective as G;
+        let lib = part_library();
+        let mut source = stackup_with_fab();
+        source.push(board_rect(Point::mm(0, 0), Point::mm(20, 20)));
+        source.push(G::Text {
+            string: "FAB".into(),
+            at: Point::mm(4, 10),
+            height: MM,
+            layer: "F.Fab".into(),
+            orient: crate::doc::Orient::IDENTITY,
+        });
+        let mut h = History::new(Default::default());
+        h.commit(
+            Transaction::one(Command::SetSource(source)),
+            &lib,
+            "fabtext",
+        )
+        .unwrap();
+        let doc = h.doc();
+
+        // Fab SVG carries the text strokes.
+        let set = fab_svg_set(doc, &lib).unwrap();
+        assert_eq!(set.len(), 1);
+        assert!(
+            set[0].1.matches("class=\"fab\"").count() >= 3,
+            "fab-slab board text renders as fab strokes:\n{}",
+            set[0].1
+        );
+        // The composite SVG and silk Gerbers must NOT show it as silk.
+        let s = svg(doc, &lib).unwrap();
+        assert!(
+            !s.contains("class=\"silk\""),
+            "fab-slab board text must not leak onto silk:\n{s}"
+        );
+        // The F.SilkS silk Gerber is empty of drawing ops (no D-code selection / strokes).
+        let su = crate::elaborate::stackup(&doc.source);
+        let silk = su.slab("F.SilkS").unwrap();
+        let g = gerber_silk(doc, &lib, silk).unwrap();
+        assert!(
+            !g.contains("D10*"),
+            "no strokes on the silk Gerber for fab-slab text:\n{g}"
+        );
+    }
+
+    /// Board-level `text` on a silk slab is unchanged by the F1 fix — it still lowers to a
+    /// `Role::Marking` silk stroke (silk byte-identity for the default stackup).
+    #[test]
+    fn board_text_on_silk_slab_unchanged() {
+        use crate::elaborate::GenDirective as G;
+        let lib = part_library();
+        let mut h = History::new(Default::default());
+        h.commit(
+            Transaction::one(Command::SetSource(vec![
+                board_rect(Point::mm(0, 0), Point::mm(20, 20)),
+                G::Text {
+                    string: "S".into(),
+                    at: Point::mm(4, 10),
+                    height: MM,
+                    layer: "F.SilkS".into(),
+                    orient: crate::doc::Orient::IDENTITY,
+                },
+            ])),
+            &lib,
+            "silktext",
+        )
+        .unwrap();
+        let s = svg(h.doc(), &lib).unwrap();
+        assert!(
+            s.contains("class=\"silk\""),
+            "silk-slab board text still renders as silk strokes:\n{s}"
+        );
+    }
+
+    /// F3: a footprint `F.Fab` graphic on a **flipped** component swaps to `B.Fab`
+    /// (`swap_side`) and lands on the bottom fab sheet — the same side derivation copper
+    /// uses. With both fab slabs authored, the graphic appears only on `board-B_Fab.svg`.
+    #[test]
+    fn flipped_component_fab_graphic_lands_on_bottom_sheet() {
+        use crate::elaborate::GenDirective as G;
+        let mut lib = part_library();
+        lib.insert("FAB".into(), fab_footprint()); // authors an F.Fab graphic + text
+        // Default stackup + both F.Fab and B.Fab datum slabs.
+        let mut slabs = Stackup::default_2layer().slabs;
+        let ftop = slabs.iter().find(|s| s.name == "F.Cu").unwrap().z.hi;
+        let bbot = slabs.iter().find(|s| s.name == "B.Cu").unwrap().z.lo;
+        slabs.push(Slab {
+            name: "F.Fab".into(),
+            z: ZRange::new(ftop, ftop),
+            role: Role::Datum,
+            material: None,
+        });
+        slabs.push(Slab {
+            name: "B.Fab".into(),
+            z: ZRange::new(bbot, bbot),
+            role: Role::Datum,
+            material: None,
+        });
+        let mut source: Vec<G> = slabs.into_iter().map(G::Slab).collect();
+        source.push(board_rect(Point::mm(0, 0), Point::mm(20, 20)));
+        source.push(G::Instance {
+            path: "u".into(),
+            part: "FAB".into(),
+            params: std::collections::BTreeMap::new(),
+            label: None,
+        });
+        source.push(G::Place {
+            path: "u".into(),
+            pos: Point::mm(10, 10),
+        });
+        source.push(G::Rotate {
+            path: "u".into(),
+            orient: crate::doc::Orient::default().flipped(),
+        });
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(source)), &lib, "flip")
+            .unwrap();
+        let doc = h.doc();
+
+        let set = fab_svg_set(doc, &lib).unwrap();
+        // Two fab slabs ⇒ two SVGs; the flipped graphic draws on B.Fab, not F.Fab.
+        let by_name = |name: &str| set.iter().find(|(n, _)| n == name).map(|(_, c)| c.as_str());
+        let f = by_name("board-F_Fab.svg").expect("F.Fab sheet present");
+        let b = by_name("board-B_Fab.svg").expect("B.Fab sheet present");
+        assert!(
+            !f.contains("class=\"fab\""),
+            "flipped graphic is NOT on the front sheet:\n{f}"
+        );
+        assert!(
+            b.contains("class=\"fab-bottom\""),
+            "flipped graphic swaps to the bottom sheet:\n{b}"
+        );
+    }
+
+    /// An authored-but-empty fab slab (no fab geometry, no board outline) emits a valid SVG
+    /// via the fallback 10mm viewBox — the degenerate path must not panic or produce an
+    /// empty viewBox.
+    #[test]
+    fn empty_fab_slab_emits_valid_svg() {
+        use crate::elaborate::GenDirective as G;
+        let lib = part_library();
+        // A stackup with one copper slab and one fab slab, and NO board / geometry.
+        let source = vec![
+            G::Slab(Slab {
+                name: "F.Cu".into(),
+                z: ZRange::new(0, 35_000),
+                role: Role::Conductor,
+                material: None,
+            }),
+            G::Slab(Slab {
+                name: "F.Fab".into(),
+                z: ZRange::new(35_000, 35_000),
+                role: Role::Datum,
+                material: None,
+            }),
+        ];
+        let mut h = History::new(Default::default());
+        h.commit(
+            Transaction::one(Command::SetSource(source)),
+            &lib,
+            "emptyfab",
+        )
+        .unwrap();
+        let set = fab_svg_set(h.doc(), &lib).unwrap();
+        assert_eq!(set.len(), 1);
+        let (name, s) = &set[0];
+        assert_eq!(name, "board-F_Fab.svg");
+        // Fallback bbox path: a 10mm box + margin ⇒ a 14mm-wide non-degenerate viewBox.
+        assert!(
+            s.contains("viewBox=\"-2.000000 -2.000000 14.000000 14.000000\""),
+            "fallback viewBox:\n{s}"
+        );
+        assert!(
+            s.contains("class=\"outline-bbox\""),
+            "fallback outline rect:\n{s}"
+        );
+        assert!(s.ends_with("</svg>\n"));
+    }
 }

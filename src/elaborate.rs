@@ -1095,17 +1095,6 @@ pub fn stackup(source: &Source) -> Stackup {
     }
 }
 
-/// Resolve a **slab name** to its absolute [`ZRange`] via the stackup (Decision 13).
-/// An unknown name is a **hard error** — no board-z / `ZRange(0,0)` fallback — naming
-/// the unknown slab and the available slab names, matching the crate's text-parse
-/// `Result<_, String>` error idiom.
-fn slab_z(su: &Stackup, name: &str) -> Result<ZRange, String> {
-    su.slab_z(name).ok_or_else(|| {
-        let names: Vec<&str> = su.slabs.iter().map(|s| s.name.as_str()).collect();
-        format!("unknown slab `{name}` (available: {})", names.join(", "))
-    })
-}
-
 /// Lower the authored board/region geometry of a `Source` into the converged
 /// [`NetFeature`] model — a [`Feature`] (pure physical geometry) paired with the
 /// optional net it carries. This is the additive producer the convergence's Phase 2
@@ -1256,14 +1245,17 @@ pub fn font_load_failure(source: &Source) -> Option<(String, String)> {
     }
 }
 
-/// Lower one authored [`GenDirective::Text`] into stroke-font [`Role::Marking`]
-/// features (Decision 9). The shared [`crate::font::text_strokes`] produces the glyph
-/// centreline polylines in a local frame (left-origin — board text's authored `at` *is*
-/// the origin, so it stays [`Justify::Left`](crate::font::Justify::Left)); each is then
-/// rotated by `orient` about that origin (exact for [`Orient::IDENTITY`]), translated to
-/// `at`, and traced at a pen width of `height / 8` on the named slab's z (via [`slab_z`]
-/// — an unknown name is a hard error). The markings are **netless** — silk carries no
-/// electrical identity.
+/// Lower one authored [`GenDirective::Text`] into stroke-font features on its named slab
+/// (Decision 9). The shared [`crate::font::text_strokes`] produces the glyph centreline
+/// polylines in a local frame (left-origin — board text's authored `at` *is* the origin,
+/// so it stays [`Justify::Left`](crate::font::Justify::Left)); each is then rotated by
+/// `orient` about that origin (exact for [`Orient::IDENTITY`]), translated to `at`, and
+/// traced at a pen width of `height / 8` on the named slab's z (an unknown name is a hard
+/// error). The feature's [`Role`] is **forward-queried from the resolved slab** — silk
+/// slabs are [`Role::Marking`], a fab slab is [`Role::Datum`] (Decision 15) — exactly as
+/// [`crate::part::graphic_features`] takes a graphic's role from its slab, rather than
+/// hardcoding `Marking` (which silently shipped fab-slab text onto silk). The features are
+/// **netless** — marking/fab surface geometry carries no electrical identity.
 fn text_features(
     string: &str,
     at: Point,
@@ -1273,7 +1265,11 @@ fn text_features(
     su: &Stackup,
     font: Option<&crate::font::TtfFont>,
 ) -> Result<Vec<NetFeature>, String> {
-    let z = slab_z(su, layer)?;
+    let slab = su.slab(layer).ok_or_else(|| {
+        let names: Vec<&str> = su.slabs.iter().map(|s| s.name.as_str()).collect();
+        format!("unknown slab `{layer}` (available: {})", names.join(", "))
+    })?;
+    let (role, z) = (slab.role.clone(), slab.z);
     // rotate about the text origin, then place at `at`.
     let place = |local: Point| {
         let r = orient.apply(local);
@@ -1287,7 +1283,7 @@ fn text_features(
         // Outline font: each glyph is a filled `Area` already — place it (no pen trace).
         for shape in crate::font::text_regions(string, height, crate::font::Justify::Left, font) {
             out.push(NetFeature::netless(Feature::prism(
-                Role::Marking,
+                role.clone(),
                 shape.map_points(place),
                 z,
             )));
@@ -1298,7 +1294,7 @@ fn text_features(
         for stroke in crate::font::text_strokes(string, height, crate::font::Justify::Left) {
             let pts: Vec<Point> = stroke.into_iter().map(place).collect();
             out.push(NetFeature::netless(Feature::prism(
-                Role::Marking,
+                role.clone(),
                 Shape2D::trace(pts, pen),
                 z,
             )));
