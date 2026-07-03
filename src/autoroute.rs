@@ -667,9 +667,14 @@ impl BlockMap {
     }
 
     /// Stamp one obstacle `shape` onto the grid: block the trace mask on layer `l` (or all
-    /// layers if `l` is `None`) for nodes within `clr + width/2 + half_edge`, and the via
-    /// mask (all-layer) for nodes within `clr + via_pad/2 + half_edge`. Scans only the
-    /// obstacle's grown bbox, so a small pad on a big board is cheap.
+    /// layers if `l` is `None`) for nodes whose routed copper would come within `clr` of
+    /// the obstacle, and likewise the via mask (all-layer). The thresholds passed to
+    /// [`crate::geom::clearance_violated`] are `clr + width/2 + half_edge` (trace) and
+    /// `clr + via_pad/2 + half_edge` (via); `clearance_violated` adds the *obstacle's* own
+    /// radius on top, so the effective edge-to-edge block distance is
+    /// `clr + our_half + obstacle_half + half_edge` — the half-edge slop covering the
+    /// routed edge that reaches a neighbour `pitch` away. Scans only the obstacle's grown
+    /// bbox, so a small pad on a big board is cheap.
     #[allow(clippy::too_many_arguments)]
     fn stamp(
         grid: &Grid,

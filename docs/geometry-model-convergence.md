@@ -894,6 +894,29 @@ Then the post-convergence steps proceed on the corrected foundation:
   pins = non-blocking `E_REFDES_PIN_DUP` (the E_PIN_CONFLICT precedent).
 - Follow-up lint: copper slab without a mask slab is silent (issue 0024, from the
   fab-svg review).
+- ~~Autorouter honesty + N-layer + fine pitch (0003, most of 0004, part of 0023)~~ —
+  **resolved (feat/router-honest, 2026-07-03)**: the autorouter's obstacle/grid/layer
+  machinery reworked. Obstacles now derive from `route::world_features` (the unified DRC
+  stream) — real pad **extents**, other-net traces/vias on their true slabs, copper
+  **pours** (`Area` conductors), and `Role::Keepout` copper/route regions, rasterized per
+  copper slab via the exact clearance kernel; inner-layer copper is no longer dropped. The
+  grid is genuinely **N-layer** (`copper_slabs().len()`; A* over `(i,j,layer)`, via moves
+  between adjacent layers at a per-crossed-layer cost; a through via blocks/needs room on
+  every copper layer at its site). The **trace/via pitch split** (the QFN fix) decouples
+  grid pitch (`min_trace_width + min_clearance`, resolving 0.4 mm pad pitch) from via size:
+  via legality is a separate per-cell mask, and a via must additionally keep
+  `via_pad/2 + width/2 + clearance` from any *other* net's same-run copper (an owner-ring
+  check in A* — a coarser grid used to hide this). Board **masking** carves the grid to the
+  real outline ∖ cutouts and pulls back from every edge by the edge clearance.
+  `verify_and_prune` extended to also check keepout intrusion + board edge, so `routed`
+  means DRC-clean (judgment call, flagged). `autoroute()`'s signature is unchanged (stackup
+  derived internally). Adversarially reviewed — no correctness findings. **Explicitly still
+  open (issue 0008, a future design cycle owns them):** rip-up/negotiation, topological /
+  push-and-shove routing, net-ordering optimization, H/V per-layer directionality bias,
+  length/impedance, blind/buried vias. Consequence: the greedy router routes fewer nets on
+  a dense board than a rip-up router would (the PoC's toy-library fanout dropped vs. the old
+  *permissive* point model), but everything it lays is genuinely clearance-clean — honesty
+  over count.
 - ~~Folding into `architecture.md` §8~~ — **done (2026-07-03)**: §8 rewritten to the
   current model (Decisions 13–18); the retired Stages-1–3 prose replaced; pour-kernel
   and arc narratives kept there as marked historical records. This document remains
