@@ -619,6 +619,9 @@ pub fn world_features(
     // annotation query, computed once.
     let reg = crate::annotate::registry(&doc.source);
     let refdes = crate::annotate::refdes(doc, lib, &reg);
+    // Doc-wide outline font (Decision 17), resolved once per pass; `None` ⇒ the stroke
+    // font. Same resolve-once pattern as the SVG/silk producers.
+    let font = crate::elaborate::resolve_font(&doc.source);
     for (id, c) in &doc.components {
         let Some(def) = lib.get(&c.part) else {
             continue;
@@ -635,7 +638,7 @@ pub fn world_features(
         }
         let rd = refdes.get(id).map(String::as_str).unwrap_or("");
         let lbl = crate::annotate::label(c, def, &reg);
-        for f in crate::part::text_features(def, c, su, rd, &lbl) {
+        for f in crate::part::text_features(def, c, su, rd, &lbl, font.as_ref()) {
             out.push(NetFeature::netless(f));
         }
     }
@@ -1059,6 +1062,81 @@ mod pour_tests {
         h.commit(Transaction::one(Command::SetSource(src)), &lib, "pour")
             .expect("elaborates");
         (h.doc().clone(), lib)
+    }
+
+    /// The `world_features` text seam (Decision 17): footprint labels lowered through the
+    /// unified producer honour the doc-wide `font`. A part with an `O` literal anchor,
+    /// under a `font` directive resolving to the test TTF, yields a `Role::Marking`
+    /// **filled `Area`** (outline glyph) in the world-feature stream — proving the font is
+    /// threaded to `world_features`' `part::text_features` call, not just the export one.
+    #[test]
+    fn world_features_footprint_text_honours_ttf_font() {
+        // The test TTF, written to a temp file (fonts resolve by path).
+        let mut path = std::env::temp_dir();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        path.push(format!("ecad-route-ttf-{}-{stamp}.ttf", std::process::id()));
+        std::fs::write(&path, crate::ttf::build_test_ttf()).unwrap();
+
+        // A footprint carrying a single silk text anchor.
+        let mut lib = part_library();
+        lib.insert(
+            "LBL".into(),
+            crate::part::PartDef {
+                name: "LBL".into(),
+                pins: vec![],
+                interfaces: std::collections::BTreeMap::new(),
+                graphics: vec![],
+                texts: vec![crate::part::FpText {
+                    kind: crate::part::FpTextKind::Literal("O".into()),
+                    at: Point { x: 0, y: 0 },
+                    height: MM,
+                    layer: "F.SilkS".into(),
+                    orient: crate::doc::Orient::default(),
+                    hide: false,
+                }],
+                courtyard: None,
+                class: None,
+            },
+        );
+        let src = vec![
+            board_rect(Point::mm(0, 0), Point::mm(10, 10)),
+            G::Font {
+                path: path.to_string_lossy().into_owned(),
+            },
+            G::Instance {
+                path: "u".into(),
+                part: "LBL".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Place {
+                path: "u".into(),
+                pos: Point::mm(5, 5),
+            },
+        ];
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "ttf")
+            .expect("elaborates");
+        let doc = h.doc().clone();
+
+        let su = stackup(&doc.source);
+        let world =
+            world_features(&doc, &lib, &netlist_of(&doc), &DesignRules::default(), &su).unwrap();
+        let ttf_marks = world
+            .iter()
+            .filter(|nf| {
+                nf.feature.role == Role::Marking
+                    && matches!(&nf.feature.extent, Extent::Prism { shape, .. } if matches!(shape, Shape2D::Area { .. }))
+            })
+            .count();
+        assert!(
+            ttf_marks >= 1,
+            "footprint text reached world_features as a filled Area (TTF), got {ttf_marks}"
+        );
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
