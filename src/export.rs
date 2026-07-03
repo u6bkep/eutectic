@@ -1384,6 +1384,8 @@ psu.reg,LDO,0.000000,0.000000,0,T
                 G::Instance {
                     path: "u1".into(),
                     part: "MCU".into(),
+                    params: std::collections::BTreeMap::new(),
+                    label: None,
                 },
                 G::Rotate {
                     path: "u1".into(),
@@ -1411,6 +1413,8 @@ psu.reg,LDO,0.000000,0.000000,0,T
                 G::Instance {
                     path: "u1".into(),
                     part: "MCU".into(),
+                    params: std::collections::BTreeMap::new(),
+                    label: None,
                 },
                 G::Rotate {
                     path: "u1".into(),
@@ -1490,6 +1494,7 @@ psu.reg,LDO,0.000000,0.000000,0,T
                 interfaces: BTreeMap::new(),
                 graphics: Vec::new(),
                 courtyard: None,
+                class: None,
             },
         );
         let mut h = History::new(Default::default());
@@ -1497,6 +1502,8 @@ psu.reg,LDO,0.000000,0.000000,0,T
             Transaction::one(Command::SetSource(vec![G::Instance {
                 path: "u1".into(),
                 part: "PAD".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             }])),
             &lib,
             "pad",
@@ -1565,6 +1572,8 @@ psu.reg,LDO,0.000000,0.000000,0,T
             Transaction::one(Command::SetSource(vec![G::Instance {
                 path: "u1".into(),
                 part: "GFX".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             }])),
             &lib,
             "gfx",
@@ -1599,6 +1608,8 @@ psu.reg,LDO,0.000000,0.000000,0,T
             Transaction::one(Command::SetSource(vec![G::Instance {
                 path: "u1".into(),
                 part: "TRI".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             }])),
             &lib,
             "tri",
@@ -1646,10 +1657,14 @@ psu.reg,LDO,0.000000,0.000000,0,T
             G::Instance {
                 path: "c0".into(),
                 part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Instance {
                 path: "c1".into(),
                 part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Place {
                 path: "c0".into(),
@@ -1980,6 +1995,8 @@ psu.reg,LDO,0.000000,0.000000,0,T
             G::Instance {
                 path: "u1".into(),
                 part: "PADX".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Place {
                 path: "u1".into(),
@@ -2026,14 +2043,20 @@ psu.reg,LDO,0.000000,0.000000,0,T
             G::Instance {
                 path: "reg".into(),
                 part: "LDO".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Instance {
                 path: "c0".into(),
                 part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Instance {
                 path: "c1".into(),
                 part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Place {
                 path: "reg".into(),
@@ -2101,10 +2124,14 @@ psu.reg,LDO,0.000000,0.000000,0,T
             G::Instance {
                 path: "g".into(),
                 part: "P1".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Instance {
                 path: "s".into(),
                 part: "P1".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Place {
                 path: "g".into(),
@@ -2216,6 +2243,8 @@ psu.reg,LDO,0.000000,0.000000,0,T
                 G::Instance {
                     path: "j".into(),
                     part: "TH".into(),
+                    params: std::collections::BTreeMap::new(),
+                    label: None,
                 },
                 G::Place {
                     path: "j".into(),
@@ -2352,6 +2381,8 @@ psu.reg,LDO,0.000000,0.000000,0,T
             Transaction::one(Command::SetSource(vec![G::Instance {
                 path: "u1".into(),
                 part: "TRI".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             }])),
             &lib,
             "tri",
@@ -2389,6 +2420,8 @@ psu.reg,LDO,0.000000,0.000000,0,T
             Transaction::one(Command::SetSource(vec![G::Instance {
                 path: "u1".into(),
                 part: "ARCLINE".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             }])),
             &lib,
             "arcline",

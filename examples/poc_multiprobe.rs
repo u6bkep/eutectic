@@ -205,6 +205,8 @@ impl Builder {
         self.s.push(G::Instance {
             path: path.into(),
             part: part.into(),
+            params: std::collections::BTreeMap::new(),
+            label: None,
         });
     }
     fn place(&mut self, path: &str, x: i64, y: i64) {

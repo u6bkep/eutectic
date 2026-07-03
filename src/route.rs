@@ -805,10 +805,14 @@ mod pour_tests {
             G::Instance {
                 path: "g".into(),
                 part: "PT".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Instance {
                 path: "s".into(),
                 part: "PS".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Place {
                 path: "g".into(),
@@ -895,6 +899,8 @@ mod pour_tests {
             G::Instance {
                 path: "g".into(),
                 part: "PT".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::ConnectPins {
                 net: "GND".into(),
@@ -1019,10 +1025,14 @@ mod pour_tests {
             G::Instance {
                 path: "g1".into(),
                 part: "PT".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Instance {
                 path: "g2".into(),
                 part: "PT".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Place {
                 path: "g1".into(),
@@ -1092,14 +1102,20 @@ mod pour_tests {
             G::Instance {
                 path: "g1".into(),
                 part: "PT".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Instance {
                 path: "g2".into(),
                 part: "PT".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Instance {
                 path: "s".into(),
                 part: "PT".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Place {
                 path: "g1".into(),
@@ -1174,10 +1190,14 @@ mod pour_tests {
             G::Instance {
                 path: "g1".into(),
                 part: "PT".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Instance {
                 path: "g2".into(),
                 part: "PT".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Place {
                 path: "g1".into(),
@@ -1250,10 +1270,14 @@ mod pour_tests {
             G::Instance {
                 path: "g1".into(),
                 part: "PT".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Instance {
                 path: "g2".into(),
                 part: "PT".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Place {
                 path: "g1".into(),
@@ -1373,10 +1397,14 @@ mod pour_tests {
             G::Instance {
                 path: "sig".into(),
                 part: "SIG".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Instance {
                 path: "gd".into(),
                 part: "GDFAB".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Place {
                 path: "sig".into(),
@@ -1457,10 +1485,14 @@ mod pour_tests {
             G::Instance {
                 path: "a".into(),
                 part: "PT".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Instance {
                 path: "b".into(),
                 part: "PT".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Place {
                 path: "a".into(),

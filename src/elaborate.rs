@@ -42,10 +42,15 @@ pub struct RegionDecl {
 /// A directive in the generative program.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GenDirective {
-    /// Instantiate `part` at hierarchical `path`.
+    /// Instantiate `part` at hierarchical `path`. Optionally carries identity
+    /// `params` (authored display-normal strings — copied verbatim onto the
+    /// [`Component`]) and a display `label` template override (Decision 14). Both
+    /// default empty/None for the common case (an IC identified by part name alone).
     Instance {
         path: String,
         part: String,
+        params: BTreeMap<String, String>,
+        label: Option<String>,
     },
     /// Source-provided default placement (a *free* DOF unless overridden).
     Place {
@@ -77,6 +82,16 @@ pub enum GenDirective {
     /// placement/connectivity directive — elaboration's passes ignore it; it is read
     /// only by [`stackup`].
     Slab(Slab),
+    /// One authored **class-registry** entry (Decision 14): the conventions —
+    /// refdes `prefix`, label `template`, class-default params — for a component
+    /// `class`. Accumulated by [`registry`](crate::annotate::registry) over the built-in
+    /// seeds, mirroring how [`Slab`](Self::Slab) directives are collected by
+    /// [`stackup`]. A display/identity directive — elaboration's placement/connectivity
+    /// passes ignore it.
+    Class {
+        name: String,
+        entry: crate::annotate::ClassEntry,
+    },
     /// Relational placement constraint solved by the least-change solver.
     Near {
         a: String,
@@ -185,7 +200,13 @@ pub fn elaborate(
 
     // Pass 1: instances.
     for d in source {
-        if let GenDirective::Instance { path, part } = d {
+        if let GenDirective::Instance {
+            path,
+            part,
+            params,
+            label,
+        } = d
+        {
             let id = EntityId::new(path.clone());
             if !lib.contains_key(part) {
                 errors.push(
@@ -225,6 +246,8 @@ pub fn elaborate(
                     part: part.clone(),
                     pos,
                     orient: Orient::default(),
+                    params: params.clone(),
+                    label: label.clone(),
                 },
             );
         }
@@ -1208,12 +1231,16 @@ pub fn psu_module(n: usize) -> Source {
     let mut s = vec![GenDirective::Instance {
         path: "psu.reg".into(),
         part: "LDO".into(),
+        params: std::collections::BTreeMap::new(),
+        label: None,
     }];
     for i in 0..n {
         let dec = format!("psu.dec[{i}]");
         s.push(GenDirective::Instance {
             path: dec.clone(),
             part: "Cap".into(),
+            params: std::collections::BTreeMap::new(),
+            label: None,
         });
         s.push(GenDirective::ConnectPins {
             net: "VBUS".into(),
@@ -1251,6 +1278,8 @@ pub fn ring(prefix: &str, part: &str, center: Point, radius: Nm, count: usize) -
         s.push(GenDirective::Instance {
             path: path.clone(),
             part: part.to_string(),
+            params: std::collections::BTreeMap::new(),
+            label: None,
         });
         s.push(GenDirective::Place {
             path: path.clone(),

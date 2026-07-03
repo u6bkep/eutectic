@@ -15,6 +15,7 @@
 //! - `text` — canonical serializer + parser for tier-1 truth (the text front-end).
 //! - `export` — deterministic output artifacts (netlist / pick-and-place / SVG).
 
+pub mod annotate;
 pub mod autoroute;
 pub mod command;
 pub mod diagnostic;
@@ -28,6 +29,7 @@ pub mod id;
 pub mod kicad;
 pub mod part;
 pub mod project;
+pub mod quantity;
 pub mod query;
 pub mod region;
 pub mod route;
@@ -79,10 +81,14 @@ mod tests {
             GenDirective::Instance {
                 path: "mcu".into(),
                 part: "MCU".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Instance {
                 path: "sens".into(),
                 part: "Sensor".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::ConnectInterface {
                 a: ("mcu".into(), "uart".into()),
@@ -137,6 +143,8 @@ mod tests {
         let bad = vec![GenDirective::Instance {
             path: "x".into(),
             part: "Nope".into(),
+            params: std::collections::BTreeMap::new(),
+            label: None,
         }];
         let r = h.commit(Transaction::one(Command::SetSource(bad)), &lib, "bad");
         assert!(r.is_err());
@@ -195,6 +203,8 @@ mod tests {
         src.push(GenDirective::Instance {
             path: "psu.spare".into(),
             part: "Cap".into(),
+            params: std::collections::BTreeMap::new(),
+            label: None,
         });
         h.commit(Transaction::one(Command::SetSource(src)), &lib, "spare")
             .unwrap();
@@ -228,6 +238,7 @@ mod tests {
                 interfaces: BTreeMap::new(),
                 graphics: Vec::new(),
                 courtyard: None,
+                class: None,
             },
         );
         lib
@@ -238,6 +249,8 @@ mod tests {
             GenDirective::Instance {
                 path: "u1".into(),
                 part: "PWRCHIP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::ConnectPins {
                 net: "+3V3".into(),
@@ -314,6 +327,8 @@ mod tests {
             GenDirective::Instance {
                 path: "u1".into(),
                 part: "PWRCHIP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::ConnectPins {
                 net: "x".into(),
@@ -338,10 +353,14 @@ mod tests {
             GenDirective::Instance {
                 path: "u1".into(),
                 part: "PWRCHIP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Instance {
                 path: "u2".into(),
                 part: "PWRCHIP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::ConnectPins {
                 net: "a".into(),
@@ -394,6 +413,7 @@ mod tests {
                 interfaces: BTreeMap::new(),
                 graphics: Vec::new(),
                 courtyard: None,
+                class: None,
             },
         );
         lib
@@ -404,10 +424,14 @@ mod tests {
             GenDirective::Instance {
                 path: "p1".into(),
                 part: "PAD".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Instance {
                 path: "p2".into(),
                 part: "PAD".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Fix {
                 path: "p1".into(),
@@ -446,6 +470,8 @@ mod tests {
             GenDirective::Instance {
                 path: "a".into(),
                 part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Place {
                 path: "a".into(),
@@ -454,6 +480,8 @@ mod tests {
             GenDirective::Instance {
                 path: "b".into(),
                 part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Place {
                 path: "b".into(),
@@ -488,10 +516,14 @@ mod tests {
             GenDirective::Instance {
                 path: "p1".into(),
                 part: "PAD".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Instance {
                 path: "p2".into(),
                 part: "PAD".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Place {
                 path: "p1".into(),
@@ -568,6 +600,8 @@ mod tests {
             GenDirective::Instance {
                 path: "u1".into(),
                 part: "PWRCHIP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Near {
                 a: "ghost".into(),
@@ -800,14 +834,20 @@ mod tests {
             GenDirective::Instance {
                 path: "reg".into(),
                 part: "LDO".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Instance {
                 path: "c1".into(),
                 part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Instance {
                 path: "c2".into(),
                 part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
         ]);
         assert_eq!(pos(&d, "c1"), Point::mm(10, 0));
@@ -820,10 +860,14 @@ mod tests {
             GenDirective::Instance {
                 path: "a".into(),
                 part: "LDO".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Instance {
                 path: "b".into(),
                 part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Near {
                 a: "a".into(),
@@ -840,10 +884,14 @@ mod tests {
             GenDirective::Instance {
                 path: "a".into(),
                 part: "LDO".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Instance {
                 path: "b".into(),
                 part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Place {
                 path: "a".into(),
@@ -868,6 +916,8 @@ mod tests {
             GenDirective::Instance {
                 path: "a".into(),
                 part: "LDO".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Place {
                 path: "a".into(),
@@ -888,6 +938,8 @@ mod tests {
             GenDirective::Instance {
                 path: "u1".into(),
                 part: "MCU".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Rotate {
                 path: "u1".into(),
@@ -903,6 +955,8 @@ mod tests {
         let d0 = placed(vec![GenDirective::Instance {
             path: "u1".into(),
             part: "MCU".into(),
+            params: std::collections::BTreeMap::new(),
+            label: None,
         }]);
         assert_eq!(
             d0.components[&EntityId::new("u1")].orient,
@@ -922,6 +976,8 @@ mod tests {
                 GenDirective::Instance {
                     path: "u1".into(),
                     part: "MCU".into(),
+                    params: std::collections::BTreeMap::new(),
+                    label: None,
                 },
                 GenDirective::Rotate {
                     path: "u1".into(),
@@ -949,10 +1005,14 @@ mod tests {
             GenDirective::Instance {
                 path: "reg".into(),
                 part: "LDO".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Instance {
                 path: "dec".into(),
                 part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Fix {
                 path: "reg".into(),
@@ -996,6 +1056,8 @@ mod tests {
             GenDirective::Instance {
                 path: "reg".into(),
                 part: "LDO".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Fix {
                 path: "reg".into(),
@@ -1004,6 +1066,8 @@ mod tests {
             GenDirective::Instance {
                 path: "dec".into(),
                 part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Near {
                 a: "dec".into(),
@@ -1294,6 +1358,8 @@ mod tests {
             GenDirective::Instance {
                 path: "reg".into(),
                 part: "LDO".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Fix {
                 path: "reg".into(),
@@ -1305,6 +1371,8 @@ mod tests {
             src.push(GenDirective::Instance {
                 path: d.clone(),
                 part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             });
             src.push(GenDirective::Near {
                 a: d,
@@ -1510,10 +1578,14 @@ mod tests {
             GenDirective::Instance {
                 path: "reg".into(),
                 part: "LDO".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Instance {
                 path: "dec".into(),
                 part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Place {
                 path: "reg".into(),
@@ -1600,6 +1672,8 @@ mod tests {
             GenDirective::Instance {
                 path: "reg".into(),
                 part: "LDO".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Place {
                 path: "reg".into(),
@@ -1832,6 +1906,8 @@ mod tests {
             s.push(GenDirective::Instance {
                 path: "spare".into(),
                 part: part.into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             });
             s
         };

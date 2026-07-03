@@ -816,6 +816,7 @@ mod tests {
                 interfaces: BTreeMap::new(),
                 graphics: Vec::new(),
                 courtyard: None,
+                class: None,
             },
         );
         // Net B's pad sits at the origin; net A is a separate net.
@@ -823,6 +824,8 @@ mod tests {
             G::Instance {
                 path: "b".into(),
                 part: "PAD".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Fix {
                 path: "b".into(),
@@ -893,10 +896,14 @@ mod tests {
             G::Instance {
                 path: "reg".into(),
                 part: "LDO".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Instance {
                 path: "dec".into(),
                 part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Place {
                 path: "reg".into(),
@@ -969,10 +976,14 @@ mod tests {
             G::Instance {
                 path: "reg".into(),
                 part: "LDO".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Instance {
                 path: "dec".into(),
                 part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Place {
                 path: "reg".into(),
@@ -1044,10 +1055,14 @@ mod tests {
             G::Instance {
                 path: "reg".into(),
                 part: "LDO".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Instance {
                 path: "dec".into(),
                 part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Place {
                 path: "reg".into(),
@@ -1116,14 +1131,20 @@ mod tests {
             G::Instance {
                 path: "reg".into(),
                 part: "LDO".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Instance {
                 path: "c0".into(),
                 part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Instance {
                 path: "c1".into(),
                 part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             G::Place {
                 path: "reg".into(),

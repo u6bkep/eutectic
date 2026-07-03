@@ -292,6 +292,15 @@ pub struct Component {
     /// source via `GenDirective::Rotate` (planar rotation + optional bottom-side flip);
     /// used to place pins/pads in world space.
     pub orient: Orient,
+    /// Authored identity **parameters** — the display-normal spelling at rest
+    /// (`value` → `4.7k`, `tol` → `5%`), never parsed here (Decision 14). Together with
+    /// `part` these *are* the component's identity for the BOM (and, later, simulation);
+    /// consumers parse at their own boundary. Empty for most ICs, whose identity is the
+    /// part name alone. Overlaid on the class `defaults` to form the *effective* params.
+    pub params: BTreeMap<String, String>,
+    /// Optional display-label override (Decision 14) — a template in its own right,
+    /// tried before the class template. Purely cosmetic; carries no identity weight.
+    pub label: Option<String>,
 }
 
 /// A net is a hyperedge over a set of pins. Membership *is* the connectivity

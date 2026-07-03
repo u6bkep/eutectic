@@ -341,6 +341,8 @@ pub fn import_footprint(text: &str) -> Result<PartDef, String> {
         interfaces: BTreeMap::new(),
         graphics,
         courtyard,
+        // The importer does not infer class from a footprint (Decision 14, out of scope).
+        class: None,
     })
 }
 
@@ -1339,6 +1341,7 @@ pub fn join_symbol_footprint(symbol: &Symbol, footprint: &PartDef) -> JoinReport
         // Silk/courtyard geometry is the footprint's, carried through the join.
         graphics: footprint.graphics.clone(),
         courtyard: footprint.courtyard.clone(),
+        class: None,
     };
     JoinReport {
         part,

@@ -23,10 +23,14 @@ fn main() {
         GenDirective::Instance {
             path: "mcu".into(),
             part: "MCU".into(),
+            params: std::collections::BTreeMap::new(),
+            label: None,
         },
         GenDirective::Instance {
             path: "sens".into(),
             part: "Sensor".into(),
+            params: std::collections::BTreeMap::new(),
+            label: None,
         },
         GenDirective::ConnectInterface {
             a: ("mcu".into(), "uart".into()),
@@ -45,10 +49,14 @@ fn main() {
         GenDirective::Instance {
             path: "reg1".into(),
             part: "LDO".into(),
+            params: std::collections::BTreeMap::new(),
+            label: None,
         },
         GenDirective::Instance {
             path: "reg2".into(),
             part: "LDO".into(),
+            params: std::collections::BTreeMap::new(),
+            label: None,
         },
         GenDirective::ConnectPins {
             net: "VBUS".into(),
@@ -104,6 +112,8 @@ fn main() {
     src.push(GenDirective::Instance {
         path: "psu.spare".into(),
         part: "Cap".into(),
+        params: std::collections::BTreeMap::new(),
+        label: None,
     });
     h3.commit(Transaction::one(Command::SetSource(src)), &lib, "spare")
         .unwrap();

@@ -168,6 +168,11 @@ pub struct PartDef {
     /// [`courtyard_half_extents`] prefer it over the derived pad-hull. `None` ⇒ derive
     /// from pad copper as before.
     pub courtyard: Option<Shape2D>,
+    /// Manual **class** override (Decision 14) — when `Some`, the annotation query uses
+    /// it verbatim instead of deriving the class from the part name (`R_0402` → `R`).
+    /// `None` for every imported part (the KiCad importer does not populate it) and for
+    /// the toy library; authored only where the name heuristic would guess wrong.
+    pub class: Option<String>,
 }
 
 impl PartDef {
@@ -576,6 +581,7 @@ pub fn part_library() -> PartLib {
             interfaces: BTreeMap::new(),
             graphics: Vec::new(),
             courtyard: None,
+            class: None,
         },
     );
     lib.insert(
@@ -589,6 +595,7 @@ pub fn part_library() -> PartLib {
             interfaces: BTreeMap::new(),
             graphics: Vec::new(),
             courtyard: None,
+            class: None,
         },
     );
     lib.insert(
@@ -616,6 +623,7 @@ pub fn part_library() -> PartLib {
             interfaces: BTreeMap::from([("uart".into(), uart())]),
             graphics: Vec::new(),
             courtyard: None,
+            class: None,
         },
     );
     lib.insert(
@@ -643,6 +651,7 @@ pub fn part_library() -> PartLib {
             interfaces: BTreeMap::from([("uart".into(), uart())]),
             graphics: Vec::new(),
             courtyard: None,
+            class: None,
         },
     );
     lib
@@ -663,6 +672,8 @@ mod tests {
                 prov: Provenance::Free,
             },
             orient,
+            params: std::collections::BTreeMap::new(),
+            label: None,
         }
     }
 
@@ -700,6 +711,7 @@ mod tests {
             interfaces: BTreeMap::new(),
             graphics: Vec::new(),
             courtyard: None,
+            class: None,
         };
         // A functional name fans out to *every* matching pad number.
         assert_eq!(
@@ -1212,6 +1224,7 @@ mod tests {
             interfaces: BTreeMap::new(),
             graphics: Vec::new(),
             courtyard: None,
+            class: None,
         };
         let court = courtyard_shape(&def).expect("a real pad part has a courtyard");
         assert!(
@@ -1264,6 +1277,7 @@ mod tests {
             interfaces: BTreeMap::new(),
             graphics: Vec::new(),
             courtyard: None,
+            class: None,
         };
         assert!(courtyard_shape(&one).is_none());
     }
@@ -1291,6 +1305,7 @@ mod tests {
                 layer: "F.SilkS".into(),
             }],
             courtyard: None,
+            class: None,
         };
         let top = comp("G", Point { x: 0, y: 0 }, Orient::default());
         let bot = comp("G", Point { x: 0, y: 0 }, Orient::default().flipped());
@@ -1326,6 +1341,7 @@ mod tests {
                 layer: "F.Fab".into(), // not a slab in the default stackup
             }],
             courtyard: None,
+            class: None,
         };
         let c = comp("G", Point { x: 0, y: 0 }, Orient::default());
         assert!(graphic_features(&def, &c, &su).is_empty());
@@ -1362,6 +1378,7 @@ mod tests {
                 },
             ],
             courtyard: None,
+            class: None,
         };
         let c = comp("G", Point { x: 0, y: 0 }, Orient::default());
         let feats = graphic_features(&def, &c, &su);
@@ -1413,6 +1430,7 @@ mod tests {
             interfaces: BTreeMap::new(),
             graphics: Vec::new(),
             courtyard: Some(Shape2D::rect(Point { x: 0, y: 0 }, 8 * MM, 4 * MM)),
+            class: None,
         };
         // Half-extents come from the imported outline (4mm × 2mm), not the pad hull.
         assert_eq!(courtyard_half_extents(&def), (4 * MM, 2 * MM));

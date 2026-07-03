@@ -29,7 +29,9 @@
 //!
 //! ```text
 //! # ---- generative source (tier-1) ----
-//! inst    <path> <part>            # instantiate a part at a hierarchical path
+//! inst    <path> <part> [label=<v>] [p:<k>=<v> ...]  # instantiate a part; optional
+//!                                  #   display label + identity params (quote for spaces)
+//! class   <name> [prefix=<v>] [template=<v>] [p:<k>=<v> ...]  # class-registry entry
 //! place   <path> (<x>, <y>)        # source default placement (a free DOF)
 //! fix     <path> (<x>, <y>)        # hard placement constraint (mechanical datum)
 //! board   (<x>, <y>) (<x>, <y>)    # board outline (min corner, max corner)
@@ -68,6 +70,7 @@
 //! pin psu.dec[0] (5.5mm, 3mm)
 //! ```
 
+use crate::annotate::ClassEntry;
 use crate::diagnostic::{Diagnostic, Location};
 use crate::doc::{Doc, MM, Nm, Orient, Override, Point, Strength};
 use crate::elaborate::{GenDirective, RegionDecl, Source, board_rect};
@@ -111,7 +114,24 @@ pub fn serialize(doc: &Doc) -> String {
 
 fn render_directive(d: &GenDirective) -> String {
     match d {
-        GenDirective::Instance { path, part } => format!("inst {path} {part}"),
+        GenDirective::Instance {
+            path,
+            part,
+            params,
+            label,
+        } => {
+            // `inst <path> <part> [label=<val>] [p:<key>=<val> ...]`. Values are quoted
+            // only when they must be (whitespace / `#` / empty), so the common case stays
+            // `p:value=10k`. Params render in `BTreeMap` (key) order for a canonical form.
+            let mut s = format!("inst {path} {part}");
+            if let Some(l) = label {
+                s.push_str(&format!(" label={}", quote_value(l)));
+            }
+            for (k, v) in params {
+                s.push_str(&format!(" p:{k}={}", quote_value(v)));
+            }
+            s
+        }
         GenDirective::Place { path, pos } => format!("place {path} {}", fmt_point(*pos)),
         GenDirective::Fix { path, pos } => format!("fix {path} {}", fmt_point(*pos)),
         GenDirective::Board { outline } => {
@@ -153,6 +173,21 @@ fn render_directive(d: &GenDirective) -> String {
                 out.push_str(&m.name);
             }
             out
+        }
+        GenDirective::Class { name, entry } => {
+            // `class <name> [prefix=<val>] [template=<val>] [p:<key>=<val> ...]`. Defaults
+            // reuse the `p:` param namespace from `inst`; keys render in `BTreeMap` order.
+            let mut s = format!("class {name}");
+            if let Some(p) = &entry.prefix {
+                s.push_str(&format!(" prefix={}", quote_value(p)));
+            }
+            if let Some(t) = &entry.template {
+                s.push_str(&format!(" template={}", quote_value(t)));
+            }
+            for (k, v) in &entry.defaults {
+                s.push_str(&format!(" p:{k}={}", quote_value(v)));
+            }
+            s
         }
         GenDirective::Near { a, b, within } => format!("near {a} {b} {}", fmt_len(*within)),
         GenDirective::MinSep { a, b, gap } => format!("minsep {a} {b} {}", fmt_len(*gap)),
@@ -454,8 +489,37 @@ fn parse_line(line: &str) -> Result<Item, String> {
     };
     Ok(match kw {
         "inst" => {
-            let (path, part) = two_tokens(rest, "inst <path> <part>")?;
-            Item::Directive(GenDirective::Instance { path, part })
+            // `inst <path> <part> [label=<val>] [p:<key>=<val> ...]`. `path`/`part` are
+            // the two leading bare tokens; a `label=` token carries the display template
+            // and `p:<key>=<val>` tokens carry identity params (values may be quoted to
+            // include spaces). Bare `inst <path> <part>` still parses (empty/None).
+            const USAGE: &str = "inst <path> <part> [label=<val>] [p:<key>=<val> ...]";
+            let toks = split_ws_quoted(rest);
+            if toks.len() < 2 {
+                return Err(USAGE.into());
+            }
+            let path = toks[0].clone();
+            let part = toks[1].clone();
+            let mut params = BTreeMap::new();
+            let mut label = None;
+            for tok in &toks[2..] {
+                if let Some(v) = tok.strip_prefix("label=") {
+                    label = Some(unquote(v).to_string());
+                } else if let Some(kv) = tok.strip_prefix("p:") {
+                    let (k, v) = kv
+                        .split_once('=')
+                        .ok_or_else(|| format!("inst param needs p:<key>=<value>: `{tok}`"))?;
+                    params.insert(k.to_string(), unquote(v).to_string());
+                } else {
+                    return Err(format!("inst: unexpected token `{tok}` ({USAGE})"));
+                }
+            }
+            Item::Directive(GenDirective::Instance {
+                path,
+                part,
+                params,
+                label,
+            })
         }
         "place" => {
             let (path, pos) = path_and_point(rest)?;
@@ -557,6 +621,34 @@ fn parse_line(line: &str) -> Result<Item, String> {
                 role,
                 material,
             }))
+        }
+        "class" => {
+            // `class <name> [prefix=<val>] [template=<val>] [p:<key>=<val> ...]`. Defaults
+            // reuse the `p:` param namespace from `inst`; `prefix`/`template` values may be
+            // quoted (a template with spaces). Merged over the built-in seeds by
+            // `annotate::registry`.
+            const USAGE: &str = "class <name> [prefix=<val>] [template=<val>] [p:<key>=<val> ...]";
+            let toks = split_ws_quoted(rest);
+            if toks.is_empty() {
+                return Err(USAGE.into());
+            }
+            let name = toks[0].clone();
+            let mut entry = ClassEntry::default();
+            for tok in &toks[1..] {
+                if let Some(v) = tok.strip_prefix("prefix=") {
+                    entry.prefix = Some(unquote(v).to_string());
+                } else if let Some(v) = tok.strip_prefix("template=") {
+                    entry.template = Some(unquote(v).to_string());
+                } else if let Some(kv) = tok.strip_prefix("p:") {
+                    let (k, v) = kv
+                        .split_once('=')
+                        .ok_or_else(|| format!("class default needs p:<key>=<value>: `{tok}`"))?;
+                    entry.defaults.insert(k.to_string(), unquote(v).to_string());
+                } else {
+                    return Err(format!("class: unexpected token `{tok}` ({USAGE})"));
+                }
+            }
+            Item::Directive(GenDirective::Class { name, entry })
         }
         "near" => {
             let (a, b, len) = two_tokens_and_len(rest, "near <a> <b> <len>")?;
@@ -743,6 +835,52 @@ fn parse_line(line: &str) -> Result<Item, String> {
         }
         other => return Err(format!("unknown directive `{other}`")),
     })
+}
+
+/// Quote a `key=value` token value only when it needs it: whitespace, a `#` (which the
+/// comment stripper would otherwise eat), a double quote, or the empty string. Embedded
+/// quotes are not escaped — the same documented limitation as `text`-label serialization.
+fn quote_value(v: &str) -> String {
+    let needs = v.is_empty() || v.chars().any(|c| c.is_whitespace() || c == '#' || c == '"');
+    if needs {
+        format!("\"{v}\"")
+    } else {
+        v.to_string()
+    }
+}
+
+/// Split on whitespace, but keep a double-quoted run (which may hold spaces) intact as
+/// part of its token — so `p:desc="a b"` is one token. Quote characters are retained;
+/// [`unquote`] strips them from an extracted value.
+fn split_ws_quoted(s: &str) -> Vec<String> {
+    let mut toks = Vec::new();
+    let mut cur = String::new();
+    let mut in_q = false;
+    for c in s.chars() {
+        match c {
+            '"' => {
+                in_q = !in_q;
+                cur.push(c);
+            }
+            c if c.is_whitespace() && !in_q => {
+                if !cur.is_empty() {
+                    toks.push(std::mem::take(&mut cur));
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        toks.push(cur);
+    }
+    toks
+}
+
+/// Strip one surrounding pair of double quotes from a value, if present.
+fn unquote(v: &str) -> &str {
+    v.strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(v)
 }
 
 fn two_tokens(rest: &str, usage: &str) -> Result<(String, String), String> {
@@ -1023,10 +1161,14 @@ mod tests {
             GenDirective::Instance {
                 path: "mcu".into(),
                 part: "MCU".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Instance {
                 path: "sens".into(),
                 part: "Sensor".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::ConnectInterface {
                 a: ("mcu".into(), "uart".into()),
@@ -1041,14 +1183,20 @@ mod tests {
             GenDirective::Instance {
                 path: "reg".into(),
                 part: "LDO".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Instance {
                 path: "c1".into(),
                 part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Instance {
                 path: "c2".into(),
                 part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Fix {
                 path: "reg".into(),
@@ -1082,18 +1230,26 @@ mod tests {
             GenDirective::Instance {
                 path: "psu.reg".into(),
                 part: "LDO".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Instance {
                 path: "psu.dec[0]".into(),
                 part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Instance {
                 path: "mcu".into(),
                 part: "MCU".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Instance {
                 path: "sens".into(),
                 part: "Sensor".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Place {
                 path: "psu.dec[0]".into(),
@@ -1314,6 +1470,98 @@ slab F.Cu 1.565mm 1.6mm conductor copper";
         // Canonical serialization re-parses to the same source.
         let doc = doc_of(src.clone(), BTreeMap::new());
         assert_eq!(parse(&serialize(&doc)).unwrap().0, src);
+    }
+
+    /// An `inst` directive carrying a display label and identity params parses to the
+    /// expected `Instance` (params in `BTreeMap` order, values unquoted) and round-trips.
+    /// A quoted value with spaces and a `#` survives (the `#` is not a comment here).
+    #[test]
+    fn inst_with_params_and_label_round_trips() {
+        let text = "inst r1 R_0402 label=\"{value:si:Ω}\" p:tol=5% p:value=4.7k";
+        let (src, _) = parse(text).expect("parse");
+        let mut params = BTreeMap::new();
+        params.insert("tol".into(), "5%".into());
+        params.insert("value".into(), "4.7k".into());
+        assert_eq!(
+            src,
+            vec![GenDirective::Instance {
+                path: "r1".into(),
+                part: "R_0402".into(),
+                params,
+                label: Some("{value:si:Ω}".into()),
+            }]
+        );
+        // Canonical serialization re-parses to the same source.
+        let doc = doc_of(src.clone(), BTreeMap::new());
+        assert_eq!(parse(&serialize(&doc)).unwrap().0, src);
+
+        // A quoted param value with a space and a `#` round-trips (not a comment).
+        let text2 = "inst u1 MCU p:desc=\"dual # buck\"";
+        let (src2, _) = parse(text2).expect("parse2");
+        let doc2 = doc_of(src2.clone(), BTreeMap::new());
+        assert_eq!(parse(&serialize(&doc2)).unwrap().0, src2);
+        if let GenDirective::Instance { params, .. } = &src2[0] {
+            assert_eq!(params["desc"], "dual # buck");
+        } else {
+            panic!("expected Instance");
+        }
+
+        // Bare `inst <path> <part>` still parses with empty/None defaults.
+        let (bare, _) = parse("inst q1 NPN").expect("bare");
+        assert_eq!(
+            bare,
+            vec![GenDirective::Instance {
+                path: "q1".into(),
+                part: "NPN".into(),
+                params: BTreeMap::new(),
+                label: None,
+            }]
+        );
+    }
+
+    /// Elaboration copies an instance's `params`/`label` verbatim onto its `Component`.
+    #[test]
+    fn elaboration_copies_params_and_label_onto_component() {
+        let (src, _) = parse("inst c1 Cap label=\"{value}\" p:value=100n").expect("parse");
+        let doc = placed(src);
+        let c = &doc.components[&EntityId::new("c1")];
+        assert_eq!(c.label.as_deref(), Some("{value}"));
+        assert_eq!(c.params["value"], "100n");
+    }
+
+    /// A `class` directive parses to the expected `Class { name, ClassEntry }` (prefix,
+    /// template, and `p:`-namespaced defaults) and round-trips through `serialize`.
+    #[test]
+    fn class_directive_parses_and_round_trips() {
+        let text = "class R prefix=RES template=\"{value:si:Ω}\" p:tol=5%";
+        let (src, _) = parse(text).expect("parse");
+        let mut defaults = BTreeMap::new();
+        defaults.insert("tol".into(), "5%".into());
+        assert_eq!(
+            src,
+            vec![GenDirective::Class {
+                name: "R".into(),
+                entry: ClassEntry {
+                    prefix: Some("RES".into()),
+                    template: Some("{value:si:Ω}".into()),
+                    defaults,
+                },
+            }]
+        );
+        let doc = doc_of(src.clone(), BTreeMap::new());
+        assert_eq!(parse(&serialize(&doc)).unwrap().0, src);
+
+        // A bare `class <name>` (all fields defaulted) also round-trips.
+        let (bare, _) = parse("class LED").expect("bare");
+        assert_eq!(
+            bare,
+            vec![GenDirective::Class {
+                name: "LED".into(),
+                entry: ClassEntry::default(),
+            }]
+        );
+        let doc2 = doc_of(bare.clone(), BTreeMap::new());
+        assert_eq!(parse(&serialize(&doc2)).unwrap().0, bare);
     }
 
     /// A region directive parses to the expected `RegionDecl` (role, net, layer, and
@@ -1590,6 +1838,8 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
             GenDirective::Instance {
                 path: "c0".into(),
                 part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             // GND must be a connected net for the conductor pour to validate.
             GenDirective::ConnectPins {
@@ -1751,10 +2001,14 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
             GenDirective::Instance {
                 path: "reg".into(),
                 part: "LDO".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Instance {
                 path: "dec".into(),
                 part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
             },
             GenDirective::Fix {
                 path: "reg".into(),

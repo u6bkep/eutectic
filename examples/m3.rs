@@ -21,6 +21,8 @@ fn scene(mcu_datum: Point) -> Source {
         G::Instance {
             path: "mcu".into(),
             part: "MCU".into(),
+            params: std::collections::BTreeMap::new(),
+            label: None,
         },
         G::Fix {
             path: "mcu".into(),
@@ -33,6 +35,8 @@ fn scene(mcu_datum: Point) -> Source {
         s.push(G::Instance {
             path: d.clone(),
             part: "Cap".into(),
+            params: std::collections::BTreeMap::new(),
+            label: None,
         });
         s.push(G::Near {
             a: d.clone(),
@@ -59,6 +63,8 @@ fn scene(mcu_datum: Point) -> Source {
     s.push(G::Instance {
         path: "h0".into(),
         part: "Cap".into(),
+        params: std::collections::BTreeMap::new(),
+        label: None,
     });
     s.push(G::Fix {
         path: "h0".into(),
@@ -70,6 +76,8 @@ fn scene(mcu_datum: Point) -> Source {
         s.push(G::Instance {
             path: h.clone(),
             part: "Cap".into(),
+            params: std::collections::BTreeMap::new(),
+            label: None,
         });
         s.push(G::Place {
             path: h.clone(),

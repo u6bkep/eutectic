@@ -24,14 +24,20 @@ fn main() {
         G::Instance {
             path: "reg".into(),
             part: "LDO".into(),
+            params: std::collections::BTreeMap::new(),
+            label: None,
         },
         G::Instance {
             path: "c0".into(),
             part: "Cap".into(),
+            params: std::collections::BTreeMap::new(),
+            label: None,
         },
         G::Instance {
             path: "c1".into(),
             part: "Cap".into(),
+            params: std::collections::BTreeMap::new(),
+            label: None,
         },
         G::Place {
             path: "reg".into(),
