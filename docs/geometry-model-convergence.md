@@ -469,6 +469,88 @@ and the ordinal survives only inside the router. Footprint-local layer reference
 **side-relative** (a footprint's silk is "silk on *my* side"; F↔B swaps on flip, exactly
 as `pad_features` already swaps pad copper via `is_bottom`) — the 0020↔0016 joint.
 
+### Decision 14 — refdes/label are derived display; params are strings; class registry holds the conventions (2026-07-02)
+
+Auto-text (the 0016 follow-up) forced the question "what does a `Reference`/`Value`
+text anchor resolve to?", and the answer exposed two needs that must not share a field:
+**part identity** (exactly what is placed — for the BOM, and eventually simulation) and
+**display** (what the silk says). The model conflates neither with the identity spine:
+`EntityId` (the hierarchical instance path) stays untouched as source identity; a
+reference designator is a *different namespace* — flat, compact, conventionally
+prefixed, consumed by manufacturing-time humans — and is therefore **derived**, the
+classic annotation pass recast as a query.
+
+**Identity: `(part, effective params)`.** `Component` gains
+`params: BTreeMap<String, String>` (empty for most ICs — an MCU's identity is its
+`PartDef` name; a resistor's is its parameter set). Params are **authored strings at
+rest** — the display-normal spelling (`4.7k`) is the source of truth, and **consumers
+parse at their own boundary** (the label formatter today, simulation later, at which
+point a commit-time `E_BAD_QUANTITY` diagnostic can arrive *for the params that
+consumer reads*). No speculative type ontology: the key vocabulary approaches the
+number of component kinds, and typed storage would have to re-format authored
+spellings for display (owning SI-prefix formatting and drift between "what was typed"
+and "what the silk says"). MPN/sourcing is a *later BOM-export resolution* of
+(footprint, params) → orderable part — a lookup table in a future BOM module, not a
+`Component` field.
+
+**Display: `label: Option<String>`** on `Component` — optional, cosmetic, no identity
+weight. Display derives from identity, never the reverse.
+
+**The class registry** is one authored, seeded table keying everything conventional:
+
+```
+class → { prefix?, template?, defaults? }
+```
+
+- `class(comp)` query: `PartDef.class` override, else the leading alpha run of the
+  part name (`R_0402`→`R`, `LED_0603`→`LED`), else `U`. One concept, two consumers.
+- `prefix` (default: the class name itself) feeds the **refdes annotation query**:
+  deterministic per-class numbering over components in path order. Insertion-unstable
+  by accepted trade-off; the EntityId-keyed **override system is the reserved stability
+  mechanism** (pin assignments when a board ships) — not built now, kept open.
+- `template` feeds the **label query**: instance `label` (itself a template) →
+  registry template → built-in `"{value}"`; if the rendered result is empty
+  (referenced keys absent), fall through to the part name — one rule covers passives
+  *and* ICs before any table entry is authored.
+- `defaults` are class-default params (`R → tol=5%`); instance params override, and
+  BOM identity uses the *merged* effective params.
+
+**Template display semantics** keep the software unopinionated: `{key}` substitutes
+verbatim (authored spelling wins); `{key:si:Ω}` and `{key:iec}` parse-and-render
+(`2.6kΩ` vs `2R6` — the convention lives in the user's table entry). Parse failure
+degrades to verbatim substitution, never an error. The quantity parser is the first
+boundary-parser and the one simulation inherits.
+
+**Text anchors** (the auto-text mechanism): `PartDef` gains `texts: Vec<FpText>` with
+`kind: Reference | Label | Literal(String)` — an *anchor* (position, height, layer,
+orient), never a frozen string, per Decision 9 (strokes derived) and the salsa
+principle (refdes edits re-render; it's a query over component state). KiCad
+`fp_text reference "REF**"` imports as a `Reference` anchor, discarding the
+placeholder; `fp_text value` imports as `Label` (our vocabulary does not inherit
+KiCad's identity/display conflation). Footprint text generates strokes in
+footprint-local frame through the same `to_world` as graphics — bottom-side mirroring
+falls out of the orientation quaternion with zero special-case code. The shared stroke
+lowering gains **justification** (KiCad text is center-anchored, board text stays
+left-origin; content is live, so the offset cannot be baked at import). Pen width
+stays the `height/8` rule — KiCad's explicit thickness is not stored.
+
+### Decision 15 — paste is derived; fab is an ordinary authorable slab (2026-07-02)
+
+The "virtual layer" question dissolves under Decision 13 — no new machinery:
+
+- **Paste is derived, not authored.** Stencil apertures are a function of pad geometry
+  (pad shrunk by a paste margin), exactly as mask openings are pad copper inflated.
+  When stencil Gerbers are wanted, that is a forward query over pads — no slab, no
+  role, no authoring vocabulary today.
+- **Fab is just a named slab you may choose to author.** Fab graphics/text import as
+  ordinary `FpGraphic`/`FpText` with layer `"F.Fab"`; `graphic_features` already skips
+  layers absent from the stackup, so they materialize only if the user authors an
+  `F.Fab` slab — zero-height (`ZRange` permits `lo == hi`), `Role::Datum` (already in
+  the enum; becomes parseable). Datum is excluded from physical clash queries —
+  zero-height ranges *touch* their neighbours since `ZRange::overlaps` is closed.
+  Graphic lowering takes its `Role` from the resolved slab's role rather than
+  hardcoding `Marking`.
+
 ## 7. Convergence plan: sequential foundation → parallel fan-out → sequential spine
 
 > **Status: executed (2026-06-30).** Every phase and post-convergence step below has
@@ -516,11 +598,11 @@ Then the post-convergence steps proceed on the corrected foundation:
 - **Trace/via slab-name migration** rides with 0011 (route serialization): serialized
   routes reference slab names; `route::Layer` ordinals become router-internal only
   (Decision 13 rule 2).
-- **Auto-text** (refdes/value live text + KiCad `fp_text`) — next text slice; the
-  graphics home (`PartDef.graphics`) and side-relative lowering exist now.
-- **Paste/fab virtual layers** — paste is derivable-by-default (Decision 13); fab is
-  documentation-only with no honest z. Decide zero-thickness slabs vs skip when a
-  consumer appears.
+- **Auto-text** (refdes/label live text + KiCad `fp_text`) — **designed (Decision 14,
+  2026-07-02)**: text anchors + class registry (params/label/refdes queries);
+  implementation in progress (branches feat/class-registry, feat/auto-text).
+- ~~Paste/fab virtual layers~~ — **resolved (Decision 15)**: paste derived at export,
+  fab an ordinary authorable zero-height `Datum` slab (branch feat/datum-slabs).
 - Whether component bodies get a dedicated role/material or reuse `Keepout`.
 - Relation to issue 0004 (planes / multilayer): the volumetric convergence is the
   natural home for that work.
