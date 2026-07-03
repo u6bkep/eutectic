@@ -308,8 +308,10 @@ fn role_token(role: &Role) -> String {
             KeepoutKind::Drill => "keepout-drill".into(),
             KeepoutKind::Route => "keepout-route".into(),
         },
-        // Not authorable as a region today; emit a stable token so serialization is
-        // never lossy-by-panic (parse rejects these, so they never round-trip in).
+        // Not authorable via a `region` directive (the `region` parser rejects these),
+        // but they ARE authorable as `slab` roles and round-trip that way — so the
+        // token must stay stable and lossless. `substrate`/`marking`/`mask`/`datum`
+        // are all parsed by the `slab` grammar.
         Role::Substrate => "substrate".into(),
         Role::Marking => "marking".into(),
         Role::Mask => "mask".into(),
