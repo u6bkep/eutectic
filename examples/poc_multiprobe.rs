@@ -20,7 +20,7 @@ use ecad_core::command::{Command, Transaction};
 use ecad_core::diagnostic::render;
 use ecad_core::doc::{MM, Point};
 use ecad_core::elaborate::{GenDirective as G, Source, board_rect};
-use ecad_core::export::{excellon_drill, gerber_set, netlist, placement_csv, svg};
+use ecad_core::export::{excellon_drill, fab_svg_set, gerber_set, netlist, placement_csv, svg};
 use ecad_core::history::History;
 use ecad_core::kicad::{
     apply_role_map, import_footprint_file, import_symbol_named, join_symbol_footprint,
@@ -616,6 +616,10 @@ fn main() {
         );
     }
     for (name, content) in gset {
+        write(&name, &content, &mut wrote);
+    }
+    // Fab-drawing SVGs (Decision 15) — empty unless the stackup authors a fab slab.
+    for (name, content) in fab_svg_set(doc, &lib).unwrap() {
         write(&name, &content, &mut wrote);
     }
     println!("  wrote: {}", wrote.join(", "));

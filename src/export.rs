@@ -9,7 +9,9 @@
 //! Artifacts: the connectivity (`netlist`), placement (`placement_csv`) and sketch
 //! (`svg`) exporters, plus **fab output** — RS-274X Gerber per copper layer + an
 //! `Edge.Cuts` outline ([`gerber_layer`] / [`gerber_edge_cuts`] / [`gerber_set`])
-//! and an Excellon drill program ([`excellon_drill`]). Now that routing writes real
+//! and an Excellon drill program ([`excellon_drill`]) — and a **fab-drawing SVG** pass
+//! ([`svg_fab`] / [`fab_svg_set`], Decision 15: one SVG per authored `Role::Datum` slab,
+//! the consumer that lets an authored fab slab actually render). Now that routing writes real
 //! copper into the `Doc` (traces with width, vias with pad+drill) and footprint pads
 //! carry render geometry, the fab artifacts describe genuine copper. All coordinates
 //! flow from integer nanometres into each format by integer arithmetic (the Gerber
@@ -336,7 +338,7 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> Result<String, String> {
                     continue;
                 }
                 let Extent::Prism { shape, z } = &f.extent;
-                out.push_str(&svg_silk(shape, &flip, is_bottom_silk(&su, z)));
+                out.push_str(&svg_silk(shape, &flip, is_bottom_side(&su, z)));
             }
         }
         let o = c.pos.value;
@@ -390,7 +392,7 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> Result<String, String> {
             continue;
         }
         let Extent::Prism { shape, z } = &nf.feature.extent;
-        out.push_str(&svg_silk(shape, &flip, is_bottom_silk(&su, z)));
+        out.push_str(&svg_silk(shape, &flip, is_bottom_side(&su, z)));
     }
 
     out.push_str("</svg>\n");
@@ -414,6 +416,18 @@ fn svg_silk(shape: &Shape2D, flip: &impl Fn(Nm) -> Nm, bottom: bool) -> String {
     } else {
         ("silk", "#888888")
     };
+    svg_surface(shape, flip, class, color)
+}
+
+/// One derived surface shape in the marking look, in the given `class`/`color`. Shared
+/// by silk ([`svg_silk`]) and the fab drawing ([`svg_fab`]) — the shape-arm handling is
+/// identical, only the class/colour differ. A [`Shape2D::Stroke`] (`fp_line`/`fp_arc`/
+/// text) draws as a thin stroked centreline polyline whose pen is the shape's inflation
+/// diameter (`radius * 2`); a [`Shape2D::Polygon`] (`fp_poly`/`fp_rect`) is a *filled*
+/// area, so it draws as a closed filled polygon — rendering it as a centreline polyline
+/// would emit `stroke-width = radius*2 = 0` and vanish; a [`Shape2D::Area`] (TTF outline
+/// text) is an even-odd `<path>` so its counters read as voids.
+fn svg_surface(shape: &Shape2D, flip: &impl Fn(Nm) -> Nm, class: &str, color: &str) -> String {
     let coords: Vec<String> = shape
         .points()
         .iter()
@@ -429,8 +443,6 @@ fn svg_silk(shape: &Shape2D, flip: &impl Fn(Nm) -> Nm, bottom: bool) -> String {
             coords.join(" "),
             fmt_mm(shape.radius() * 2),
         ),
-        // A filled-area marking (e.g. TTF outline text) is an even-odd `<path>` so its
-        // counters read as voids.
         Shape2D::Area { region } => format!(
             "  <path class=\"{class}\" d=\"{}\" fill=\"{color}\" fill-rule=\"evenodd\" stroke=\"none\"/>\n",
             region_svg_d(region, flip),
@@ -438,11 +450,11 @@ fn svg_silk(shape: &Shape2D, flip: &impl Fn(Nm) -> Nm, bottom: bool) -> String {
     }
 }
 
-/// Is a marking feature at z-range `z` on the **bottom** silk side? A marking slab
-/// outboard of (at or below) the bottom copper is bottom silk; anything else is top.
-/// A forward query against the stackup — the side is derived from z, never stored
-/// (Decision 13). Falls back to top when there is no bottom copper to compare against.
-fn is_bottom_silk(su: &Stackup, z: &ZRange) -> bool {
+/// Is a surface feature at z-range `z` on the **bottom** side? A slab outboard of (at or
+/// below) the bottom copper is bottom-side (silk or fab); anything else is top. A forward
+/// query against the stackup — the side is derived from z, never stored (Decision 13).
+/// Falls back to top when there is no bottom copper to compare against.
+fn is_bottom_side(su: &Stackup, z: &ZRange) -> bool {
     su.bottom_copper().is_some_and(|bot| z.hi <= bot.lo)
 }
 
@@ -1206,10 +1218,9 @@ fn excellon_files(hits: Vec<(bool, Nm, DrillKind)>) -> Vec<(String, String)> {
     out
 }
 
-/// The solder-mask Gerber for one outer side (`Top`→`F.Mask`, `Bottom`→`B.Mask`),
-/// derived **forward** from the model — never recomputed from a parallel rule set
-/// (Decision 13). The mask slab for the side is resolved by z-position
-/// ([`Stackup::top_mask`]/[`Stackup::bottom_mask`]); the file draws the **openings**
+/// The solder-mask Gerber for one [`Role::Mask`] `slab`, derived **forward** from the
+/// model — never recomputed from a parallel rule set, and entered by the slab's *name*,
+/// not a copper-layer enum (Decision 13 / 16 stage 4). The file draws the **openings**
 /// (the fab inverts to the mask coverage — a draw-the-openings convention that stays an
 /// export-format detail):
 ///
@@ -1219,56 +1230,49 @@ fn excellon_files(hits: Vec<(bool, Nm, DrillKind)>) -> Vec<(String, String)> {
 ///   pad-opening output. A pad's **drill** `Void` is a through-cut at the *full* stackup
 ///   z, not the mask z, so it is not one of these — and it must not be: it sits inside
 ///   the pad opening (drawing it again would double the flash) and its home is the
-///   Excellon file. Through-hole pads open both sides because `pad_features` places an
-///   opening at each side's mask slab.
+///   Excellon file. Through-hole pads open every mask slab their z spans because
+///   `pad_features` places an opening at each side's mask slab.
 /// - Board cutouts: milled through the whole stack, so they remove mask over their whole
-///   area — drawn as `G36`/`G37` region fills. This is new (the old parallel rule missed
-///   cutouts entirely); it is strictly additive.
+///   area — drawn as `G36`/`G37` region fills.
 ///
-/// A side with no mask slab in the stackup opens nothing (an empty mask layer). Object
-/// order is `(EntityId, pin, region)` then cutouts — fully deterministic. Fallible
+/// Object order is `(EntityId, pin, region)` then cutouts — fully deterministic. Fallible
 /// because the cutout query runs the slab-name materialization gate (Decision 13).
-pub fn gerber_mask(doc: &Doc, lib: &PartLib, side: Layer) -> Result<String, String> {
+pub fn gerber_mask(doc: &Doc, lib: &PartLib, slab: &Slab) -> Result<String, String> {
     let su = crate::elaborate::stackup(&doc.source);
-    let mask_slab = mask_slab_of(&su, side);
-    let mask_z = mask_slab.map(|s| s.z);
+    let mask_z = slab.z;
 
     // Pad openings: `Void`s whose z lies within this mask slab (pad_features places the
     // inflated-copper opening there). A through-cut `Void` (a drill) extends past the
     // slab and is excluded — subsumed by the opening, and belongs to the drill file.
     let mut openings: Vec<(Point, Aperture)> = Vec::new();
-    // Board cutouts remove mask over their whole area. A cutout is now a *hole* in the
-    // board region (Decision 16b/c), not a `Void` feature, so the openings come from
-    // `board_region().holes()` — the CW cutout rings — as region fills. A cutout is a
-    // full-stack through-cut, so it always pierces a present mask slab; the `mask_z`
-    // gate is just "does this side have a mask".
-    let mut cutout_holes = Region::default();
-    if let Some(mask_z) = mask_z {
-        for c in doc.components.values() {
-            let Some(def) = lib.get(&c.part) else {
-                continue;
-            };
-            for pin in &def.pins {
-                for f in pin.pad_features(c, &su) {
-                    if f.role != Role::Void {
-                        continue;
-                    }
-                    let Extent::Prism { shape, z } = &f.extent;
-                    // A pad opening sits within the mask slab; a through-cut (drill) does
-                    // not and is skipped (it is subsumed by the opening).
-                    if z.lo < mask_z.lo || z.hi > mask_z.hi {
-                        continue;
-                    }
-                    if let Some(fa) = shape_flash(shape) {
-                        openings.push(fa);
-                    }
+    for c in doc.components.values() {
+        let Some(def) = lib.get(&c.part) else {
+            continue;
+        };
+        for pin in &def.pins {
+            for f in pin.pad_features(c, &su) {
+                if f.role != Role::Void {
+                    continue;
+                }
+                let Extent::Prism { shape, z } = &f.extent;
+                // A pad opening sits within the mask slab; a through-cut (drill) does
+                // not and is skipped (it is subsumed by the opening).
+                if z.lo < mask_z.lo || z.hi > mask_z.hi {
+                    continue;
+                }
+                if let Some(fa) = shape_flash(shape) {
+                    openings.push(fa);
                 }
             }
         }
-        if let Some(region) = crate::elaborate::board_region(&doc.source) {
-            cutout_holes = region.holes();
-        }
     }
+    // Board cutouts remove mask over their whole area. A cutout is now a *hole* in the
+    // board region (Decision 16b/c), not a `Void` feature, so the openings come from
+    // `board_region().holes()` — the CW cutout rings — as region fills. A cutout is a
+    // full-stack through-cut, so it always pierces a present mask slab.
+    let cutout_holes = crate::elaborate::board_region(&doc.source)
+        .map(|region| region.holes())
+        .unwrap_or_default();
 
     let mut aps: BTreeSet<Aperture> = BTreeSet::new();
     for (_, a) in &openings {
@@ -1281,7 +1285,7 @@ pub fn gerber_mask(doc: &Doc, lib: &PartLib, side: Layer) -> Result<String, Stri
         .collect();
 
     let mut out = String::new();
-    out.push_str(&format!("G04 {} *\n", mask_name(&su, side)));
+    out.push_str(&format!("G04 {} *\n", slab_file(&slab.name)));
     out.push_str("%FSLAX46Y46*%\n");
     out.push_str("%MOMM*%\n");
     for (a, code) in &codes {
@@ -1299,56 +1303,36 @@ pub fn gerber_mask(doc: &Doc, lib: &PartLib, side: Layer) -> Result<String, Stri
     Ok(out)
 }
 
-/// The resolved solder-mask [`Slab`] for a side — the `Role::Mask` slab immediately
-/// outboard of the outer copper (by z-position; [`Stackup::top_mask`]/[`bottom_mask`]),
-/// so a custom-named mask slab resolves like the default `F.Mask`/`B.Mask`. `None` if
-/// that side has no mask.
-fn mask_slab_of(su: &Stackup, side: Layer) -> Option<&Slab> {
-    let z = match side {
-        Layer::Bottom => su.bottom_mask(),
-        _ => su.top_mask(),
-    }?;
-    su.slabs.iter().find(|s| s.role == Role::Mask && s.z == z)
-}
-
-/// The mask filename token for a side: the resolved mask slab's name (`.`→`_`, so a
-/// custom `TopMask` keeps its name), else the conventional `F_Mask`/`B_Mask` fallback
-/// when the side carries no mask slab. The default stackup's `F.Mask`/`B.Mask` yield the
-/// unchanged `F_Mask`/`B_Mask`.
-fn mask_name(su: &Stackup, side: Layer) -> String {
-    match mask_slab_of(su, side) {
-        Some(s) => slab_file(&s.name),
-        None if side == Layer::Bottom => "B_Mask".to_string(),
-        None => "F_Mask".to_string(),
-    }
-}
-
 /// The KiCad-style filename token for a named slab: the slab name with `.`→`_`
 /// (`F.SilkS`→`F_SilkS`), matching the `F_Cu` convention of [`layer_file`]. Names the
-/// marking (silk) and solder-mask Gerbers from their resolved slab (see [`mask_name`]).
+/// marking (silk), solder-mask, and fab Gerbers/SVGs from their resolved slab.
 fn slab_file(name: &str) -> String {
     name.replace('.', "_")
 }
 
-/// Every world-frame [`Role::Marking`] feature of the board: lowered board text (from
-/// the converged [`crate::elaborate::features`] view) plus each placed component's
-/// footprint silk ([`crate::part::graphic_features`], side-swapped + placed). The single
-/// forward source of silk geometry the mask/silk exporters and the SVG render share.
-/// Fallible because the board-text lowering resolves slab names (an unknown one is a
-/// hard error, per Decision 13).
-fn marking_features(
+/// Every world-frame feature of the board carrying `role`: board-level graphics/text
+/// (from the converged [`crate::elaborate::features`] view) plus each placed component's
+/// footprint graphics ([`crate::part::graphic_features`], side-swapped + placed) and
+/// auto-text ([`crate::part::text_features`]). The single forward source of derived
+/// surface geometry the mask/silk exporters, the fab SVG pass, and the SVG render share:
+/// silk queries [`Role::Marking`], the fab drawing [`Role::Datum`] (Decision 15 — the
+/// role is resolved from the slab, so both flow through the same producer). Fallible
+/// because the board-level lowering resolves slab names (an unknown one is a hard error,
+/// per Decision 13).
+fn role_features(
     doc: &Doc,
     lib: &PartLib,
     su: &Stackup,
+    role: Role,
 ) -> Result<Vec<crate::geom::Feature>, String> {
     let mut out: Vec<crate::geom::Feature> = Vec::new();
     for nf in crate::elaborate::features(&doc.source)? {
-        if nf.feature.role == Role::Marking {
+        if nf.feature.role == role {
             out.push(nf.feature);
         }
     }
-    // Footprint auto-text (Decision 14) rides the same Marking-filtered silk path as
-    // graphics; `refdes` is a whole-document query, computed once.
+    // Footprint auto-text (Decision 14) rides the same role-filtered path as graphics;
+    // `refdes` is a whole-document query, computed once.
     let reg = crate::annotate::registry(&doc.source);
     let refdes = crate::annotate::refdes(doc, lib, &reg);
     let font = crate::elaborate::resolve_font(&doc.source);
@@ -1357,14 +1341,14 @@ fn marking_features(
             continue;
         };
         for f in crate::part::graphic_features(def, c, su) {
-            if f.role == Role::Marking {
+            if f.role == role {
                 out.push(f);
             }
         }
         let rd = refdes.get(id).map(String::as_str).unwrap_or("");
         let lbl = crate::annotate::label(c, def, &reg);
         for f in crate::part::text_features(def, c, su, rd, &lbl, font.as_ref()) {
-            if f.role == Role::Marking {
+            if f.role == role {
                 out.push(f);
             }
         }
@@ -1377,10 +1361,10 @@ fn marking_features(
 /// [`Shape2D::Stroke`] (`fp_line`/`fp_arc`/text) draws as its centreline with a round
 /// aperture of the stroke's pen diameter (`radius * 2`); a [`Shape2D::Polygon`]
 /// (`fp_poly`/`fp_rect`) is a filled area, drawn as a `G36`/`G37` region. Aperture codes
-/// run from 10 in `Ord` order; object order follows [`marking_features`] — deterministic.
+/// run from 10 in `Ord` order; object order follows [`role_features`] — deterministic.
 pub fn gerber_silk(doc: &Doc, lib: &PartLib, slab: &Slab) -> Result<String, String> {
     let su = crate::elaborate::stackup(&doc.source);
-    let feats: Vec<Shape2D> = marking_features(doc, lib, &su)?
+    let feats: Vec<Shape2D> = role_features(doc, lib, &su, Role::Marking)?
         .into_iter()
         .filter(|f| {
             let Extent::Prism { z, .. } = &f.extent;
@@ -1444,18 +1428,181 @@ pub fn gerber_silk(doc: &Doc, lib: &PartLib, slab: &Slab) -> Result<String, Stri
     Ok(out)
 }
 
-/// The marking (silk) slabs of the stackup, ordered **top-down** (highest z first) so a
-/// board's fileset lists `F.SilkS` before `B.SilkS`, mirroring `F_Cu`/`B_Cu` and
-/// `F_Mask`/`B_Mask` ordering.
-fn marking_slabs(su: &Stackup) -> Vec<Slab> {
+/// The stackup's slabs of a given `role`, ordered **top-down** (highest z first) so a
+/// board's fileset lists the front side before the back (`F.SilkS` before `B.SilkS`,
+/// `F.Fab` before `B.Fab`), mirroring `F_Cu`/`B_Cu` and `F_Mask`/`B_Mask` ordering.
+fn role_slabs(su: &Stackup, role: Role) -> Vec<Slab> {
     let mut m: Vec<Slab> = su
         .slabs
         .iter()
-        .filter(|s| s.role == Role::Marking)
+        .filter(|s| s.role == role)
         .cloned()
         .collect();
     m.sort_by_key(|s| std::cmp::Reverse(s.z.hi));
     m
+}
+
+/// The marking (silk) slabs, top-down. See [`role_slabs`].
+fn marking_slabs(su: &Stackup) -> Vec<Slab> {
+    role_slabs(su, Role::Marking)
+}
+
+/// The fab-drawing ([`Role::Datum`]) slabs, top-down. See [`role_slabs`]. Empty unless
+/// the stackup authors a fab slab (`F.Fab`/`B.Fab`) — the default stackup has none, so
+/// the fab fileset is empty by default (Decision 15).
+fn datum_slabs(su: &Stackup) -> Vec<Slab> {
+    role_slabs(su, Role::Datum)
+}
+
+/// One fab-drawing SVG for a [`Role::Datum`] `slab` (Decision 15): the board outline for
+/// context plus every [`Role::Datum`] feature whose z intersects the slab, drawn in the
+/// marking look (mirroring the silk SVG pass). This is the consumer that closes the
+/// documented "an authored fab slab renders nowhere" gap — footprint fab graphics/text
+/// import as `F.Fab`/`B.Fab` and lower with the slab's role, then materialize here.
+///
+/// Unlike [`svg`] (a single top-view composite of the whole board), this is one file per
+/// fab slab, so a two-sided design gets a distinct `F.Fab` and `B.Fab` drawing. Bottom
+/// fab is mirrored about board-y (as a bottom drawing is normally viewed through the
+/// board), matching how [`svg_silk`] visually distinguishes the two silk sides — here we
+/// mirror the *geometry* since a per-side sheet is read head-on, not composited.
+///
+/// Fallible because the underlying feature lowering resolves slab names (Decision 13).
+///
+/// A gerber_fab would slot beside [`gerber_silk`] the same way (iterate the same
+/// [`datum_slabs`], emit RS-274X instead of SVG) if fab Gerber output is wanted later;
+/// this slice is SVG-only.
+pub fn svg_fab(doc: &Doc, lib: &PartLib, slab: &Slab) -> Result<String, String> {
+    const MARGIN: Nm = 2 * MM;
+    let su = crate::elaborate::stackup(&doc.source);
+    let board = source_board(doc);
+    let bottom = is_bottom_side(&su, &slab.z);
+
+    // This slab's fab features: `Role::Datum` shapes whose z intersects the slab (the
+    // same forward-per-slab query the silk Gerber uses).
+    let shapes: Vec<Shape2D> = role_features(doc, lib, &su, Role::Datum)?
+        .into_iter()
+        .filter(|f| {
+            let Extent::Prism { z, .. } = &f.extent;
+            z.overlaps(&slab.z)
+        })
+        .map(|f| {
+            let Extent::Prism { shape, .. } = f.extent;
+            shape
+        })
+        .collect();
+
+    // Content bounds: the board corners and every fab-feature point (so nothing clips),
+    // + margin. Falls back to a 10 mm box for an empty sheet so the viewBox is never
+    // degenerate — matching [`svg`].
+    let mut pts: Vec<Point> = Vec::new();
+    if let Some((min, max)) = board.as_ref().and_then(Region::bbox) {
+        pts.push(min);
+        pts.push(max);
+    }
+    for s in &shapes {
+        pts.extend(s.points());
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = match pts.first() {
+        Some(p) => (p.x, p.y, p.x, p.y),
+        None => (0, 0, 10 * MM, 10 * MM),
+    };
+    for p in &pts {
+        x0 = x0.min(p.x);
+        y0 = y0.min(p.y);
+        x1 = x1.max(p.x);
+        y1 = y1.max(p.y);
+    }
+    x0 -= MARGIN;
+    y0 -= MARGIN;
+    x1 += MARGIN;
+    y1 += MARGIN;
+
+    // Flip board-y into the SVG (downward) frame; for a bottom sheet, also mirror x about
+    // the content centre so the drawing reads as viewed from the back.
+    let flip = |y: Nm| -> Nm { y0 + y1 - y };
+    let mirror = |x: Nm| -> Nm { if bottom { x0 + x1 - x } else { x } };
+
+    let mut out = String::new();
+    out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    out.push_str(&format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"{} {} {} {}\">\n",
+        fmt_mm(x0),
+        fmt_mm(y0),
+        fmt_mm(x1 - x0),
+        fmt_mm(y1 - y0),
+    ));
+
+    // Board outline for context (like [`svg`]): the board region as an even-odd path, else
+    // the implicit bounding box.
+    match &board {
+        Some(region) => {
+            // Mirror each ring's x for a bottom sheet (no-op on top). Winding flips under
+            // mirroring, but the fill is even-odd so crossing count — not orientation —
+            // decides voids; the outline reads correctly either way.
+            let region = Region::new(
+                region
+                    .rings
+                    .iter()
+                    .map(|ring| {
+                        ring.iter()
+                            .map(|p| Point {
+                                x: mirror(p.x),
+                                y: p.y,
+                            })
+                            .collect()
+                    })
+                    .collect(),
+            );
+            out.push_str(&format!(
+                "  <path class=\"outline-board\" d=\"{}\" fill=\"none\" fill-rule=\"evenodd\" stroke=\"black\" stroke-width=\"0.1\"/>\n",
+                region_svg_d(&region, &flip)
+            ));
+        }
+        None => {
+            let (bx0, by0, bx1, by1) = (x0 + MARGIN, y0 + MARGIN, x1 - MARGIN, y1 - MARGIN);
+            out.push_str(&format!(
+                "  <rect class=\"outline-bbox\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"none\" stroke=\"black\" stroke-width=\"0.1\"/>\n",
+                fmt_mm(bx0),
+                fmt_mm(flip(by1)),
+                fmt_mm(bx1 - bx0),
+                fmt_mm(by1 - by0),
+            ));
+        }
+    }
+
+    // The fab features themselves, in the marking look (front/back class + colour).
+    let (class, color) = if bottom {
+        ("fab-bottom", "#996633")
+    } else {
+        ("fab", "#663300")
+    };
+    for shape in &shapes {
+        let shape = shape.map_points(|p| Point {
+            x: mirror(p.x),
+            y: p.y,
+        });
+        out.push_str(&svg_surface(&shape, &flip, class, color));
+    }
+
+    out.push_str("</svg>\n");
+    Ok(out)
+}
+
+/// The deterministic fab-drawing SVG fileset: one `board-F_Fab.svg` / `board-B_Fab.svg`
+/// per authored [`Role::Datum`] slab (top-down; see [`datum_slabs`]), named from the slab
+/// with the [`slab_file`] convention (`.`→`_`) that the Gerbers use. Empty for the default
+/// stackup (no fab slab). `(filename, content)` pairs, stable order; fallible because the
+/// per-slab render resolves slab names (Decision 13).
+pub fn fab_svg_set(doc: &Doc, lib: &PartLib) -> Result<Vec<(String, String)>, String> {
+    let su = crate::elaborate::stackup(&doc.source);
+    let mut out = Vec::new();
+    for slab in datum_slabs(&su) {
+        out.push((
+            format!("board-{}.svg", slab_file(&slab.name)),
+            svg_fab(doc, lib, &slab)?,
+        ));
+    }
+    Ok(out)
 }
 
 /// The full deterministic fab fileset: one Gerber per copper layer (`board-F_Cu.gbr`
@@ -1474,10 +1621,13 @@ pub fn gerber_set(doc: &Doc, lib: &PartLib) -> Result<Vec<(String, String)>, Str
         ));
     }
     let su = crate::elaborate::stackup(&doc.source);
-    for side in [Layer::Top, Layer::Bottom] {
+    // One solder-mask Gerber per `Role::Mask` slab, iterated by name (top-down; F.Mask
+    // before B.Mask on the default stackup) exactly as silk iterates its marking slabs —
+    // no copper-layer enum (Decision 16 stage 4).
+    for slab in role_slabs(&su, Role::Mask) {
         out.push((
-            format!("board-{}.gbr", mask_name(&su, side)),
-            gerber_mask(doc, lib, side)?,
+            format!("board-{}.gbr", slab_file(&slab.name)),
+            gerber_mask(doc, lib, &slab)?,
         ));
     }
     for slab in marking_slabs(&su) {
@@ -1504,6 +1654,23 @@ mod tests {
     use crate::elaborate::{board_rect, psu_module};
     use crate::history::History;
     use crate::part::part_library;
+
+    /// Resolve a `Role::Mask` slab of `doc` by side — the top/bottom mask by z-position —
+    /// so the mask tests can name a side while `gerber_mask` takes the slab itself. Panics
+    /// if the side carries no mask (the tests all use the default stackup, which has both).
+    fn mask_of(doc: &Doc, side: Layer) -> Slab {
+        let su = crate::elaborate::stackup(&doc.source);
+        let z = match side {
+            Layer::Bottom => su.bottom_mask(),
+            _ => su.top_mask(),
+        }
+        .expect("side has a mask slab");
+        su.slabs
+            .iter()
+            .find(|s| s.role == Role::Mask && s.z == z)
+            .cloned()
+            .expect("mask slab present")
+    }
 
     fn doc_psu(n: usize) -> (Doc, PartLib) {
         let lib = part_library();
@@ -2531,7 +2698,7 @@ psu.reg,LDO,0.000000,0.000000,0,T
         // padded_board has an F.Cu rect pad 0.6x1.2 and a circle pad 0.8. The mask
         // opening inflates each by 0.05mm per side: rect → 0.7x1.3, circle → 0.9.
         let (doc, lib) = padded_board();
-        let f = gerber_mask(&doc, &lib, Layer::Top).unwrap();
+        let f = gerber_mask(&doc, &lib, &mask_of(&doc, Layer::Top)).unwrap();
         assert!(f.contains("F_Mask"));
         assert!(
             f.contains("R,0.700000X1.300000*%"),
@@ -2541,7 +2708,7 @@ psu.reg,LDO,0.000000,0.000000,0,T
         assert_eq!(f.matches("D03*").count(), 2, "one opening per pad");
         // No bottom-side pads ⇒ no openings on B_Mask.
         assert_eq!(
-            gerber_mask(&doc, &lib, Layer::Bottom)
+            gerber_mask(&doc, &lib, &mask_of(&doc, Layer::Bottom))
                 .unwrap()
                 .matches("D03*")
                 .count(),
@@ -2580,14 +2747,14 @@ psu.reg,LDO,0.000000,0.000000,0,T
         // drill `Void` is a through-cut (full-stack z), not a mask-slab opening, so it is
         // NOT an extra flash — the count stays one opening per side.
         assert_eq!(
-            gerber_mask(doc, &lib, Layer::Top)
+            gerber_mask(doc, &lib, &mask_of(doc, Layer::Top))
                 .unwrap()
                 .matches("D03*")
                 .count(),
             1
         );
         assert_eq!(
-            gerber_mask(doc, &lib, Layer::Bottom)
+            gerber_mask(doc, &lib, &mask_of(doc, Layer::Bottom))
                 .unwrap()
                 .matches("D03*")
                 .count(),
@@ -2617,14 +2784,14 @@ psu.reg,LDO,0.000000,0.000000,0,T
             "cut",
         )
         .unwrap();
-        let f = gerber_mask(h.doc(), &lib, Layer::Top).unwrap();
+        let f = gerber_mask(h.doc(), &lib, &mask_of(h.doc(), Layer::Top)).unwrap();
         assert!(f.contains("G36*"), "cutout opens a mask region:\n{f}");
         assert!(f.contains("G37*"), "region closes:\n{f}");
         // The cutout corner (12mm) is drawn in the region contour (nm coordinates).
         assert!(f.contains("X12000000Y12000000"), "cutout boundary:\n{f}");
         // Both faces lose mask over a through cutout.
         assert!(
-            gerber_mask(h.doc(), &lib, Layer::Bottom)
+            gerber_mask(h.doc(), &lib, &mask_of(h.doc(), Layer::Bottom))
                 .unwrap()
                 .contains("G36*")
         );
@@ -2853,5 +3020,220 @@ psu.reg,LDO,0.000000,0.000000,0,T
             !s.contains("class=\"silk\" "),
             "no top-silk class for a bottom-only board:\n{s}"
         );
+    }
+
+    // --- fab drawing (Decision 15 consumer) -------------------------------
+
+    /// The default 2-layer stackup with an added zero-height `F.Fab` datum slab at the
+    /// F.Cu top face — the way a user authors a fab slab (Decision 15). Returned as `Slab`
+    /// directives so `elaborate::stackup` picks them up.
+    fn stackup_with_fab() -> Vec<crate::elaborate::GenDirective> {
+        use crate::elaborate::GenDirective as G;
+        let mut slabs = Stackup::default_2layer().slabs;
+        let top = slabs.iter().find(|s| s.name == "F.Cu").unwrap().z.hi;
+        slabs.push(Slab {
+            name: "F.Fab".into(),
+            z: ZRange::new(top, top),
+            role: Role::Datum,
+            material: None,
+        });
+        slabs.into_iter().map(G::Slab).collect()
+    }
+
+    /// A footprint carrying an SMD pad, an `F.Fab` graphic line, and an `F.Fab` `user`
+    /// text anchor (imported as a `Literal`) — the three fab-layer inputs the drawing pass
+    /// must render.
+    fn fab_footprint() -> PartDef {
+        crate::kicad::import_footprint(
+            r#"(footprint "FAB"
+                (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu"))
+                (fp_line (start 0 0) (end 1 0) (width 0.12) (layer "F.Fab"))
+                (fp_text user "FAB1" (at 0 1) (layer "F.Fab") (effects (font (size 1 1)))))"#,
+        )
+        .unwrap()
+    }
+
+    /// An authored `F.Fab` slab plus a footprint with fab graphics and a fab text anchor
+    /// emits a fab SVG that carries both the graphic stroke and the text strokes — the
+    /// consumer that closes the "authored fab slab renders nowhere" gap (Decision 15).
+    #[test]
+    fn fab_svg_emitted_with_graphics_and_text() {
+        use crate::elaborate::GenDirective as G;
+        let mut lib = part_library();
+        lib.insert("FAB".into(), fab_footprint());
+        let mut source = stackup_with_fab();
+        source.push(board_rect(Point::mm(0, 0), Point::mm(20, 20)));
+        source.push(G::Instance {
+            path: "u".into(),
+            part: "FAB".into(),
+            params: std::collections::BTreeMap::new(),
+            label: None,
+        });
+        source.push(G::Place {
+            path: "u".into(),
+            pos: Point::mm(5, 5),
+        });
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(source)), &lib, "fab")
+            .unwrap();
+        let doc = h.doc();
+
+        let set = fab_svg_set(doc, &lib).unwrap();
+        assert_eq!(set.len(), 1, "one fab slab ⇒ one fab SVG");
+        let (name, svg) = &set[0];
+        assert_eq!(name, "board-F_Fab.svg");
+        // Board outline for context.
+        assert!(svg.contains("class=\"outline-board\""), "outline:\n{svg}");
+        // The fab graphic line draws as a fab-class stroke.
+        assert!(
+            svg.contains("class=\"fab\""),
+            "fab graphic + text render as fab strokes:\n{svg}"
+        );
+        // Text lowers to several glyph strokes ⇒ more than the single graphic line.
+        assert!(
+            svg.matches("class=\"fab\"").count() >= 3,
+            "graphic line + multiple text strokes expected:\n{svg}"
+        );
+        assert_eq!(
+            fab_svg_set(doc, &lib),
+            fab_svg_set(doc, &lib),
+            "deterministic"
+        );
+    }
+
+    /// With **no** fab slab authored (the default stackup), the fab fileset is empty and
+    /// fab-layer footprint graphics stay invisible in every other output — the Decision 15
+    /// contract (a fab graphic materializes only when a fab slab exists).
+    #[test]
+    fn no_fab_slab_means_no_fab_output_and_invisible_graphics() {
+        use crate::elaborate::GenDirective as G;
+        let mut lib = part_library();
+        lib.insert("FAB".into(), fab_footprint());
+        let mut h = History::new(Default::default());
+        h.commit(
+            Transaction::one(Command::SetSource(vec![
+                board_rect(Point::mm(0, 0), Point::mm(20, 20)),
+                G::Instance {
+                    path: "u".into(),
+                    part: "FAB".into(),
+                    params: std::collections::BTreeMap::new(),
+                    label: None,
+                },
+                G::Place {
+                    path: "u".into(),
+                    pos: Point::mm(5, 5),
+                },
+            ])),
+            &lib,
+            "no-fab",
+        )
+        .unwrap();
+        let doc = h.doc();
+
+        // No fab SVG.
+        assert!(
+            fab_svg_set(doc, &lib).unwrap().is_empty(),
+            "no fab slab ⇒ no fab file"
+        );
+        // The fab graphic is inert everywhere else: not in the SVG, not in the Gerber set.
+        let s = svg(doc, &lib).unwrap();
+        assert!(
+            !s.contains("class=\"fab\""),
+            "fab graphic must not leak into the SVG:\n{s}"
+        );
+        let gset = gerber_set(doc, &lib).unwrap();
+        assert!(
+            gset.iter().all(|(n, _)| !n.contains("Fab")),
+            "no fab Gerber in the fileset: {:?}",
+            gset.iter().map(|(n, _)| n).collect::<Vec<_>>()
+        );
+    }
+
+    /// A bottom fab slab (`B.Fab`) renders with the bottom-side class, mirroring the silk
+    /// side split. Driven by a footprint carrying a `B.Fab` graphic (placed top-side, so
+    /// `swap_side` leaves it on `B.Fab`) — the footprint path is role-driven off the slab,
+    /// so a `Role::Datum` `B.Fab` slab produces a bottom-side fab feature.
+    #[test]
+    fn bottom_fab_gets_bottom_class() {
+        use crate::elaborate::GenDirective as G;
+        let mut lib = part_library();
+        lib.insert(
+            "BFAB".into(),
+            crate::kicad::import_footprint(
+                r#"(footprint "BFAB"
+                    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu"))
+                    (fp_line (start 0 0) (end 1 0) (width 0.12) (layer "B.Fab")))"#,
+            )
+            .unwrap(),
+        );
+        let mut slabs = Stackup::default_2layer().slabs;
+        let bot = slabs.iter().find(|s| s.name == "B.Cu").unwrap().z.lo;
+        slabs.push(Slab {
+            name: "B.Fab".into(),
+            z: ZRange::new(bot, bot),
+            role: Role::Datum,
+            material: None,
+        });
+        let mut source: Vec<G> = slabs.into_iter().map(G::Slab).collect();
+        source.push(board_rect(Point::mm(0, 0), Point::mm(20, 20)));
+        source.push(G::Instance {
+            path: "u".into(),
+            part: "BFAB".into(),
+            params: std::collections::BTreeMap::new(),
+            label: None,
+        });
+        source.push(G::Place {
+            path: "u".into(),
+            pos: Point::mm(5, 5),
+        });
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(source)), &lib, "bfab")
+            .unwrap();
+        let set = fab_svg_set(h.doc(), &lib).unwrap();
+        assert_eq!(set.len(), 1);
+        assert_eq!(set[0].0, "board-B_Fab.svg");
+        assert!(
+            set[0].1.contains("class=\"fab-bottom\""),
+            "bottom fab gets its own class:\n{}",
+            set[0].1
+        );
+    }
+
+    // --- mask export enters by role (Decision 16 stage 4) -----------------
+
+    /// A custom stackup with a single `Role::Mask` slab exports exactly one mask Gerber,
+    /// named from that slab — the mask loop iterates mask slabs by name, not a fixed
+    /// `[Top, Bottom]` copper-layer pair.
+    #[test]
+    fn single_mask_slab_exports_one_mask_gerber() {
+        use crate::elaborate::GenDirective as G;
+        // A 1-layer stackup: one copper slab and one mask slab above it.
+        let slabs = vec![
+            Slab {
+                name: "F.Cu".into(),
+                z: ZRange::new(0, 35_000),
+                role: Role::Conductor,
+                material: None,
+            },
+            Slab {
+                name: "F.Mask".into(),
+                z: ZRange::new(35_000, 45_000),
+                role: Role::Mask,
+                material: None,
+            },
+        ];
+        let mut source: Vec<G> = slabs.into_iter().map(G::Slab).collect();
+        source.push(board_rect(Point::mm(0, 0), Point::mm(10, 10)));
+        let lib = part_library();
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(source)), &lib, "1mask")
+            .unwrap();
+        let gset = gerber_set(h.doc(), &lib).unwrap();
+        let masks: Vec<&String> = gset
+            .iter()
+            .map(|(n, _)| n)
+            .filter(|n| n.contains("Mask"))
+            .collect();
+        assert_eq!(masks, vec!["board-F_Mask.gbr"], "exactly one mask Gerber");
     }
 }

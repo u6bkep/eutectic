@@ -691,7 +691,11 @@ unified producer — pours→`NetFeature`, via conductor+`Void` lowering, the Ex
 rewrite, keepout enforcement; (3) the trace/via slab-name migration rides here
 naturally (`net_features`' `(Layer, NetFeature)` keying dissolves into the stream) —
 0011's serialization design is Decision 18; (4) trailing: mask export
-iterates `Role::Mask` slabs by name (dropping `side: Layer`).
+iterates `Role::Mask` slabs by name (dropping `side: Layer`) — **done (branch
+feat/fab-svg)**: `gerber_mask` now takes the `Role::Mask` `Slab`, `gerber_set` loops
+`role_slabs(Role::Mask)` (top-down, F before B), `mask_slab_of`/`mask_name` deleted;
+output byte-identical for the default stackup (verified by diffing the `gerber` example
+before/after).
 
 ### Decision 17 — TTF outline text rides `Area` (2026-07-03)
 
@@ -833,8 +837,16 @@ Then the post-convergence steps proceed on the corrected foundation:
   EntityId overrides (reserved); typed quantities at the simulation boundary.
 - ~~Paste/fab virtual layers~~ — **resolved (Decision 15, implemented 2026-07-03)**:
   paste derived at export, fab an ordinary authorable zero-height `Datum` slab
-  (branch feat/datum-slabs). No fab output consumer yet — an authored fab slab
-  renders nowhere (documented).
+  (branch feat/datum-slabs). **Fab output consumer landed (branch feat/fab-svg)**: a
+  per-fab-slab SVG pass (`export::svg_fab` / `fab_svg_set`) iterates `Role::Datum` slabs
+  by name (a `datum_slabs` sibling of `marking_slabs`) and renders each fab slab's
+  `Role::Datum` features + board outline like silk — closing the "renders nowhere" gap.
+  Fab *Gerber* output is still deferred: a `gerber_fab` would slot beside `gerber_silk`
+  over the same `datum_slabs` (noted at `svg_fab`). Known limitation carried by this
+  branch: **board-level** `text` on a fab slab still lowers to `Role::Marking`
+  (hardcoded in `elaborate::features`' text path), so it lands on silk, not fab — only
+  the footprint graphic/text path is role-driven off the slab today; making board text
+  role-driven is the follow-up (out of this branch's scope).
 - ~~Bottom-flip axis convention~~ — **resolved (2026-07-03, branch feat/flip-axis)**:
   `Orient::flipped()` is Ry(180) (x-negates, y preserved — KiCad/fab board-turn
   convention, bottom silk upright); placement CSV decomposes the flip and reports the
