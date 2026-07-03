@@ -258,6 +258,30 @@ pub fn svg(doc: &Doc, lib: &PartLib) -> Result<String, String> {
         }
     }
 
+    // Through-cut voids (authored `hole` NPTH drills, Decision 16b): a source-level
+    // `Role::Void` feature is a physical hole in the board a human reading the sketch
+    // must see (the outline path above draws only outline ∖ cutouts, not standalone
+    // voids). Each draws as an outlined circle at its center/radius. Pad/via drill
+    // `Void`s live in `world_features`, not the source-only stream read here, so this is
+    // exactly the authored holes — no double-draw of plated barrels.
+    for nf in crate::elaborate::features(&doc.source)? {
+        if nf.feature.role != Role::Void {
+            continue;
+        }
+        let Extent::Prism { shape, .. } = &nf.feature.extent;
+        let r = shape.radius();
+        for c in shape.points() {
+            if r > 0 {
+                out.push_str(&format!(
+                    "  <circle class=\"hole\" cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"none\" stroke=\"black\" stroke-width=\"0.1\"/>\n",
+                    fmt_mm(c.x),
+                    fmt_mm(flip(c.y)),
+                    fmt_mm(r),
+                ));
+            }
+        }
+    }
+
     // Copper pour fills, under the components/traces: one translucent `<path>` per
     // pour (outer + hole subpaths, even-odd fill so knockouts read as voids), in the
     // pour's layer colour. Deterministic (pours iterate in source/net/layer order).
@@ -1204,8 +1228,9 @@ pub fn excellon_drill(doc: &Doc, lib: &PartLib) -> Vec<(String, String)> {
 
 /// Split a `(plated, diameter, kind)` hit list into the PTH / NPTH drill files, emitting
 /// each only when it has holes. Factored out of [`excellon_drill`] so the split is unit-
-/// testable without an authoring path for NPTH holes (which the model cannot produce yet
-/// — a mounting-hole `Void` is future work; see 0022 / Decision 16b).
+/// testable on a synthesized hit list; the end-to-end authoring path for an NPTH hole is
+/// the `hole` directive → a full-stackup material-less [`Role::Void`] (Decision 16b), and
+/// the through-cut query above classifies it non-plated into `board-NPTH.drl`.
 fn excellon_files(hits: Vec<(bool, Nm, DrillKind)>) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for (plated, label, filename) in [
@@ -1884,6 +1909,33 @@ psu.reg,LDO,0.000000,0.000000,0,T
             s.contains("class=\"outline-bbox\""),
             "implicit bbox outline expected"
         );
+    }
+
+    /// An authored `hole` (NPTH through-cut) draws as an outlined circle in the SVG, so a
+    /// human reading the sketch sees the mounting hole (the outline path draws only the
+    /// board region, not standalone voids).
+    #[test]
+    fn svg_draws_authored_holes() {
+        use crate::elaborate::GenDirective as G;
+        let lib = part_library();
+        let mut h = History::new(Default::default());
+        h.commit(
+            Transaction::one(Command::SetSource(vec![
+                board_rect(Point::mm(0, 0), Point::mm(20, 20)),
+                G::Hole {
+                    center: Point::mm(3, 17),
+                    dia: 2_700_000,
+                },
+            ])),
+            &lib,
+            "hole",
+        )
+        .unwrap();
+        let s = svg(h.doc(), &lib).unwrap();
+        assert!(s.contains("class=\"hole\""), "hole circle expected:\n{s}");
+        // Radius = dia/2 = 1.35mm, centered at cx=3mm.
+        assert!(s.contains("cx=\"3.000000\""), "hole at x=3mm:\n{s}");
+        assert!(s.contains("r=\"1.350000\""), "hole radius 1.35mm:\n{s}");
     }
 
     #[test]

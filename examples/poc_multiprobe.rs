@@ -715,8 +715,16 @@ fn main() {
     .unwrap();
     let text2 = serialize(h2.doc());
     if text1 == text2 {
+        // FIXPOINT, not full fidelity: serialize(parse(serialize(doc))) == serialize(doc)
+        // holds, so parse/serialize are stable inverses of each other. It does NOT prove
+        // the doc->text projection is lossless — the board's corner radius is dropped at
+        // serialization (F4), and since it is already gone from `text1`, both sides agree
+        // and the byte-compare is blind to that loss. So: the text round-trip is a stable
+        // fixpoint; a rounded outline is silently flattened to a sharp polygon upstream.
         println!(
-            "  LOSSLESS: re-serialized text is byte-identical ({} bytes)",
+            "  FIXPOINT: parse/serialize are stable inverses, byte-identical ({} bytes). \
+             NOTE: the doc->text projection drops the board corner radius (F4), so this \
+             check cannot see that loss.",
             text1.len()
         );
     } else {

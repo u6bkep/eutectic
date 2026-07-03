@@ -750,6 +750,11 @@ fn parse_line(line: &str) -> Result<Item, String> {
                 return Err("hole needs exactly one center point: hole (x,y) dia=<len>".into());
             }
             let dia = dia.ok_or("hole needs a diameter: hole (x,y) dia=<len>")?;
+            if dia <= 0 {
+                return Err(format!(
+                    "hole: diameter must be positive (got {dia}nm) — a zero/negative drill is degenerate"
+                ));
+            }
             Item::Directive(GenDirective::Hole {
                 center: pts[0],
                 dia,
@@ -2751,6 +2756,21 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
             e.contains("1:1"),
             "error should carry the line location: {e}"
         );
+    }
+
+    /// A `hole` parses with a positive diameter and round-trips; a zero or negative
+    /// diameter is rejected at parse (a degenerate/negative drill tool must not slip
+    /// silently into the Excellon output).
+    #[test]
+    fn hole_requires_positive_diameter() {
+        let ok = parse("hole (4mm, 4mm) dia=2.7mm").unwrap();
+        assert_eq!(ok.source.len(), 1, "one hole directive");
+        assert!(
+            parse("hole (4mm, 4mm) dia=0mm").is_err(),
+            "zero diameter rejected"
+        );
+        let e = crate::diagnostic::render(&parse("hole (4mm, 4mm) dia=-1mm").unwrap_err());
+        assert!(e.contains("must be positive"), "negative rejected: {e}");
     }
 
     #[test]
