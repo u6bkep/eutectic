@@ -1,399 +1,743 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="-2.000000 -3.045000 60.000000 49.045000">
-  <polygon class="outline-board" points="0.000000,42.955000 56.000000,42.955000 56.000000,-1.045000 0.000000,-1.045000" fill="none" stroke="black" stroke-width="0.1"/>
+  <path class="outline-board" d="M0.000000,42.955000 L56.000000,42.955000 L56.000000,-1.045000 L0.000000,-1.045000 Z" fill="none" fill-rule="evenodd" stroke="black" stroke-width="0.1"/>
   <g class="component" data-id="C0">
-    <circle class="pad" cx="26.295791" cy="23.766431" r="0.3"/>
-    <circle class="pad" cx="27.255791" cy="23.766431" r="0.3"/>
-    <circle class="origin" cx="26.775791" cy="23.766431" r="0.5" fill="red"/>
-    <text x="26.775791" y="23.766431" font-size="1.5">C0</text>
+    <polygon class="pad" points="26.364222,23.678443 26.644222,23.678443 26.644222,23.338443 26.364222,23.338443"/>
+    <polygon class="pad" points="27.324222,23.678443 27.604222,23.678443 27.604222,23.338443 27.324222,23.338443"/>
+  <polyline class="silk" points="26.876386,23.868443 27.092058,23.868443" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="26.876386,23.148443 27.092058,23.148443" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="26.912793,24.382729 26.769936,24.239872 26.484222,24.239872 26.341365,24.382729 26.341365,24.954157 26.484222,25.097014 26.769936,25.097014 26.912793,24.954157" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="27.341365,24.382729 27.484222,24.239872 27.484222,25.097014" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="27.341365,25.097014 27.627079,25.097014" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle class="origin" cx="26.984222" cy="23.508443" r="0.5" fill="red"/>
+    <text x="26.984222" y="23.508443" font-size="1.5">C0</text>
   </g>
   <g class="component" data-id="C1">
-    <circle class="pad" cx="24.070000" cy="14.295000" r="0.3"/>
-    <circle class="pad" cx="25.030000" cy="14.295000" r="0.3"/>
-    <circle class="origin" cx="24.550000" cy="14.295000" r="0.5" fill="red"/>
-    <text x="24.550000" y="14.295000" font-size="1.5">C1</text>
+    <polygon class="pad" points="23.930009,14.615000 24.210009,14.615000 24.210009,14.275000 23.930009,14.275000"/>
+    <polygon class="pad" points="24.890009,14.615000 25.170009,14.615000 25.170009,14.275000 24.890009,14.275000"/>
+  <polyline class="silk" points="24.442173,14.805000 24.657845,14.805000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="24.442173,14.085000 24.657845,14.085000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="24.407152,15.319286 24.264295,15.176429 23.978581,15.176429 23.835724,15.319286 23.835724,15.890714 23.978581,16.033571 24.264295,16.033571 24.407152,15.890714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="24.692866,15.319286 24.835724,15.176429 25.121438,15.176429 25.264295,15.319286 25.264295,15.462143 24.692866,16.033571 25.264295,16.033571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle class="origin" cx="24.550009" cy="14.445000" r="0.5" fill="red"/>
+    <text x="24.550009" y="14.445000" font-size="1.5">C1</text>
   </g>
   <g class="component" data-id="C10">
-    <circle class="pad" cx="24.070000" cy="23.615000" r="0.3"/>
-    <circle class="pad" cx="25.030000" cy="23.615000" r="0.3"/>
-    <circle class="origin" cx="24.550000" cy="23.615000" r="0.5" fill="red"/>
-    <text x="24.550000" y="23.615000" font-size="1.5">C10</text>
+    <polygon class="pad" points="23.930000,23.635000 24.210000,23.635000 24.210000,23.295000 23.930000,23.295000"/>
+    <polygon class="pad" points="24.890000,23.635000 25.170000,23.635000 25.170000,23.295000 24.890000,23.295000"/>
+  <polyline class="silk" points="24.442164,23.825000 24.657836,23.825000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="24.442164,23.105000 24.657836,23.105000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="24.407143,24.339286 24.264286,24.196429 23.978572,24.196429 23.835715,24.339286 23.835715,24.910714 23.978572,25.053571 24.264286,25.053571 24.407143,24.910714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="24.692857,24.196429 25.264286,24.196429 24.978572,24.625000 25.264286,24.767857 25.264286,24.910714 25.121429,25.053571 24.835715,25.053571 24.692857,24.910714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle class="origin" cx="24.550000" cy="23.465000" r="0.5" fill="red"/>
+    <text x="24.550000" y="23.465000" font-size="1.5">C10</text>
   </g>
   <g class="component" data-id="C11">
-    <circle class="pad" cx="30.265159" cy="14.295000" r="0.3"/>
-    <circle class="pad" cx="31.225159" cy="14.295000" r="0.3"/>
-    <circle class="origin" cx="30.745159" cy="14.295000" r="0.5" fill="red"/>
-    <text x="30.745159" y="14.295000" font-size="1.5">C11</text>
+    <polygon class="pad" points="30.186493,14.615000 30.466493,14.615000 30.466493,14.275000 30.186493,14.275000"/>
+    <polygon class="pad" points="31.146493,14.615000 31.426493,14.615000 31.426493,14.275000 31.146493,14.275000"/>
+  <polyline class="silk" points="30.698657,14.805000 30.914329,14.805000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="30.698657,14.085000 30.914329,14.085000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="30.663636,15.319286 30.520779,15.176429 30.235065,15.176429 30.092208,15.319286 30.092208,15.890714 30.235065,16.033571 30.520779,16.033571 30.663636,15.890714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="31.377922,16.033571 31.377922,15.176429 30.949350,15.747857 31.520779,15.747857" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle class="origin" cx="30.806493" cy="14.445000" r="0.5" fill="red"/>
+    <text x="30.806493" y="14.445000" font-size="1.5">C11</text>
   </g>
   <g class="component" data-id="C12">
-    <circle class="pad" cx="33.914322" cy="19.515145" r="0.3"/>
-    <circle class="pad" cx="34.874322" cy="19.515145" r="0.3"/>
-    <circle class="origin" cx="34.394322" cy="19.515145" r="0.5" fill="red"/>
-    <text x="34.394322" y="19.515145" font-size="1.5">C12</text>
+    <polygon class="pad" points="33.791737,20.002611 34.071737,20.002611 34.071737,19.662611 33.791737,19.662611"/>
+    <polygon class="pad" points="34.751737,20.002611 35.031737,20.002611 35.031737,19.662611 34.751737,19.662611"/>
+  <polyline class="silk" points="34.303901,20.192611 34.519573,20.192611" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="34.303901,19.472611 34.519573,19.472611" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="34.268880,20.706897 34.126023,20.564040 33.840309,20.564040 33.697452,20.706897 33.697452,21.278325 33.840309,21.421182 34.126023,21.421182 34.268880,21.278325" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="35.126023,20.564040 34.554594,20.564040 34.554594,20.992611 34.983166,20.992611 35.126023,21.135468 35.126023,21.278325 34.983166,21.421182 34.697452,21.421182 34.554594,21.278325" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle class="origin" cx="34.411737" cy="19.832611" r="0.5" fill="red"/>
+    <text x="34.411737" y="19.832611" font-size="1.5">C12</text>
   </g>
   <g class="component" data-id="C13">
-    <circle class="pad" cx="33.103092" cy="23.525000" r="0.3"/>
-    <circle class="pad" cx="34.063092" cy="23.525000" r="0.3"/>
-    <circle class="origin" cx="33.583092" cy="23.525000" r="0.5" fill="red"/>
-    <text x="33.583092" y="23.525000" font-size="1.5">C13</text>
+    <polygon class="pad" points="33.148505,23.008568 33.428505,23.008568 33.428505,22.668568 33.148505,22.668568"/>
+    <polygon class="pad" points="34.108505,23.008568 34.388505,23.008568 34.388505,22.668568 34.108505,22.668568"/>
+  <polyline class="silk" points="33.660669,23.198568 33.876341,23.198568" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="33.660669,22.478568 33.876341,22.478568" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="33.625648,23.712854 33.482791,23.569997 33.197077,23.569997 33.054220,23.712854 33.054220,24.284282 33.197077,24.427139 33.482791,24.427139 33.625648,24.284282" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="34.482791,23.712854 34.339934,23.569997 34.054220,23.569997 33.911362,23.712854 33.911362,24.284282 34.054220,24.427139 34.339934,24.427139 34.482791,24.284282 34.482791,24.141425 34.339934,23.998568 33.911362,23.998568" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle class="origin" cx="33.768505" cy="22.838568" r="0.5" fill="red"/>
+    <text x="33.768505" y="22.838568" font-size="1.5">C13</text>
   </g>
   <g class="component" data-id="C2">
-    <circle class="pad" cx="28.245159" cy="14.295000" r="0.3"/>
-    <circle class="pad" cx="29.205159" cy="14.295000" r="0.3"/>
-    <circle class="origin" cx="28.725159" cy="14.295000" r="0.5" fill="red"/>
-    <text x="28.725159" y="14.295000" font-size="1.5">C2</text>
+    <polygon class="pad" points="28.366493,14.615000 28.646493,14.615000 28.646493,14.275000 28.366493,14.275000"/>
+    <polygon class="pad" points="29.326493,14.615000 29.606493,14.615000 29.606493,14.275000 29.326493,14.275000"/>
+  <polyline class="silk" points="28.878657,14.805000 29.094329,14.805000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="28.878657,14.085000 29.094329,14.085000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="28.843636,15.319286 28.700779,15.176429 28.415065,15.176429 28.272208,15.319286 28.272208,15.890714 28.415065,16.033571 28.700779,16.033571 28.843636,15.890714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="29.129350,15.176429 29.700779,15.176429 29.272208,16.033571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle class="origin" cx="28.986493" cy="14.445000" r="0.5" fill="red"/>
+    <text x="28.986493" y="14.445000" font-size="1.5">C2</text>
   </g>
   <g class="component" data-id="C3">
-    <circle class="pad" cx="33.296007" cy="15.883658" r="0.3"/>
-    <circle class="pad" cx="34.256007" cy="15.883658" r="0.3"/>
-    <circle class="origin" cx="33.776007" cy="15.883658" r="0.5" fill="red"/>
-    <text x="33.776007" y="15.883658" font-size="1.5">C3</text>
+    <polygon class="pad" points="33.165605,15.968535 33.445605,15.968535 33.445605,15.628535 33.165605,15.628535"/>
+    <polygon class="pad" points="34.125605,15.968535 34.405605,15.968535 34.405605,15.628535 34.125605,15.628535"/>
+  <polyline class="silk" points="33.677769,16.158535 33.893441,16.158535" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="33.677769,15.438535 33.893441,15.438535" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="33.642748,16.672821 33.499891,16.529964 33.214177,16.529964 33.071320,16.672821 33.071320,17.244249 33.214177,17.387106 33.499891,17.387106 33.642748,17.244249" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="34.071320,16.958535 33.928462,16.815678 33.928462,16.672821 34.071320,16.529964 34.357034,16.529964 34.499891,16.672821 34.499891,16.815678 34.357034,16.958535 34.071320,16.958535" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="34.357034,16.958535 34.499891,17.101392 34.499891,17.244249 34.357034,17.387106 34.071320,17.387106 33.928462,17.244249 33.928462,17.101392 34.071320,16.958535" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle class="origin" cx="33.785605" cy="15.798535" r="0.5" fill="red"/>
+    <text x="33.785605" y="15.798535" font-size="1.5">C3</text>
   </g>
   <g class="component" data-id="C4">
-    <circle class="pad" cx="33.917298" cy="18.395147" r="0.3"/>
-    <circle class="pad" cx="34.877298" cy="18.395147" r="0.3"/>
-    <circle class="origin" cx="34.397298" cy="18.395147" r="0.5" fill="red"/>
-    <text x="34.397298" y="18.395147" font-size="1.5">C4</text>
+    <polygon class="pad" points="33.819677,19.082611 34.099677,19.082611 34.099677,18.742611 33.819677,18.742611"/>
+    <polygon class="pad" points="34.779677,19.082611 35.059677,19.082611 35.059677,18.742611 34.779677,18.742611"/>
+  <polyline class="silk" points="34.331841,19.272611 34.547513,19.272611" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="34.331841,18.552611 34.547513,18.552611" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="34.296820,19.786897 34.153963,19.644040 33.868249,19.644040 33.725392,19.786897 33.725392,20.358325 33.868249,20.501182 34.153963,20.501182 34.296820,20.358325" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="35.153963,19.929754 35.011106,20.072611 34.725392,20.072611 34.582534,19.929754 34.582534,19.786897 34.725392,19.644040 35.011106,19.644040 35.153963,19.786897 35.153963,19.929754" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="35.153963,19.929754 35.153963,20.358325 35.011106,20.501182 34.725392,20.501182" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle class="origin" cx="34.439677" cy="18.912611" r="0.5" fill="red"/>
+    <text x="34.439677" y="18.912611" font-size="1.5">C4</text>
   </g>
   <g class="component" data-id="C5">
-    <circle class="pad" cx="34.055000" cy="21.755142" r="0.3"/>
-    <circle class="pad" cx="35.015000" cy="21.755142" r="0.3"/>
-    <circle class="origin" cx="34.535000" cy="21.755142" r="0.5" fill="red"/>
-    <text x="34.535000" y="21.755142" font-size="1.5">C5</text>
+    <polygon class="pad" points="33.805524,22.088568 34.085524,22.088568 34.085524,21.748568 33.805524,21.748568"/>
+    <polygon class="pad" points="34.765524,22.088568 35.045524,22.088568 35.045524,21.748568 34.765524,21.748568"/>
+  <polyline class="silk" points="34.317688,22.278568 34.533360,22.278568" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="34.317688,21.558568 34.533360,21.558568" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="33.854095,22.792854 33.711238,22.649997 33.425524,22.649997 33.282667,22.792854 33.282667,23.364282 33.425524,23.507139 33.711238,23.507139 33.854095,23.364282" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="34.282667,22.792854 34.425524,22.649997 34.425524,23.507139" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="34.282667,23.507139 34.568381,23.507139" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="35.139809,23.507139 34.996952,23.364282 34.996952,22.792854 35.139809,22.649997 35.425524,22.649997 35.568381,22.792854 35.568381,23.364282 35.425524,23.507139 35.139809,23.507139" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="35.139809,23.364282 35.425524,22.792854" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle class="origin" cx="34.425524" cy="21.918568" r="0.5" fill="red"/>
+    <text x="34.425524" y="21.918568" font-size="1.5">C5</text>
   </g>
   <g class="component" data-id="C6">
-    <circle class="pad" cx="29.009735" cy="24.735000" r="0.3"/>
-    <circle class="pad" cx="29.969735" cy="24.735000" r="0.3"/>
-    <circle class="origin" cx="29.489735" cy="24.735000" r="0.5" fill="red"/>
-    <text x="29.489735" y="24.735000" font-size="1.5">C6</text>
+    <polygon class="pad" points="29.233797,24.555000 29.513797,24.555000 29.513797,24.215000 29.233797,24.215000"/>
+    <polygon class="pad" points="30.193797,24.555000 30.473797,24.555000 30.473797,24.215000 30.193797,24.215000"/>
+  <polyline class="silk" points="29.745961,24.745000 29.961633,24.745000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="29.745961,24.025000 29.961633,24.025000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="29.353797,25.259286 29.210940,25.116429 28.925226,25.116429 28.782369,25.259286 28.782369,25.830714 28.925226,25.973571 29.210940,25.973571 29.353797,25.830714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="29.782369,25.259286 29.925226,25.116429 29.925226,25.973571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="29.782369,25.973571 30.068083,25.973571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="30.639511,25.259286 30.782369,25.116429 30.782369,25.973571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="30.639511,25.973571 30.925226,25.973571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle class="origin" cx="29.853797" cy="24.385000" r="0.5" fill="red"/>
+    <text x="29.853797" y="24.385000" font-size="1.5">C6</text>
   </g>
   <g class="component" data-id="C7">
-    <circle class="pad" cx="29.983447" cy="23.615000" r="0.3"/>
-    <circle class="pad" cx="30.943447" cy="23.615000" r="0.3"/>
-    <circle class="origin" cx="30.463447" cy="23.615000" r="0.5" fill="red"/>
-    <text x="30.463447" y="23.615000" font-size="1.5">C7</text>
+    <polygon class="pad" points="29.508505,23.635000 29.788505,23.635000 29.788505,23.295000 29.508505,23.295000"/>
+    <polygon class="pad" points="30.468505,23.635000 30.748505,23.635000 30.748505,23.295000 30.468505,23.295000"/>
+  <polyline class="silk" points="30.020669,23.825000 30.236341,23.825000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="30.020669,23.105000 30.236341,23.105000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="29.557076,24.339286 29.414219,24.196429 29.128505,24.196429 28.985648,24.339286 28.985648,24.910714 29.128505,25.053571 29.414219,25.053571 29.557076,24.910714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="29.985648,24.339286 30.128505,24.196429 30.128505,25.053571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="29.985648,25.053571 30.271362,25.053571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="30.699933,24.339286 30.842790,24.196429 31.128505,24.196429 31.271362,24.339286 31.271362,24.482143 30.699933,25.053571 31.271362,25.053571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle class="origin" cx="30.128505" cy="23.465000" r="0.5" fill="red"/>
+    <text x="30.128505" y="23.465000" font-size="1.5">C7</text>
   </g>
   <g class="component" data-id="C8">
-    <circle class="pad" cx="33.882354" cy="20.635142" r="0.3"/>
-    <circle class="pad" cx="34.842354" cy="20.635142" r="0.3"/>
-    <circle class="origin" cx="34.362354" cy="20.635142" r="0.5" fill="red"/>
-    <text x="34.362354" y="20.635142" font-size="1.5">C8</text>
+    <polygon class="pad" points="33.808751,21.168568 34.088751,21.168568 34.088751,20.828568 33.808751,20.828568"/>
+    <polygon class="pad" points="34.768751,21.168568 35.048751,21.168568 35.048751,20.828568 34.768751,20.828568"/>
+  <polyline class="silk" points="34.320915,21.358568 34.536587,21.358568" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="34.320915,20.638568 34.536587,20.638568" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="33.857322,21.872854 33.714465,21.729997 33.428751,21.729997 33.285894,21.872854 33.285894,22.444282 33.428751,22.587139 33.714465,22.587139 33.857322,22.444282" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="34.285894,21.872854 34.428751,21.729997 34.428751,22.587139" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="34.285894,22.587139 34.571608,22.587139" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="35.000179,21.729997 35.571608,21.729997 35.285894,22.158568 35.571608,22.301425 35.571608,22.444282 35.428751,22.587139 35.143036,22.587139 35.000179,22.444282" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle class="origin" cx="34.428751" cy="20.998568" r="0.5" fill="red"/>
+    <text x="34.428751" y="20.998568" font-size="1.5">C8</text>
   </g>
   <g class="component" data-id="C9">
-    <circle class="pad" cx="32.630000" cy="22.405000" r="0.3"/>
-    <circle class="pad" cx="33.590000" cy="22.405000" r="0.3"/>
-    <circle class="origin" cx="33.110000" cy="22.405000" r="0.5" fill="red"/>
-    <text x="33.110000" y="22.405000" font-size="1.5">C9</text>
+    <polygon class="pad" points="31.328505,23.550049 31.608505,23.550049 31.608505,23.210049 31.328505,23.210049"/>
+    <polygon class="pad" points="32.288505,23.550049 32.568505,23.550049 32.568505,23.210049 32.288505,23.210049"/>
+  <polyline class="silk" points="31.840669,23.740049 32.056341,23.740049" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="31.840669,23.020049 32.056341,23.020049" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="31.377076,24.254335 31.234219,24.111478 30.948505,24.111478 30.805648,24.254335 30.805648,24.825763 30.948505,24.968620 31.234219,24.968620 31.377076,24.825763" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="31.805648,24.254335 31.948505,24.111478 31.948505,24.968620" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="31.805648,24.968620 32.091362,24.968620" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="32.948505,24.968620 32.948505,24.111478 32.519933,24.682906 33.091362,24.682906" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle class="origin" cx="31.948505" cy="23.380049" r="0.5" fill="red"/>
+    <text x="31.948505" y="23.380049" font-size="1.5">C9</text>
   </g>
   <g class="component" data-id="C_IN">
-    <circle class="pad" cx="9.520000" cy="24.955000" r="0.3"/>
-    <circle class="pad" cx="10.480000" cy="24.955000" r="0.3"/>
+    <polygon class="pad" points="9.380000,25.125000 9.660000,25.125000 9.660000,24.785000 9.380000,24.785000"/>
+    <polygon class="pad" points="10.340000,25.125000 10.620000,25.125000 10.620000,24.785000 10.340000,24.785000"/>
+  <polyline class="silk" points="9.892164,25.315000 10.107836,25.315000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="9.892164,24.595000 10.107836,24.595000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="9.428571,25.829286 9.285714,25.686429 9.000000,25.686429 8.857143,25.829286 8.857143,26.400714 9.000000,26.543571 9.285714,26.543571 9.428571,26.400714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="9.857143,25.829286 10.000000,25.686429 10.000000,26.543571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="9.857143,26.543571 10.142857,26.543571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="11.142857,25.686429 10.571428,25.686429 10.571428,26.115000 11.000000,26.115000 11.142857,26.257857 11.142857,26.400714 11.000000,26.543571 10.714285,26.543571 10.571428,26.400714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
     <circle class="origin" cx="10.000000" cy="24.955000" r="0.5" fill="red"/>
     <text x="10.000000" y="24.955000" font-size="1.5">C_IN</text>
   </g>
   <g class="component" data-id="C_OUT">
-    <circle class="pad" cx="17.520000" cy="24.955000" r="0.3"/>
-    <circle class="pad" cx="18.480000" cy="24.955000" r="0.3"/>
+    <polygon class="pad" points="17.380000,25.125000 17.660000,25.125000 17.660000,24.785000 17.380000,24.785000"/>
+    <polygon class="pad" points="18.340000,25.125000 18.620000,25.125000 18.620000,24.785000 18.340000,24.785000"/>
+  <polyline class="silk" points="17.892164,25.315000 18.107836,25.315000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="17.892164,24.595000 18.107836,24.595000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="17.428571,25.829286 17.285714,25.686429 17.000000,25.686429 16.857143,25.829286 16.857143,26.400714 17.000000,26.543571 17.285714,26.543571 17.428571,26.400714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="17.857143,25.829286 18.000000,25.686429 18.000000,26.543571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="17.857143,26.543571 18.142857,26.543571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="19.142857,25.829286 19.000000,25.686429 18.714285,25.686429 18.571428,25.829286 18.571428,26.400714 18.714285,26.543571 19.000000,26.543571 19.142857,26.400714 19.142857,26.257857 19.000000,26.115000 18.571428,26.115000" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
     <circle class="origin" cx="18.000000" cy="24.955000" r="0.5" fill="red"/>
     <text x="18.000000" y="24.955000" font-size="1.5">C_OUT</text>
   </g>
   <g class="component" data-id="C_X1">
-    <circle class="pad" cx="14.520000" cy="9.955000" r="0.3"/>
-    <circle class="pad" cx="15.480000" cy="9.955000" r="0.3"/>
+    <polygon class="pad" points="14.380000,10.125000 14.660000,10.125000 14.660000,9.785000 14.380000,9.785000"/>
+    <polygon class="pad" points="15.340000,10.125000 15.620000,10.125000 15.620000,9.785000 15.340000,9.785000"/>
+  <polyline class="silk" points="14.892164,10.315000 15.107836,10.315000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="14.892164,9.595000 15.107836,9.595000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="14.428571,10.829286 14.285714,10.686429 14.000000,10.686429 13.857143,10.829286 13.857143,11.400714 14.000000,11.543571 14.285714,11.543571 14.428571,11.400714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="14.857143,10.829286 15.000000,10.686429 15.000000,11.543571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="14.857143,11.543571 15.142857,11.543571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="15.571428,10.686429 16.142857,10.686429 15.714285,11.543571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
     <circle class="origin" cx="15.000000" cy="9.955000" r="0.5" fill="red"/>
     <text x="15.000000" y="9.955000" font-size="1.5">C_X1</text>
   </g>
   <g class="component" data-id="C_X2">
-    <circle class="pad" cx="20.520000" cy="9.955000" r="0.3"/>
-    <circle class="pad" cx="21.480000" cy="9.955000" r="0.3"/>
+    <polygon class="pad" points="20.380000,10.125000 20.660000,10.125000 20.660000,9.785000 20.380000,9.785000"/>
+    <polygon class="pad" points="21.340000,10.125000 21.620000,10.125000 21.620000,9.785000 21.340000,9.785000"/>
+  <polyline class="silk" points="20.892164,10.315000 21.107836,10.315000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="20.892164,9.595000 21.107836,9.595000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="20.428571,10.829286 20.285714,10.686429 20.000000,10.686429 19.857143,10.829286 19.857143,11.400714 20.000000,11.543571 20.285714,11.543571 20.428571,11.400714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="20.857143,10.829286 21.000000,10.686429 21.000000,11.543571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="20.857143,11.543571 21.142857,11.543571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="21.714285,11.115000 21.571428,10.972143 21.571428,10.829286 21.714285,10.686429 22.000000,10.686429 22.142857,10.829286 22.142857,10.972143 22.000000,11.115000 21.714285,11.115000" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="22.000000,11.115000 22.142857,11.257857 22.142857,11.400714 22.000000,11.543571 21.714285,11.543571 21.571428,11.400714 21.571428,11.257857 21.714285,11.115000" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
     <circle class="origin" cx="21.000000" cy="9.955000" r="0.5" fill="red"/>
     <text x="21.000000" y="9.955000" font-size="1.5">C_X2</text>
   </g>
   <g class="component" data-id="D1">
-    <circle class="pad" cx="39.085000" cy="29.505000" r="0.3"/>
-    <circle class="pad" cx="39.085000" cy="28.405000" r="0.3"/>
-    <circle class="pad" cx="40.915000" cy="28.405000" r="0.3"/>
-    <circle class="pad" cx="40.915000" cy="29.505000" r="0.3"/>
+    <polygon class="pad" points="38.735000,29.855000 39.435000,29.855000 39.435000,29.155000 38.735000,29.155000"/>
+    <polygon class="pad" points="38.735000,28.755000 39.435000,28.755000 39.435000,28.055000 38.735000,28.055000"/>
+    <polygon class="pad" points="40.565000,28.755000 41.265000,28.755000 41.265000,28.055000 40.565000,28.055000"/>
+    <polygon class="pad" points="40.565000,29.855000 41.265000,29.855000 41.265000,29.155000 40.565000,29.155000"/>
+  <polyline class="silk" points="38.400000,27.805000 38.400000,29.805000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="38.400000,27.805000 41.600000,27.805000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="38.700000,30.105000 38.400000,29.805000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="38.700000,30.105000 41.600000,30.105000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="41.600000,30.105000 41.600000,27.805000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
     <circle class="origin" cx="40.000000" cy="28.955000" r="0.5" fill="red"/>
     <text x="40.000000" y="28.955000" font-size="1.5">D1</text>
   </g>
   <g class="component" data-id="J1">
-    <circle class="pad" cx="2.000000" cy="37.955000" r="0.3"/>
-    <circle class="pad" cx="3.000000" cy="37.955000" r="0.3"/>
-    <circle class="pad" cx="4.000000" cy="37.955000" r="0.3"/>
-    <circle class="pad" cx="0.700000" cy="34.080000" r="0.3"/>
+    <polygon class="pad" points="1.850000,38.580000 2.150000,38.580000 2.150000,37.330000 1.850000,37.330000"/>
+    <polygon class="pad" points="2.850000,38.580000 3.150000,38.580000 3.150000,37.330000 2.850000,37.330000"/>
+    <polygon class="pad" points="3.850000,38.580000 4.150000,38.580000 4.150000,37.330000 3.850000,37.330000"/>
+    <polygon class="pad" points="0.350000,34.730000 1.050000,34.730000 1.050000,33.430000 0.350000,33.430000"/>
+  <polyline class="silk" points="0.390000,37.740000 1.440000,37.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="0.390000,35.240000 0.390000,37.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="1.440000,37.740000 1.440000,38.730000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="1.560000,33.270000 4.440000,33.270000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="5.610000,37.740000 4.560000,37.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="5.610000,35.240000 5.610000,37.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="2.071428,39.506429 2.071428,40.220714 1.928571,40.363571 1.642857,40.363571 1.500000,40.220714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="2.928571,39.649286 2.785714,39.506429 2.500000,39.506429 2.357142,39.649286 2.357142,39.792143 2.500000,39.935000 2.785714,39.935000 2.928571,40.077857 2.928571,40.220714 2.785714,40.363571 2.500000,40.363571 2.357142,40.220714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="3.214285,39.506429 3.785714,39.506429" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="3.500000,39.506429 3.500000,40.363571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="4.214285,39.649286 4.357142,39.506429 4.357142,40.363571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="4.214285,40.363571 4.500000,40.363571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
     <circle class="origin" cx="3.000000" cy="35.955000" r="0.5" fill="red"/>
     <text x="3.000000" y="35.955000" font-size="1.5">J1</text>
   </g>
   <g class="component" data-id="J10">
-    <circle class="pad" cx="52.000000" cy="9.955000" r="0.3"/>
-    <circle class="pad" cx="53.000000" cy="9.955000" r="0.3"/>
-    <circle class="pad" cx="54.000000" cy="9.955000" r="0.3"/>
-    <circle class="pad" cx="50.700000" cy="6.080000" r="0.3"/>
+    <polygon class="pad" points="51.850000,10.580000 52.150000,10.580000 52.150000,9.330000 51.850000,9.330000"/>
+    <polygon class="pad" points="52.850000,10.580000 53.150000,10.580000 53.150000,9.330000 52.850000,9.330000"/>
+    <polygon class="pad" points="53.850000,10.580000 54.150000,10.580000 54.150000,9.330000 53.850000,9.330000"/>
+    <polygon class="pad" points="50.350000,6.730000 51.050000,6.730000 51.050000,5.430000 50.350000,5.430000"/>
+  <polyline class="silk" points="50.390000,9.740000 51.440000,9.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="50.390000,7.240000 50.390000,9.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="51.440000,9.740000 51.440000,10.730000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="51.560000,5.270000 54.440000,5.270000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="55.610000,9.740000 54.560000,9.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="55.610000,7.240000 55.610000,9.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="52.000000,11.506429 52.000000,12.220714 51.857143,12.363571 51.571429,12.363571 51.428572,12.220714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="52.857143,11.649286 52.714286,11.506429 52.428572,11.506429 52.285714,11.649286 52.285714,11.792143 52.428572,11.935000 52.714286,11.935000 52.857143,12.077857 52.857143,12.220714 52.714286,12.363571 52.428572,12.363571 52.285714,12.220714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="53.142857,11.506429 53.714286,11.506429" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="53.428572,11.506429 53.428572,12.363571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="54.000000,11.649286 54.142857,11.506429 54.428572,11.506429 54.571429,11.649286 54.571429,11.792143 54.000000,12.363571 54.571429,12.363571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
     <circle class="origin" cx="53.000000" cy="7.955000" r="0.5" fill="red"/>
     <text x="53.000000" y="7.955000" font-size="1.5">J10</text>
   </g>
   <g class="component" data-id="J11">
-    <circle class="pad" cx="24.750000" cy="44.000000" r="0.3"/>
-    <circle class="pad" cx="25.550000" cy="44.000000" r="0.3"/>
-    <circle class="pad" cx="26.750000" cy="44.000000" r="0.3"/>
-    <circle class="pad" cx="27.750000" cy="44.000000" r="0.3"/>
-    <circle class="pad" cx="28.250000" cy="44.000000" r="0.3"/>
-    <circle class="pad" cx="29.250000" cy="44.000000" r="0.3"/>
-    <circle class="pad" cx="30.450000" cy="44.000000" r="0.3"/>
-    <circle class="pad" cx="31.250000" cy="44.000000" r="0.3"/>
-    <circle class="pad" cx="31.250000" cy="44.000000" r="0.3"/>
-    <circle class="pad" cx="30.450000" cy="44.000000" r="0.3"/>
-    <circle class="pad" cx="29.750000" cy="44.000000" r="0.3"/>
-    <circle class="pad" cx="28.750000" cy="44.000000" r="0.3"/>
-    <circle class="pad" cx="27.250000" cy="44.000000" r="0.3"/>
-    <circle class="pad" cx="26.250000" cy="44.000000" r="0.3"/>
-    <circle class="pad" cx="25.550000" cy="44.000000" r="0.3"/>
-    <circle class="pad" cx="24.750000" cy="44.000000" r="0.3"/>
-    <circle class="pad" cx="23.680000" cy="43.085000" r="0.3"/>
+    <polygon class="pad" points="24.600000,44.575000 24.900000,44.575000 24.900000,43.425000 24.600000,43.425000"/>
+    <polygon class="pad" points="25.400000,44.575000 25.700000,44.575000 25.700000,43.425000 25.400000,43.425000"/>
+    <polygon class="pad" points="26.675000,44.650000 26.825000,44.650000 26.825000,43.350000 26.675000,43.350000"/>
+    <polygon class="pad" points="27.675000,44.650000 27.825000,44.650000 27.825000,43.350000 27.675000,43.350000"/>
+    <polygon class="pad" points="28.175000,44.650000 28.325000,44.650000 28.325000,43.350000 28.175000,43.350000"/>
+    <polygon class="pad" points="29.175000,44.650000 29.325000,44.650000 29.325000,43.350000 29.175000,43.350000"/>
+    <polygon class="pad" points="30.300000,44.575000 30.600000,44.575000 30.600000,43.425000 30.300000,43.425000"/>
+    <polygon class="pad" points="31.100000,44.575000 31.400000,44.575000 31.400000,43.425000 31.100000,43.425000"/>
+    <polygon class="pad" points="31.100000,44.575000 31.400000,44.575000 31.400000,43.425000 31.100000,43.425000"/>
+    <polygon class="pad" points="30.300000,44.575000 30.600000,44.575000 30.600000,43.425000 30.300000,43.425000"/>
+    <polygon class="pad" points="29.675000,44.650000 29.825000,44.650000 29.825000,43.350000 29.675000,43.350000"/>
+    <polygon class="pad" points="28.675000,44.650000 28.825000,44.650000 28.825000,43.350000 28.675000,43.350000"/>
+    <polygon class="pad" points="27.175000,44.650000 27.325000,44.650000 27.325000,43.350000 27.175000,43.350000"/>
+    <polygon class="pad" points="26.175000,44.650000 26.325000,44.650000 26.325000,43.350000 26.175000,43.350000"/>
+    <polygon class="pad" points="25.400000,44.575000 25.700000,44.575000 25.700000,43.425000 25.400000,43.425000"/>
+    <polygon class="pad" points="24.600000,44.575000 24.900000,44.575000 24.900000,43.425000 24.600000,43.425000"/>
+    <polygon class="pad" points="23.680000,43.635000 23.680000,42.535000"/>
+  <polyline class="silk" points="23.300000,41.855000 23.300000,39.855000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="23.300000,37.955000 23.300000,36.055000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="23.300000,36.055000 32.700000,36.055000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="32.700000,41.855000 32.700000,39.855000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="32.700000,37.955000 32.700000,36.055000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="26.500000,45.171429 26.500000,45.885714 26.642857,46.028571 26.928571,46.028571 27.071428,45.885714 27.071428,45.171429" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="27.928571,45.314286 27.785714,45.171429 27.500000,45.171429 27.357142,45.314286 27.357142,45.457143 27.500000,45.600000 27.785714,45.600000 27.928571,45.742857 27.928571,45.885714 27.785714,46.028571 27.500000,46.028571 27.357142,45.885714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="28.214285,46.028571 28.214285,45.171429 28.642857,45.171429 28.785714,45.314286 28.785714,45.457143 28.642857,45.600000 28.214285,45.600000" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="28.642857,45.600000 28.785714,45.742857 28.785714,45.885714 28.642857,46.028571 28.214285,46.028571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="29.214285,45.314286 29.357142,45.171429 29.357142,46.028571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="29.214285,46.028571 29.500000,46.028571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
     <circle class="origin" cx="28.000000" cy="39.955000" r="0.5" fill="red"/>
     <text x="28.000000" y="39.955000" font-size="1.5">J11</text>
   </g>
   <g class="component" data-id="J2">
-    <circle class="pad" cx="2.000000" cy="30.955000" r="0.3"/>
-    <circle class="pad" cx="3.000000" cy="30.955000" r="0.3"/>
-    <circle class="pad" cx="4.000000" cy="30.955000" r="0.3"/>
-    <circle class="pad" cx="0.700000" cy="27.080000" r="0.3"/>
+    <polygon class="pad" points="1.850000,31.580000 2.150000,31.580000 2.150000,30.330000 1.850000,30.330000"/>
+    <polygon class="pad" points="2.850000,31.580000 3.150000,31.580000 3.150000,30.330000 2.850000,30.330000"/>
+    <polygon class="pad" points="3.850000,31.580000 4.150000,31.580000 4.150000,30.330000 3.850000,30.330000"/>
+    <polygon class="pad" points="0.350000,27.730000 1.050000,27.730000 1.050000,26.430000 0.350000,26.430000"/>
+  <polyline class="silk" points="0.390000,30.740000 1.440000,30.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="0.390000,28.240000 0.390000,30.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="1.440000,30.740000 1.440000,31.730000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="1.560000,26.270000 4.440000,26.270000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="5.610000,30.740000 4.560000,30.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="5.610000,28.240000 5.610000,30.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="2.000000,32.506429 2.000000,33.220714 1.857143,33.363571 1.571429,33.363571 1.428572,33.220714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="2.857143,32.649286 2.714286,32.506429 2.428572,32.506429 2.285714,32.649286 2.285714,32.792143 2.428572,32.935000 2.714286,32.935000 2.857143,33.077857 2.857143,33.220714 2.714286,33.363571 2.428572,33.363571 2.285714,33.220714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="3.142857,32.506429 3.714286,32.506429" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="3.428572,32.506429 3.428572,33.363571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="4.000000,32.506429 4.571429,32.506429 4.285714,32.935000 4.571429,33.077857 4.571429,33.220714 4.428572,33.363571 4.142857,33.363571 4.000000,33.220714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
     <circle class="origin" cx="3.000000" cy="28.955000" r="0.5" fill="red"/>
     <text x="3.000000" y="28.955000" font-size="1.5">J2</text>
   </g>
   <g class="component" data-id="J3">
-    <circle class="pad" cx="2.000000" cy="23.955000" r="0.3"/>
-    <circle class="pad" cx="3.000000" cy="23.955000" r="0.3"/>
-    <circle class="pad" cx="4.000000" cy="23.955000" r="0.3"/>
-    <circle class="pad" cx="0.700000" cy="20.080000" r="0.3"/>
+    <polygon class="pad" points="1.850000,24.580000 2.150000,24.580000 2.150000,23.330000 1.850000,23.330000"/>
+    <polygon class="pad" points="2.850000,24.580000 3.150000,24.580000 3.150000,23.330000 2.850000,23.330000"/>
+    <polygon class="pad" points="3.850000,24.580000 4.150000,24.580000 4.150000,23.330000 3.850000,23.330000"/>
+    <polygon class="pad" points="0.350000,20.730000 1.050000,20.730000 1.050000,19.430000 0.350000,19.430000"/>
+  <polyline class="silk" points="0.390000,23.740000 1.440000,23.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="0.390000,21.240000 0.390000,23.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="1.440000,23.740000 1.440000,24.730000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="1.560000,19.270000 4.440000,19.270000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="5.610000,23.740000 4.560000,23.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="5.610000,21.240000 5.610000,23.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="2.000000,25.506429 2.000000,26.220714 1.857143,26.363571 1.571429,26.363571 1.428572,26.220714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="2.857143,25.649286 2.714286,25.506429 2.428572,25.506429 2.285714,25.649286 2.285714,25.792143 2.428572,25.935000 2.714286,25.935000 2.857143,26.077857 2.857143,26.220714 2.714286,26.363571 2.428572,26.363571 2.285714,26.220714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="3.142857,25.506429 3.714286,25.506429" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="3.428572,25.506429 3.428572,26.363571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="4.428572,26.363571 4.428572,25.506429 4.000000,26.077857 4.571429,26.077857" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
     <circle class="origin" cx="3.000000" cy="21.955000" r="0.5" fill="red"/>
     <text x="3.000000" y="21.955000" font-size="1.5">J3</text>
   </g>
   <g class="component" data-id="J4">
-    <circle class="pad" cx="2.000000" cy="16.955000" r="0.3"/>
-    <circle class="pad" cx="3.000000" cy="16.955000" r="0.3"/>
-    <circle class="pad" cx="4.000000" cy="16.955000" r="0.3"/>
-    <circle class="pad" cx="0.700000" cy="13.080000" r="0.3"/>
+    <polygon class="pad" points="1.850000,17.580000 2.150000,17.580000 2.150000,16.330000 1.850000,16.330000"/>
+    <polygon class="pad" points="2.850000,17.580000 3.150000,17.580000 3.150000,16.330000 2.850000,16.330000"/>
+    <polygon class="pad" points="3.850000,17.580000 4.150000,17.580000 4.150000,16.330000 3.850000,16.330000"/>
+    <polygon class="pad" points="0.350000,13.730000 1.050000,13.730000 1.050000,12.430000 0.350000,12.430000"/>
+  <polyline class="silk" points="0.390000,16.740000 1.440000,16.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="0.390000,14.240000 0.390000,16.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="1.440000,16.740000 1.440000,17.730000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="1.560000,12.270000 4.440000,12.270000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="5.610000,16.740000 4.560000,16.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="5.610000,14.240000 5.610000,16.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="2.000000,18.506429 2.000000,19.220714 1.857143,19.363571 1.571429,19.363571 1.428572,19.220714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="2.857143,18.649286 2.714286,18.506429 2.428572,18.506429 2.285714,18.649286 2.285714,18.792143 2.428572,18.935000 2.714286,18.935000 2.857143,19.077857 2.857143,19.220714 2.714286,19.363571 2.428572,19.363571 2.285714,19.220714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="3.142857,18.506429 3.714286,18.506429" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="3.428572,18.506429 3.428572,19.363571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="4.571429,18.506429 4.000000,18.506429 4.000000,18.935000 4.428572,18.935000 4.571429,19.077857 4.571429,19.220714 4.428572,19.363571 4.142857,19.363571 4.000000,19.220714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
     <circle class="origin" cx="3.000000" cy="14.955000" r="0.5" fill="red"/>
     <text x="3.000000" y="14.955000" font-size="1.5">J4</text>
   </g>
   <g class="component" data-id="J5">
-    <circle class="pad" cx="2.000000" cy="9.955000" r="0.3"/>
-    <circle class="pad" cx="3.000000" cy="9.955000" r="0.3"/>
-    <circle class="pad" cx="4.000000" cy="9.955000" r="0.3"/>
-    <circle class="pad" cx="0.700000" cy="6.080000" r="0.3"/>
+    <polygon class="pad" points="1.850000,10.580000 2.150000,10.580000 2.150000,9.330000 1.850000,9.330000"/>
+    <polygon class="pad" points="2.850000,10.580000 3.150000,10.580000 3.150000,9.330000 2.850000,9.330000"/>
+    <polygon class="pad" points="3.850000,10.580000 4.150000,10.580000 4.150000,9.330000 3.850000,9.330000"/>
+    <polygon class="pad" points="0.350000,6.730000 1.050000,6.730000 1.050000,5.430000 0.350000,5.430000"/>
+  <polyline class="silk" points="0.390000,9.740000 1.440000,9.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="0.390000,7.240000 0.390000,9.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="1.440000,9.740000 1.440000,10.730000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="1.560000,5.270000 4.440000,5.270000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="5.610000,9.740000 4.560000,9.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="5.610000,7.240000 5.610000,9.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="2.000000,11.506429 2.000000,12.220714 1.857143,12.363571 1.571429,12.363571 1.428572,12.220714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="2.857143,11.649286 2.714286,11.506429 2.428572,11.506429 2.285714,11.649286 2.285714,11.792143 2.428572,11.935000 2.714286,11.935000 2.857143,12.077857 2.857143,12.220714 2.714286,12.363571 2.428572,12.363571 2.285714,12.220714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="3.142857,11.506429 3.714286,11.506429" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="3.428572,11.506429 3.428572,12.363571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="4.571429,11.649286 4.428572,11.506429 4.142857,11.506429 4.000000,11.649286 4.000000,12.220714 4.142857,12.363571 4.428572,12.363571 4.571429,12.220714 4.571429,12.077857 4.428572,11.935000 4.000000,11.935000" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
     <circle class="origin" cx="3.000000" cy="7.955000" r="0.5" fill="red"/>
     <text x="3.000000" y="7.955000" font-size="1.5">J5</text>
   </g>
   <g class="component" data-id="J6">
-    <circle class="pad" cx="52.000000" cy="37.955000" r="0.3"/>
-    <circle class="pad" cx="53.000000" cy="37.955000" r="0.3"/>
-    <circle class="pad" cx="54.000000" cy="37.955000" r="0.3"/>
-    <circle class="pad" cx="50.700000" cy="34.080000" r="0.3"/>
+    <polygon class="pad" points="51.850000,38.580000 52.150000,38.580000 52.150000,37.330000 51.850000,37.330000"/>
+    <polygon class="pad" points="52.850000,38.580000 53.150000,38.580000 53.150000,37.330000 52.850000,37.330000"/>
+    <polygon class="pad" points="53.850000,38.580000 54.150000,38.580000 54.150000,37.330000 53.850000,37.330000"/>
+    <polygon class="pad" points="50.350000,34.730000 51.050000,34.730000 51.050000,33.430000 50.350000,33.430000"/>
+  <polyline class="silk" points="50.390000,37.740000 51.440000,37.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="50.390000,35.240000 50.390000,37.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="51.440000,37.740000 51.440000,38.730000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="51.560000,33.270000 54.440000,33.270000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="55.610000,37.740000 54.560000,37.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="55.610000,35.240000 55.610000,37.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="52.000000,39.506429 52.000000,40.220714 51.857143,40.363571 51.571429,40.363571 51.428572,40.220714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="52.857143,39.649286 52.714286,39.506429 52.428572,39.506429 52.285714,39.649286 52.285714,39.792143 52.428572,39.935000 52.714286,39.935000 52.857143,40.077857 52.857143,40.220714 52.714286,40.363571 52.428572,40.363571 52.285714,40.220714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="53.142857,39.506429 53.714286,39.506429" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="53.428572,39.506429 53.428572,40.363571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="54.000000,39.506429 54.571429,39.506429 54.142857,40.363571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
     <circle class="origin" cx="53.000000" cy="35.955000" r="0.5" fill="red"/>
     <text x="53.000000" y="35.955000" font-size="1.5">J6</text>
   </g>
   <g class="component" data-id="J7">
-    <circle class="pad" cx="52.000000" cy="30.955000" r="0.3"/>
-    <circle class="pad" cx="53.000000" cy="30.955000" r="0.3"/>
-    <circle class="pad" cx="54.000000" cy="30.955000" r="0.3"/>
-    <circle class="pad" cx="50.700000" cy="27.080000" r="0.3"/>
+    <polygon class="pad" points="51.850000,31.580000 52.150000,31.580000 52.150000,30.330000 51.850000,30.330000"/>
+    <polygon class="pad" points="52.850000,31.580000 53.150000,31.580000 53.150000,30.330000 52.850000,30.330000"/>
+    <polygon class="pad" points="53.850000,31.580000 54.150000,31.580000 54.150000,30.330000 53.850000,30.330000"/>
+    <polygon class="pad" points="50.350000,27.730000 51.050000,27.730000 51.050000,26.430000 50.350000,26.430000"/>
+  <polyline class="silk" points="50.390000,30.740000 51.440000,30.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="50.390000,28.240000 50.390000,30.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="51.440000,30.740000 51.440000,31.730000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="51.560000,26.270000 54.440000,26.270000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="55.610000,30.740000 54.560000,30.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="55.610000,28.240000 55.610000,30.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="52.000000,32.506429 52.000000,33.220714 51.857143,33.363571 51.571429,33.363571 51.428572,33.220714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="52.857143,32.649286 52.714286,32.506429 52.428572,32.506429 52.285714,32.649286 52.285714,32.792143 52.428572,32.935000 52.714286,32.935000 52.857143,33.077857 52.857143,33.220714 52.714286,33.363571 52.428572,33.363571 52.285714,33.220714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="53.142857,32.506429 53.714286,32.506429" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="53.428572,32.506429 53.428572,33.363571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="54.142857,32.935000 54.000000,32.792143 54.000000,32.649286 54.142857,32.506429 54.428572,32.506429 54.571429,32.649286 54.571429,32.792143 54.428572,32.935000 54.142857,32.935000" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="54.428572,32.935000 54.571429,33.077857 54.571429,33.220714 54.428572,33.363571 54.142857,33.363571 54.000000,33.220714 54.000000,33.077857 54.142857,32.935000" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
     <circle class="origin" cx="53.000000" cy="28.955000" r="0.5" fill="red"/>
     <text x="53.000000" y="28.955000" font-size="1.5">J7</text>
   </g>
   <g class="component" data-id="J8">
-    <circle class="pad" cx="52.000000" cy="23.955000" r="0.3"/>
-    <circle class="pad" cx="53.000000" cy="23.955000" r="0.3"/>
-    <circle class="pad" cx="54.000000" cy="23.955000" r="0.3"/>
-    <circle class="pad" cx="50.700000" cy="20.080000" r="0.3"/>
+    <polygon class="pad" points="51.850000,24.580000 52.150000,24.580000 52.150000,23.330000 51.850000,23.330000"/>
+    <polygon class="pad" points="52.850000,24.580000 53.150000,24.580000 53.150000,23.330000 52.850000,23.330000"/>
+    <polygon class="pad" points="53.850000,24.580000 54.150000,24.580000 54.150000,23.330000 53.850000,23.330000"/>
+    <polygon class="pad" points="50.350000,20.730000 51.050000,20.730000 51.050000,19.430000 50.350000,19.430000"/>
+  <polyline class="silk" points="50.390000,23.740000 51.440000,23.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="50.390000,21.240000 50.390000,23.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="51.440000,23.740000 51.440000,24.730000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="51.560000,19.270000 54.440000,19.270000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="55.610000,23.740000 54.560000,23.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="55.610000,21.240000 55.610000,23.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="52.000000,25.506429 52.000000,26.220714 51.857143,26.363571 51.571429,26.363571 51.428572,26.220714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="52.857143,25.649286 52.714286,25.506429 52.428572,25.506429 52.285714,25.649286 52.285714,25.792143 52.428572,25.935000 52.714286,25.935000 52.857143,26.077857 52.857143,26.220714 52.714286,26.363571 52.428572,26.363571 52.285714,26.220714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="53.142857,25.506429 53.714286,25.506429" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="53.428572,25.506429 53.428572,26.363571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="54.571429,25.792143 54.428572,25.935000 54.142857,25.935000 54.000000,25.792143 54.000000,25.649286 54.142857,25.506429 54.428572,25.506429 54.571429,25.649286 54.571429,25.792143" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="54.571429,25.792143 54.571429,26.220714 54.428572,26.363571 54.142857,26.363571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
     <circle class="origin" cx="53.000000" cy="21.955000" r="0.5" fill="red"/>
     <text x="53.000000" y="21.955000" font-size="1.5">J8</text>
   </g>
   <g class="component" data-id="J9">
-    <circle class="pad" cx="52.000000" cy="16.955000" r="0.3"/>
-    <circle class="pad" cx="53.000000" cy="16.955000" r="0.3"/>
-    <circle class="pad" cx="54.000000" cy="16.955000" r="0.3"/>
-    <circle class="pad" cx="50.700000" cy="13.080000" r="0.3"/>
+    <polygon class="pad" points="51.850000,17.580000 52.150000,17.580000 52.150000,16.330000 51.850000,16.330000"/>
+    <polygon class="pad" points="52.850000,17.580000 53.150000,17.580000 53.150000,16.330000 52.850000,16.330000"/>
+    <polygon class="pad" points="53.850000,17.580000 54.150000,17.580000 54.150000,16.330000 53.850000,16.330000"/>
+    <polygon class="pad" points="50.350000,13.730000 51.050000,13.730000 51.050000,12.430000 50.350000,12.430000"/>
+  <polyline class="silk" points="50.390000,16.740000 51.440000,16.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="50.390000,14.240000 50.390000,16.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="51.440000,16.740000 51.440000,17.730000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="51.560000,12.270000 54.440000,12.270000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="55.610000,16.740000 54.560000,16.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="55.610000,14.240000 55.610000,16.740000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="51.571428,18.506429 51.571428,19.220714 51.428571,19.363571 51.142857,19.363571 51.000000,19.220714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="52.428571,18.649286 52.285714,18.506429 52.000000,18.506429 51.857142,18.649286 51.857142,18.792143 52.000000,18.935000 52.285714,18.935000 52.428571,19.077857 52.428571,19.220714 52.285714,19.363571 52.000000,19.363571 51.857142,19.220714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="52.714285,18.506429 53.285714,18.506429" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="53.000000,18.506429 53.000000,19.363571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="53.714285,18.649286 53.857142,18.506429 53.857142,19.363571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="53.714285,19.363571 54.000000,19.363571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="54.571428,19.363571 54.428571,19.220714 54.428571,18.649286 54.571428,18.506429 54.857142,18.506429 55.000000,18.649286 55.000000,19.220714 54.857142,19.363571 54.571428,19.363571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="54.571428,19.220714 54.857142,18.649286" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
     <circle class="origin" cx="53.000000" cy="14.955000" r="0.5" fill="red"/>
     <text x="53.000000" y="14.955000" font-size="1.5">J9</text>
   </g>
   <g class="component" data-id="L1">
-    <circle class="pad" cx="21.325000" cy="28.955000" r="0.3"/>
-    <circle class="pad" cx="22.675000" cy="28.955000" r="0.3"/>
+    <polygon class="pad" points="21.000000,29.955000 21.650000,29.955000 21.650000,27.955000 21.000000,27.955000"/>
+    <polygon class="pad" points="22.350000,29.955000 23.000000,29.955000 23.000000,27.955000 22.350000,27.955000"/>
+  <polyline class="silk" points="21.000000,30.055000 23.000000,30.055000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="21.000000,27.855000 23.000000,27.855000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="21.357143,30.526429 21.357143,31.383571 21.928571,31.383571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="22.357143,30.669286 22.500000,30.526429 22.500000,31.383571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="22.357143,31.383571 22.642857,31.383571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
     <circle class="origin" cx="22.000000" cy="28.955000" r="0.5" fill="red"/>
     <text x="22.000000" y="28.955000" font-size="1.5">L1</text>
   </g>
   <g class="component" data-id="R_AVDD">
-    <circle class="pad" cx="23.490000" cy="24.955000" r="0.3"/>
-    <circle class="pad" cx="24.510000" cy="24.955000" r="0.3"/>
+    <polygon class="pad" points="23.355000,25.140000 23.625000,25.140000 23.625000,24.770000 23.355000,24.770000"/>
+    <polygon class="pad" points="24.375000,25.140000 24.645000,25.140000 24.645000,24.770000 24.375000,24.770000"/>
+  <polyline class="silk" points="23.846359,25.335000 24.153641,25.335000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="23.846359,24.575000 24.153641,24.575000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="23.357143,26.553571 23.357143,25.696429 23.785714,25.696429 23.928571,25.839286 23.928571,25.982143 23.785714,26.125000 23.357143,26.125000" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="23.642857,26.125000 23.928571,26.553571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="24.357143,25.839286 24.500000,25.696429 24.500000,26.553571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="24.357143,26.553571 24.642857,26.553571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
     <circle class="origin" cx="24.000000" cy="24.955000" r="0.5" fill="red"/>
     <text x="24.000000" y="24.955000" font-size="1.5">R_AVDD</text>
   </g>
   <g class="component" data-id="R_BOOT">
-    <circle class="pad" cx="43.490000" cy="8.955000" r="0.3"/>
-    <circle class="pad" cx="44.510000" cy="8.955000" r="0.3"/>
+    <polygon class="pad" points="43.355000,9.140000 43.625000,9.140000 43.625000,8.770000 43.355000,8.770000"/>
+    <polygon class="pad" points="44.375000,9.140000 44.645000,9.140000 44.645000,8.770000 44.375000,8.770000"/>
+  <polyline class="silk" points="43.846359,9.335000 44.153641,9.335000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="43.846359,8.575000 44.153641,8.575000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="43.285715,10.553571 43.285715,9.696429 43.714286,9.696429 43.857143,9.839286 43.857143,9.982143 43.714286,10.125000 43.285715,10.125000" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="43.571429,10.125000 43.857143,10.553571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="44.142857,9.839286 44.285715,9.696429 44.571429,9.696429 44.714286,9.839286 44.714286,9.982143 44.142857,10.553571 44.714286,10.553571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
     <circle class="origin" cx="44.000000" cy="8.955000" r="0.5" fill="red"/>
     <text x="44.000000" y="8.955000" font-size="1.5">R_BOOT</text>
   </g>
   <g class="component" data-id="R_CC1">
-    <circle class="pad" cx="21.390000" cy="37.955000" r="0.3"/>
-    <circle class="pad" cx="22.410000" cy="37.955000" r="0.3"/>
-    <circle class="origin" cx="21.900000" cy="37.955000" r="0.5" fill="red"/>
-    <text x="21.900000" y="37.955000" font-size="1.5">R_CC1</text>
+    <polygon class="pad" points="21.355000,38.140000 21.625000,38.140000 21.625000,37.770000 21.355000,37.770000"/>
+    <polygon class="pad" points="22.375000,38.140000 22.645000,38.140000 22.645000,37.770000 22.375000,37.770000"/>
+  <polyline class="silk" points="21.846359,38.335000 22.153641,38.335000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="21.846359,37.575000 22.153641,37.575000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="21.285715,39.553571 21.285715,38.696429 21.714286,38.696429 21.857143,38.839286 21.857143,38.982143 21.714286,39.125000 21.285715,39.125000" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="21.571429,39.125000 21.857143,39.553571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="22.142857,38.696429 22.714286,38.696429 22.428572,39.125000 22.714286,39.267857 22.714286,39.410714 22.571429,39.553571 22.285715,39.553571 22.142857,39.410714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle class="origin" cx="22.000000" cy="37.955000" r="0.5" fill="red"/>
+    <text x="22.000000" y="37.955000" font-size="1.5">R_CC1</text>
   </g>
   <g class="component" data-id="R_CC2">
-    <circle class="pad" cx="33.590000" cy="37.955000" r="0.3"/>
-    <circle class="pad" cx="34.610000" cy="37.955000" r="0.3"/>
-    <circle class="origin" cx="34.100000" cy="37.955000" r="0.5" fill="red"/>
-    <text x="34.100000" y="37.955000" font-size="1.5">R_CC2</text>
+    <polygon class="pad" points="33.355000,38.140000 33.625000,38.140000 33.625000,37.770000 33.355000,37.770000"/>
+    <polygon class="pad" points="34.375000,38.140000 34.645000,38.140000 34.645000,37.770000 34.375000,37.770000"/>
+  <polyline class="silk" points="33.846359,38.335000 34.153641,38.335000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="33.846359,37.575000 34.153641,37.575000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="33.285715,39.553571 33.285715,38.696429 33.714286,38.696429 33.857143,38.839286 33.857143,38.982143 33.714286,39.125000 33.285715,39.125000" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="33.571429,39.125000 33.857143,39.553571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="34.571429,39.553571 34.571429,38.696429 34.142857,39.267857 34.714286,39.267857" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle class="origin" cx="34.000000" cy="37.955000" r="0.5" fill="red"/>
+    <text x="34.000000" y="37.955000" font-size="1.5">R_CC2</text>
   </g>
   <g class="component" data-id="R_DM">
-    <circle class="pad" cx="30.490000" cy="34.365000" r="0.3"/>
-    <circle class="pad" cx="31.510000" cy="34.365000" r="0.3"/>
-    <circle class="origin" cx="31.000000" cy="34.365000" r="0.5" fill="red"/>
-    <text x="31.000000" y="34.365000" font-size="1.5">R_DM</text>
+    <polygon class="pad" points="30.355000,35.140000 30.625000,35.140000 30.625000,34.770000 30.355000,34.770000"/>
+    <polygon class="pad" points="31.375000,35.140000 31.645000,35.140000 31.645000,34.770000 31.375000,34.770000"/>
+  <polyline class="silk" points="30.846359,35.335000 31.153641,35.335000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="30.846359,34.575000 31.153641,34.575000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="30.285715,36.553571 30.285715,35.696429 30.714286,35.696429 30.857143,35.839286 30.857143,35.982143 30.714286,36.125000 30.285715,36.125000" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="30.571429,36.125000 30.857143,36.553571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="31.714286,35.696429 31.142857,35.696429 31.142857,36.125000 31.571429,36.125000 31.714286,36.267857 31.714286,36.410714 31.571429,36.553571 31.285715,36.553571 31.142857,36.410714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle class="origin" cx="31.000000" cy="34.955000" r="0.5" fill="red"/>
+    <text x="31.000000" y="34.955000" font-size="1.5">R_DM</text>
   </g>
   <g class="component" data-id="R_DP">
-    <circle class="pad" cx="24.490000" cy="34.365000" r="0.3"/>
-    <circle class="pad" cx="25.510000" cy="34.365000" r="0.3"/>
-    <circle class="origin" cx="25.000000" cy="34.365000" r="0.5" fill="red"/>
-    <text x="25.000000" y="34.365000" font-size="1.5">R_DP</text>
+    <polygon class="pad" points="24.355000,35.140000 24.625000,35.140000 24.625000,34.770000 24.355000,34.770000"/>
+    <polygon class="pad" points="25.375000,35.140000 25.645000,35.140000 25.645000,34.770000 25.375000,34.770000"/>
+  <polyline class="silk" points="24.846359,35.335000 25.153641,35.335000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="24.846359,34.575000 25.153641,34.575000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="24.285715,36.553571 24.285715,35.696429 24.714286,35.696429 24.857143,35.839286 24.857143,35.982143 24.714286,36.125000 24.285715,36.125000" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="24.571429,36.125000 24.857143,36.553571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="25.714286,35.839286 25.571429,35.696429 25.285715,35.696429 25.142857,35.839286 25.142857,36.410714 25.285715,36.553571 25.571429,36.553571 25.714286,36.410714 25.714286,36.267857 25.571429,36.125000 25.142857,36.125000" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle class="origin" cx="25.000000" cy="34.955000" r="0.5" fill="red"/>
+    <text x="25.000000" y="34.955000" font-size="1.5">R_DP</text>
   </g>
   <g class="component" data-id="R_X">
-    <circle class="pad" cx="15.490000" cy="15.955000" r="0.3"/>
-    <circle class="pad" cx="16.510000" cy="15.955000" r="0.3"/>
+    <polygon class="pad" points="15.355000,16.140000 15.625000,16.140000 15.625000,15.770000 15.355000,15.770000"/>
+    <polygon class="pad" points="16.375000,16.140000 16.645000,16.140000 16.645000,15.770000 16.375000,15.770000"/>
+  <polyline class="silk" points="15.846359,16.335000 16.153641,16.335000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="15.846359,15.575000 16.153641,15.575000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="15.285715,17.553571 15.285715,16.696429 15.714286,16.696429 15.857143,16.839286 15.857143,16.982143 15.714286,17.125000 15.285715,17.125000" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="15.571429,17.125000 15.857143,17.553571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="16.142857,16.696429 16.714286,16.696429 16.285715,17.553571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
     <circle class="origin" cx="16.000000" cy="15.955000" r="0.5" fill="red"/>
     <text x="16.000000" y="15.955000" font-size="1.5">R_X</text>
   </g>
   <g class="component" data-id="SW1">
-    <circle class="pad" cx="41.800000" cy="5.680000" r="0.3"/>
-    <circle class="pad" cx="38.200000" cy="4.230000" r="0.3"/>
+    <polygon class="pad" points="41.100000,6.205000 42.500000,6.205000 42.500000,5.155000 41.100000,5.155000"/>
+    <polygon class="pad" points="37.500000,4.755000 38.900000,4.755000 38.900000,3.705000 37.500000,3.705000"/>
+  <polygon class="silk" points="37.400000,6.355000 42.600000,6.355000 42.600000,3.355000 37.400000,3.355000" fill="#888888" stroke="none"/>
+  <polygon class="silk" points="39.100000,2.755000 40.900000,2.755000 40.900000,3.355000 39.100000,3.355000" fill="#888888" stroke="none"/>
+  <polyline class="silk" points="38.642857,7.426429 38.071429,7.426429 38.071429,8.283571 38.642857,8.283571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="38.071429,7.855000 38.500000,7.855000" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="38.928571,7.426429 39.214286,8.283571 39.500000,7.426429" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="39.928571,8.283571 39.785714,8.140714 39.785714,7.569286 39.928571,7.426429 40.214286,7.426429 40.357143,7.569286 40.357143,8.140714 40.214286,8.283571 39.928571,8.283571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="40.071429,7.997857 40.357143,8.283571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="40.642857,8.283571 40.642857,7.426429 41.071429,7.426429 41.214286,7.569286 41.214286,7.712143 41.071429,7.855000 40.642857,7.855000" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="41.642857,7.569286 41.785714,7.426429 41.785714,8.283571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="41.642857,8.283571 41.928571,8.283571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
     <circle class="origin" cx="40.000000" cy="4.955000" r="0.5" fill="red"/>
     <text x="40.000000" y="4.955000" font-size="1.5">SW1</text>
   </g>
   <g class="component" data-id="SW2">
-    <circle class="pad" cx="17.800000" cy="5.680000" r="0.3"/>
-    <circle class="pad" cx="14.200000" cy="4.230000" r="0.3"/>
+    <polygon class="pad" points="17.100000,6.205000 18.500000,6.205000 18.500000,5.155000 17.100000,5.155000"/>
+    <polygon class="pad" points="13.500000,4.755000 14.900000,4.755000 14.900000,3.705000 13.500000,3.705000"/>
+  <polygon class="silk" points="13.400000,6.355000 18.600000,6.355000 18.600000,3.355000 13.400000,3.355000" fill="#888888" stroke="none"/>
+  <polygon class="silk" points="15.100000,2.755000 16.900000,2.755000 16.900000,3.355000 15.100000,3.355000" fill="#888888" stroke="none"/>
+  <polyline class="silk" points="14.571428,7.426429 14.000000,7.426429 14.000000,8.283571 14.571428,8.283571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="14.000000,7.855000 14.428571,7.855000" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="14.857142,7.426429 15.142857,8.283571 15.428571,7.426429" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="15.857142,8.283571 15.714285,8.140714 15.714285,7.569286 15.857142,7.426429 16.142857,7.426429 16.285714,7.569286 16.285714,8.140714 16.142857,8.283571 15.857142,8.283571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="16.000000,7.997857 16.285714,8.283571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="16.571428,8.283571 16.571428,7.426429 17.000000,7.426429 17.142857,7.569286 17.142857,7.712143 17.000000,7.855000 16.571428,7.855000" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="17.428571,7.569286 17.571428,7.426429 17.857142,7.426429 18.000000,7.569286 18.000000,7.712143 17.428571,8.283571 18.000000,8.283571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
     <circle class="origin" cx="16.000000" cy="4.955000" r="0.5" fill="red"/>
     <text x="16.000000" y="4.955000" font-size="1.5">SW2</text>
   </g>
   <g class="component" data-id="U1">
-    <circle class="pad" cx="24.550000" cy="21.755000" r="0.3"/>
-    <circle class="pad" cx="24.550000" cy="21.355000" r="0.3"/>
-    <circle class="pad" cx="24.550000" cy="20.955000" r="0.3"/>
-    <circle class="pad" cx="24.550000" cy="20.555000" r="0.3"/>
-    <circle class="pad" cx="24.550000" cy="20.155000" r="0.3"/>
-    <circle class="pad" cx="24.550000" cy="19.755000" r="0.3"/>
-    <circle class="pad" cx="24.550000" cy="19.355000" r="0.3"/>
-    <circle class="pad" cx="24.550000" cy="18.955000" r="0.3"/>
-    <circle class="pad" cx="24.550000" cy="18.555000" r="0.3"/>
-    <circle class="pad" cx="24.550000" cy="18.155000" r="0.3"/>
-    <circle class="pad" cx="24.550000" cy="17.755000" r="0.3"/>
-    <circle class="pad" cx="24.550000" cy="17.355000" r="0.3"/>
-    <circle class="pad" cx="24.550000" cy="16.955000" r="0.3"/>
-    <circle class="pad" cx="24.550000" cy="16.555000" r="0.3"/>
-    <circle class="pad" cx="24.550000" cy="16.155000" r="0.3"/>
-    <circle class="pad" cx="25.200000" cy="15.505000" r="0.3"/>
-    <circle class="pad" cx="25.600000" cy="15.505000" r="0.3"/>
-    <circle class="pad" cx="26.000000" cy="15.505000" r="0.3"/>
-    <circle class="pad" cx="26.400000" cy="15.505000" r="0.3"/>
-    <circle class="pad" cx="26.800000" cy="15.505000" r="0.3"/>
-    <circle class="pad" cx="27.200000" cy="15.505000" r="0.3"/>
-    <circle class="pad" cx="27.600000" cy="15.505000" r="0.3"/>
-    <circle class="pad" cx="28.000000" cy="15.505000" r="0.3"/>
-    <circle class="pad" cx="28.400000" cy="15.505000" r="0.3"/>
-    <circle class="pad" cx="28.800000" cy="15.505000" r="0.3"/>
-    <circle class="pad" cx="29.200000" cy="15.505000" r="0.3"/>
-    <circle class="pad" cx="29.600000" cy="15.505000" r="0.3"/>
-    <circle class="pad" cx="30.000000" cy="15.505000" r="0.3"/>
-    <circle class="pad" cx="30.400000" cy="15.505000" r="0.3"/>
-    <circle class="pad" cx="30.800000" cy="15.505000" r="0.3"/>
-    <circle class="pad" cx="31.450000" cy="16.155000" r="0.3"/>
-    <circle class="pad" cx="31.450000" cy="16.555000" r="0.3"/>
-    <circle class="pad" cx="31.450000" cy="16.955000" r="0.3"/>
-    <circle class="pad" cx="31.450000" cy="17.355000" r="0.3"/>
-    <circle class="pad" cx="31.450000" cy="17.755000" r="0.3"/>
-    <circle class="pad" cx="31.450000" cy="18.155000" r="0.3"/>
-    <circle class="pad" cx="31.450000" cy="18.555000" r="0.3"/>
-    <circle class="pad" cx="31.450000" cy="18.955000" r="0.3"/>
-    <circle class="pad" cx="31.450000" cy="19.355000" r="0.3"/>
-    <circle class="pad" cx="31.450000" cy="19.755000" r="0.3"/>
-    <circle class="pad" cx="31.450000" cy="20.155000" r="0.3"/>
-    <circle class="pad" cx="31.450000" cy="20.555000" r="0.3"/>
-    <circle class="pad" cx="31.450000" cy="20.955000" r="0.3"/>
-    <circle class="pad" cx="31.450000" cy="21.355000" r="0.3"/>
-    <circle class="pad" cx="31.450000" cy="21.755000" r="0.3"/>
-    <circle class="pad" cx="30.800000" cy="22.405000" r="0.3"/>
-    <circle class="pad" cx="30.400000" cy="22.405000" r="0.3"/>
-    <circle class="pad" cx="30.000000" cy="22.405000" r="0.3"/>
-    <circle class="pad" cx="29.600000" cy="22.405000" r="0.3"/>
-    <circle class="pad" cx="29.200000" cy="22.405000" r="0.3"/>
-    <circle class="pad" cx="28.800000" cy="22.405000" r="0.3"/>
-    <circle class="pad" cx="28.400000" cy="22.405000" r="0.3"/>
-    <circle class="pad" cx="28.000000" cy="22.405000" r="0.3"/>
-    <circle class="pad" cx="27.600000" cy="22.405000" r="0.3"/>
-    <circle class="pad" cx="27.200000" cy="22.405000" r="0.3"/>
-    <circle class="pad" cx="26.800000" cy="22.405000" r="0.3"/>
-    <circle class="pad" cx="26.400000" cy="22.405000" r="0.3"/>
-    <circle class="pad" cx="26.000000" cy="22.405000" r="0.3"/>
-    <circle class="pad" cx="25.600000" cy="22.405000" r="0.3"/>
-    <circle class="pad" cx="25.200000" cy="22.405000" r="0.3"/>
-    <circle class="pad" cx="26.550000" cy="20.405000" r="0.3"/>
+    <polygon class="pad" points="24.200000,21.805000 24.900000,21.805000 24.900000,21.705000 24.200000,21.705000"/>
+    <polygon class="pad" points="24.200000,21.405000 24.900000,21.405000 24.900000,21.305000 24.200000,21.305000"/>
+    <polygon class="pad" points="24.200000,21.005000 24.900000,21.005000 24.900000,20.905000 24.200000,20.905000"/>
+    <polygon class="pad" points="24.200000,20.605000 24.900000,20.605000 24.900000,20.505000 24.200000,20.505000"/>
+    <polygon class="pad" points="24.200000,20.205000 24.900000,20.205000 24.900000,20.105000 24.200000,20.105000"/>
+    <polygon class="pad" points="24.200000,19.805000 24.900000,19.805000 24.900000,19.705000 24.200000,19.705000"/>
+    <polygon class="pad" points="24.200000,19.405000 24.900000,19.405000 24.900000,19.305000 24.200000,19.305000"/>
+    <polygon class="pad" points="24.200000,19.005000 24.900000,19.005000 24.900000,18.905000 24.200000,18.905000"/>
+    <polygon class="pad" points="24.200000,18.605000 24.900000,18.605000 24.900000,18.505000 24.200000,18.505000"/>
+    <polygon class="pad" points="24.200000,18.205000 24.900000,18.205000 24.900000,18.105000 24.200000,18.105000"/>
+    <polygon class="pad" points="24.200000,17.805000 24.900000,17.805000 24.900000,17.705000 24.200000,17.705000"/>
+    <polygon class="pad" points="24.200000,17.405000 24.900000,17.405000 24.900000,17.305000 24.200000,17.305000"/>
+    <polygon class="pad" points="24.200000,17.005000 24.900000,17.005000 24.900000,16.905000 24.200000,16.905000"/>
+    <polygon class="pad" points="24.200000,16.605000 24.900000,16.605000 24.900000,16.505000 24.200000,16.505000"/>
+    <polygon class="pad" points="24.200000,16.205000 24.900000,16.205000 24.900000,16.105000 24.200000,16.105000"/>
+    <polygon class="pad" points="25.150000,15.855000 25.250000,15.855000 25.250000,15.155000 25.150000,15.155000"/>
+    <polygon class="pad" points="25.550000,15.855000 25.650000,15.855000 25.650000,15.155000 25.550000,15.155000"/>
+    <polygon class="pad" points="25.950000,15.855000 26.050000,15.855000 26.050000,15.155000 25.950000,15.155000"/>
+    <polygon class="pad" points="26.350000,15.855000 26.450000,15.855000 26.450000,15.155000 26.350000,15.155000"/>
+    <polygon class="pad" points="26.750000,15.855000 26.850000,15.855000 26.850000,15.155000 26.750000,15.155000"/>
+    <polygon class="pad" points="27.150000,15.855000 27.250000,15.855000 27.250000,15.155000 27.150000,15.155000"/>
+    <polygon class="pad" points="27.550000,15.855000 27.650000,15.855000 27.650000,15.155000 27.550000,15.155000"/>
+    <polygon class="pad" points="27.950000,15.855000 28.050000,15.855000 28.050000,15.155000 27.950000,15.155000"/>
+    <polygon class="pad" points="28.350000,15.855000 28.450000,15.855000 28.450000,15.155000 28.350000,15.155000"/>
+    <polygon class="pad" points="28.750000,15.855000 28.850000,15.855000 28.850000,15.155000 28.750000,15.155000"/>
+    <polygon class="pad" points="29.150000,15.855000 29.250000,15.855000 29.250000,15.155000 29.150000,15.155000"/>
+    <polygon class="pad" points="29.550000,15.855000 29.650000,15.855000 29.650000,15.155000 29.550000,15.155000"/>
+    <polygon class="pad" points="29.950000,15.855000 30.050000,15.855000 30.050000,15.155000 29.950000,15.155000"/>
+    <polygon class="pad" points="30.350000,15.855000 30.450000,15.855000 30.450000,15.155000 30.350000,15.155000"/>
+    <polygon class="pad" points="30.750000,15.855000 30.850000,15.855000 30.850000,15.155000 30.750000,15.155000"/>
+    <polygon class="pad" points="31.100000,16.205000 31.800000,16.205000 31.800000,16.105000 31.100000,16.105000"/>
+    <polygon class="pad" points="31.100000,16.605000 31.800000,16.605000 31.800000,16.505000 31.100000,16.505000"/>
+    <polygon class="pad" points="31.100000,17.005000 31.800000,17.005000 31.800000,16.905000 31.100000,16.905000"/>
+    <polygon class="pad" points="31.100000,17.405000 31.800000,17.405000 31.800000,17.305000 31.100000,17.305000"/>
+    <polygon class="pad" points="31.100000,17.805000 31.800000,17.805000 31.800000,17.705000 31.100000,17.705000"/>
+    <polygon class="pad" points="31.100000,18.205000 31.800000,18.205000 31.800000,18.105000 31.100000,18.105000"/>
+    <polygon class="pad" points="31.100000,18.605000 31.800000,18.605000 31.800000,18.505000 31.100000,18.505000"/>
+    <polygon class="pad" points="31.100000,19.005000 31.800000,19.005000 31.800000,18.905000 31.100000,18.905000"/>
+    <polygon class="pad" points="31.100000,19.405000 31.800000,19.405000 31.800000,19.305000 31.100000,19.305000"/>
+    <polygon class="pad" points="31.100000,19.805000 31.800000,19.805000 31.800000,19.705000 31.100000,19.705000"/>
+    <polygon class="pad" points="31.100000,20.205000 31.800000,20.205000 31.800000,20.105000 31.100000,20.105000"/>
+    <polygon class="pad" points="31.100000,20.605000 31.800000,20.605000 31.800000,20.505000 31.100000,20.505000"/>
+    <polygon class="pad" points="31.100000,21.005000 31.800000,21.005000 31.800000,20.905000 31.100000,20.905000"/>
+    <polygon class="pad" points="31.100000,21.405000 31.800000,21.405000 31.800000,21.305000 31.100000,21.305000"/>
+    <polygon class="pad" points="31.100000,21.805000 31.800000,21.805000 31.800000,21.705000 31.100000,21.705000"/>
+    <polygon class="pad" points="30.750000,22.755000 30.850000,22.755000 30.850000,22.055000 30.750000,22.055000"/>
+    <polygon class="pad" points="30.350000,22.755000 30.450000,22.755000 30.450000,22.055000 30.350000,22.055000"/>
+    <polygon class="pad" points="29.950000,22.755000 30.050000,22.755000 30.050000,22.055000 29.950000,22.055000"/>
+    <polygon class="pad" points="29.550000,22.755000 29.650000,22.755000 29.650000,22.055000 29.550000,22.055000"/>
+    <polygon class="pad" points="29.150000,22.755000 29.250000,22.755000 29.250000,22.055000 29.150000,22.055000"/>
+    <polygon class="pad" points="28.750000,22.755000 28.850000,22.755000 28.850000,22.055000 28.750000,22.055000"/>
+    <polygon class="pad" points="28.350000,22.755000 28.450000,22.755000 28.450000,22.055000 28.350000,22.055000"/>
+    <polygon class="pad" points="27.950000,22.755000 28.050000,22.755000 28.050000,22.055000 27.950000,22.055000"/>
+    <polygon class="pad" points="27.550000,22.755000 27.650000,22.755000 27.650000,22.055000 27.550000,22.055000"/>
+    <polygon class="pad" points="27.150000,22.755000 27.250000,22.755000 27.250000,22.055000 27.150000,22.055000"/>
+    <polygon class="pad" points="26.750000,22.755000 26.850000,22.755000 26.850000,22.055000 26.750000,22.055000"/>
+    <polygon class="pad" points="26.350000,22.755000 26.450000,22.755000 26.450000,22.055000 26.350000,22.055000"/>
+    <polygon class="pad" points="25.950000,22.755000 26.050000,22.755000 26.050000,22.055000 25.950000,22.055000"/>
+    <polygon class="pad" points="25.550000,22.755000 25.650000,22.755000 25.650000,22.055000 25.550000,22.055000"/>
+    <polygon class="pad" points="25.150000,22.755000 25.250000,22.755000 25.250000,22.055000 25.150000,22.055000"/>
+    <polygon class="pad" points="26.550000,20.405000"/>
+  <polyline class="silk" points="24.390000,22.565000 24.840000,22.565000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="24.390000,22.115000 24.390000,22.565000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="24.390000,15.345000 24.390000,15.795000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="24.840000,15.345000 24.390000,15.345000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="31.160000,22.565000 31.610000,22.565000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="31.610000,22.565000 31.610000,22.115000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="31.610000,15.795000 31.610000,15.345000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="31.610000,15.345000 31.160000,15.345000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polygon class="silk" points="23.890000,21.755000 23.560000,21.515000 23.560000,21.995000" fill="#888888" stroke="none"/>
+  <polyline class="silk" points="26.642857,24.183571 26.500000,24.040714 26.500000,23.469286 26.642857,23.326429 26.928571,23.326429 27.071428,23.469286 27.071428,24.040714 26.928571,24.183571 26.642857,24.183571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="26.785714,23.897857 27.071428,24.183571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="27.928571,23.326429 27.357142,23.326429 27.357142,24.183571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="27.357142,23.755000 27.785714,23.755000" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="28.214285,24.183571 28.214285,23.326429 28.785714,24.183571 28.785714,23.326429" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="29.214285,23.469286 29.357142,23.326429 29.357142,24.183571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="29.214285,24.183571 29.500000,24.183571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
     <circle class="origin" cx="28.000000" cy="18.955000" r="0.5" fill="red"/>
     <text x="28.000000" y="18.955000" font-size="1.5">U1</text>
   </g>
   <g class="component" data-id="U2">
-    <circle class="pad" cx="35.525000" cy="14.773658" r="0.3"/>
-    <circle class="pad" cx="35.525000" cy="13.503658" r="0.3"/>
-    <circle class="pad" cx="35.525000" cy="12.233658" r="0.3"/>
-    <circle class="pad" cx="35.525000" cy="10.963658" r="0.3"/>
-    <circle class="pad" cx="40.475000" cy="10.963658" r="0.3"/>
-    <circle class="pad" cx="40.475000" cy="12.233658" r="0.3"/>
-    <circle class="pad" cx="40.475000" cy="13.503658" r="0.3"/>
-    <circle class="pad" cx="40.475000" cy="14.773658" r="0.3"/>
-    <circle class="origin" cx="38.000000" cy="12.868658" r="0.5" fill="red"/>
-    <text x="38.000000" y="12.868658" font-size="1.5">U2</text>
+    <polygon class="pad" points="34.700000,15.010000 36.350000,15.010000 36.350000,14.710000 34.700000,14.710000"/>
+    <polygon class="pad" points="34.700000,13.740000 36.350000,13.740000 36.350000,13.440000 34.700000,13.440000"/>
+    <polygon class="pad" points="34.700000,12.470000 36.350000,12.470000 36.350000,12.170000 34.700000,12.170000"/>
+    <polygon class="pad" points="34.700000,11.200000 36.350000,11.200000 36.350000,10.900000 34.700000,10.900000"/>
+    <polygon class="pad" points="39.650000,11.200000 41.300000,11.200000 41.300000,10.900000 39.650000,10.900000"/>
+    <polygon class="pad" points="39.650000,12.470000 41.300000,12.470000 41.300000,12.170000 39.650000,12.170000"/>
+    <polygon class="pad" points="39.650000,13.740000 41.300000,13.740000 41.300000,13.440000 39.650000,13.440000"/>
+    <polygon class="pad" points="39.650000,15.010000 41.300000,15.010000 41.300000,14.710000 39.650000,14.710000"/>
+  <polyline class="silk" points="35.940000,15.515000 40.060000,15.515000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="35.940000,15.420000 35.940000,15.515000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="35.940000,10.395000 35.940000,10.490000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="40.060000,15.515000 40.060000,15.420000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="40.060000,10.490000 40.060000,10.395000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="40.060000,10.395000 35.940000,10.395000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polygon class="silk" points="35.400000,15.425000 35.160000,15.755000 35.640000,15.755000" fill="#888888" stroke="none"/>
+  <polyline class="silk" points="36.642857,16.069286 36.500000,15.926429 36.214286,15.926429 36.071429,16.069286 36.071429,16.212143 36.214286,16.355000 36.500000,16.355000 36.642857,16.497857 36.642857,16.640714 36.500000,16.783571 36.214286,16.783571 36.071429,16.640714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="37.071429,16.783571 36.928571,16.640714 36.928571,16.069286 37.071429,15.926429 37.357143,15.926429 37.500000,16.069286 37.500000,16.640714 37.357143,16.783571 37.071429,16.783571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="37.785714,15.926429 38.357143,15.926429" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="38.071429,15.926429 38.071429,16.783571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="37.785714,16.783571 38.357143,16.783571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="39.214286,16.069286 39.071429,15.926429 38.785714,15.926429 38.642857,16.069286 38.642857,16.640714 38.785714,16.783571 39.071429,16.783571 39.214286,16.640714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="39.642857,16.069286 39.785714,15.926429 39.785714,16.783571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="39.642857,16.783571 39.928571,16.783571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle class="origin" cx="38.000000" cy="12.955000" r="0.5" fill="red"/>
+    <text x="38.000000" y="12.955000" font-size="1.5">U2</text>
   </g>
   <g class="component" data-id="U3">
-    <circle class="pad" cx="12.862500" cy="29.905000" r="0.3"/>
-    <circle class="pad" cx="12.862500" cy="28.955000" r="0.3"/>
-    <circle class="pad" cx="12.862500" cy="28.005000" r="0.3"/>
-    <circle class="pad" cx="15.137500" cy="28.005000" r="0.3"/>
-    <circle class="pad" cx="15.137500" cy="29.905000" r="0.3"/>
+    <polygon class="pad" points="12.350000,30.055000 13.375000,30.055000 13.375000,29.755000 12.350000,29.755000"/>
+    <polygon class="pad" points="12.350000,29.105000 13.375000,29.105000 13.375000,28.805000 12.350000,28.805000"/>
+    <polygon class="pad" points="12.350000,28.155000 13.375000,28.155000 13.375000,27.855000 12.350000,27.855000"/>
+    <polygon class="pad" points="14.625000,28.155000 15.650000,28.155000 15.650000,27.855000 14.625000,27.855000"/>
+    <polygon class="pad" points="14.625000,30.055000 15.650000,30.055000 15.650000,29.755000 14.625000,29.755000"/>
+  <polyline class="silk" points="13.090000,30.515000 14.910000,30.515000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="13.090000,30.465000 13.090000,30.515000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="13.090000,27.395000 13.090000,27.445000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="14.910000,30.515000 14.910000,30.465000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="14.910000,29.345000 14.910000,28.565000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="14.910000,27.445000 14.910000,27.395000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="14.910000,27.395000 13.090000,27.395000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polygon class="silk" points="12.550000,30.465000 12.310000,30.795000 12.790000,30.795000" fill="#888888" stroke="none"/>
+  <polyline class="silk" points="13.071428,31.069286 12.928571,30.926429 12.642857,30.926429 12.500000,31.069286 12.500000,31.212143 12.642857,31.355000 12.928571,31.355000 13.071428,31.497857 13.071428,31.640714 12.928571,31.783571 12.642857,31.783571 12.500000,31.640714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="13.500000,31.783571 13.357142,31.640714 13.357142,31.069286 13.500000,30.926429 13.785714,30.926429 13.928571,31.069286 13.928571,31.640714 13.785714,31.783571 13.500000,31.783571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="14.214285,30.926429 14.785714,30.926429" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="14.500000,30.926429 14.500000,31.783571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="15.214285,31.069286 15.357142,30.926429 15.357142,31.783571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="15.214285,31.783571 15.500000,31.783571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
     <circle class="origin" cx="14.000000" cy="28.955000" r="0.5" fill="red"/>
     <text x="14.000000" y="28.955000" font-size="1.5">U3</text>
   </g>
   <g class="component" data-id="Y1">
-    <circle class="pad" cx="16.900000" cy="12.105000" r="0.3"/>
-    <circle class="pad" cx="19.100000" cy="12.105000" r="0.3"/>
-    <circle class="pad" cx="19.100000" cy="13.805000" r="0.3"/>
-    <circle class="pad" cx="16.900000" cy="13.805000" r="0.3"/>
+    <polygon class="pad" points="16.450000,12.455000 17.350000,12.455000 17.350000,11.755000 16.450000,11.755000"/>
+    <polygon class="pad" points="18.650000,12.455000 19.550000,12.455000 19.550000,11.755000 18.650000,11.755000"/>
+    <polygon class="pad" points="18.650000,14.155000 19.550000,14.155000 19.550000,13.455000 18.650000,13.455000"/>
+    <polygon class="pad" points="16.450000,14.155000 17.350000,14.155000 17.350000,13.455000 16.450000,13.455000"/>
+  <polyline class="silk" points="15.940000,14.665000 15.940000,11.245000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="15.940000,11.245000 20.060000,11.245000" fill="none" stroke="#888888" stroke-width="0.120000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="15.357143,15.119286 15.214286,14.976429 14.928572,14.976429 14.785715,15.119286 14.785715,15.690714 14.928572,15.833571 15.214286,15.833571 15.357143,15.690714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="15.642857,15.833571 15.642857,14.976429 16.071429,14.976429 16.214286,15.119286 16.214286,15.262143 16.071429,15.405000 15.642857,15.405000" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="15.928572,15.405000 16.214286,15.833571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="16.500000,14.976429 16.785715,15.405000 17.071429,14.976429" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="16.785715,15.405000 16.785715,15.833571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="17.928572,15.119286 17.785715,14.976429 17.500000,14.976429 17.357143,15.119286 17.357143,15.262143 17.500000,15.405000 17.785715,15.405000 17.928572,15.547857 17.928572,15.690714 17.785715,15.833571 17.500000,15.833571 17.357143,15.690714" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="18.214286,14.976429 18.785715,14.976429" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="18.500000,14.976429 18.500000,15.833571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="19.071429,15.833571 19.357143,14.976429 19.642857,15.833571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="19.214286,15.405000 19.500000,15.405000" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="19.928572,14.976429 19.928572,15.833571 20.500000,15.833571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="20.928572,15.119286 21.071429,14.976429 21.071429,15.833571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="silk" points="20.928572,15.833571 21.214286,15.833571" fill="none" stroke="#888888" stroke-width="0.125000" stroke-linecap="round" stroke-linejoin="round"/>
     <circle class="origin" cx="18.000000" cy="12.955000" r="0.5" fill="red"/>
     <text x="18.000000" y="12.955000" font-size="1.5">Y1</text>
   </g>
-  <polyline class="trace trace-top" data-id="t26" points="24.070000,23.615000 23.850000,23.605000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
-  <polyline class="trace trace-bottom" data-id="t27" points="23.850000,23.605000 23.850000,15.055000 23.400000,15.055000 23.400000,13.705000 29.700000,13.705000 29.700000,14.155000 30.150000,14.155000 30.265159,14.295000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
-  <polyline class="trace trace-bottom" data-id="t28" points="30.150000,14.155000 30.150000,15.055000 31.500000,15.055000 31.500000,15.505000 31.950000,15.505000 31.950000,19.555000 33.750000,19.555000 33.914322,19.515145" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
-  <polyline class="trace trace-bottom" data-id="t29" points="23.850000,23.605000 22.500000,23.605000 22.500000,29.005000 22.675000,28.955000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
-  <polyline class="trace trace-bottom" data-id="t30" points="30.150000,15.055000 28.350000,15.055000 28.350000,15.505000 28.000000,15.505000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
-  <polyline class="trace trace-bottom" data-id="t31" points="31.950000,19.555000 31.500000,19.555000 31.450000,19.355000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
-  <polyline class="trace trace-bottom" data-id="t32" points="23.850000,23.155000 29.250000,23.155000 29.250000,22.705000 29.200000,22.405000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
-  <polyline class="trace trace-bottom" data-id="t33" points="31.500000,19.555000 25.200000,19.555000 24.550000,19.755000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
-  <polyline class="trace trace-top" data-id="t38" points="44.510000,8.955000 44.550000,8.755000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
-  <polyline class="trace trace-top" data-id="t39" points="44.550000,8.755000 44.100000,8.755000 44.100000,8.305000 41.850000,8.305000 41.850000,5.605000 41.800000,5.680000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
-  <polyline class="trace trace-top" data-id="t50" points="29.750000,44.000000 29.700000,42.955000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
-  <polyline class="trace trace-top" data-id="t51" points="29.700000,42.955000 29.700000,38.005000 33.750000,38.005000 33.590000,37.955000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
-  <polyline class="trace trace-top" data-id="t100" points="33.103092,23.525000 33.300000,23.605000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
-  <polyline class="trace trace-top" data-id="t101" points="33.300000,23.605000 32.400000,23.605000 32.400000,24.955000 31.500000,24.955000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
-  <polyline class="trace trace-bottom" data-id="t102" points="31.500000,24.955000 31.050000,24.955000 31.050000,25.855000 26.100000,25.855000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
-  <polyline class="trace trace-top" data-id="t103" points="26.100000,25.855000 22.950000,25.855000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
-  <polyline class="trace trace-bottom" data-id="t104" points="22.950000,25.855000 22.950000,24.505000 24.300000,24.505000 24.300000,24.955000 24.510000,24.955000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
-  <polyline class="trace trace-top" data-id="t105" points="32.400000,23.605000 32.400000,23.155000 31.950000,23.155000 31.950000,22.705000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
-  <polyline class="trace trace-bottom" data-id="t106" points="31.950000,22.705000 31.050000,22.705000 31.050000,22.255000 30.800000,22.405000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle class="via" data-id="v1" cx="23.850000" cy="23.605000" r="0.150000" fill="#333"/>
-  <circle class="via" data-id="v14" cx="31.500000" cy="24.955000" r="0.150000" fill="#333"/>
-  <circle class="via" data-id="v15" cx="26.100000" cy="25.855000" r="0.150000" fill="#333"/>
-  <circle class="via" data-id="v16" cx="22.950000" cy="25.855000" r="0.150000" fill="#333"/>
-  <circle class="via" data-id="v17" cx="31.950000" cy="22.705000" r="0.150000" fill="#333"/>
+  <polyline class="trace trace-top" data-id="t26" points="24.070000,23.465000 23.850000,23.605000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t27" points="23.850000,23.605000 23.850000,22.255000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t28" points="23.850000,22.255000 23.850000,15.055000 23.400000,15.055000 23.400000,13.705000 30.150000,13.705000 30.150000,14.605000 30.326493,14.445000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t29" points="30.150000,14.605000 30.150000,15.055000 31.500000,15.055000 31.500000,15.505000 31.950000,15.505000 31.950000,20.005000 33.750000,20.005000 33.931737,19.832611" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t30" points="23.850000,22.255000 22.500000,22.255000 22.500000,29.005000 22.675000,28.955000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t31" points="27.900000,13.705000 27.900000,15.055000 28.350000,15.055000 28.350000,15.505000 28.000000,15.505000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t32" points="31.950000,19.555000 31.500000,19.555000 31.450000,19.355000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t33" points="22.500000,24.055000 28.350000,24.055000 28.350000,23.155000 29.250000,23.155000 29.250000,22.705000 29.200000,22.405000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t34" points="31.500000,19.555000 25.200000,19.555000 24.550000,19.755000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t39" points="44.510000,8.955000 44.550000,8.755000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t40" points="44.550000,8.755000 44.100000,8.755000 44.100000,8.305000 41.850000,8.305000 41.850000,5.605000 41.800000,5.680000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t51" points="29.750000,44.000000 29.700000,42.955000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t52" points="29.700000,42.955000 29.700000,38.005000 33.300000,38.005000 33.490000,37.955000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t92" points="30.490000,34.955000 30.600000,34.855000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t93" points="30.600000,34.855000 28.800000,34.855000 28.800000,25.855000 22.950000,25.855000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-bottom" data-id="t94" points="22.950000,25.855000 22.950000,24.505000 28.800000,24.505000 28.800000,23.605000" fill="none" stroke="#0066cc" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline class="trace trace-top" data-id="t95" points="28.800000,23.605000 28.800000,22.405000" fill="none" stroke="#cc0000" stroke-width="0.150000" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle class="via" data-id="v1" cx="23.850000" cy="22.255000" r="0.150000" fill="#333"/>
+  <circle class="via" data-id="v13" cx="22.950000" cy="25.855000" r="0.150000" fill="#333"/>
+  <circle class="via" data-id="v14" cx="28.800000" cy="23.605000" r="0.150000" fill="#333"/>
 </svg>
