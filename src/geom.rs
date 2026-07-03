@@ -351,7 +351,9 @@ impl Shape2D {
     /// This shape inflated (Minkowski ⊕ a disc) by `d`: the skeleton is unchanged and
     /// the inflation radius grows by `d`. Offsetting copper by a clearance is *exactly*
     /// this — disc Minkowski sums add radii — which is why a pour knockout never needs
-    /// a bespoke polygon-offset. `d` may be negative (deflate); the radius floors at 0.
+    /// a bespoke polygon-offset. `d` may be negative (deflate) for a `Stroke`/`Polygon`
+    /// (the radius floors at 0); for an [`Area`](Shape2D::Area) a negative `d` (erosion)
+    /// is unimplemented and **panics**.
     pub fn inflated(&self, d: Nm) -> Shape2D {
         match self {
             Shape2D::Stroke { path, radius } => Shape2D::Stroke {
@@ -364,14 +366,15 @@ impl Shape2D {
             },
             // An `Area` is already realised rings, so inflation is the region kernel's
             // exact Minkowski dilation by a disc of `d` (same decomposition
-            // `shape_to_region` uses). `d == 0` is identity. **Negative `d` (erosion) is
-            // not implemented** — no consumer needs it yet (clearance offsets are always
-            // positive) — and returns the region unchanged; see the branch report.
+            // `shape_to_region` uses). `d == 0` is identity; **negative `d` (erosion) is
+            // not implemented and panics** in [`region::dilate`](crate::region::dilate) —
+            // no consumer needs it (clearance offsets are always positive) and a silent
+            // wrong answer is worse than a loud one.
             Shape2D::Area { region } => Shape2D::Area {
-                region: if d > 0 {
-                    crate::region::dilate(region, d, crate::region::DEFAULT_CIRCLE_SEGS)
-                } else {
+                region: if d == 0 {
                     region.clone()
+                } else {
+                    crate::region::dilate(region, d, crate::region::DEFAULT_CIRCLE_SEGS)
                 },
             },
         }
@@ -395,7 +398,20 @@ impl Shape2D {
                     rings: region
                         .rings
                         .iter()
-                        .map(|ring| ring.iter().map(|&p| f(p)).collect())
+                        .map(|ring| {
+                            let before = crate::region::signed_area2(ring);
+                            let mut mapped: Vec<Point> = ring.iter().map(|&p| f(p)).collect();
+                            // A reflecting transform (negative determinant — e.g. a
+                            // bottom-side flip (x,y)→(−x,y)) reverses every ring's signed
+                            // area, so CCW islands would read as CW holes and vice versa.
+                            // Restore each ring's original winding sign so the region's
+                            // fill semantics survive the map (containment / holes()).
+                            let after = crate::region::signed_area2(&mapped);
+                            if after != 0 && (before > 0) != (after > 0) {
+                                mapped.reverse();
+                            }
+                            mapped
+                        })
                         .collect(),
                 },
             },
@@ -1832,6 +1848,58 @@ mod tests {
         assert!(
             !area.clears(&near_wall, MM / 2),
             "a shape hard against a hole wall violates"
+        );
+    }
+
+    /// A reflecting `map_points` (a bottom-side flip, `(x,y)→(−x,y)`, negative
+    /// determinant) reverses every ring's signed area. `map_points` must re-sign the
+    /// rings so islands stay islands and holes stay holes — otherwise `holes()`/
+    /// `islands()` invert (a wave-2 bottom-silk glyph would render as its own negative).
+    #[test]
+    fn area_map_points_preserves_orientation_under_reflection() {
+        use crate::region::{DEFAULT_CIRCLE_SEGS, difference, shape_to_region, signed_area2};
+        // 10 mm square centred at +6 mm x (so a reflection across x=0 relocates it), with
+        // a 4 mm hole. Filled ring x∈[1,11]∖[4,8]; hole centre at (6,0).
+        let outer = shape_to_region(
+            &Shape2D::rect(pt(6 * MM, 0), 10 * MM, 10 * MM),
+            DEFAULT_CIRCLE_SEGS,
+        );
+        let hole = shape_to_region(
+            &Shape2D::rect(pt(6 * MM, 0), 4 * MM, 4 * MM),
+            DEFAULT_CIRCLE_SEGS,
+        );
+        let area = Shape2D::Area {
+            region: difference(&outer, &hole),
+        };
+
+        let flipped = area.map_points(|p| Point { x: -p.x, y: p.y });
+        let region = flipped.region().unwrap();
+
+        // Fill semantics survive: a filled-ring point (was (9,0) → (−9,0)) is on the
+        // board; the hole centre (was (6,0) → (−6,0)) is still excluded.
+        assert!(
+            flipped.contains_point(pt(-9 * MM, 0)),
+            "island still filled"
+        );
+        assert!(
+            !flipped.contains_point(pt(-6 * MM, 0)),
+            "hole still excluded"
+        );
+
+        // Orientation survives: exactly one CCW island ring, and holes()/islands() still
+        // classify correctly (the actual regression surface).
+        assert_eq!(
+            region.rings.iter().filter(|r| signed_area2(r) > 0).count(),
+            1,
+            "one CCW island ring"
+        );
+        assert_eq!(region.holes().rings.len(), 1, "the hole is still a hole");
+        let islands = region.islands();
+        assert_eq!(islands.len(), 1, "one island");
+        assert_eq!(
+            islands[0].rings.len(),
+            2,
+            "island keeps its hole (outer + hole)"
         );
     }
 }

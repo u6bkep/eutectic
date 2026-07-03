@@ -237,8 +237,10 @@ fn locate(p: Point, rings: &[Ring]) -> Loc {
     }
 }
 
-/// Twice the signed area of a ring (shoelace). CCW > 0, CW < 0.
-fn signed_area2(ring: &[Point]) -> i128 {
+/// Twice the signed area of a ring (shoelace). CCW > 0, CW < 0. Public so orientation-
+/// sensitive callers (e.g. re-signing an `Area`'s rings after a reflecting transform)
+/// share the one exact computation.
+pub fn signed_area2(ring: &[Point]) -> i128 {
     let n = ring.len();
     if n < 3 {
         return 0;
@@ -831,11 +833,15 @@ pub fn shape_to_region(shape: &Shape2D, circle_segs: usize) -> Region {
 /// fat rectangle per boundary edge ∪ one disc per vertex, all unioned), generalized from
 /// a single skeleton to a region's rings — so a hole shrinks and an island grows by `d`,
 /// exactly as `solid ⊕ disc` demands. Reuses the one boolean engine ([`union_all`]); no
-/// new offsetter. `d ≤ 0` is returned unchanged (erosion is not implemented — see
-/// [`Shape2D::inflated`](crate::geom::Shape2D::inflated)).
+/// new offsetter. `d == 0` is identity; **`d < 0` (erosion) is not implemented and
+/// panics** — no consumer needs it (clearance offsets are always positive), and a silent
+/// wrong answer is worse than a loud one.
 pub fn dilate(region: &Region, d: Nm, circle_segs: usize) -> Region {
-    if d <= 0 {
+    if d == 0 {
         return region.clone();
+    }
+    if d < 0 {
+        unimplemented!("region::dilate: negative offset (erosion) is not implemented");
     }
     let mut pieces = vec![region.clone()];
     for ring in &region.rings {
@@ -1032,8 +1038,18 @@ mod tests {
             big.contains_point(pt(0, 15 * MM / 10)),
             "hole wall moved inward"
         );
-        // d <= 0 is identity.
+        // d == 0 is identity.
         assert_eq!(dilate(&holed, 0, DEFAULT_CIRCLE_SEGS), holed);
+    }
+
+    #[test]
+    #[should_panic(expected = "erosion")]
+    fn dilate_negative_offset_panics() {
+        let sq = shape_to_region(
+            &Shape2D::rect(pt(0, 0), 4 * MM, 4 * MM),
+            DEFAULT_CIRCLE_SEGS,
+        );
+        let _ = dilate(&sq, -MM, DEFAULT_CIRCLE_SEGS);
     }
 
     #[test]

@@ -481,6 +481,10 @@ fn gerber_region_fill(region: &Region, out: &mut String) {
         return;
     }
     out.push_str("G36*\n");
+    // Region contours are straight; force linear interpolation so the block is correct
+    // regardless of any preceding arc-mode state (self-contained — callers need not
+    // reset). Idempotent when already G01.
+    out.push_str("G01*\n");
     for ring in &region.rings {
         if ring.len() < 3 {
             continue;
@@ -1299,15 +1303,11 @@ pub fn gerber_silk(doc: &Doc, lib: &PartLib, slab: &Slab) -> Result<String, Stri
                 gerber_contour(s, &mut out, &mut mode, &mut g75);
                 out.push_str("G37*\n");
             }
-            // A filled-area marking (TTF outline text): its rings as a region fill. Reset
-            // to G01 first — a preceding stroke may have left arc mode set, and region
-            // contours are straight.
+            // A filled-area marking (TTF outline text): its rings as a region fill. The
+            // helper emits its own G01, leaving interpolation linear afterwards.
             Shape2D::Area { region } => {
-                if mode != "G01" {
-                    out.push_str("G01*\n");
-                    mode = "G01";
-                }
                 gerber_region_fill(region, &mut out);
+                mode = "G01";
             }
         }
     }
