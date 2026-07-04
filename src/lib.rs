@@ -36,6 +36,7 @@ pub mod query;
 pub mod region;
 pub mod route;
 pub mod schematic;
+pub mod schematic_svg;
 pub mod solve;
 pub mod svg_import;
 pub mod text;

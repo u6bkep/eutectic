@@ -392,6 +392,14 @@ pub struct ReconReport {
     /// unplaced part rather than hard-aborting a legitimate variant toggle (§20c). In
     /// `EntityId` (path) order.
     pub unplaced_components: Vec<EntityId>,
+    /// Findings on the drawn schematic wires (§20d), pre-built by
+    /// [`crate::schematic::validate_wires`] in the pre-order wire walk. A **degrade**, not
+    /// a fault (a wire is presentational): a wire on a DNP-dropped component, or a wire
+    /// drawn across two different nets, each surface as a `W_SCHEMATIC_WIRE` warning that
+    /// leaves the doc clean (`is_clean` ignores them). Empty when there is no `schematic`
+    /// block or no wire earns a warning. (Hard wire errors — an unknown endpoint comp/pin —
+    /// abort the commit and never reach here.)
+    pub schematic_wire_warnings: Vec<crate::diagnostic::Diagnostic>,
 }
 
 impl ReconReport {
@@ -406,8 +414,10 @@ impl ReconReport {
         // `unplaced_components` are deliberately excluded — a font that fails to load
         // degrades to the stroke font (Decision 17), unmasked outer copper (issue 0024)
         // still elaborates/exports honestly, a DNP dangling reference is an intentional
-        // variant toggle (Decision 21b), and an unplaced component still renders in the
-        // derived bin (Decision 20c). All are warnings that leave the doc clean.
+        // variant toggle (Decision 21b), an unplaced component still renders in the
+        // derived bin (Decision 20c), and a `schematic_wire_warnings` finding is a
+        // presentational-wire disagreement with the netlist (Decision 20d) — the netlist
+        // is still the truth. All are warnings that leave the doc clean.
     }
 }
 
@@ -531,6 +541,10 @@ impl crate::diagnostic::Diagnose for ReconReport {
                 .with_help("add a `sym {id}` to a `row`/`column` in the `schematic` block to place it"),
             );
         }
+        // Drawn-wire findings (§20d), already built by `validate_wires`. Degrade, not fault
+        // (a wire is presentational): each is a `W_SCHEMATIC_WIRE` warning, and `is_clean`
+        // ignores them.
+        out.extend(self.schematic_wire_warnings.iter().cloned());
         out
     }
 }

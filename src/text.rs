@@ -1262,9 +1262,31 @@ fn parse_layout_nodes(nodes: &[Node], errors: &mut Vec<Diagnostic>) -> Vec<Layou
                     Err(e) => errors.push(err_line("E_SCHEMATIC", e, b.line)),
                 }
             }
+            "wire" => {
+                if b.opened_block {
+                    errors.push(err_line(
+                        "E_SCHEMATIC",
+                        "`wire` is a leaf and takes no block".to_string(),
+                        b.line,
+                    ));
+                    continue;
+                }
+                match parse_wire_header(&b.rest) {
+                    Ok(wire) => {
+                        // Range-check the presentational waypoints, same discipline as
+                        // `gap` / `dx` / every other authored length (issue 0018) — an
+                        // over-bound value is E_COORD_RANGE here, not a later panic.
+                        let coords: Vec<Nm> =
+                            wire.waypoints.iter().flat_map(|p| [p.x, p.y]).collect();
+                        check_coord_range(coords, b.line, errors);
+                        out.push(LayoutNode::Wire(wire));
+                    }
+                    Err(e) => errors.push(err_line("E_SCHEMATIC", e, b.line)),
+                }
+            }
             other => errors.push(err_line(
                 "E_SCHEMATIC",
-                format!("`{other}` is not valid inside a layout container (expected `row`, `column`, or `sym`)"),
+                format!("`{other}` is not valid inside a layout container (expected `row`, `column`, `sym`, or `wire`)"),
                 b.line,
             )),
         }
@@ -1571,6 +1593,49 @@ fn parse_sym_header(toks: &[String], _line: u32) -> Result<Symbol, String> {
     Ok(Symbol { path, rot, dx, dy })
 }
 
+/// Parse a `wire` leaf tail (`<aComp>.<aPin> <bComp>.<bPin> [via (x,y) (x,y) …]`). The two
+/// endpoints are the leading tokens (each `comp.pin`, split at the *last* dot so a
+/// hierarchical comp path with dots survives — the `nearpin` idiom); an optional `via`
+/// keyword introduces the presentational waypoint list, a run of `(x,y)` coordinates.
+/// Endpoints round-trip: a quoted endpoint token is opaque (so a comp path holding
+/// `#`/`=`/spaces survives), matching the `sym` path convention.
+fn parse_wire_header(rest: &str) -> Result<crate::schematic::Wire, String> {
+    use crate::schematic::{Wire, WireEnd};
+    const USAGE: &str = "wire <aComp>.<aPin> <bComp>.<bPin> [via (x,y) (x,y) …]";
+
+    // Split the header at the `via` keyword: the part before it holds the two endpoint
+    // tokens; the part after is the coordinate list. `via` is matched as a whole
+    // whitespace-delimited token so a comp path can't accidentally contain it.
+    let toks: Vec<&str> = rest.split_whitespace().collect();
+    let via_at = toks.iter().position(|t| *t == "via");
+    let (ends, waypoints) = match via_at {
+        Some(i) => {
+            // Rejoin the tokens after the `via` keyword; `extract_points` scans for the
+            // `(x, y)` groups, so a space reintroduced inside a coordinate is harmless.
+            let coord_str = toks[i + 1..].join(" ");
+            if coord_str.is_empty() {
+                return Err(format!(
+                    "`via` needs at least one waypoint `(x, y)`: {USAGE}"
+                ));
+            }
+            (&toks[..i], extract_points(&coord_str)?)
+        }
+        None => (&toks[..], Vec::new()),
+    };
+    if ends.len() != 2 {
+        return Err(format!("expected two endpoints: {USAGE}"));
+    }
+    let parse_end = |tok: &str| -> Result<WireEnd, String> {
+        let (comp, pin) = split_last_dot(unquote(tok), "pin")?;
+        Ok(WireEnd { comp, pin })
+    };
+    Ok(Wire {
+        a: parse_end(ends[0])?,
+        b: parse_end(ends[1])?,
+        waypoints,
+    })
+}
+
 /// Parse a `sym` `rot=` value: only the four cardinals are legal in v1 (§20b — authored
 /// orientation, no arbitrary angles on the layout leaf). Yields the tiny exact cardinal
 /// quaternion.
@@ -1619,6 +1684,11 @@ fn emit_layout_nodes(nodes: &[LayoutNode], indent: &mut String, out: &mut String
             LayoutNode::Symbol(s) => {
                 out.push_str(indent);
                 out.push_str(&sym_line(s));
+                out.push('\n');
+            }
+            LayoutNode::Wire(w) => {
+                out.push_str(indent);
+                out.push_str(&wire_line(w));
                 out.push('\n');
             }
             LayoutNode::Comment(text) => {
@@ -1690,6 +1760,23 @@ fn sym_line(s: &crate::schematic::Symbol) -> String {
     }
     if s.dy != 0 {
         out.push_str(&format!(" dy={}", fmt_len(s.dy)));
+    }
+    out
+}
+
+/// A `wire` leaf line: `wire <a> <b>`, then `via` and the waypoint coordinate list when
+/// present (omitted for a straight pin-to-pin wire) — the minimal canonical form. Each
+/// endpoint is `comp.pin`, quoted as a whole when a structural character would break
+/// re-parsing (matching [`quote_token`]'s rule for the `sym` path).
+fn wire_line(w: &crate::schematic::Wire) -> String {
+    let end = |e: &crate::schematic::WireEnd| quote_token(&format!("{}.{}", e.comp, e.pin));
+    let mut out = format!("wire {} {}", end(&w.a), end(&w.b));
+    if !w.waypoints.is_empty() {
+        out.push_str(" via");
+        for p in &w.waypoints {
+            out.push(' ');
+            out.push_str(&fmt_point(*p));
+        }
     }
     out
 }
@@ -4906,6 +4993,89 @@ inst top MCU
             node = &c.children[0];
         }
         assert!(matches!(node, LayoutNode::Symbol(s) if s.path == "C1"));
+    }
+
+    #[test]
+    fn wire_parses_straight_and_via() {
+        use crate::schematic::Wire;
+        let layout = parse_layout(
+            "schematic {\n  row {\n    wire C1.p1 C2.p2\n    wire U1.tx U2.rx via (1mm, 2mm) (3mm, -4mm)\n  }\n}\n",
+        );
+        let LayoutNode::Container(row) = &layout.roots[0] else {
+            panic!("expected a container");
+        };
+        // A straight wire (no waypoints), endpoints split at the last dot.
+        let LayoutNode::Wire(Wire { a, b, waypoints }) = &row.children[0] else {
+            panic!("expected a wire");
+        };
+        assert_eq!((a.comp.as_str(), a.pin.as_str()), ("C1", "p1"));
+        assert_eq!((b.comp.as_str(), b.pin.as_str()), ("C2", "p2"));
+        assert!(waypoints.is_empty());
+        // A routed wire with two waypoints.
+        let LayoutNode::Wire(Wire { waypoints, .. }) = &row.children[1] else {
+            panic!("expected a wire");
+        };
+        assert_eq!(
+            waypoints,
+            &vec![
+                Point {
+                    x: 1_000_000,
+                    y: 2_000_000
+                },
+                Point {
+                    x: 3_000_000,
+                    y: -4_000_000
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn wire_hierarchical_path_splits_at_last_dot() {
+        use crate::schematic::Wire;
+        // A hierarchical comp path (with dots and an index) survives — only the *last* dot
+        // separates the pin, matching the `nearpin` idiom.
+        let layout = parse_layout("schematic {\n  wire psu.dec[0].p1 mcu.rst\n}\n");
+        let LayoutNode::Wire(Wire { a, b, .. }) = &layout.roots[0] else {
+            panic!("expected a wire");
+        };
+        assert_eq!((a.comp.as_str(), a.pin.as_str()), ("psu.dec[0]", "p1"));
+        assert_eq!((b.comp.as_str(), b.pin.as_str()), ("mcu", "rst"));
+    }
+
+    #[test]
+    fn wire_round_trips_byte_identical() {
+        let canonical = "schematic {\n  row {\n    wire C1.p1 C2.p2\n    wire U1.tx U2.rx via (1mm, 2mm)\n  }\n}\n";
+        let doc = Doc {
+            schematic: parse(canonical).unwrap().schematic,
+            ..Default::default()
+        };
+        assert_eq!(serialize(&doc), canonical);
+    }
+
+    #[test]
+    fn wire_errors_are_e_schematic() {
+        // A one-endpoint wire, a non-`comp.pin` endpoint, a `via` with no waypoint, and a
+        // block on a `wire` leaf are all hard `E_SCHEMATIC`.
+        for bad in [
+            "schematic {\n  wire C1.p1\n}\n",
+            "schematic {\n  wire C1 C2.p2\n}\n",
+            "schematic {\n  wire C1.p1 C2.p2 via\n}\n",
+            "schematic {\n  wire C1.p1 C2.p2 {\n  }\n}\n",
+        ] {
+            let err = parse(bad).unwrap_err();
+            assert!(
+                err.iter().any(|d| d.code == "E_SCHEMATIC"),
+                "expected E_SCHEMATIC for `{bad}`, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wire_waypoints_are_range_checked() {
+        // A waypoint past ±1 m is E_COORD_RANGE, same discipline as `gap`/`dx` (issue 0018).
+        let err = parse("schematic {\n  wire C1.p1 C2.p2 via (2000mm, 0mm)\n}\n").unwrap_err();
+        assert!(err.iter().any(|d| d.code == "E_COORD_RANGE"), "{err:?}");
     }
 
     #[test]

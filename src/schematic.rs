@@ -62,12 +62,45 @@ pub enum Align {
 pub enum LayoutNode {
     Container(Container),
     Symbol(Symbol),
+    /// A drawn, purely **presentational** pin-to-pin connection (§20d). Carries no
+    /// layout semantics for the *flow* — it reserves no slot and never moves a symbol —
+    /// but it is a real authored node that [`schematic_svg`](crate::schematic_svg) draws
+    /// and [`validate`] range-checks / net-cross-checks. A no-op downstream: it has zero
+    /// effect on the netlist or DRC (the netlist is the truth; a wire is a picture of it).
+    Wire(Wire),
     /// A preserved whole-line comment (stored without its leading `#`), so mixed
     /// authorship inside a `schematic` block round-trips (the Decision-20/21 requirement).
     /// Carries no layout semantics — [`reflow`] and [`validate`] skip it.
     Comment(String),
     /// A preserved blank line, same round-trip purpose as [`LayoutNode::Comment`].
     Blank,
+}
+
+/// One endpoint of a drawn [`Wire`]: a component instance path and a pin identity on it
+/// (a pad number or `port.signal`, the [`PinRef`](crate::doc::PinRef) vocabulary). Kept
+/// as the authored `(comp, pin)` split (the `split_last_dot` idiom in [`crate::text`]) so
+/// a hierarchical comp path with dots survives.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WireEnd {
+    pub comp: String,
+    pub pin: String,
+}
+
+/// A drawn wire (§20d): a presentational line between two pins, optionally routed through
+/// authored **waypoints** (`via (x,y) …`). v1 renders it as a straight segment (no
+/// waypoints) or a polyline through the waypoints — a deliberately dumb drawing, never a
+/// router. Waypoints are schematic-space coordinates (nm), range-checked at parse time
+/// like every other authored length (issue 0018). A wire is a no-op to the netlist: it
+/// exists only to let an author draw a connection the way they like. Drawing a wire
+/// between pins on *different* nets is legal (the tag at each pin still tells the truth)
+/// but earns a `W_SCHEMATIC_WIRE` "your drawing disagrees with the netlist" warning.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Wire {
+    pub a: WireEnd,
+    pub b: WireEnd,
+    /// Presentational routing waypoints in schematic space, in draw order. Empty ⇒ a
+    /// straight pin-to-pin segment.
+    pub waypoints: Vec<Point>,
 }
 
 /// A `row`/`column` flow container. `name` is optional but, when present, must be unique
@@ -125,14 +158,32 @@ impl Symbol {
 impl SchematicLayout {
     /// Every symbol path that appears anywhere in the tree, in a pre-order walk. Used by
     /// [`validate`] and [`reflow`] to relate the tree to the component universe.
-    fn symbol_paths(&self) -> Vec<&str> {
+    pub(crate) fn symbol_paths(&self) -> Vec<&str> {
         let mut out = Vec::new();
         fn walk<'a>(nodes: &'a [LayoutNode], out: &mut Vec<&'a str>) {
             for n in nodes {
                 match n {
                     LayoutNode::Symbol(s) => out.push(s.path.as_str()),
                     LayoutNode::Container(c) => walk(&c.children, out),
-                    LayoutNode::Comment(_) | LayoutNode::Blank => {}
+                    LayoutNode::Wire(_) | LayoutNode::Comment(_) | LayoutNode::Blank => {}
+                }
+            }
+        }
+        walk(&self.roots, out.as_mut());
+        out
+    }
+
+    /// Every drawn [`Wire`] in the tree, in a pre-order walk — the order
+    /// [`schematic_svg`](crate::schematic_svg) draws them and [`validate_wires`] reports
+    /// them, so both are deterministic.
+    pub fn wires(&self) -> Vec<&Wire> {
+        let mut out = Vec::new();
+        fn walk<'a>(nodes: &'a [LayoutNode], out: &mut Vec<&'a Wire>) {
+            for n in nodes {
+                match n {
+                    LayoutNode::Wire(w) => out.push(w),
+                    LayoutNode::Container(c) => walk(&c.children, out),
+                    LayoutNode::Symbol(_) | LayoutNode::Comment(_) | LayoutNode::Blank => {}
                 }
             }
         }
@@ -244,6 +295,126 @@ pub fn validate(
     (errors, unplaced.into_iter().collect())
 }
 
+/// Validate the drawn wires (§20d) against the elaborated universe — a sibling of
+/// [`validate`], kept separate because a wire needs the *part library* (to resolve pin
+/// identities) and the *netlist* (to spot a wire drawn across two nets), which `validate`
+/// does not. Wires are presentational, so their findings mirror the `sym` gate but never
+/// touch the flow:
+///
+///   - **Hard `E_SCHEMATIC` errors** (returned first): an endpoint whose component path is
+///     unknown to the source (a typo, exactly like an unknown `sym` path), or whose pin
+///     selector names no pin on that component's part (a typo'd pin). Collect-all.
+///   - **`W_SCHEMATIC_WIRE` warnings** (returned second): a wire endpoint on a
+///     DNP-dropped component (the wire degrades like a `sym` — non-blocking, §20c × 21b),
+///     and a wire whose two endpoints resolve onto *different* nets (a legal but honest
+///     "your drawing disagrees with the netlist" signal — the net tag at each pin still
+///     tells the truth). Both leave the doc clean.
+///
+/// `components` is the populated path→part universe; `lib` sizes/enumerates pins;
+/// `dnp_dropped` is the depopulated-path set; `pin_net` maps a resolved
+/// [`PinRef`](crate::doc::PinRef) to its net name (absent ⇒ the pin joins no net). The
+/// wire order is the pre-order [`SchematicLayout::wires`] walk, so output is deterministic.
+pub fn validate_wires(
+    layout: &SchematicLayout,
+    components: &BTreeMap<EntityId, String>,
+    lib: &PartLib,
+    dnp_dropped: &BTreeSet<String>,
+    pin_net: &impl Fn(&crate::doc::PinRef) -> Option<String>,
+) -> (Vec<Diagnostic>, Vec<Diagnostic>) {
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+
+    // Resolve one wire endpoint to the set of stored pin identities it names, emitting the
+    // right diagnostic on the way. Returns `None` when the endpoint should be skipped for
+    // the cross-net check (unknown comp/pin already errored, or a DNP-dropped comp warned).
+    let resolve_end = |end: &WireEnd,
+                       errors: &mut Vec<Diagnostic>,
+                       warnings: &mut Vec<Diagnostic>|
+     -> Option<Vec<crate::doc::PinRef>> {
+        let cid = EntityId::new(end.comp.clone());
+        let Some(part) = components.get(&cid) else {
+            // Not a populated component: a DNP-dropped path degrades (like a sym); an
+            // otherwise-unknown path is a hard typo.
+            if dnp_dropped.contains(end.comp.as_str()) {
+                warnings.push(
+                    Diagnostic::warning(
+                        "W_SCHEMATIC_WIRE",
+                        format!(
+                            "wire endpoint `{}.{}` is on `{}`, which an `if=` variant depopulated; the wire is not drawn",
+                            end.comp, end.pin, end.comp
+                        ),
+                        Location::Entity(cid),
+                    ),
+                );
+            } else {
+                errors.push(Diagnostic::error(
+                    "E_SCHEMATIC",
+                    format!(
+                        "wire endpoint `{}.{}` names no component instance",
+                        end.comp, end.pin
+                    ),
+                    Location::Entity(cid),
+                ));
+            }
+            return None;
+        };
+        let Some(def) = lib.get(part) else {
+            // A populated component whose part is missing from the lib: the sym path already
+            // renders as a min box; a wire on it can't resolve a pin, so skip it silently
+            // (the missing part is its own upstream concern, not a wire error).
+            return None;
+        };
+        let ids = def.resolve_selector(&end.pin);
+        if ids.is_empty() {
+            errors.push(Diagnostic::error(
+                "E_SCHEMATIC",
+                format!(
+                    "wire endpoint `{}.{}` names no pin on part `{part}`",
+                    end.comp, end.pin
+                ),
+                Location::Entity(cid),
+            ));
+            return None;
+        }
+        Some(
+            ids.iter()
+                .map(|id| crate::doc::PinRef::new(&cid, id))
+                .collect(),
+        )
+    };
+
+    for w in layout.wires() {
+        let a = resolve_end(&w.a, &mut errors, &mut warnings);
+        let b = resolve_end(&w.b, &mut errors, &mut warnings);
+        // Cross-net check only when both endpoints resolved to real pins. Two endpoints
+        // "agree" if they share any net (a multi-pad selector fans out; sharing one net is
+        // enough to call the drawing honest). A wire where neither side joins any net is
+        // silent — there is nothing to disagree with.
+        if let (Some(a), Some(b)) = (a, b) {
+            let nets_a: BTreeSet<String> = a.iter().filter_map(pin_net).collect();
+            let nets_b: BTreeSet<String> = b.iter().filter_map(pin_net).collect();
+            if !nets_a.is_empty() && !nets_b.is_empty() && nets_a.is_disjoint(&nets_b) {
+                // Deterministic message: name the two nets in sorted order.
+                let na = nets_a.iter().next().unwrap();
+                let nb = nets_b.iter().next().unwrap();
+                warnings.push(
+                    Diagnostic::warning(
+                        "W_SCHEMATIC_WIRE",
+                        format!(
+                            "wire `{}.{}` — `{}.{}` connects different nets (`{na}` vs `{nb}`); the drawn wire does not match the netlist",
+                            w.a.comp, w.a.pin, w.b.comp, w.b.pin
+                        ),
+                        Location::None,
+                    )
+                    .with_help("wires are presentational; the net tag at each pin is the truth"),
+                );
+            }
+        }
+    }
+
+    (errors, warnings)
+}
+
 // ----------------------------------------------------------------------------
 // Symbol sizing (Decision 20e — boxes-with-pins)
 // ----------------------------------------------------------------------------
@@ -288,6 +459,82 @@ fn edge_pins(def: &PartDef) -> Vec<String> {
         }
     }
     names
+}
+
+/// Which edge of the symbol box a pin stub sits on (Decision 20e's parity split).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PinSide {
+    Left,
+    Right,
+}
+
+/// One pin stub's placement on the symbol box, in the box's own frame (origin at the box
+/// center, y-up) — everything [`schematic_svg`](crate::schematic_svg) needs to draw a stub
+/// and its label/tag *exactly* where [`symbol_extent`] sized for it, without re-deriving
+/// the parity split. `name` is the human label; `id` is the stored pin identity (pad
+/// number, or `port.signal`) for the net-tag lookup — the [`PinRef`](crate::doc::PinRef)
+/// vocabulary. `dy` is the stub's vertical offset from the box center (positive = up).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PinSlot {
+    pub name: String,
+    pub id: String,
+    pub side: PinSide,
+    pub dy: Nm,
+}
+
+/// The pin stubs of a part, placed on the box edges exactly as [`symbol_extent`] sizes
+/// them (Decision 20e): the same enumeration order ([`edge_pins`] — discrete pins, then
+/// interface signals) and the same left/right parity split, so a renderer draws precisely
+/// what reflow packed. Left and right columns each fill top-down from the box top, at
+/// [`PIN_PITCH`] spacing starting [`PIN_MARGIN`] below the top edge. The box half-height is
+/// derived from the busier side's count, identical to `symbol_extent`.
+///
+/// Returned in the [`edge_pins`] order (left/right interleaved by parity), so the output
+/// is deterministic. Pairs with [`symbol_extent`] — call both on the same [`PartDef`].
+pub fn pin_slots(def: &PartDef) -> Vec<PinSlot> {
+    let names = edge_pins(def);
+    let ids = edge_pin_ids(def);
+    let n = names.len();
+    let left = n.div_ceil(2);
+    let right = n / 2;
+    let side_count = left.max(right) as Nm;
+    // Box half-height, matching `symbol_extent`'s `h` (before the MIN_BOX_H floor — the
+    // stubs anchor to the pitch grid, not the floored box, which only grows the box, never
+    // the pin spacing).
+    let h = (side_count * PIN_PITCH + 2 * PIN_MARGIN).max(MIN_BOX_H);
+    let half_h = h / 2;
+    // The first stub sits PIN_MARGIN below the top edge; each subsequent one a pitch down.
+    let stub_dy = |slot: Nm| half_h - PIN_MARGIN - slot * PIN_PITCH;
+
+    let mut out = Vec::new();
+    let (mut li, mut ri) = (0i64, 0i64);
+    for (i, (name, id)) in names.into_iter().zip(ids).enumerate() {
+        let (side, dy) = if i % 2 == 0 {
+            let dy = stub_dy(li);
+            li += 1;
+            (PinSide::Left, dy)
+        } else {
+            let dy = stub_dy(ri);
+            ri += 1;
+            (PinSide::Right, dy)
+        };
+        out.push(PinSlot { name, id, side, dy });
+    }
+    out
+}
+
+/// The stored pin **identity** of each edge pin, in [`edge_pins`] order: a pad `number`
+/// for a discrete pin, `port.signal` for an interface signal — the
+/// [`PinRef`](crate::doc::PinRef) vocabulary the netlist keys on. Parallel to
+/// [`edge_pins`] (the display names), so the two zip.
+fn edge_pin_ids(def: &PartDef) -> Vec<String> {
+    let mut ids: Vec<String> = def.pins.iter().map(|p| p.number.clone()).collect();
+    for (port, iface) in &def.interfaces {
+        for sig in iface.signals.keys() {
+            ids.push(format!("{port}.{sig}"));
+        }
+    }
+    ids
 }
 
 /// Size the box-with-pins for a part (Decision 20e). Separable from packing so Phase 2's
@@ -456,8 +703,9 @@ fn measure(node: &LayoutNode, sized: &impl Fn(&Symbol) -> Extent) -> Extent {
     match node {
         LayoutNode::Symbol(s) => sized(s),
         LayoutNode::Container(c) => measure_container(c, sized),
-        // Trivia is preserved for round-trip but has no geometry.
-        LayoutNode::Comment(_) | LayoutNode::Blank => Extent { w: 0, h: 0 },
+        // A wire is presentational (§20d) and reserves no flow slot; trivia is preserved
+        // for round-trip. Neither has flow geometry.
+        LayoutNode::Wire(_) | LayoutNode::Comment(_) | LayoutNode::Blank => Extent { w: 0, h: 0 },
     }
 }
 
@@ -578,8 +826,9 @@ fn place_node(
         LayoutNode::Container(c) => {
             place_container(c, slot, sized, out);
         }
-        // Trivia never reaches here (filtered by `flow_children`); handled for totality.
-        LayoutNode::Comment(_) | LayoutNode::Blank => {}
+        // Wires and trivia never reach here (filtered by `flow_children`); handled for
+        // totality.
+        LayoutNode::Wire(_) | LayoutNode::Comment(_) | LayoutNode::Blank => {}
     }
 }
 
@@ -686,6 +935,22 @@ mod tests {
         assert!(ldo.h >= cap.h);
         // Every box is at least the minimum.
         assert!(cap.w >= MIN_BOX_W && cap.h >= MIN_BOX_H);
+    }
+
+    #[test]
+    fn pin_slots_split_by_parity_and_fit_the_box() {
+        let lib = part_library();
+        let def = &lib["MCU"]; // 2 discrete pins + uart(tx,rx) = 4 edge pins.
+        let slots = pin_slots(def);
+        assert_eq!(slots.len(), 4);
+        // Parity split: even indices left, odd right (2 each).
+        assert_eq!(slots.iter().filter(|s| s.side == PinSide::Left).count(), 2);
+        assert_eq!(slots.iter().filter(|s| s.side == PinSide::Right).count(), 2);
+        // Every stub sits within the box the sizer produced (|dy| ≤ half-height).
+        let e = symbol_extent(def);
+        for s in &slots {
+            assert!(s.dy.abs() <= e.h / 2, "stub {s:?} outside box h={}", e.h);
+        }
     }
 
     #[test]
@@ -968,6 +1233,95 @@ mod tests {
         assert!(errors.is_empty(), "DNP-dropped placed sym must not error");
         // C2 surfaces as unplaced (so it warns), and is absent from the placed set.
         assert_eq!(unplaced, vec![EntityId::new("C2")]);
+    }
+
+    // --- wire validation ----------------------------------------------------
+
+    fn wire(a: (&str, &str), b: (&str, &str)) -> LayoutNode {
+        LayoutNode::Wire(Wire {
+            a: WireEnd {
+                comp: a.0.into(),
+                pin: a.1.into(),
+            },
+            b: WireEnd {
+                comp: b.0.into(),
+                pin: b.1.into(),
+            },
+            waypoints: vec![],
+        })
+    }
+
+    /// A pin→net lookup from `(comp, pin, net)` triples.
+    fn nets(triples: &[(&str, &str, &str)]) -> impl Fn(&crate::doc::PinRef) -> Option<String> {
+        let map: BTreeMap<(String, String), String> = triples
+            .iter()
+            .map(|(c, p, n)| ((c.to_string(), p.to_string()), n.to_string()))
+            .collect();
+        move |pr: &crate::doc::PinRef| map.get(&(pr.comp.to_string(), pr.pin.clone())).cloned()
+    }
+
+    #[test]
+    fn wire_to_real_pins_on_same_net_is_silent() {
+        let lib = part_library();
+        let u = universe(&[("C1", "Cap"), ("C2", "Cap")]);
+        let layout = SchematicLayout {
+            roots: vec![wire(("C1", "p1"), ("C2", "p1"))],
+        };
+        let net = nets(&[("C1", "p1", "N1"), ("C2", "p1", "N1")]);
+        let (errors, warnings) = validate_wires(&layout, &u, &lib, &dnp(&[]), &net);
+        assert!(errors.is_empty());
+        assert!(warnings.is_empty(), "same-net wire is honest: {warnings:?}");
+    }
+
+    #[test]
+    fn wire_across_two_nets_warns_not_errors() {
+        let lib = part_library();
+        let u = universe(&[("C1", "Cap"), ("C2", "Cap")]);
+        let layout = SchematicLayout {
+            roots: vec![wire(("C1", "p1"), ("C2", "p1"))],
+        };
+        // The two pins are on *different* nets: legal but honest disagreement (§20d).
+        let net = nets(&[("C1", "p1", "N1"), ("C2", "p1", "N2")]);
+        let (errors, warnings) = validate_wires(&layout, &u, &lib, &dnp(&[]), &net);
+        assert!(errors.is_empty(), "cross-net is a warning, not an error");
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code, "W_SCHEMATIC_WIRE");
+        assert!(warnings[0].message.contains("different nets"));
+    }
+
+    #[test]
+    fn wire_unknown_comp_or_pin_is_an_error() {
+        let lib = part_library();
+        let u = universe(&[("C1", "Cap")]);
+        // Unknown component `NOPE`, and a real component with a bogus pin.
+        let layout = SchematicLayout {
+            roots: vec![
+                wire(("C1", "p1"), ("NOPE", "p1")),
+                wire(("C1", "bogus"), ("C1", "p2")),
+            ],
+        };
+        let (errors, _) = validate_wires(&layout, &u, &lib, &dnp(&[]), &nets(&[]));
+        assert_eq!(errors.len(), 2);
+        assert!(errors.iter().all(|e| e.code == "E_SCHEMATIC"));
+    }
+
+    #[test]
+    fn wire_on_dnp_dropped_comp_degrades_to_warning() {
+        let lib = part_library();
+        // C2 is DNP-dropped (declared, then `if=false`). A wire onto it must not error — it
+        // degrades like a `sym` (§20c × 21b), a non-blocking W_SCHEMATIC_WIRE.
+        let u = universe(&[("C1", "Cap")]);
+        let layout = SchematicLayout {
+            roots: vec![wire(("C1", "p1"), ("C2", "p1"))],
+        };
+        let (errors, warnings) = validate_wires(&layout, &u, &lib, &dnp(&["C2"]), &nets(&[]));
+        assert!(
+            errors.is_empty(),
+            "DNP-dropped wire endpoint must not error"
+        );
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code, "W_SCHEMATIC_WIRE");
+        assert!(warnings[0].message.contains("depopulated"));
     }
 
     #[test]

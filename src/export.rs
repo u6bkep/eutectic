@@ -32,7 +32,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// exactly six fractional digits. Pure integer arithmetic — no float, so the
 /// fixed-point determinism invariant is preserved end to end (e.g. `-2_000_000` ->
 /// `"-2.000000"`, `1_325_000` -> `"1.325000"`).
-fn fmt_mm(nm: Nm) -> String {
+pub(crate) fn fmt_mm(nm: Nm) -> String {
     let neg = nm < 0;
     let a = nm.unsigned_abs();
     let int = a / MM as u64;
@@ -112,6 +112,16 @@ fn part_pin_ids(def: &PartDef) -> Vec<String> {
     let mut ids: Vec<String> = def.pins.iter().map(|p| p.number.clone()).collect();
     for (port, iface) in &def.interfaces {
         for sig in iface.signals.keys() {
+            // Issue 0029: skip a signal *bound* to a real pad (`iface.pads`). Its pad is
+            // already enumerated by number above — the bound signal *is* that pad (the pin
+            // identity `iface_infer` nets under). Enumerating `port.signal` too would draw
+            // the same physical pin twice: once as real pad copper (by number) and once as
+            // the 0.3 mm fallback dot (`port.signal` finds no `PinDef`), so the fallback
+            // painted a spurious duplicate dot over the copper. An abstract (unbound)
+            // signal keeps its `port.signal` identity — it has no colliding pad.
+            if iface.pads.contains_key(sig) {
+                continue;
+            }
             ids.push(format!("{port}.{sig}"));
         }
     }
@@ -119,7 +129,7 @@ fn part_pin_ids(def: &PartDef) -> Vec<String> {
 }
 
 /// Minimal XML text escaping for labels.
-fn xml_escape(s: &str) -> String {
+pub(crate) fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -1995,6 +2005,76 @@ psu.reg,LDO,0.000000,0.000000,0,T
         assert!(
             !s.contains("<circle class=\"pad\""),
             "the r=0.3 pad-dot lie should be gone for a real pad:\n{s}"
+        );
+    }
+
+    #[test]
+    fn bound_interface_signal_draws_no_spurious_dot() {
+        // Issue 0029: an interface signal *bound* to a real pad (`iface.pads`) must not be
+        // enumerated as a separate `port.signal` pin — its pad is already drawn as copper
+        // by number, so the `port.signal` fallback dot painted a duplicate on the pad.
+        use crate::elaborate::GenDirective as G;
+        use crate::part::{Dir, InterfaceDef, PadCopper, PadGeo, PadLayers, PinDef, PinRole};
+
+        let mut iface = InterfaceDef {
+            type_name: "uart".into(),
+            signals: BTreeMap::from([("tx".into(), Dir::Out)]),
+            offsets: BTreeMap::from([("tx".into(), Point { x: 0, y: 0 })]),
+            mate: Vec::new(),
+            pads: BTreeMap::new(),
+        };
+        // Bind the `tx` signal to pad number `1` (the imported-part case).
+        iface.pads.insert("tx".into(), "1".into());
+
+        let def = PartDef {
+            name: "BND".into(),
+            pins: vec![PinDef {
+                name: "1".into(),
+                number: "1".into(),
+                role: PinRole::Passive,
+                offset: Point { x: 0, y: 0 },
+                pad: Some(PadGeo {
+                    copper: vec![PadCopper {
+                        shape: Shape2D::rect(Point { x: 0, y: 0 }, MM, MM),
+                        layers: PadLayers::Top,
+                    }],
+                    drill: None,
+                }),
+            }],
+            interfaces: BTreeMap::from([("port".to_string(), iface)]),
+            graphics: Vec::new(),
+            texts: Vec::new(),
+            courtyard: None,
+            class: None,
+        };
+
+        // The bound signal is dropped from the enumeration; only the pad number remains.
+        assert_eq!(part_pin_ids(&def), vec!["1".to_string()]);
+
+        // And the rendered SVG draws the real pad copper, with no `<circle class="pad">`
+        // fallback dot on top of it.
+        let mut lib = PartLib::new();
+        lib.insert("BND".into(), def);
+        let mut h = History::new(Default::default());
+        h.commit(
+            Transaction::one(Command::SetSource(vec![G::Instance {
+                path: "u1".into(),
+                part: "BND".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            }])),
+            &lib,
+            "bnd",
+        )
+        .unwrap();
+        let s = svg(h.doc(), &lib).unwrap();
+        assert!(
+            s.contains("<polygon class=\"pad\""),
+            "real pad copper expected:\n{s}"
+        );
+        assert!(
+            !s.contains("<circle class=\"pad\""),
+            "no spurious fallback dot for the bound interface signal:\n{s}"
         );
     }
 

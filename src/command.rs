@@ -305,8 +305,34 @@ pub fn apply(
             return Err(errors);
         }
         next.report.unplaced_components = unplaced;
+
+        // Drawn-wire validation (Decision 20d): a sibling gate that also needs the part
+        // library (to resolve endpoint pins) and the elaborated netlist (to spot a wire
+        // drawn across two nets), which `validate` does not. An unknown endpoint comp/pin
+        // is a hard `E_SCHEMATIC` abort (a typo, like an unknown `sym` path); a wire on a
+        // DNP-dropped part, or across two nets, degrades to a non-blocking
+        // `W_SCHEMATIC_WIRE` finding on the report (§20d — a wire is presentational).
+        let parts: std::collections::BTreeMap<EntityId, String> = next
+            .components
+            .iter()
+            .map(|(id, c)| (id.clone(), c.part.clone()))
+            .collect();
+        // Resolved identity → net name, built once from the materialized netlist.
+        let pin_to_net: std::collections::BTreeMap<crate::doc::PinRef, String> = next
+            .nets
+            .values()
+            .flat_map(|net| net.members.iter().map(|m| (m.clone(), net.name.clone())))
+            .collect();
+        let pin_net = |p: &crate::doc::PinRef| pin_to_net.get(p).cloned();
+        let (wire_errors, wire_warnings) =
+            crate::schematic::validate_wires(layout, &parts, lib, &elab.dnp_dropped, &pin_net);
+        if !wire_errors.is_empty() {
+            return Err(wire_errors);
+        }
+        next.report.schematic_wire_warnings = wire_warnings;
     } else {
         next.report.unplaced_components.clear();
+        next.report.schematic_wire_warnings.clear();
     }
 
     // Decay: garbage-collect hints that the reconciliation found ineffective.
