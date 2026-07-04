@@ -555,7 +555,12 @@ fn strip_comment(raw: &str) -> &str {
 // generic nested representation and its (de)serialization — no directive here
 // consumes a block yet (see [`keyword_takes_block`]). The Decision-20 layout tree
 // (`row`/`column`) and Decision-21 `def` bodies are the consumers-to-be: they will
-// walk a [`Block`]'s header + children without re-tokenizing.
+// walk a [`Block`]'s header + children ([`Node`]) without re-tokenizing.
+//
+// A block body is a [`Node`] sequence: child directives interleaved with the comment
+// and blank lines between them. Trivia is preserved *inside* blocks (Decision 21's
+// mixed-authorship `def` bodies must round-trip) but dropped at the top level, where
+// the flat path has always dropped it.
 
 /// A directive together with any block body it opened. Header tokens are pre-split
 /// (whitespace-aware, keeping quoted runs intact — the same tokenization the flat
@@ -573,16 +578,39 @@ pub struct Block {
     /// Every whitespace-separated header token (including the keyword at index 0),
     /// with quoted runs kept intact. Consumers walk these; they are never re-split.
     pub tokens: Vec<String>,
-    /// The header with its keyword removed and surrounding whitespace trimmed — the
-    /// exact `rest` the flat directive path feeds to [`parse_line`]. Preserves the
-    /// original spacing/quoting so coordinate- and quote-sensitive parsers still work.
+    /// The whitespace-normalized header tail: the header with its keyword removed. The
+    /// keyword→tail separator is collapsed to nothing here (this is the tail *after* the
+    /// separating whitespace) but the tail's own internal spacing and quoting are
+    /// preserved verbatim — so coordinate- and quote-sensitive per-directive parsers see
+    /// the same content they parse today. NOT a byte-exact slice of the source line (the
+    /// leading separator is normalized); every current per-directive parser is
+    /// whitespace-insensitive across the keyword boundary, so this is exact for their
+    /// purposes. A consumer needing the raw line should reconstruct via the tokens.
     pub rest: String,
     /// Whether this directive opened a `{ … }` block (true even if the body is empty).
     pub opened_block: bool,
-    /// Child directives inside this directive's block, in source order.
-    pub children: Vec<Block>,
+    /// This block's body, in source order: child directives interleaved with the
+    /// comment and blank lines between them (trivia is preserved *inside* blocks so
+    /// mixed-authorship `def` bodies round-trip — Decision 21). Empty for a leaf.
+    pub children: Vec<Node>,
     /// 1-based source line of the header.
     pub line: u32,
+}
+
+/// One entry in a block body: a nested directive, or a preserved trivia line (a comment
+/// or a blank). Trivia is retained only *inside* blocks; the top-level forest carries
+/// only [`Node::Block`] (the flat path's pre-existing behavior — top-level comments and
+/// blanks are not tier-1 state and are dropped as they always were).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Node {
+    /// A nested directive (itself possibly a block opener).
+    Block(Block),
+    /// A whole-line comment, stored **without** its leading `#` or surrounding
+    /// whitespace (re-emitted as `# <text>` at canonical indent). An empty-bodied
+    /// comment (`#` alone) stores the empty string.
+    Comment(String),
+    /// A blank line.
+    Blank,
 }
 
 impl Block {
@@ -599,13 +627,37 @@ impl Block {
 
 /// The per-keyword block allowlist. No existing directive accepts a block, so this is
 /// `false` for every keyword today: a block opened on any current keyword is a parse
-/// error, leaving all existing documents unchanged. Phase-1/2 consumers (the
-/// Decision-20 layout containers, Decision-21 `def`) flip their keyword to `true`
-/// here when they land; the block tree is already built for every keyword, so a
-/// consumer only needs to opt in and walk [`Block::children`].
-fn keyword_takes_block(_keyword: &str) -> bool {
+/// error, leaving all existing documents unchanged.
+///
+/// A Phase-1/2 consumer (the Decision-20 layout containers, Decision-21 `def`) enables
+/// its keyword by wiring **three** things — the block tree is already built for every
+/// keyword, but nothing walks a block body yet, so opting in is not a one-liner:
+///
+/// 1. return `true` here for the keyword;
+/// 2. add a children-aware arm in [`parse_forest`] *before* the `parse_line`
+///    fallthrough, which walks [`Block::children`] (recursing into nested
+///    [`Node::Block`]s) and lowers the body into its own tier-1 representation;
+/// 3. add storage for that representation in [`Parsed`].
+///
+/// The recursion path in [`parse_forest`] is exercised end-to-end by a `cfg(test)`
+/// block-accepting keyword (see the `testblock` tests), so Phase 1 inherits a tested
+/// descent rather than a latent one.
+fn keyword_takes_block(keyword: &str) -> bool {
+    // A test-only sentinel keyword that opts into blocks, so the `parse_forest` descent
+    // path is covered before any real consumer lands (finding 3). Never reachable in a
+    // non-test build; real keywords are added to this match when their consumer lands.
+    #[cfg(test)]
+    if keyword == TEST_BLOCK_KEYWORD {
+        return true;
+    }
+    let _ = keyword;
     false
 }
+
+/// A `cfg(test)` sentinel keyword that accepts a block, used to exercise the
+/// `parse_forest` descent end-to-end. Chosen not to collide with any real directive.
+#[cfg(test)]
+const TEST_BLOCK_KEYWORD: &str = "testblock";
 
 /// Split a block-tree header into its tokens, keeping quoted runs intact. The leading
 /// token is the keyword; `rest` is the original header with the keyword and one run of
@@ -656,27 +708,56 @@ fn is_block_close(line: &str) -> bool {
     line == "}"
 }
 
+/// The comment text of a raw line whose code part (quote-aware) is empty — i.e. a
+/// whole-line comment. Returns the text after the first unquoted `#`, trimmed, or
+/// `None` if the line carries no comment. (A blank line has no `#` and returns `None`.)
+fn whole_line_comment(raw: &str) -> Option<&str> {
+    let mut in_str = false;
+    for (i, c) in raw.char_indices() {
+        match c {
+            '"' => in_str = !in_str,
+            '#' if !in_str => return Some(raw[i + 1..].trim()),
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Parse text into a forest of [`Block`]s: the nested-block grammar's generic
 /// representation. Comment stripping is quote-aware (a `#` inside a quoted value is
-/// literal) and happens *before* brace detection on the unquoted remainder. Blank
-/// lines are skipped. Errors — an unbalanced `{` (a block left open at end of input)
-/// and a `}` with no open block — are `E_BLOCK` diagnostics located by line number,
-/// collected in the house *collect-all* style. On any error the whole parse fails and
-/// no partial tree escapes.
+/// literal) and happens *before* brace detection on the unquoted remainder. Comment and
+/// blank lines *inside a block* are preserved as [`Node`] trivia (Decision 21 mixed
+/// authorship); at the top level they are dropped, as the flat path has always done.
+/// Errors — an unbalanced `{` (a block left open at end of input), a `}` with no open
+/// block, and an empty-keyword block opener (a lone `{`) — are `E_BLOCK` diagnostics
+/// located by line number, collected in the house *collect-all* style. On any error the
+/// whole parse fails and no partial tree escapes.
 pub fn parse_blocks(text: &str) -> Result<Vec<Block>, Vec<Diagnostic>> {
-    // A stack of (open-block header, its accumulating children). The bottom frame is
-    // the synthetic top-level forest, whose "header" is never read.
-    let mut stack: Vec<(Option<Block>, Vec<Block>)> = vec![(None, Vec::new())];
+    // A stack of (open-block header, its accumulating body). The bottom frame is the
+    // synthetic top-level forest, whose opener is `None` and is never read.
+    let mut stack: Vec<(Option<Block>, Vec<Node>)> = vec![(None, Vec::new())];
     let mut errors: Vec<Diagnostic> = Vec::new();
+    // Whether the innermost frame is a real (non-bottom) block: trivia is preserved only
+    // there, so top-level comments/blanks stay dropped exactly as before.
+    let in_block = |stack: &Vec<(Option<Block>, Vec<Node>)>| stack.len() > 1;
 
     for (i, raw) in text.lines().enumerate() {
         let lineno = (i + 1) as u32;
         let stripped = strip_comment(raw).trim();
         if stripped.is_empty() {
+            // A trivia line (blank or whole-line comment). Preserve it inside a block;
+            // drop it at the top level (unchanged flat behavior).
+            if in_block(&stack) {
+                let node = match whole_line_comment(raw) {
+                    Some(text) => Node::Comment(text.to_string()),
+                    None => Node::Blank,
+                };
+                stack.last_mut().unwrap().1.push(node);
+            }
             continue;
         }
         if is_block_close(stripped) {
-            if stack.len() <= 1 {
+            if !in_block(&stack) {
                 errors.push(Diagnostic::error(
                     "E_BLOCK",
                     "`}` with no open block".to_string(),
@@ -687,20 +768,30 @@ pub fn parse_blocks(text: &str) -> Result<Vec<Block>, Vec<Diagnostic>> {
                 ));
                 continue;
             }
-            // Pop the frame, attach its finished children, and push the completed
-            // block onto its parent.
+            // Pop the frame, attach its finished body, and push the completed block onto
+            // its parent as a `Node::Block`.
             let (opener, children) = stack.pop().expect("checked len > 1");
             let mut block = opener.expect("non-bottom frame always carries an opener");
             block.children = children;
-            stack
-                .last_mut()
-                .expect("bottom frame is never popped")
-                .1
-                .push(block);
+            stack.last_mut().unwrap().1.push(Node::Block(block));
             continue;
         }
         let (header, opened) = split_block_open(stripped);
         let (keyword, tokens, rest) = split_header(header);
+        if opened && keyword.is_empty() {
+            // A `{` with no directive in front (e.g. a lone `{`). Rejected here in the
+            // public API so a malformed opener never reaches a consumer or serializes to
+            // a leading-space line (finding 4). No frame is opened.
+            errors.push(Diagnostic::error(
+                "E_BLOCK",
+                "block opener has no directive before `{`".to_string(),
+                Location::Span {
+                    line: lineno,
+                    col: 1,
+                },
+            ));
+            continue;
+        }
         let block = Block {
             keyword,
             tokens,
@@ -710,14 +801,10 @@ pub fn parse_blocks(text: &str) -> Result<Vec<Block>, Vec<Diagnostic>> {
             line: lineno,
         };
         if opened {
-            // Open a new frame; its children accumulate until the matching `}`.
+            // Open a new frame; its body accumulates until the matching `}`.
             stack.push((Some(block), Vec::new()));
         } else {
-            stack
-                .last_mut()
-                .expect("bottom frame is never popped")
-                .1
-                .push(block);
+            stack.last_mut().unwrap().1.push(Node::Block(block));
         }
     }
 
@@ -738,9 +825,18 @@ pub fn parse_blocks(text: &str) -> Result<Vec<Block>, Vec<Diagnostic>> {
     }
 
     if errors.is_empty() {
-        Ok(stack.pop().expect("bottom frame is always present").1)
+        // Top-level trivia was never pushed (the bottom frame is not "in a block"), so
+        // the bottom frame holds only `Node::Block`; unwrap to the `Vec<Block>` forest.
+        let top = stack.pop().expect("bottom frame is always present").1;
+        Ok(top
+            .into_iter()
+            .map(|n| match n {
+                Node::Block(b) => b,
+                _ => unreachable!("top-level trivia is dropped, never pushed"),
+            })
+            .collect())
     } else {
-        // Report opener errors in source order (the pop order above is innermost-first).
+        // Report errors in source order (the opener pop order above is innermost-first).
         errors.sort_by_key(|d| match d.location {
             Location::Span { line, .. } => line,
             _ => 0,
@@ -755,32 +851,61 @@ const BLOCK_INDENT: &str = "  ";
 
 /// Serialize a forest of [`Block`]s back to canonical block-grammar text, deterministic
 /// and round-tripping ([`parse_blocks`] of the output reproduces the forest). Each
-/// directive renders as its header line; a block opener appends ` {`, its children
-/// render indented one level deeper, and a `}` closes at the opener's indent. This is
-/// the emission half consumers reuse once their keyword opts into blocks; the flat
-/// [`serialize`] on a `Doc` is unchanged (routeless/blockless docs stay byte-identical).
+/// directive renders as its header line; a block opener appends ` {`, its body renders
+/// indented one level deeper (nested directives, and the comment/blank trivia between
+/// them), and a `}` closes at the opener's indent. A comment renders as `# <text>` (or
+/// bare `#` when empty), a blank as an empty line. This is the emission half consumers
+/// reuse once their keyword opts into blocks; the flat [`serialize`] on a `Doc` is
+/// unchanged (routeless/blockless docs stay byte-identical).
 pub fn serialize_blocks(blocks: &[Block]) -> String {
     let mut out = String::new();
-    emit_blocks(blocks, 0, &mut out);
+    // `indent` grows/shrinks by one level per depth so ancestors are never re-indented
+    // (emission is O(total output), not O(depth·output)).
+    let mut indent = String::new();
+    emit_block_seq(blocks, &mut indent, &mut out);
     out
 }
 
-fn emit_blocks(blocks: &[Block], depth: usize, out: &mut String) {
+/// Emit a sequence of block *directives* (no trivia — the top-level forest and the
+/// caller's convenience over a `&[Block]`), wrapping each into a `Node::Block` view.
+fn emit_block_seq(blocks: &[Block], indent: &mut String, out: &mut String) {
     for b in blocks {
-        for _ in 0..depth {
-            out.push_str(BLOCK_INDENT);
-        }
-        out.push_str(&b.header_line());
-        if b.opened_block {
-            out.push_str(" {\n");
-            emit_blocks(&b.children, depth + 1, out);
-            for _ in 0..depth {
-                out.push_str(BLOCK_INDENT);
+        emit_block(b, indent, out);
+    }
+}
+
+/// Emit a block body: nested directives interleaved with preserved trivia.
+fn emit_nodes(nodes: &[Node], indent: &mut String, out: &mut String) {
+    for n in nodes {
+        match n {
+            Node::Block(b) => emit_block(b, indent, out),
+            Node::Comment(text) => {
+                out.push_str(indent);
+                if text.is_empty() {
+                    out.push_str("#\n");
+                } else {
+                    out.push_str("# ");
+                    out.push_str(text);
+                    out.push('\n');
+                }
             }
-            out.push_str("}\n");
-        } else {
-            out.push('\n');
+            Node::Blank => out.push('\n'),
         }
+    }
+}
+
+fn emit_block(b: &Block, indent: &mut String, out: &mut String) {
+    out.push_str(indent);
+    out.push_str(&b.header_line());
+    if b.opened_block {
+        out.push_str(" {\n");
+        indent.push_str(BLOCK_INDENT);
+        emit_nodes(&b.children, indent, out);
+        indent.truncate(indent.len() - BLOCK_INDENT.len());
+        out.push_str(indent);
+        out.push_str("}\n");
+    } else {
+        out.push('\n');
     }
 }
 
@@ -803,13 +928,8 @@ pub fn parse(text: &str) -> Result<Parsed, Vec<Diagnostic>> {
     let mut next_vid: u64 = 1;
     let mut errors: Vec<Diagnostic> = Vec::new();
 
-    parse_forest(
-        &blocks,
-        &mut parsed,
-        &mut next_tid,
-        &mut next_vid,
-        &mut errors,
-    );
+    let top: Vec<Node> = blocks.into_iter().map(Node::Block).collect();
+    parse_forest(&top, &mut parsed, &mut next_tid, &mut next_vid, &mut errors);
 
     if errors.is_empty() {
         Ok(parsed)
@@ -818,68 +938,100 @@ pub fn parse(text: &str) -> Result<Parsed, Vec<Diagnostic>> {
     }
 }
 
-/// Walk a [`Block`] forest, lowering each directive into `parsed`. Today no keyword
-/// accepts a block (see [`keyword_takes_block`]): a directive that opened a block is a
-/// hard `E_BLOCK` error and its children are not descended into, so every existing
-/// (blockless) document flows through the exact same per-directive path as before.
-/// When a consumer opts a keyword into blocks, this is where the block header + its
-/// already-parsed children get handed to that consumer.
+/// Walk a block body (a `Node` sequence), lowering each directive into `parsed`. Trivia
+/// nodes (comments, blanks) carry no tier-1 state and are skipped — the flat path has
+/// always dropped them. A block opener on a keyword that accepts blocks
+/// ([`keyword_takes_block`]) has its header lowered *and* its children descended into
+/// (the tested recursion path — a real consumer replaces this generic descent with one
+/// that stores the body). A block opener on any other keyword is a hard `E_BLOCK`
+/// error; per the house *collect-all* ethos its children are still line-parsed so their
+/// own `E_PARSE` diagnostics surface in the same pass (their results are discarded).
 fn parse_forest(
-    blocks: &[Block],
+    nodes: &[Node],
     parsed: &mut Parsed,
     next_tid: &mut u64,
     next_vid: &mut u64,
     errors: &mut Vec<Diagnostic>,
 ) {
-    for b in blocks {
-        let lineno = b.line;
+    for node in nodes {
+        let b = match node {
+            Node::Block(b) => b,
+            // Trivia is preserved in the tree but is not tier-1 state; skip it.
+            Node::Comment(_) | Node::Blank => continue,
+        };
         if b.opened_block && !keyword_takes_block(&b.keyword) {
             errors.push(Diagnostic::error(
                 "E_BLOCK",
                 format!("directive `{}` does not take a block", b.keyword),
                 Location::Span {
-                    line: lineno,
+                    line: b.line,
                     col: 1,
                 },
             ));
-            // Do not descend: the children belong to a directive we could not accept.
+            // Collect-all: still surface the children's own syntax errors this pass, so
+            // fixing the keyword does not reveal a fresh round of errors. Results are
+            // discarded (the block was rejected); only diagnostics are kept.
+            let mut scratch = Parsed::default();
+            let (mut t, mut v) = (1u64, 1u64);
+            parse_forest(&b.children, &mut scratch, &mut t, &mut v, errors);
             continue;
         }
-        // A leaf directive lowers through the flat line grammar, exactly as before.
-        let line = b.header_line();
-        match parse_line(&line) {
-            Ok(Item::Directive(d)) => {
-                check_coord_range(directive_coords(&d), lineno, errors);
-                parsed.source.push(d);
-            }
-            Ok(Item::Override(id, ov)) => {
-                let coords = ov.pos.map_or(vec![], |p| vec![p.x, p.y]);
-                check_coord_range(coords, lineno, errors);
-                parsed.overrides.insert(id, ov);
-            }
-            Ok(Item::RefdesPin(id, refdes)) => {
-                parsed.refdes_pins.insert(id, refdes);
-            }
-            Ok(Item::Route(t)) => {
-                let coords = t.path.iter().flat_map(|p| [p.x, p.y]).chain([t.width]);
-                check_coord_range(coords.collect(), lineno, errors);
-                parsed.traces.insert(TraceId(*next_tid), t);
-                *next_tid += 1;
-            }
-            Ok(Item::Via(v)) => {
-                check_coord_range(vec![v.at.x, v.at.y, v.drill, v.pad], lineno, errors);
-                parsed.vias.insert(ViaId(*next_vid), v);
-                *next_vid += 1;
-            }
-            Err(e) => errors.push(Diagnostic::error(
-                "E_PARSE",
-                format!("{e} (in `{line}`)"),
-                Location::Span {
-                    line: lineno,
-                    col: 1,
-                },
-            )),
+        if b.opened_block {
+            // An accepted block (only the `cfg(test)` sentinel today). A real consumer's
+            // arm parses the header its own way and stores the body; the generic stand-in
+            // here just descends into the children (lowered as ordinary directives into
+            // `parsed.source`), which exercises the recursion end-to-end.
+            parse_forest(&b.children, parsed, next_tid, next_vid, errors);
+        } else {
+            // A leaf directive lowers through the flat line grammar, exactly as before.
+            lower_directive(b, parsed, next_tid, next_vid, errors);
         }
+    }
+}
+
+/// Lower a single directive's header line through the flat [`parse_line`] grammar into
+/// `parsed`. Shared by the normal walk and the rejected-block child-diagnostics scan.
+fn lower_directive(
+    b: &Block,
+    parsed: &mut Parsed,
+    next_tid: &mut u64,
+    next_vid: &mut u64,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let lineno = b.line;
+    let line = b.header_line();
+    match parse_line(&line) {
+        Ok(Item::Directive(d)) => {
+            check_coord_range(directive_coords(&d), lineno, errors);
+            parsed.source.push(d);
+        }
+        Ok(Item::Override(id, ov)) => {
+            let coords = ov.pos.map_or(vec![], |p| vec![p.x, p.y]);
+            check_coord_range(coords, lineno, errors);
+            parsed.overrides.insert(id, ov);
+        }
+        Ok(Item::RefdesPin(id, refdes)) => {
+            parsed.refdes_pins.insert(id, refdes);
+        }
+        Ok(Item::Route(t)) => {
+            let coords = t.path.iter().flat_map(|p| [p.x, p.y]).chain([t.width]);
+            check_coord_range(coords.collect(), lineno, errors);
+            parsed.traces.insert(TraceId(*next_tid), t);
+            *next_tid += 1;
+        }
+        Ok(Item::Via(v)) => {
+            check_coord_range(vec![v.at.x, v.at.y, v.drill, v.pad], lineno, errors);
+            parsed.vias.insert(ViaId(*next_vid), v);
+            *next_vid += 1;
+        }
+        Err(e) => errors.push(Diagnostic::error(
+            "E_PARSE",
+            format!("{e} (in `{line}`)"),
+            Location::Span {
+                line: lineno,
+                col: 1,
+            },
+        )),
     }
 }
 
@@ -3124,6 +3276,14 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
         }
     }
 
+    /// The nested block within a body node, for terse child assertions.
+    fn as_block(n: &Node) -> &Block {
+        match n {
+            Node::Block(b) => b,
+            other => panic!("expected a Node::Block, got {other:?}"),
+        }
+    }
+
     /// Nesting to 3+ levels builds the expected tree, with header tokens pre-split and
     /// children in source order. (No keyword accepts a block yet, so this exercises the
     /// generic representation via `parse_blocks`, not `parse`.)
@@ -3148,15 +3308,15 @@ row main gap=2mm {
         assert!(row.opened_block);
         // `row` has two children: `column` (a block) then `inst c1` (a leaf), in order.
         assert_eq!(row.children.len(), 2);
-        let col = &row.children[0];
+        let col = as_block(&row.children[0]);
         assert_eq!(col.keyword, "column");
         assert!(col.opened_block);
-        assert_eq!(row.children[1], leaf("inst c1 Cap", 7));
+        assert_eq!(row.children[1], Node::Block(leaf("inst c1 Cap", 7)));
         // `column` -> `def` (block) -> `inst r1` (leaf), 3 levels below the row.
-        let def = &col.children[0];
+        let def = as_block(&col.children[0]);
         assert_eq!(def.keyword, "def");
         assert!(def.opened_block);
-        assert_eq!(def.children, vec![leaf("inst r1 R", 4)]);
+        assert_eq!(def.children, vec![Node::Block(leaf("inst r1 R", 4))]);
     }
 
     /// An empty block still round-trips as a block (opened_block true, no children) —
@@ -3168,6 +3328,63 @@ row main gap=2mm {
         assert_eq!(forest.len(), 1);
         assert!(forest[0].opened_block);
         assert!(forest[0].children.is_empty());
+    }
+
+    /// Comments and blank lines *inside* a block are preserved as trivia nodes, in
+    /// order, and round-trip byte-faithfully through serialize -> parse -> serialize
+    /// (Decision 21 mixed authorship). Top-level trivia stays dropped (the flat path's
+    /// pre-existing behavior).
+    #[test]
+    fn block_interior_trivia_round_trips() {
+        let text = "\
+# top-level comment (dropped, as always)
+def amp {
+  # bias network
+  inst r1 R
+
+  # decoupling
+  inst c1 Cap
+}
+";
+        let forest = parse_blocks(text).expect("parse");
+        let def = &forest[0];
+        // The body preserves the two comments, the blank, and two directives in order.
+        assert_eq!(
+            def.children,
+            vec![
+                Node::Comment("bias network".into()),
+                Node::Block(leaf("inst r1 R", 4)),
+                Node::Blank,
+                Node::Comment("decoupling".into()),
+                Node::Block(leaf("inst c1 Cap", 7)),
+            ]
+        );
+        // Round-trip: the canonical form (top-level comment stripped) is a fixed point,
+        // and the interior trivia survives byte-for-byte.
+        let canon = serialize_blocks(&forest);
+        let expected = "\
+def amp {
+  # bias network
+  inst r1 R
+
+  # decoupling
+  inst c1 Cap
+}
+";
+        assert_eq!(
+            canon, expected,
+            "interior trivia round-trips byte-faithfully"
+        );
+        // Structural fixpoint: re-parsing the canonical form and re-serializing is a
+        // fixed point. (The tree carries source line numbers, which legitimately differ
+        // between the original — with its dropped top-level comment on line 1 — and the
+        // canonical form; the byte-identity above is the faithful-round-trip guarantee.)
+        let reforest = parse_blocks(&canon).unwrap();
+        assert_eq!(
+            serialize_blocks(&reforest),
+            canon,
+            "canonical form is a fixpoint"
+        );
     }
 
     /// An unbalanced `{` (a block never closed) is an `E_BLOCK` error located at the
@@ -3290,6 +3507,100 @@ inst top MCU
             forest.iter().all(|b| !b.opened_block),
             "a canonical Doc serialization contains no blocks"
         );
+    }
+
+    /// A block opener with no directive before `{` (e.g. a lone `{`) is rejected by
+    /// `parse_blocks` itself — the public API guardrail (finding 4), so a malformed
+    /// opener never reaches a consumer nor serializes to a leading-space line.
+    #[test]
+    fn empty_keyword_block_is_rejected_by_parse_blocks() {
+        let err = parse_blocks("{\n}").unwrap_err();
+        assert!(err.iter().any(|d| d.code == "E_BLOCK"), "got: {err:?}");
+        let rendered = crate::diagnostic::render(&err);
+        assert!(
+            rendered.contains("no directive before"),
+            "clear message: {rendered}"
+        );
+    }
+
+    /// Collect-all through a rejected block: an unaccepted block's *children* are still
+    /// line-parsed, so their own syntax errors surface in the same pass as the
+    /// `E_BLOCK` rejection (finding 5) — the author fixes both at once, not in two
+    /// rounds.
+    #[test]
+    fn rejected_block_still_reports_child_errors() {
+        // `inst` does not take a block; its child is itself a bad line.
+        let err = parse("inst u1 MCU {\n  frobnicate x\n}").unwrap_err();
+        let rendered = crate::diagnostic::render(&err);
+        assert!(
+            err.iter().any(|d| d.code == "E_BLOCK"),
+            "the block rejection: {rendered}"
+        );
+        assert!(
+            rendered.contains("unknown directive") && rendered.contains("frobnicate"),
+            "the child's own error surfaces too: {rendered}"
+        );
+        // The child error is located on its own line (2), not the opener's (1).
+        assert!(
+            rendered.contains("2:1"),
+            "child located by line: {rendered}"
+        );
+    }
+
+    /// The `parse_forest` descent path is exercised end-to-end by a `cfg(test)`
+    /// block-accepting keyword (finding 3): a block on `testblock` is *not* rejected,
+    /// its children are descended into and lowered as ordinary directives into
+    /// `parsed.source`, and the block tree serializes to a fixed point. This gives
+    /// Phase 1 a tested recursion path rather than a latent one.
+    #[test]
+    fn accepted_block_descends_into_children() {
+        assert!(
+            keyword_takes_block(TEST_BLOCK_KEYWORD),
+            "the sentinel keyword opts into blocks"
+        );
+        let text = "\
+testblock amp {
+  inst r1 R
+  inst c1 Cap
+}
+inst top MCU
+";
+        let parsed = parse(text).expect("accepted block parses without E_BLOCK");
+        // The descent lowered both children plus the trailing top-level directive; the
+        // `testblock` header itself contributes no directive (a real consumer owns it).
+        assert_eq!(
+            parsed.source,
+            vec![
+                GenDirective::Instance {
+                    path: "r1".into(),
+                    part: "R".into(),
+                    params: BTreeMap::new(),
+                    label: None,
+                },
+                GenDirective::Instance {
+                    path: "c1".into(),
+                    part: "Cap".into(),
+                    params: BTreeMap::new(),
+                    label: None,
+                },
+                GenDirective::Instance {
+                    path: "top".into(),
+                    part: "MCU".into(),
+                    params: BTreeMap::new(),
+                    label: None,
+                },
+            ]
+        );
+        // A syntax error *inside* an accepted block is reported at its own line.
+        let err = parse("testblock a {\n  place foo (3mm)\n}").unwrap_err();
+        assert!(
+            crate::diagnostic::render(&err).contains("2:1"),
+            "child error located by line: {err:?}"
+        );
+        // The block tree round-trips (serialize -> parse -> serialize fixpoint).
+        let forest = parse_blocks(text).unwrap();
+        let once = serialize_blocks(&forest);
+        assert_eq!(parse_blocks(&once).unwrap(), forest);
     }
 
     #[test]
