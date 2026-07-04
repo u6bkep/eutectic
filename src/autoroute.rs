@@ -68,11 +68,32 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 /// they are exclusively `AddTrace`/`AddVia` carrying `Provenance::Free`. `routed` and
 /// `unrouted` list the nets the run succeeded / failed on (a multi-pin net is "routed"
 /// only when *all* its pins were connected; a failed net emits no copper).
+///
+/// `stats` records the *pre-verify* search result — how many nets the greedy search
+/// connected and how much copper it proposed BEFORE `verify_and_prune` culled clashers and
+/// `reconcile_routed_with_ratsnest` demoted fragmented nets. The gap between `stats` and
+/// the final `routed`/`commands` is the cost of the fenced greedy-no-rip-up model: the
+/// search finds many routes that mutually clash and get pruned. The pre-verify number is
+/// the capability signal for the rip-up/negotiation discussion (issue 0008), so it is a
+/// reproducible field, not transient instrumentation.
 #[derive(Clone, Debug, Default)]
 pub struct AutorouteResult {
     pub commands: Vec<Command>,
     pub routed: Vec<NetId>,
     pub unrouted: Vec<NetId>,
+    pub stats: AutorouteStats,
+}
+
+/// The greedy search's result *before* verification/reconciliation mutate it (see
+/// [`AutorouteResult`]). Populated once, immediately after the net-by-net pass.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AutorouteStats {
+    /// Nets the search connected (tree completed) before verify pruned any.
+    pub pre_verify_routed: usize,
+    /// Total commands (traces + vias) the search proposed before pruning.
+    pub pre_verify_commands: usize,
+    /// Of `pre_verify_commands`, how many were vias (the stitching-via signal).
+    pub pre_verify_vias: usize,
 }
 
 /// Propose a routing transaction for `doc`. Pure: reads facts, returns commands.
@@ -178,13 +199,35 @@ pub fn autoroute(doc: &Doc, lib: &PartLib, rules: &DesignRules) -> AutorouteResu
             via_pad,
         );
 
-        // Decision 19b — same-net plane fills are stitching targets. Grid cells over this
-        // net's OWN pour fill (on the pour's slab) are pre-connected tree membership: the
-        // A* search then discovers pad→plane stitching vias as ordinary via drops. Seeding
-        // with ALL own-fill cells lets the router treat a fragmented plane as one node —
-        // acceptable because pin_islands (layer-honest, Task A) is the downstream judge and
-        // reports any remaining islands as unrouted; the router does not paper over it.
-        let plane_seeds = own_plane_cells(&grid, doc, lib, rules, &su, &netlist, nid);
+        // Pre-connected tree membership seeded into the A* tree:
+        //  - Decision 19b — the net's OWN pour fill cells (stitching targets): the search
+        //    then discovers pad→plane stitching vias as ordinary via drops. Seeding ALL
+        //    own-fill cells lets the router treat a fragmented plane as one node —
+        //    acceptable because pin_islands (layer-honest, Task A) is the downstream judge.
+        //  - F1 — the net's OWN already-committed trace/via copper: makes a rerun build on
+        //    prior copper (idempotent no-op for a connected net, extension for a partial
+        //    one) instead of silently duplicating it (same-net overlap is invisible to
+        //    verify and DRC). This matters because a demoted net keeps its partial copper,
+        //    so iterative reruns are the expected workflow.
+        let mut seeds = own_plane_cells(&grid, doc, lib, rules, &su, &netlist, nid);
+        seeds.extend(own_copper_cells(
+            &grid,
+            doc,
+            &su,
+            &layer_names,
+            nid,
+            via_pad,
+        ));
+        seeds.sort_unstable();
+        seeds.dedup();
+        // Per-pad: is this pad already tied to the net's committed copper (a prior pass, a
+        // hand route)? Used by route_net to skip re-stubbing a connected pad (F1
+        // idempotency) — a geometric test on the pad centre, robust to the pad's grid node
+        // shifting between passes (which node-set matching alone was not).
+        let pad_connected: Vec<bool> = pads
+            .iter()
+            .map(|p| pad_on_own_copper(doc, &su, nid, p))
+            .collect();
 
         match route_net(
             &grid,
@@ -193,7 +236,8 @@ pub fn autoroute(doc: &Doc, lib: &PartLib, rules: &DesignRules) -> AutorouteResu
             net_seq as i32,
             nid,
             pads,
-            &plane_seeds,
+            &seeds,
+            &pad_connected,
             width,
             via_pad,
             via_drill,
@@ -209,6 +253,18 @@ pub fn autoroute(doc: &Doc, lib: &PartLib, rules: &DesignRules) -> AutorouteResu
             None => result.unrouted.push(nid.clone()),
         }
     }
+
+    // Snapshot the pre-verify search result (the capability signal for the rip-up
+    // discussion, issue 0008) BEFORE verify/reconcile mutate `routed`/`commands`.
+    result.stats = AutorouteStats {
+        pre_verify_routed: result.routed.len(),
+        pre_verify_commands: result.commands.len(),
+        pre_verify_vias: result
+            .commands
+            .iter()
+            .filter(|c| matches!(c, Command::AddVia(..)))
+            .count(),
+    };
 
     // Don't trust the construction invariant — verify the proposed copper against the
     // real DRC and drop any net that actually clashes.
@@ -955,6 +1011,117 @@ fn own_plane_cells(
     cells
 }
 
+/// The grid cells covered by a net's **own already-committed** trace and via copper, as
+/// A* seed states (F1 fix). One state per grid node that lies on a same-net trace (within
+/// its half-width, on the trace's slab ordinal) or under a same-net via (within its
+/// pad radius, on every copper slab the barrel spans). Seeded into the A* tree exactly
+/// like [`own_plane_cells`], so a rerun of the router treats prior copper as
+/// pre-connected: a fully-routed net's pads are already reachable through its own copper
+/// (tree spans them ⇒ nothing emitted, an idempotent no-op), and a partially-routed net
+/// EXTENDS its copper toward the unconnected pads instead of laying a duplicate. Both
+/// `Pinned` (hand/frozen) and `Free` (router-owned) copper count — the router builds on
+/// whatever copper the net already carries. Same-net overlap is invisible to verify and
+/// DRC, so without this a second pass silently duplicates clean nets' copper.
+fn own_copper_cells(
+    grid: &Grid,
+    doc: &Doc,
+    su: &Stackup,
+    layer_names: &[String],
+    cur: &NetId,
+    via_pad: Nm,
+) -> Vec<State> {
+    let cu = su.copper_slabs();
+    let ord = |name: &str| layer_names.iter().position(|n| n == name);
+    let mut cells: Vec<State> = Vec::new();
+
+    // Traces: cells within the trace's half-width of any centreline segment, on its slab.
+    for t in doc.traces.values() {
+        if t.net != *cur {
+            continue;
+        }
+        let Some(l) = ord(&t.layer) else { continue };
+        let r = t.width / 2;
+        for seg in t.path.windows(2) {
+            let (a, b) = (seg[0], seg[1]);
+            let lo = Point {
+                x: a.x.min(b.x),
+                y: a.y.min(b.y),
+            };
+            let hi = Point {
+                x: a.x.max(b.x),
+                y: a.y.max(b.y),
+            };
+            let (imin, imax, jmin, jmax) = grid.bbox_range(lo, hi, r);
+            for j in jmin..=jmax {
+                for i in imin..=imax {
+                    if within(grid.world(i, j), a, b, r) {
+                        cells.push((i, j, l));
+                    }
+                }
+            }
+        }
+    }
+
+    // Vias: cells within the via's pad radius of its centre, on every spanned copper slab.
+    for v in doc.vias.values() {
+        if v.net != *cur {
+            continue;
+        }
+        let r = via_pad.max(v.pad) / 2;
+        let lo = Point {
+            x: v.at.x - r,
+            y: v.at.y - r,
+        };
+        let hi = Point {
+            x: v.at.x + r,
+            y: v.at.y + r,
+        };
+        let (imin, imax, jmin, jmax) = grid.bbox_range(lo, hi, 0);
+        for s in v.spanned_slabs(&cu) {
+            let Some(l) = ord(&s.name) else { continue };
+            for j in jmin..=jmax {
+                for i in imin..=imax {
+                    if within(grid.world(i, j), v.at, v.at, r) {
+                        cells.push((i, j, l));
+                    }
+                }
+            }
+        }
+    }
+
+    cells.sort_unstable();
+    cells.dedup();
+    cells
+}
+
+/// Is a pad already electrically tied to its net's **committed** copper (F1)? A geometric
+/// test on the pad centre mirroring the ratsnest's pin incidence: the pad touches a
+/// same-net trace (centre within the trace's half-width of a segment) or a same-net via
+/// (centre within the via's pad radius). Pours are handled separately (the pad is seeded
+/// through `own_plane_cells`). Used to skip re-stubbing an already-connected pad on a
+/// rerun. `at` is checked in world XY; a pad is an all-layer point for incidence just as
+/// the ratsnest treats it, so no per-layer gate is applied here (matching route::pin_islands
+/// pin↔trace/via incidence, which is all-layer). Robust to the pad's grid node shifting
+/// between passes, which node-set matching alone was not.
+fn pad_on_own_copper(doc: &Doc, _su: &Stackup, cur: &NetId, p: &Pad) -> bool {
+    let touches_seg = |a: Point, b: Point, r: Nm| within(p.at, a, b, r);
+    for t in doc.traces.values() {
+        if t.net != *cur {
+            continue;
+        }
+        let r = t.width / 2;
+        if t.path.windows(2).any(|s| touches_seg(s[0], s[1], r)) {
+            return true;
+        }
+    }
+    for v in doc.vias.values() {
+        if v.net == *cur && touches_seg(v.at, v.at, v.pad / 2) {
+            return true;
+        }
+    }
+    false
+}
+
 // ----------------------------------------------------------------------------
 // Per-net maze routing.
 // ----------------------------------------------------------------------------
@@ -972,7 +1139,8 @@ fn route_net(
     net_seq: i32,
     nid: &NetId,
     pads: &[Pad],
-    plane_seeds: &[State],
+    seeds: &[State],
+    pad_connected: &[bool],
     width: Nm,
     via_pad: Nm,
     via_drill: Nm,
@@ -1003,20 +1171,45 @@ fn route_net(
     // The set of (node, layer) currently in the net's connected copper.
     let mut tree: Vec<State> = Vec::new();
 
-    // Decision 19b: if the net owns a plane, seed the tree with its own fill cells — A*
-    // zero-cost sources — and route *every* pad to it (each pad→plane stitch is a via the
-    // A* path yields). Otherwise seed at pin 0 (the classic MST start) and route pins 1..n.
+    // If the net carries pre-connected copper (its own pour fill — Decision 19b — and/or
+    // its own already-committed traces/vias — F1), seed the tree with those `seeds` cells
+    // and route *every* pad to the tree: a pad→plane stitch is a via the A* path yields,
+    // and a pad already sitting on prior copper routes in zero steps (idempotent rerun).
+    // Otherwise seed at pin 0 (the classic MST start) and route pins 1..n.
     //
-    // Plane cells are NOT `claim`ed into `owner`: the plane is derived pour copper, not a
-    // routed node, and claiming it would make a foreign net's via see the plane cell as
-    // owned and reject it — defeating 19a via-permeability. They stay `owner == -1` (free),
-    // which the own net traverses freely and a foreign net's via may punch. Other nets are
-    // already forbidden from running *traces* over the plane by their BlockMap (the pour
-    // stamps the trace mask). Seeding all own-fill cells may present a fragmented plane as
-    // one node; the ratsnest is the honest downstream judge (see `own_plane_cells`).
-    // Index of the first pin that must route to the tree.
-    let first_pin = if plane_seeds.is_empty() {
-        // Seed the connected tree at pin 0; stub its pad onto its grid node.
+    // Seed cells are NOT `claim`ed into `owner`: pour fill is derived copper, not a routed
+    // node, and claiming it would make a foreign net's via see the cell as owned and reject
+    // it — defeating 19a via-permeability. They stay `owner == -1` (free), which the own
+    // net traverses freely and a foreign net's via may punch; other nets are already barred
+    // from *traces* over same-net copper by their BlockMap (world_features stamps it).
+    // Seeding all own-fill cells may present a fragmented plane as one node; the ratsnest is
+    // the honest downstream judge (see `own_plane_cells`).
+    // The tree is seeded from all pre-connected copper the net already carries:
+    //  - `seeds`: its own pour fill (Decision 19b stitching targets) and its own committed
+    //    trace/via cells (F1 — so a rerun builds on prior copper).
+    //  - the grid node of every pad ALREADY on the net's committed copper
+    //    (`pad_connected[k]` — a geometric test): that node may not coincide with a seed
+    //    cell (the pad's nearest routable node can shift between passes as other nets'
+    //    copper lands), so add it explicitly and emit no stub for that pad below.
+    //
+    // Seed/pad cells are NOT `claim`ed into `owner`: pour fill is derived copper, not a
+    // routed node, and claiming it would make a foreign net's via see the cell as owned and
+    // reject it — defeating 19a via-permeability. They stay `owner == -1` (free), which the
+    // own net traverses freely and a foreign net's via may punch; other nets are already
+    // barred from *traces* over same-net copper by their BlockMap (world_features stamps
+    // it). Seeding all own-fill cells may present a fragmented plane as one node; the
+    // ratsnest is the honest downstream judge (see `own_plane_cells`).
+    tree.extend_from_slice(seeds);
+    for (k, p) in pin_nodes.iter().enumerate() {
+        if pad_connected[k] {
+            tree.push(*p);
+        }
+    }
+
+    // If nothing pre-connects the net, seed the classic MST start at pin 0 (stub its pad
+    // onto its grid node) and route pins 1..n; otherwise every not-yet-connected pad routes
+    // to the pre-connected tree.
+    let first_pin = if tree.is_empty() {
         let (si, sj, sl) = pin_nodes[0];
         claim(owner, si, sj, sl, &mut claimed);
         let seed_world = grid.world(si, sj);
@@ -1035,12 +1228,23 @@ fn route_net(
         tree.push((si, sj, sl));
         1
     } else {
-        tree.extend_from_slice(plane_seeds);
-        0 // every pad stitches to the plane
+        0
     };
 
-    // Route each remaining pin to the existing tree.
+    // Tree membership for the idempotency skip. A pad whose node is already in the tree is
+    // connected — via committed trace/via copper (`pad_connected`), a same-slab plane cell
+    // it sits on (seeded from `own_plane_cells`, so a pour-only-connected pad with no stub
+    // is caught here even though `pad_connected` only inspects traces/vias), or another
+    // pad's already-laid route. Routing it anyway would re-stub it, silently duplicating
+    // copper (same-net overlap is invisible to verify AND DRC).
+    let tree_set: BTreeSet<State> = tree.iter().copied().collect();
+
     for k in first_pin..pin_nodes.len() {
+        // F1 idempotency: skip a pad that is already connected (committed copper or a tree
+        // seed cell) — re-routing it would re-stub it and silently duplicate copper.
+        if pad_connected[k] || tree_set.contains(&pin_nodes[k]) {
+            continue;
+        }
         let goal = pin_nodes[k];
         let Some(path) = astar(grid, block, owner, net_seq, &tree, goal, via_clear) else {
             for idx in claimed {
@@ -1469,6 +1673,7 @@ mod tests {
             )],
             routed: vec![NetId::new("A")],
             unrouted: vec![],
+            ..Default::default()
         };
         verify_and_prune(h.doc(), &lib, &DesignRules::default(), &mut result);
         assert!(
@@ -1547,6 +1752,80 @@ mod tests {
         ]
     }
 
+    /// F1 (pour-only connection): a pad tied to its net ONLY through its own plane (no
+    /// trace/via — an SMD pad on the plane's own slab) is also a no-op on rerun. Its node
+    /// is a plane seed (in the tree), so the tree-membership skip fires even though
+    /// pad_on_own_copper (traces/vias only) does not. Two In1.Cu SMD pads over an In1.Cu
+    /// GND plane, deliberately placed OFF-grid so a naive stub would re-emit each pass.
+    #[test]
+    fn rerouting_a_pour_connected_pad_is_no_op() {
+        let mut lib = part_library();
+        lib.insert("SP".into(), smd_pad("In1.Cu"));
+        let outline = Shape2D::polygon(vec![
+            Point::mm(0, 0),
+            Point::mm(20, 0),
+            Point::mm(20, 10),
+            Point::mm(0, 10),
+        ]);
+        let mut src = four_layer_slabs();
+        src.extend(vec![
+            board_rect(Point::mm(0, 0), Point::mm(20, 10)),
+            G::Instance {
+                path: "g1".into(),
+                part: "SP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Instance {
+                path: "g2".into(),
+                part: "SP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            // Off-grid centres (the +70µm shifts) so pad ≠ its nearest grid node.
+            G::Place {
+                path: "g1".into(),
+                pos: Point {
+                    x: 5 * MM + 70_000,
+                    y: 5 * MM + 70_000,
+                },
+            },
+            G::Place {
+                path: "g2".into(),
+                pos: Point {
+                    x: 15 * MM + 70_000,
+                    y: 5 * MM + 70_000,
+                },
+            },
+            G::ConnectPins {
+                net: "GND".into(),
+                pins: vec![("g1".into(), "1".into()), ("g2".into(), "1".into())],
+            },
+            G::Region(RegionDecl {
+                shape: outline,
+                role: Role::Conductor,
+                net: Some("GND".into()),
+                layer: "In1.Cu".into(),
+            }),
+        ]);
+        let mut h = doc_of_lib(src, &lib);
+        let r1 = autoroute(h.doc(), &lib, &DesignRules::default());
+        apply_all_lib(&mut h, r1.commands, &lib);
+        let (t, v) = (h.doc().traces.len(), h.doc().vias.len());
+        let r2 = autoroute(h.doc(), &lib, &DesignRules::default());
+        assert!(
+            r2.commands.is_empty(),
+            "a pour-connected pad must be a no-op on rerun, got {:?}",
+            r2.commands
+        );
+        apply_all_lib(&mut h, r2.commands, &lib);
+        assert_eq!(
+            (h.doc().traces.len(), h.doc().vias.len()),
+            (t, v),
+            "no duplicate copper on rerun of a pour-connected net"
+        );
+    }
+
     /// Autoroute makes the previously-unrouted nets pass the ratsnest, and introduces
     /// no clearance/width violations (verified through the real DRC query).
     #[test]
@@ -1566,12 +1845,199 @@ mod tests {
         assert_eq!(r.unrouted, Vec::<NetId>::new(), "both nets should route");
         assert_eq!(r.routed.len(), 2);
         assert!(!r.commands.is_empty());
+        // Stats are populated (the pre-verify capability signal, issue 0008): a clean scene
+        // that survives verify has pre_verify_routed == final routed and matching commands.
+        assert_eq!(
+            r.stats.pre_verify_routed, 2,
+            "both nets connected pre-verify"
+        );
+        assert_eq!(
+            r.stats.pre_verify_commands,
+            r.commands.len(),
+            "no clash pruning on a clean 2-net board"
+        );
 
         apply_all(&mut h, r.commands);
         let after = drc(&h);
         assert!(
             after.is_empty(),
             "routed board must be DRC clean, got {after:?}"
+        );
+    }
+
+    /// F1 (idempotent rerun): routing, applying, then routing AGAIN emits **zero** commands
+    /// for the already-connected nets — the router ingests its own committed copper as
+    /// pre-connected tree membership (own_copper_cells), so every pad is already reachable
+    /// and nothing new is laid. Without this a second pass silently duplicates clean nets'
+    /// copper (same-net overlap is invisible to verify AND DRC). Both nets are fully routed
+    /// after pass 1, so pass 2 is a no-op.
+    #[test]
+    fn rerouting_a_connected_net_emits_no_duplicate_copper() {
+        let lib = part_library();
+        let mut h = doc_of(two_net_board());
+
+        let r1 = autoroute(h.doc(), &lib, &DesignRules::default());
+        assert_eq!(r1.routed.len(), 2, "both nets route on pass 1");
+        let (t1, v1) = (h.doc().traces.len(), h.doc().vias.len());
+        apply_all(&mut h, r1.commands);
+        let (t1b, v1b) = (h.doc().traces.len(), h.doc().vias.len());
+        assert!(t1b > t1 || v1b > v1, "pass 1 laid some copper");
+
+        // Pass 2 on the routed board: the nets are connected, so nothing is emitted.
+        let r2 = autoroute(h.doc(), &lib, &DesignRules::default());
+        assert!(
+            r2.commands.is_empty(),
+            "rerouting connected nets must emit no copper (no silent duplication), got {:?}",
+            r2.commands
+        );
+        // And applying that empty transaction leaves the geometry byte-identical.
+        apply_all(&mut h, r2.commands);
+        assert_eq!(
+            (h.doc().traces.len(), h.doc().vias.len()),
+            (t1b, v1b),
+            "no duplicate traces/vias after a second routing pass"
+        );
+        assert!(drc(&h).is_empty(), "still DRC clean after the rerun");
+    }
+
+    /// F1 (partial extension): a net with only *some* of its copper committed EXTENDS
+    /// toward the unconnected pad rather than re-laying the existing copper. A 3-pin net is
+    /// routed, one pin's copper removed to make it partial, then re-routed: the rerun adds
+    /// copper (reconnecting the orphaned pin) and the net ends up connected, DRC clean.
+    #[test]
+    fn rerouting_a_partial_net_extends_without_duplicating() {
+        let lib = part_library();
+        let src = vec![
+            board_rect(Point::mm(-6, -12), Point::mm(30, 12)),
+            G::Instance {
+                path: "reg".into(),
+                part: "LDO".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Instance {
+                path: "c0".into(),
+                part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Instance {
+                path: "c1".into(),
+                part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Place {
+                path: "reg".into(),
+                pos: Point::mm(0, 0),
+            },
+            G::Place {
+                path: "c0".into(),
+                pos: Point::mm(12, 6),
+            },
+            G::Place {
+                path: "c1".into(),
+                pos: Point::mm(20, -6),
+            },
+            G::ConnectPins {
+                net: "VBUS".into(),
+                pins: vec![
+                    ("reg".into(), "VOUT".into()),
+                    ("c0".into(), "p1".into()),
+                    ("c1".into(), "p1".into()),
+                ],
+            },
+        ];
+        let mut h = doc_of(src);
+        let r1 = autoroute(h.doc(), &lib, &DesignRules::default());
+        assert!(
+            r1.routed.contains(&NetId::new("VBUS")),
+            "pass 1 routes VBUS"
+        );
+        let pass1_cmds = r1.commands.len();
+        apply_all(&mut h, r1.commands);
+        assert!(drc(&h).is_empty(), "connected + clean after pass 1");
+
+        // Amputate: drop the last VBUS trace so the net is partially routed (an island
+        // splits off). This models a stale/edited board the router is re-fired at.
+        let victim = *h
+            .doc()
+            .traces
+            .iter()
+            .filter(|(_, t)| t.net == NetId::new("VBUS"))
+            .map(|(id, _)| id)
+            .max_by_key(|id| id.0)
+            .expect("VBUS has traces");
+        h.commit(
+            Transaction::one(Command::RemoveTrace(victim)),
+            &lib,
+            "amputate",
+        )
+        .unwrap();
+        // Snapshot the surviving VBUS copper (id → path). F1 must leave these UNTOUCHED and
+        // build on them — this is what distinguishes an extension from a wholesale re-route
+        // (which the vacuous earlier version could not tell apart: both add copper, both
+        // reconnect, both end clean). The two discriminators below fail if F1 is off.
+        let survivors: std::collections::BTreeMap<u64, Vec<Point>> = h
+            .doc()
+            .traces
+            .iter()
+            .filter(|(_, t)| t.net == NetId::new("VBUS"))
+            .map(|(id, t)| (id.0, t.path.clone()))
+            .collect();
+        let before_traces = h.doc().traces.len();
+        assert!(
+            drc(&h).iter().any(
+                |v| matches!(v, Violation::Unrouted { net, .. } if *net == NetId::new("VBUS"))
+            ),
+            "VBUS is partial after amputation"
+        );
+
+        // Re-fire: the rerun should EXTEND (add copper) to reconnect, not re-route wholesale.
+        let r2 = autoroute(h.doc(), &lib, &DesignRules::default());
+        assert!(
+            !r2.commands.is_empty(),
+            "a partial net must be extended on rerun"
+        );
+        // Discriminator 1: an extension reconnects the ONE orphaned pin, so it emits fewer
+        // commands than routing the whole net from scratch did (pass 1). With F1 off the net
+        // re-routes wholesale (pin-0 MST over all pins) and this fails.
+        assert!(
+            r2.commands.len() < pass1_cmds,
+            "extension must be cheaper than the from-scratch route ({} vs {}): F1 is \
+             re-routing wholesale, not building on committed copper",
+            r2.commands.len(),
+            pass1_cmds
+        );
+        apply_all(&mut h, r2.commands);
+        assert!(
+            h.doc().traces.len() > before_traces,
+            "rerun added copper (extension), not a no-op"
+        );
+        // Discriminator 2: every surviving trace is still present VERBATIM (same id + path)
+        // — F1 built on them; it did not rip up and re-lay the net.
+        for (id, path) in &survivors {
+            let t = h
+                .doc()
+                .traces
+                .get(&crate::id::TraceId(*id))
+                .expect("a surviving VBUS trace vanished on rerun (wholesale re-route)");
+            assert_eq!(
+                &t.path, path,
+                "a surviving VBUS trace's geometry changed on rerun (not a clean extension)"
+            );
+        }
+        assert!(
+            !drc(&h).iter().any(
+                |v| matches!(v, Violation::Unrouted { net, .. } if *net == NetId::new("VBUS"))
+            ),
+            "VBUS reconnected after the extending rerun: {:?}",
+            drc(&h)
+        );
+        assert!(
+            drc(&h).is_empty(),
+            "and the board is DRC clean: {:?}",
+            drc(&h)
         );
     }
 
@@ -2524,6 +2990,7 @@ mod tests {
             )],
             routed: vec![NetId::new("SIG")],
             unrouted: vec![],
+            ..Default::default()
         };
         (h, lib, result)
     }
@@ -2593,6 +3060,7 @@ mod tests {
             )],
             routed: vec![NetId::new("SIG")],
             unrouted: vec![NetId::new("SIG")],
+            ..Default::default()
         };
         // (SIG already unrouted for its lone pad; the point is the via command is dropped.)
         result.unrouted.clear();

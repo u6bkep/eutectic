@@ -798,6 +798,19 @@ fn main() {
         result.routed.len(),
         result.unrouted.len()
     );
+    // Pre-verify capability vs. post-verify reality: the greedy search connects far more
+    // nets (and drops stitching vias) than survive verify's clash pruning — the gap is the
+    // cost of the fenced greedy-no-rip-up model (issue 0008), the signal for that
+    // discussion. See AutorouteResult::stats.
+    let s = &result.stats;
+    println!(
+        "  pre-verify search: {} routed, {} commands ({} vias) -> after verify+reconcile: {} routed, {} vias",
+        s.pre_verify_routed,
+        s.pre_verify_commands,
+        s.pre_verify_vias,
+        result.routed.len(),
+        vias
+    );
     println!("  routed:   {:?}", result.routed);
     println!("  unrouted: {:?}", result.unrouted);
 
