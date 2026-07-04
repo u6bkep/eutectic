@@ -77,14 +77,26 @@ feat/mask-lint); TTF kerning from the legacy `kern` table, integer font-unit
 accumulation (branch feat/kerning). **Folded into `architecture.md` §8
 (2026-07-03)** — §8 now states the current model; this record remains the
 decision-by-decision history.
-**Decisions 20 + 21 drafted (2026-07-04, design agreed in discussion, NOT yet
-implemented)** — the schematic front: the schematic as the second derived projection
-(authored flexbox-style layout tree elaborated to coordinates, tags-first wires with
-presentational waypoints, no solver on the view path); and the source-language
-decision (declarative core + hermetic non-Turing-complete expression tier, `def`
-reuse with typed ports, the Onshape clause, the three-mode GUI editing model).
-Prerequisites noted in discussion: issue 0010 (interface inference from imported
-symbols) and `.kicad_sym` body-graphics import are sequenced alongside, not blockers.
+**Decisions 20 + 21 IMPLEMENTED end-to-end (drafted and landed 2026-07-04, `main`
+@ `468fe23`, 559 lib tests, seven branches in four waves)** — the schematic front:
+nested block grammar with trivia-preserving interiors (feat/block-syntax); typed-
+interface inference at the import join, identity-unified on pad numbers — **0010
+resolved** (feat/iface-infer); the hermetic expression tier — `param`, decimal-exact
+arithmetic, `inst path[lo..hi]` ranges, `if=` variants, depth-bounded (feat/expr-tier);
+the `schematic { row/column/sym }` layout tree + deterministic reflow + unplaced bin
+(feat/schematic-model); `def` reuse with typed ports on pad identity, E_DEF_*
+diagnostics, DNP prefix rule (feat/def-construct); the SVG renderer with net tags,
+presentational `wire … via (x,y)` polylines, and the **0029** fix
+(feat/schematic-render); def-embedded fragments stamped per instance, refdes headers,
+and the RP2350A capstone schematic — `poc/out/schematic.svg`, all 44 components
+placed, round-trip byte-lossless with schematic blocks (feat/schematic-capstone).
+Every branch adversarially reviewed pre-merge; majors caught and fixed: expr
+stack-overflow abort, quoting escape hatch, schematic MAX_COORD bypass, rot=90/270
+stub detach, dual pad identity (blocker), deep-DNP asymmetry, silent internal-net
+merge. Round-3 findings ledger (F1–F10 + F-def-fit) in `poc-rp2350-result.md` —
+layout quality (pin-label-blind packing, tag overprint, wires through bodies) is the
+named next frontier. Interface-typed def ports descoped (fails loud); `.kicad_sym`
+body graphics deferred (§20e); comment-trivia normalization filed as 0030.
 
 This record captures the foundation decisions; it *realigned the implementation* with
 what §8 already stated and sharpened three points (the single primitive, the placement
@@ -839,7 +851,7 @@ survived its perforation as one island. The campaign's fenced question — does 
 QFN fan-out need negotiated rip-up? — gets answered by re-measuring routed/44 under
 these semantics, not before.
 
-### Decision 20 — the schematic is a derived view: authored flow layout, tags-first wires (2026-07-04, drafted — not yet implemented)
+### Decision 20 — the schematic is a derived view: authored flow layout, tags-first wires (2026-07-04, implemented same day — see Status header)
 
 Opens the schematic front. The conventional flow — draw a schematic, generate the
 netlist from the drawing — is the finger-painting failure mode this project was
@@ -900,7 +912,7 @@ excludes it); pins, names, and net tags carry the electrical content meanwhile.
 A layout tree inside a `def` (Decision 21) is stamped per instance — reused circuits
 render identically everywhere, the thing hierarchical-sheet tools never quite deliver.
 
-### Decision 21 — the source language: declarative core, hermetic expressions, `def` reuse; computation stays at the rim (2026-07-04, drafted)
+### Decision 21 — the source language: declarative core, hermetic expressions, `def` reuse; computation stays at the rim (2026-07-04, implemented same day — see Status header)
 
 **§21a `def` implemented (branch feat/def-construct).** Grammar:
 `def <name> [param <k>=<default> ...] { body }`, a **top-level-only** block (a def body
