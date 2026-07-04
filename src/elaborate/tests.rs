@@ -1,5 +1,9 @@
 use super::*;
-use crate::geom::Extent;
+// The elaborate facade no longer imports these into its own scope (they migrated to the
+// `query`/`support` submodules with the code that uses them), so `super::*` no longer
+// re-exports them; the tests name them directly.
+use crate::geom::{Extent, NetFeature, Slab, Stackup, ZRange};
+use crate::part::PartDef;
 
 fn pt(x: Nm, y: Nm) -> Point {
     Point { x, y }
