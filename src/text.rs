@@ -87,9 +87,9 @@
 use crate::annotate::ClassEntry;
 use crate::diagnostic::{Diagnostic, Location};
 use crate::doc::{Doc, MM, Nm, Orient, Override, Point, Provenance, Strength};
-use crate::elaborate::{DefNode, GenDirective, RegionDecl, Source, board_rect, directive_coords};
 use crate::geom::{KeepoutKind, Material, Path, Role, Seg, Shape2D, Slab, ZRange, coord_ok};
 use crate::id::{EntityId, TraceId, ViaId};
+use crate::ir::{DefNode, GenDirective, RegionDecl, Source, board_rect, directive_coords};
 use crate::route::{Trace, Via};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -687,56 +687,11 @@ fn strip_comment(raw: &str) -> &str {
 // mixed-authorship `def` bodies must round-trip) but dropped at the top level, where
 // the flat path has always dropped it.
 
-/// A directive together with any block body it opened. Header tokens are pre-split
-/// (whitespace-aware, keeping quoted runs intact — the same tokenization the flat
-/// directive path uses), so a consumer walks `keyword`/`tokens`/`children` directly.
-/// `line` is the 1-based source line of the header, for diagnostics.
-///
-/// A leaf directive (no trailing `{`) has an empty `children` and `opened_block ==
-/// false`; a block opener has `opened_block == true` (even when the body is empty).
-/// The distinction matters to the flat path, which must reject a block on a keyword
-/// that does not accept one — an *empty* block is still a block.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Block {
-    /// The leading bare token (the directive keyword).
-    pub keyword: String,
-    /// Every whitespace-separated header token (including the keyword at index 0),
-    /// with quoted runs kept intact. Consumers walk these; they are never re-split.
-    pub tokens: Vec<String>,
-    /// The whitespace-normalized header tail: the header with its keyword removed. The
-    /// keyword→tail separator is collapsed to nothing here (this is the tail *after* the
-    /// separating whitespace) but the tail's own internal spacing and quoting are
-    /// preserved verbatim — so coordinate- and quote-sensitive per-directive parsers see
-    /// the same content they parse today. NOT a byte-exact slice of the source line (the
-    /// leading separator is normalized); every current per-directive parser is
-    /// whitespace-insensitive across the keyword boundary, so this is exact for their
-    /// purposes. A consumer needing the raw line should reconstruct via the tokens.
-    pub rest: String,
-    /// Whether this directive opened a `{ … }` block (true even if the body is empty).
-    pub opened_block: bool,
-    /// This block's body, in source order: child directives interleaved with the
-    /// comment and blank lines between them (trivia is preserved *inside* blocks so
-    /// mixed-authorship `def` bodies round-trip — Decision 21). Empty for a leaf.
-    pub children: Vec<Node>,
-    /// 1-based source line of the header.
-    pub line: u32,
-}
-
-/// One entry in a block body: a nested directive, or a preserved trivia line (a comment
-/// or a blank). Trivia is retained only *inside* blocks; the top-level forest carries
-/// only [`Node::Block`] (the flat path's pre-existing behavior — top-level comments and
-/// blanks are not tier-1 state and are dropped as they always were).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Node {
-    /// A nested directive (itself possibly a block opener).
-    Block(Block),
-    /// A whole-line comment, stored **without** its leading `#` or surrounding
-    /// whitespace (re-emitted as `# <text>` at canonical indent). An empty-bodied
-    /// comment (`#` alone) stores the empty string.
-    Comment(String),
-    /// A blank line.
-    Blank,
-}
+// `Block` and `Node` — the block-tree DATA model — now live in `crate::ir` (the
+// common downward dependency of `text` and `elaborate`). Re-exported here so
+// every existing `crate::text::{Block, Node}` path keeps working; the parsing and
+// serialization over them stays in this module.
+pub use crate::ir::{Block, Node};
 
 impl Block {
     /// The full header line as it feeds the flat directive path: `keyword` then
@@ -1318,7 +1273,7 @@ fn err_line(code: &'static str, msg: String, line: u32) -> Diagnostic {
 }
 
 /// Parse a top-level `def <name> [param <k>=<default> ...] { body }` (Decision 21a) and
-/// push the resulting [`GenDirective::Def`](crate::elaborate::GenDirective::Def) onto
+/// push the resulting [`GenDirective::Def`](crate::ir::GenDirective::Def) onto
 /// `parsed.source`. The header is `def <name>` followed by zero or more
 /// `param <k>=<default>` declarations *inline on the header line* — the same
 /// declaration-with-default shape a def instantiation later overrides via `p:`. The body
@@ -1493,7 +1448,7 @@ fn parse_def(b: &Block, parsed: &mut Parsed, errors: &mut Vec<Diagnostic>) {
         }
     }
 
-    parsed.source.push(crate::elaborate::GenDirective::Def {
+    parsed.source.push(GenDirective::Def {
         name,
         params,
         body,
