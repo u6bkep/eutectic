@@ -604,6 +604,16 @@ impl BlockMap {
                     // A copper/route keep-out is a hard block on every copper slab its z
                     // overlaps (netless ⇒ blocks all nets). If it overlaps no copper slab,
                     // block all layers conservatively.
+                    //
+                    // NOTE: `stamp` uses `clr` (= min_clearance) for the keep-out pull-back,
+                    // whereas the DRC/verify gate checks keep-outs at `keepout_clearance`
+                    // (default 0). With the defaults (keepout_clearance 0 ≤ min_clearance)
+                    // the grid is *stricter* than verify — the safe direction (the router
+                    // over-avoids; verify never rejects a route the grid allowed). This
+                    // becomes unsafe only if `keepout_clearance` is ever set *larger* than
+                    // `min_clearance`: the grid would then under-pull-back and verify could
+                    // drop routes the grid thought clean. If that config arises, pass
+                    // `keepout_clearance.max(min_clearance)` here.
                     let Extent::Prism { shape, z } = &f.extent;
                     let mut any = false;
                     for (k, s) in cu.iter().enumerate() {
@@ -910,6 +920,16 @@ fn astar(
     // of *other* nets lives in `owner` (the committed obstacles are already in `block.via`),
     // so a via is illegal if any node within `via_clear` is owned by another net. Scan the
     // Chebyshev box of that radius and test the exact Euclidean distance.
+    //
+    // This is a NODE approximation of the true via-to-segment distance: it measures the via
+    // centre to owned grid *nodes*, not to the foreign net's trace *segments*. A via sitting
+    // near a foreign segment's midpoint (whose endpoints are both > via_clear away, so no
+    // owned node is within the ring) can slip through here while actually inside via_clear of
+    // the centreline. That is deliberate — the exact, segment-accurate backstop is
+    // `verify_and_prune`, which re-checks every proposed via against the real DRC geometry
+    // and drops the net if it clashes. This ring check is a cheap search-time prune that
+    // catches the common axis-aligned adjacency (a via one node from a foreign trunk); the
+    // rare oblique near-miss is caught by verify. `routed` is therefore never a false clean.
     let ring = (via_clear / pitch) as usize + 1;
     let vc2 = (via_clear as i128) * (via_clear as i128);
 

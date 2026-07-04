@@ -493,6 +493,15 @@ fn clearance(a: &NetId, b: &NetId, layer: String) -> Violation {
 pub(crate) fn copper_layers_z(stackup: &Stackup) -> Vec<(Layer, ZRange)> {
     let slabs = stackup.copper_slabs();
     let n = slabs.len();
+    // This mapping assigns Top to index 0 and Bottom to the last, trusting `copper_slabs()`
+    // to return the copper top-first (it sorts by `Reverse(z.hi)`). Pin that invariant: the
+    // slabs must be in non-increasing z order, else the ordinal↔slab bridge (and every
+    // consumer keyed on it — the autorouter grid, DRC/export forward queries) silently
+    // mislabels layers.
+    debug_assert!(
+        slabs.windows(2).all(|w| w[0].z.hi >= w[1].z.hi),
+        "copper_slabs() must be ordered top-first (non-increasing z); copper_layers_z relies on it"
+    );
     slabs
         .iter()
         .enumerate()
