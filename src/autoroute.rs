@@ -850,7 +850,6 @@ impl BlockMap {
     /// routed edge that reaches a neighbour `pitch` away. Scans only the obstacle's grown
     /// bbox, so a small pad on a big board is cheap.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn stamp(
         grid: &Grid,
         trace: &mut [bool],
