@@ -1306,6 +1306,24 @@ mod tests {
     }
 
     #[test]
+    fn wire_to_interface_signal_fails_loud_not_silent() {
+        // v1 limitation (documented on parse_wire_header): a `port.signal` endpoint like
+        // `U1.uart.tx` last-dot-splits to comp `U1.uart` + pin `tx`. There is no component
+        // `U1.uart`, so it is a hard E_SCHEMATIC — loud, never silently mis-wired. The
+        // workaround is to wire the bound pad number. This pins the clean failure so the
+        // behaviour can never silently degrade into wiring the wrong node.
+        let lib = part_library();
+        let u = universe(&[("U1", "MCU")]);
+        let layout = SchematicLayout {
+            roots: vec![wire(("U1.uart", "tx"), ("U1", "VDD"))],
+        };
+        let (errors, _) = validate_wires(&layout, &u, &lib, &dnp(&[]), &nets(&[]));
+        assert_eq!(errors.len(), 1, "the interface-signal endpoint must error");
+        assert_eq!(errors[0].code, "E_SCHEMATIC");
+        assert!(errors[0].message.contains("U1.uart"));
+    }
+
+    #[test]
     fn wire_on_dnp_dropped_comp_degrades_to_warning() {
         let lib = part_library();
         // C2 is DNP-dropped (declared, then `if=false`). A wire onto it must not error — it

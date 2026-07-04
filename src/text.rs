@@ -1599,6 +1599,17 @@ fn parse_sym_header(toks: &[String], _line: u32) -> Result<Symbol, String> {
 /// keyword introduces the presentational waypoint list, a run of `(x,y)` coordinates.
 /// Endpoints round-trip: a quoted endpoint token is opaque (so a comp path holding
 /// `#`/`=`/spaces survives), matching the `sym` path convention.
+///
+/// **v1 limitation — an interface *signal* cannot be named directly.** The last-dot split
+/// makes `mcu.uart.tx` parse as comp `mcu.uart` + pin `tx`, which then fails validation
+/// (no such component) — a loud `E_SCHEMATIC`, never silent. This is deliberate: the wire
+/// vocabulary is `comp.pin`, and a `port.signal` has *two* dots. The workaround is exact
+/// and always available: **wire to the underlying pad number.** Post-0010, an interface
+/// signal bound to a pad *is* that pad (the netlist keys both under the pad-number
+/// `PinRef`), so `wire mcu.12 …` addresses the same electrical node the tag renderer draws
+/// for `uart.tx`. An abstract (unbound, toy-library) signal has no pad and simply cannot be
+/// wired in v1 — its tag still renders (§20c), so the connection is not lost, only the
+/// drawn line. Naming `port.signal` endpoints directly is a follow-up if it proves needed.
 fn parse_wire_header(rest: &str) -> Result<crate::schematic::Wire, String> {
     use crate::schematic::{Wire, WireEnd};
     const USAGE: &str = "wire <aComp>.<aPin> <bComp>.<bPin> [via (x,y) (x,y) …]";

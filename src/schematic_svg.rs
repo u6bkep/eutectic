@@ -21,7 +21,7 @@
 use crate::doc::{Doc, MM, Nm, Orient, Point};
 use crate::export::{fmt_mm, xml_escape};
 use crate::part::PartLib;
-use crate::schematic::{LayoutNode, PinSide, Placement, pin_slots};
+use crate::schematic::{LayoutNode, PinSide, Placement, pin_slots, symbol_extent};
 use std::collections::BTreeMap;
 
 /// Length of a pin stub drawn out from the box edge, and the gap before its name/tag.
@@ -166,11 +166,17 @@ pub fn schematic_svg(doc: &Doc, lib: &PartLib) -> String {
         // Pin stubs + names + net tags, per the sizing convention (only when the part is
         // known; a missing part draws the min box with no stubs — the view stays total).
         if let Some(def) = def {
+            // Stubs are built in the part's UNROTATED frame (`pin_slots` places `dy` against
+            // the unrotated box height), so the x-offset must be the unrotated half-width —
+            // NOT `pl.extent`, whose w/h reflow already swapped for a 90/270 rot. Using the
+            // swapped width here and *then* rotating would double-count the swap and float
+            // the stubs off the box. `stub_geometry` applies `rot` to the finished point.
+            let unrot_hw = symbol_extent(def).w / 2;
             for slot in pin_slots(def) {
                 // Stub base on the box edge (unrotated frame), then rotated by the authored
                 // schematic rot so the stub sticks out the correct side of the rotated box.
                 let (base, tip, tag_anchor, name_x, anchor) =
-                    stub_geometry(slot.side, hw, slot.dy, rot);
+                    stub_geometry(slot.side, unrot_hw, slot.dy, rot);
                 let (bx, by) = (pl.center.x + base.x, pl.center.y + base.y);
                 let (tx, ty) = (pl.center.x + tip.x, pl.center.y + tip.y);
                 out.push_str(&format!(
@@ -362,10 +368,13 @@ fn bin_divider_y(
 }
 
 /// Each drawn wire (§20d) as a schematic-space polyline: pin-A world point, the authored
-/// waypoints in order, pin-B world point. A wire whose endpoint pin can't be resolved (a
-/// missing part, or a DNP-dropped / unplaced component absent from `placements`) is
-/// dropped — it earns a warning at commit and simply isn't drawn. Pre-order wire walk, so
-/// the order is deterministic.
+/// waypoints in order, pin-B world point. An *unplaced* component is still in `placements`
+/// (in the bin, §20c totality), so a wire to it draws to the bin — that is intentional, not
+/// a drop. A wire is dropped only when an endpoint is genuinely absent from `placements` (a
+/// DNP-dropped component — the source declared it but a false `if=` removed it) or its part
+/// is missing from the lib / the pin selector resolves to no stub; those cases earn a
+/// warning at commit and simply are not drawn. Pre-order wire walk, so the order is
+/// deterministic.
 fn wire_polylines(
     doc: &Doc,
     placements: &BTreeMap<crate::id::EntityId, Placement>,
@@ -410,8 +419,11 @@ fn wire_end_point(
     let want = ids.first().map(String::as_str).unwrap_or(pin);
     let slot = pin_slots(def).into_iter().find(|s| s.id == want)?;
     let rot = rots.get(comp).copied().unwrap_or(Orient::IDENTITY);
-    let (_base, tip, _tag, _name, _anchors) =
-        stub_geometry(slot.side, pl.extent.w / 2, slot.dy, rot);
+    // Unrotated half-width (see the symbol loop): `stub_geometry` builds in the part's own
+    // frame and rotates the point, so passing `pl.extent` (reflow-swapped) would misplace
+    // the tip on a rotated symbol and drag the wire endpoint with it.
+    let unrot_hw = symbol_extent(def).w / 2;
+    let (_base, tip, _tag, _name, _anchors) = stub_geometry(slot.side, unrot_hw, slot.dy, rot);
     Some(Point {
         x: pl.center.x + tip.x,
         y: pl.center.y + tip.y,
@@ -487,6 +499,48 @@ mod tests {
         let wire_at = s.find("class=\"wire\"").unwrap();
         let sym_at = s.find("class=\"symbol\"").unwrap();
         assert!(wire_at < sym_at, "wire must render under symbols:\n{s}");
+    }
+
+    #[test]
+    fn stubs_sit_on_the_box_perimeter_for_every_rotation() {
+        // Regression for the rot=90/270 stub-detach bug: stub geometry is built in the
+        // part's UNROTATED frame and rotated, so a stub base must land exactly on the
+        // (post-rotation) box perimeter and its tip must fall strictly outside — for all
+        // four cardinals, not just identity. The box after `rot` has the reflow-swapped
+        // extent, centered on the origin; check each stub against that box.
+        use crate::part::part_library;
+        let lib = part_library();
+        let def = &lib["MCU"]; // 4 edge pins, non-square box (exercises the swap).
+        let base_ext = symbol_extent(def);
+        let unrot_hw = base_ext.w / 2;
+
+        for deg in [0, 90, 180, 270] {
+            let rot = Orient::from_deg(deg).unwrap();
+            // Post-rotation box half-extents (reflow swaps w/h for 90/270).
+            let (hw, hh) = if deg == 90 || deg == 270 {
+                (base_ext.h / 2, base_ext.w / 2)
+            } else {
+                (base_ext.w / 2, base_ext.h / 2)
+            };
+            for slot in pin_slots(def) {
+                // Production always feeds the UNROTATED half-width; `stub_geometry` rotates.
+                let (base, tip, _tag, _name, _anchor) =
+                    stub_geometry(slot.side, unrot_hw, slot.dy, rot);
+                // Base on the perimeter: it touches one edge (|coord| == that half-extent)
+                // and stays within the other (± a 1 nm rounding slack from the halving).
+                let on_x = (base.x.abs() - hw).abs() <= 1 && base.y.abs() <= hh + 1;
+                let on_y = (base.y.abs() - hh).abs() <= 1 && base.x.abs() <= hw + 1;
+                assert!(
+                    on_x || on_y,
+                    "rot={deg} stub base {base:?} off the {hw}×{hh} box perimeter"
+                );
+                // Tip strictly outside the box (the stub points outward).
+                assert!(
+                    tip.x.abs() > hw || tip.y.abs() > hh,
+                    "rot={deg} stub tip {tip:?} not outside the {hw}×{hh} box"
+                );
+            }
+        }
     }
 
     #[test]
