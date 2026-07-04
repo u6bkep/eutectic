@@ -1163,6 +1163,10 @@ fn parse_layout_nodes(nodes: &[Node], errors: &mut Vec<Diagnostic>) -> Vec<Layou
                 };
                 match parse_container_header(dir, &b.tokens[1..], b.line) {
                     Ok((name, gap, align)) => {
+                        // Authored length ingress: `gap` is bounded like every other
+                        // coordinate/length (issue 0018) — an over-bound value is
+                        // E_COORD_RANGE here, not an add-overflow panic later in reflow.
+                        check_coord_range(vec![gap], b.line, errors);
                         let children = parse_layout_nodes(&b.children, errors);
                         out.push(LayoutNode::Container(Container {
                             dir,
@@ -1187,7 +1191,12 @@ fn parse_layout_nodes(nodes: &[Node], errors: &mut Vec<Diagnostic>) -> Vec<Layou
                     continue;
                 }
                 match parse_sym_header(&b.tokens[1..], b.line) {
-                    Ok(sym) => out.push(LayoutNode::Symbol(sym)),
+                    Ok(sym) => {
+                        // Bound the pinned offsets, same discipline as `gap` / every other
+                        // authored length (issue 0018).
+                        check_coord_range(vec![sym.dx, sym.dy], b.line, errors);
+                        out.push(LayoutNode::Symbol(sym));
+                    }
                     Err(e) => errors.push(err_line("E_SCHEMATIC", e, b.line)),
                 }
             }
@@ -4732,6 +4741,60 @@ inst top MCU
                 "round-trip failed for name={name:?} path={path:?} via `{text}`"
             );
         }
+    }
+
+    #[test]
+    fn schematic_lengths_are_range_checked() {
+        // Authored lengths obey the issue-0018 ingress bound (MAX_COORD), like every other
+        // coordinate — an over-bound `gap`/`dx` is E_COORD_RANGE at parse, not an
+        // add-overflow panic in reflow.
+        let over = crate::geom::MAX_COORD + 1;
+        let gap_err = parse(&format!(
+            "schematic {{\n  row gap={over}nm {{\n    sym C1\n  }}\n}}\n"
+        ))
+        .unwrap_err();
+        assert!(gap_err.iter().any(|d| d.code == "E_COORD_RANGE"));
+        let dx_err = parse(&format!(
+            "schematic {{\n  row {{\n    sym C1 dx={over}nm\n  }}\n}}\n"
+        ))
+        .unwrap_err();
+        assert!(dx_err.iter().any(|d| d.code == "E_COORD_RANGE"));
+    }
+
+    #[test]
+    fn max_coord_scale_lengths_reflow_without_panic() {
+        // A gap/dx at the MAX_COORD ceiling parses and reflows cleanly (no overflow).
+        let big = crate::geom::MAX_COORD;
+        let doc = Doc {
+            schematic: parse(&format!(
+                "schematic {{\n  row gap={big}nm {{\n    sym C1 dx={big}nm dy=-{big}nm\n    sym C2\n  }}\n}}\n"
+            ))
+            .unwrap()
+            .schematic,
+            ..Default::default()
+        };
+        let lib = part_library();
+        let parts = BTreeMap::from([
+            (EntityId::new("C1"), "Cap".to_string()),
+            (EntityId::new("C2"), "Cap".to_string()),
+        ]);
+        // Must not panic (debug add-overflow) — the whole point of the range check.
+        let placed = crate::schematic::reflow(&doc.schematic.unwrap(), &parts, &lib);
+        assert_eq!(placed.len(), 2);
+    }
+
+    #[test]
+    fn canonical_defaults_are_elided_first_pass() {
+        // Explicitly-authored defaults (align=start, rot=0, gap=0, dx=0, dy=0) all elide on
+        // the FIRST serialization — guards against a regression that starts emitting them
+        // (which the already-canonical fixpoint tests would not catch).
+        let authored = "schematic {\n  row power gap=0mm align=start {\n    sym C1 rot=0 dx=0mm dy=0mm\n  }\n}\n";
+        let expected = "schematic {\n  row power {\n    sym C1\n  }\n}\n";
+        let doc = Doc {
+            schematic: parse(authored).unwrap().schematic,
+            ..Default::default()
+        };
+        assert_eq!(serialize(&doc), expected);
     }
 
     #[test]
