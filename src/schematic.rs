@@ -173,6 +173,25 @@ impl SchematicLayout {
         out
     }
 
+    /// Every [`Symbol`] leaf in the tree, in a pre-order walk (the nodes behind
+    /// [`symbol_paths`](Self::symbol_paths)) — for callers that need the authored
+    /// `rot`/`dx`/`dy`, not just the path (e.g. [`validate`]'s def-instance ignored-attr
+    /// check). Same deterministic order as `symbol_paths`.
+    fn symbols(&self) -> Vec<&Symbol> {
+        let mut out = Vec::new();
+        fn walk<'a>(nodes: &'a [LayoutNode], out: &mut Vec<&'a Symbol>) {
+            for n in nodes {
+                match n {
+                    LayoutNode::Symbol(s) => out.push(s),
+                    LayoutNode::Container(c) => walk(&c.children, out),
+                    LayoutNode::Wire(_) | LayoutNode::Comment(_) | LayoutNode::Blank => {}
+                }
+            }
+        }
+        walk(&self.roots, out.as_mut());
+        out
+    }
+
     /// Every drawn [`Wire`] in the tree, in a pre-order walk — the order
     /// [`schematic_svg`](crate::schematic_svg) draws them and [`validate_wires`] reports
     /// them, so both are deterministic.
@@ -293,6 +312,49 @@ pub fn validate(
             errors.push(Diagnostic::error(
                 "E_SCHEMATIC",
                 format!("`sym {path}` names no component instance"),
+                Location::Entity(EntityId::new(path)),
+            ));
+        }
+    }
+
+    // Ignored-attribute warnings (F7): a def-instance `sym` expands to a GROUP, not a leaf
+    // box, so an authored `rot`/`dx`/`dy` on it has no v1 meaning and `reflow` silently drops
+    // it (see `expand_def_syms`). Surface that as a non-blocking `W_SCHEMATIC` so the drop is
+    // never invisible — the author asked for a transform the group model can't honour yet.
+    for s in layout.symbols() {
+        if def_fragments.contains_key(&s.path)
+            && (s.rot != crate::doc::Orient::IDENTITY || s.dx != 0 || s.dy != 0)
+        {
+            warnings.push(Diagnostic::warning(
+                "W_SCHEMATIC",
+                format!(
+                    "`rot`/`dx`/`dy` on def-instance `sym {}` is ignored (a def instance is a \
+                     group, not a symbol box; group-level transforms are a follow-up)",
+                    s.path
+                ),
+                Location::Entity(EntityId::new(s.path.as_str())),
+            ));
+        }
+    }
+
+    // Fragment-nesting depth (guards the same cap `reflow`'s `expand_def_syms` enforces).
+    // A def-instance `sym` whose fragment nests other def instances beyond
+    // [`MAX_FRAGMENT_DEPTH`] cannot fully render — `reflow` stops expanding at the cap and
+    // the over-deep subtree vanishes. A silent drop is against the house rules, so surface
+    // it here as a hard `E_SCHEMATIC` (not a warning): the schematic would be genuinely
+    // incomplete, exactly the fault class [`crate::elaborate::MAX_DEF_DEPTH`] treats as an
+    // error. Practically unreachable (instance paths are distinct and acyclic), but the
+    // check makes the cap honest rather than a quiet truncation.
+    for path in layout.symbol_paths() {
+        if def_fragments.contains_key(path)
+            && fragment_depth(path, def_fragments, 0) > MAX_FRAGMENT_DEPTH
+        {
+            errors.push(Diagnostic::error(
+                "E_SCHEMATIC",
+                format!(
+                    "def-instance `sym {path}` nests fragments beyond the depth cap \
+                     ({MAX_FRAGMENT_DEPTH}) — the over-deep subtree would not render"
+                ),
                 Location::Entity(EntityId::new(path)),
             ));
         }
@@ -794,9 +856,11 @@ fn expand_def_syms(
         match n {
             LayoutNode::Symbol(s) => {
                 if let Some(frag) = def_fragments.get(&s.path) {
-                    // A def-instance sym: replace with a group of the fragment's roots. Guard
-                    // against pathological nesting (should be unreachable for well-formed
-                    // fragments, since instance paths are distinct and acyclic).
+                    // A def-instance sym: replace with a group of the fragment's roots. The
+                    // depth cap is a stack backstop only — a doc that would exceed it is
+                    // already rejected at commit by `validate`'s `fragment_depth` check
+                    // (E_SCHEMATIC), so a committed doc never reaches this drop. Kept so a
+                    // direct `reflow` call on a hand-built over-deep table can't recurse away.
                     if depth >= MAX_FRAGMENT_DEPTH {
                         continue;
                     }
@@ -827,6 +891,35 @@ fn expand_def_syms(
         }
     }
     out
+}
+
+/// The maximum def-instance nesting depth reachable from the fragment stamped at `path`,
+/// counting `path` itself as depth 1: 1 for a leaf fragment, +1 per nested def-instance
+/// `sym` inside it. Mirrors the recursion [`expand_def_syms`] performs at reflow, so
+/// [`validate`] can reject (as `E_SCHEMATIC`) any fragment that would exceed
+/// [`MAX_FRAGMENT_DEPTH`] and be silently truncated. The `guard` bounds this walk itself
+/// against a (validation-time) pathological input — a cycle would be an elaboration-time
+/// `E_DEF_CYCLE` long before a fragment table is built, so this only stops runaway
+/// recursion, returning a value past the cap so the caller still flags it.
+fn fragment_depth(
+    path: &str,
+    def_fragments: &BTreeMap<String, SchematicLayout>,
+    guard: usize,
+) -> usize {
+    if guard > MAX_FRAGMENT_DEPTH {
+        return guard; // past the cap; the caller's `>` check fires regardless
+    }
+    let Some(frag) = def_fragments.get(path) else {
+        return 0;
+    };
+    let deepest_child = frag
+        .symbol_paths()
+        .into_iter()
+        .filter(|p| def_fragments.contains_key(*p))
+        .map(|p| fragment_depth(p, def_fragments, guard + 1))
+        .max()
+        .unwrap_or(0);
+    1 + deepest_child
 }
 
 /// Drop every fragment `sym` whose path a doc-level `sym` places explicitly (override
@@ -1684,6 +1777,74 @@ mod tests {
         assert_eq!(warnings.len(), 1, "one override warning: {warnings:?}");
         assert_eq!(warnings[0].code, "W_SCHEMATIC");
         assert!(warnings[0].message.contains("overrides"));
+    }
+
+    #[test]
+    fn rot_dx_dy_on_def_instance_sym_warns_ignored() {
+        // F7: a def-instance sym expands to a group, so an authored rot/dx/dy on it is
+        // dropped by reflow — validate must surface that as a non-blocking W_SCHEMATIC so the
+        // drop is never invisible. A plain (identity, zero-offset) def-instance sym is silent.
+        let u = universe(&[("sense[0].R1", "R")]);
+        let ids: BTreeSet<EntityId> = u.keys().cloned().collect();
+        let fragments: BTreeMap<String, SchematicLayout> =
+            [frag_column("sense[0]", &["sense[0].R1"])]
+                .into_iter()
+                .collect();
+        // Identity + zero offset: no warning.
+        let plain = SchematicLayout {
+            roots: vec![row(vec![sym("sense[0]")])],
+        };
+        let (_e, _u, w) = validate(&plain, &ids, &dnp(&[]), &fragments);
+        assert!(w.is_empty(), "plain def-instance sym is silent: {w:?}");
+        // A pinned offset on the def-instance sym: one ignored-attr warning.
+        let shifted = SchematicLayout {
+            roots: vec![row(vec![LayoutNode::Symbol(Symbol {
+                path: "sense[0]".into(),
+                rot: Orient::IDENTITY,
+                dx: 3_000_000,
+                dy: 0,
+            })])],
+        };
+        let (errors, _unplaced, warnings) = validate(&shifted, &ids, &dnp(&[]), &fragments);
+        assert!(
+            errors.is_empty(),
+            "ignored attr is not an error: {errors:?}"
+        );
+        assert_eq!(warnings.len(), 1, "one ignored-attr warning: {warnings:?}");
+        assert_eq!(warnings[0].code, "W_SCHEMATIC");
+        assert!(warnings[0].message.contains("is ignored"));
+    }
+
+    #[test]
+    fn fragment_nesting_past_the_cap_is_an_error_not_a_silent_drop() {
+        // A chain of def instances each nesting the next, longer than MAX_FRAGMENT_DEPTH.
+        // reflow would truncate the over-deep tail silently; validate must reject it with a
+        // hard E_SCHEMATIC instead (a silent drop is against the house rules).
+        let mut fragments: BTreeMap<String, SchematicLayout> = BTreeMap::new();
+        // link[k] is a def instance whose fragment holds the next instance sym link[k+1].
+        let n = MAX_FRAGMENT_DEPTH + 2;
+        for k in 0..n {
+            let child = format!("link{}", k + 1);
+            fragments.insert(
+                format!("link{k}"),
+                SchematicLayout {
+                    roots: vec![column(vec![sym(&child)])],
+                },
+            );
+        }
+        // The doc places the head of the chain.
+        let layout = SchematicLayout {
+            roots: vec![row(vec![sym("link0")])],
+        };
+        // No populated components needed — the check is purely on fragment nesting depth.
+        let ids: BTreeSet<EntityId> = BTreeSet::new();
+        let (errors, _unplaced, _warnings) = validate(&layout, &ids, &dnp(&[]), &fragments);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.code == "E_SCHEMATIC" && e.message.contains("depth cap")),
+            "over-deep fragment nesting must be a hard error, got: {errors:?}"
+        );
     }
 
     #[test]

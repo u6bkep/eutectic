@@ -321,10 +321,11 @@ channel bank / user-I/O), and the def-embedded-layout FEATURE is demonstrated in
 filter `def` with an embedded `schematic { … }` fragment, instantiated three times. This is
 called out plainly rather than contrived into the board. **See F-def-fit below.**
 
-### Findings ledger (F1–F10)
+### Findings ledger (F1–F10, plus the named F-def-fit aside)
 
-Recorded while authoring; **none fixed this round** except the two trivial one-liners noted.
-Repro is against `cargo run --example poc_multiprobe` / the schematic SVGs.
+Recorded while authoring. **F7 is now surfaced** (a `W_SCHEMATIC` — see below); the rest are
+open, except the two trivial one-liners noted. Repro is against
+`cargo run --example poc_multiprobe` / the schematic SVGs.
 
 - **F1 — the schematic layout tree has no programmatic ingest (no `SetSchematic`).** A
   `SchematicLayout` can only enter a `Doc` by parsing a `schematic { … }` **text** block via
@@ -371,12 +372,13 @@ Repro is against `cargo run --example poc_multiprobe` / the schematic SVGs.
   to the unplaced bin). *Direction:* a container that enumerates a net's members, or a
   "remaining unplaced" sink container that captures the bin into a named group.
 
-- **F7 — `rot`/`dx`/`dy` on a def-instance `sym` are silently ignored.** A def instance
+- **F7 — `rot`/`dx`/`dy` on a def-instance `sym` are ignored (now surfaced).** A def instance
   expands to a *group*, not a leaf box, so an authored cardinal rotation or pinned offset on
-  `sym <instance>` has no v1 meaning and is dropped (documented on `expand_def_syms`). An
-  author might reasonably expect `sym ch0 rot=90` to rotate the whole stamped channel.
-  *Direction:* a group-level transform (rotate/offset the whole fragment's coordinate frame),
-  or at minimum a `W_SCHEMATIC` warning that the attribute was ignored on a def-instance sym.
+  `sym <instance>` has no v1 meaning and is dropped by reflow (documented on
+  `expand_def_syms`). **Fixed this round:** `validate` now emits a non-blocking `W_SCHEMATIC`
+  ("`rot`/`dx`/`dy` on def-instance `sym <path>` is ignored") so the drop is never invisible.
+  *Direction (still open):* a group-level transform that actually rotates/offsets the whole
+  fragment's coordinate frame, rather than just warning.
 
 - **F8 — Comment/Blank round-trip is asymmetric on a leading space.** A `LayoutNode::Comment`
   stores text *without* the leading `# ` separator; the serializer re-adds `# `. Authoring a
@@ -401,7 +403,7 @@ Repro is against `cargo run --example poc_multiprobe` / the schematic SVGs.
   a board with, e.g., a repeated per-channel level-shifter + RC + ESD cluster would show it
   properly. The mechanism itself is verified (three channels, byte-identical geometry).
 
-- **F11 — `sym <def-instance>` for a def with NO fragment hard-errors with a misleading
+- **F10 — `sym <def-instance>` for a def with NO fragment hard-errors with a misleading
   message.** `validate` treats a def-instance path as legal only when it is a `def_fragments`
   **key** (i.e. the def carried a `schematic` block). A `sym` naming a *fragmentless* def
   instance is neither a component, a DNP path, nor a fragment key, so it aborts with
@@ -413,10 +415,15 @@ Repro is against `cargo run --example poc_multiprobe` / the schematic SVGs.
   `W_SCHEMATIC` ("def instance has no layout fragment; its components bin individually")
   instead of a hard typo error. Deferred — needs the instance set surfaced from elaboration.
 
-**Trivial fixes applied this round (flagged, not deferred):** the `pub`
+**Fixes applied this round (flagged, not deferred):** the `pub`
 `serialize_schematic_block` wrapper (F1's workaround — a one-line re-export of the existing
-private `serialize_layout`), and the F8 leading-space normalization *in the capstone author*
-(not the parser — the parser fix is still open).
+private `serialize_layout`); the F8 leading-space normalization *in the capstone author*
+(not the parser — the parser fix is still open); the **F7 ignored-attr `W_SCHEMATIC`**
+(above); and making the **fragment-nesting depth cap** honest — `validate` now rejects a
+fragment nesting past `MAX_FRAGMENT_DEPTH` with a hard `E_SCHEMATIC` (`fragment_depth`)
+rather than letting reflow truncate the over-deep subtree silently. Chosen an error, not a
+warning: past the cap the schematic genuinely cannot render the tail, the same fault class
+`elaborate::MAX_DEF_DEPTH` treats as an error.
 
 **Worked cleanly (no friction):** def-fragment stamping + path prefixing; the doc-wins
 override precedence (`W_SCHEMATIC` when a doc-level `sym` supersedes a fragment placement);
