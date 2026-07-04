@@ -87,7 +87,7 @@
 use crate::annotate::ClassEntry;
 use crate::diagnostic::{Diagnostic, Location};
 use crate::doc::{Doc, MM, Nm, Orient, Override, Point, Provenance, Strength};
-use crate::elaborate::{GenDirective, RegionDecl, Source, board_rect, directive_coords};
+use crate::elaborate::{DefNode, GenDirective, RegionDecl, Source, board_rect, directive_coords};
 use crate::geom::{KeepoutKind, Material, Path, Role, Seg, Shape2D, Slab, ZRange, coord_ok};
 use crate::id::{EntityId, TraceId, ViaId};
 use crate::route::{Trace, Via};
@@ -442,7 +442,60 @@ fn render_directive(d: &GenDirective) -> String {
             // absent.
             format!("font \"{path}\"")
         }
+        GenDirective::Def {
+            name,
+            params,
+            body,
+            ports,
+        } => render_def(name, params, body, ports),
     }
+}
+
+/// Render a `def` block (Decision 21a) as canonical block-grammar text (no trailing
+/// newline — the caller appends one, matching the flat serialize loop). The header is
+/// `def <name>` with each declared param as an inline ` param <k>=<default>`; the body is
+/// each directive re-rendered and indented one level, interleaved with preserved
+/// comment/blank trivia; `port` bindings emit last, in `BTreeMap` (name) order — a
+/// deterministic canonical position independent of where they were authored. Body
+/// directives round-trip through the same [`render_directive`] the flat program uses
+/// (nested def instantiations are ordinary `inst` lines), so a def body is byte-stable
+/// across a parse→serialize→parse fixpoint.
+fn render_def(
+    name: &str,
+    params: &[(String, String)],
+    body: &[DefNode],
+    ports: &BTreeMap<String, (String, String)>,
+) -> String {
+    let mut s = format!("def {name}");
+    for (k, v) in params {
+        s.push_str(&format!(" param {k}={v}"));
+    }
+    s.push_str(" {\n");
+    for node in body {
+        match node {
+            DefNode::Directive(d) => {
+                s.push_str(BLOCK_INDENT);
+                s.push_str(&render_directive(d));
+                s.push('\n');
+            }
+            DefNode::Comment(text) if text.is_empty() => {
+                s.push_str(BLOCK_INDENT);
+                s.push_str("#\n");
+            }
+            DefNode::Comment(text) => {
+                s.push_str(BLOCK_INDENT);
+                s.push_str(&format!("# {text}\n"));
+            }
+            DefNode::Blank => s.push('\n'),
+        }
+    }
+    // Ports emit after the body, in canonical (name) order.
+    for (pname, (path, sel)) in ports {
+        s.push_str(BLOCK_INDENT);
+        s.push_str(&format!("port {pname} = {path}.{sel}\n"));
+    }
+    s.push('}');
+    s
 }
 
 fn fmt_point(p: Point) -> String {
@@ -707,7 +760,9 @@ fn keyword_takes_block(keyword: &str) -> bool {
     // Decision 20 layout tree: the `schematic` block and its nested `row`/`column`
     // containers accept block bodies. `sym` leaves do not (they are single-line
     // directives inside a container).
-    matches!(keyword, "schematic" | "row" | "column")
+    // Decision 21a: a `def` opens a block body (its sub-circuit); `port` is a leaf
+    // directive inside it.
+    matches!(keyword, "schematic" | "row" | "column" | "def")
 }
 
 /// A `cfg(test)` sentinel keyword that accepts a block, used to exercise the
@@ -1047,6 +1102,13 @@ fn parse_forest(
             }
             let roots = parse_layout_nodes(&b.children, errors);
             parsed.schematic = Some(crate::schematic::SchematicLayout { roots });
+        } else if b.opened_block && b.keyword == "def" {
+            // Decision 21a: a top-level `def <name> [param <k>=<default> ...] { body }`.
+            // The body is lowered into its own `Source` fragment (recursing this same
+            // walk over its children), so a def body is authored exactly like the flat
+            // program — parts, internal nets, `port` bindings, nested def *instantiations*.
+            // Nested def *definitions* are rejected (definitions stay top-level, v1).
+            parse_def(b, parsed, errors);
         } else if b.opened_block && matches!(b.keyword.as_str(), "row" | "column") {
             // A `row`/`column` opened outside a `schematic` block: the allowlist lets it
             // *parse* as a block (so its body's own errors surface), but it is not a
@@ -1213,6 +1275,197 @@ fn parse_layout_nodes(nodes: &[Node], errors: &mut Vec<Diagnostic>) -> Vec<Layou
 /// A span-located diagnostic at column 1 — the layout parsers' one shape.
 fn err_line(code: &'static str, msg: String, line: u32) -> Diagnostic {
     Diagnostic::error(code, msg, Location::Span { line, col: 1 })
+}
+
+/// Parse a top-level `def <name> [param <k>=<default> ...] { body }` (Decision 21a) and
+/// push the resulting [`GenDirective::Def`](crate::elaborate::GenDirective::Def) onto
+/// `parsed.source`. The header is `def <name>` followed by zero or more
+/// `param <k>=<default>` declarations *inline on the header line* — the same
+/// declaration-with-default shape a def instantiation later overrides via `p:`. The body
+/// is a source fragment (parts, internal nets, `port` bindings, nested def
+/// *instantiations*); nested def *definitions* and any non-body directive are rejected.
+/// Collect-all: every malformed piece is reported; on any error nothing partial escapes
+/// (the caller's `errors` is non-empty, so the whole parse fails).
+fn parse_def(b: &Block, parsed: &mut Parsed, errors: &mut Vec<Diagnostic>) {
+    // Header: `def <name> [param <k>=<default>]...`. Token 0 is `def`.
+    let toks = &b.tokens[1..];
+    if toks.is_empty() {
+        errors.push(err_line(
+            "E_DEF",
+            "`def` needs a name: def <name> [param <k>=<default> ...] { ... }".to_string(),
+            b.line,
+        ));
+        return;
+    }
+    let name = toks[0].clone();
+    if !is_ident(&name) {
+        errors.push(err_line(
+            "E_DEF",
+            format!("def name `{name}` must be an identifier (letters, digits, `_`)"),
+            b.line,
+        ));
+    }
+    // Inline `param <k>=<default>` declarations. They arrive as pairs of tokens
+    // (`param`, `k=default`); a bare `param` with no `k=v`, or a non-`param` token, is an
+    // error. Params keep authored order (defaults may reference earlier ones in the def
+    // scope, mirroring the doc-level `param` order-independence).
+    let mut params: Vec<(String, String)> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut i = 1;
+    while i < toks.len() {
+        if toks[i] != "param" {
+            errors.push(err_line(
+                "E_DEF",
+                format!(
+                    "def `{name}` header: unexpected token `{}` (expected `param <k>=<default>`)",
+                    toks[i]
+                ),
+                b.line,
+            ));
+            i += 1;
+            continue;
+        }
+        let Some(kv) = toks.get(i + 1) else {
+            errors.push(err_line(
+                "E_DEF",
+                format!("def `{name}` header: `param` needs `<k>=<default>`"),
+                b.line,
+            ));
+            break;
+        };
+        match kv.split_once('=') {
+            Some((k, v)) if is_ident(k) && !v.is_empty() => {
+                if !seen.insert(k.to_string()) {
+                    errors.push(err_line(
+                        "E_DEF",
+                        format!("def `{name}`: duplicate param `{k}`"),
+                        b.line,
+                    ));
+                }
+                params.push((k.to_string(), v.to_string()));
+            }
+            _ => errors.push(err_line(
+                "E_DEF",
+                format!(
+                    "def `{name}` header: malformed param `{kv}` (expected `<ident>=<default>`)"
+                ),
+                b.line,
+            )),
+        }
+        i += 2;
+    }
+
+    // Body: lower each child directive into a `Source` fragment, pulling out `port`
+    // bindings. Only body-shaped directives are accepted (inst / net / nc / connect /
+    // port); layout, placement, board/stackup, and route directives are out of scope for
+    // a def body (Phase 3). A nested `def { … }` is a hard error.
+    let mut body: Vec<DefNode> = Vec::new();
+    let mut ports: BTreeMap<String, (String, String)> = BTreeMap::new();
+    for node in &b.children {
+        let child = match node {
+            Node::Block(c) => c,
+            // Preserve body trivia so a mixed-authorship def body round-trips (Decision 21).
+            Node::Comment(text) => {
+                body.push(DefNode::Comment(text.clone()));
+                continue;
+            }
+            Node::Blank => {
+                body.push(DefNode::Blank);
+                continue;
+            }
+        };
+        if child.opened_block {
+            // The only block-opening keyword reachable here is `def` (the allowlist); a
+            // nested def definition is rejected. Any other block opener already errored in
+            // `parse_forest`'s block-rejection arm, but a `def` inside a `def` reaches here.
+            errors.push(err_line(
+                "E_DEF",
+                format!(
+                    "def `{name}`: nested `{}` block is not allowed (def definitions are top-level)",
+                    child.keyword
+                ),
+                child.line,
+            ));
+            continue;
+        }
+        match child.keyword.as_str() {
+            "port" => {
+                match parse_port(&child.rest) {
+                    Ok((pname, binding)) => {
+                        if ports.insert(pname.clone(), binding).is_some() {
+                            errors.push(err_line(
+                                "E_DEF",
+                                format!("def `{name}`: duplicate port `{pname}`"),
+                                child.line,
+                            ));
+                        }
+                    }
+                    Err(e) => errors.push(err_line("E_DEF", format!("def `{name}`: {e}"), child.line)),
+                }
+            }
+            "inst" | "net" | "nc" | "connect" => {
+                let line = child.header_line();
+                match parse_line(&line) {
+                    Ok(Item::Directive(d)) => {
+                        check_coord_range(directive_coords(&d), child.line, errors);
+                        body.push(DefNode::Directive(d));
+                    }
+                    Ok(_) => errors.push(err_line(
+                        "E_DEF",
+                        format!("def `{name}`: `{}` is not a valid body directive", child.keyword),
+                        child.line,
+                    )),
+                    Err(e) => errors.push(Diagnostic::error(
+                        "E_PARSE",
+                        format!("{e} (in `{line}`)"),
+                        Location::Span { line: child.line, col: 1 },
+                    )),
+                }
+            }
+            other => errors.push(err_line(
+                "E_DEF",
+                format!(
+                    "def `{name}`: `{other}` is not valid in a def body (expected inst / net / nc / connect / port)"
+                ),
+                child.line,
+            )),
+        }
+    }
+
+    parsed.source.push(crate::elaborate::GenDirective::Def {
+        name,
+        params,
+        body,
+        ports,
+    });
+}
+
+/// Parse a `port <name> = <internal-path>.<selector>` binding (Decision 21a bare typed
+/// ports). Returns `(port-name, (internal-path, selector))`. The `<internal-path>` is a
+/// def-relative instance path; the selector is a pin/pad selector resolved against that
+/// instance's part at stamp time (same selector grammar as `net`). Named-InterfaceDef
+/// ports (`port <name> : <iface-type> ...`) are not implemented (descoped — see report).
+fn parse_port(rest: &str) -> Result<(String, (String, String)), String> {
+    const USAGE: &str = "port <name> = <internal-path>.<pin-or-selector>";
+    // Reject the stretch interface-port form explicitly so it fails loud, not silently.
+    if rest.contains(':') && !rest.contains('=') {
+        return Err(format!(
+            "named-interface ports (`port <name> : <iface>`) are not supported in v1 ({USAGE})"
+        ));
+    }
+    let (name, target) = rest
+        .split_once('=')
+        .ok_or_else(|| format!("{USAGE} (missing `=`)"))?;
+    let name = name.trim();
+    let target = target.trim();
+    if name.is_empty() || target.is_empty() {
+        return Err(format!("{USAGE} (empty name or target)"));
+    }
+    if !is_ident(name) {
+        return Err(format!("port name `{name}` must be an identifier"));
+    }
+    let (path, sel) = split_last_dot(target, "port target")?;
+    Ok((name.to_string(), (path, sel)))
 }
 
 /// Parse a container header tail (`[name] [gap=<len>] [align=start|center|end]`). The
@@ -4862,6 +5115,339 @@ inst top MCU
         assert!(
             !placed.contains_key(&EntityId::new("C2")),
             "a depopulated part must not appear in reflow output"
+        );
+    }
+
+    // ---- Decision-21a `def` construct ------------------------------------
+
+    /// Elaborate `source` against the toy library and return the diagnostics, panicking if
+    /// it unexpectedly succeeded. (`Elaborated` isn't `Debug`, so `expect_err` can't be
+    /// used directly.)
+    fn elab_err(source: &Source) -> Vec<Diagnostic> {
+        let lib = part_library();
+        match elaborate(source, &Default::default(), &Default::default(), &lib) {
+            Ok(_) => panic!("expected elaboration to fail"),
+            Err(e) => e,
+        }
+    }
+
+    /// Return the elaborated net whose name is `name`, panicking if absent.
+    fn net_named<'a>(doc: &'a Doc, name: &str) -> &'a crate::doc::Net {
+        doc.nets
+            .values()
+            .find(|n| n.name == name)
+            .unwrap_or_else(|| panic!("net `{name}` not found in {:?}", doc.nets.keys()))
+    }
+
+    /// A `def` stamps its body per instantiation with path prefixing: `sense[0].R1`-style
+    /// component paths and path-prefixed internal nets, so two instances never collide.
+    #[test]
+    fn def_stamps_body_with_path_prefix() {
+        let src = "def rc {\n  inst R1 Cap\n  inst C1 Cap\n  net fb R1.p2 C1.p1\n}\n\
+                   inst a rc\ninst b rc";
+        let Parsed { source, .. } = parse(src).expect("parse");
+        let doc = placed(source);
+        for p in ["a.R1", "a.C1", "b.R1", "b.C1"] {
+            assert!(
+                doc.components.contains_key(&EntityId::new(p)),
+                "stamped component `{p}` missing"
+            );
+        }
+        // Internal net `fb` is path-prefixed per instance — distinct nets, no collision.
+        let a_fb = net_named(&doc, "a.fb");
+        let b_fb = net_named(&doc, "b.fb");
+        assert!(a_fb.members.iter().any(|m| m.comp.as_str() == "a.R1"));
+        assert!(b_fb.members.iter().any(|m| m.comp.as_str() == "b.R1"));
+        assert!(!a_fb.members.iter().any(|m| m.comp.as_str() == "b.R1"));
+    }
+
+    /// A connection to a def instance's port resolves through to the bound internal pin's
+    /// pad identity (no new namespace) — an outer `net VOUT amp.out` lands on `amp.R1`'s
+    /// pad, not a phantom port pin.
+    #[test]
+    fn def_port_resolves_to_bound_internal_pin() {
+        let src = "def divider {\n  inst R1 Cap\n  inst R2 Cap\n  net mid R1.p2 R2.p1\n  \
+                   port out = R1.p2\n}\n\
+                   inst d divider\nnet VOUT d.out";
+        let Parsed { source, .. } = parse(src).expect("parse");
+        let doc = placed(source);
+        let vout = net_named(&doc, "VOUT");
+        // The outer net reaches the internal R1 pad p2 — the port's binding.
+        assert!(
+            vout.members
+                .iter()
+                .any(|m| m.comp.as_str() == "d.R1" && m.pin.as_str() == "p2"),
+            "VOUT should reach d.R1.p2 via the port, got {:?}",
+            vout.members
+        );
+    }
+
+    /// Def params: a default is used when the instantiation omits it; a `p:` override
+    /// replaces it; the value flows into body expressions (evaluated in the def scope).
+    #[test]
+    fn def_params_default_and_override() {
+        let src = "def rc param val=100n {\n  inst C1 Cap p:value=(val)\n}\n\
+                   inst a rc\ninst b rc p:val=220n";
+        let Parsed { source, .. } = parse(src).expect("parse");
+        let doc = placed(source);
+        assert_eq!(
+            doc.components[&EntityId::new("a.C1")].params["value"],
+            "100n",
+            "default param flows into a body expression"
+        );
+        assert_eq!(
+            doc.components[&EntityId::new("b.C1")].params["value"],
+            "220n",
+            "p: override replaces the default"
+        );
+    }
+
+    /// A def param shadows an outer doc param of the same name (innermost wins — the same
+    /// rule as the range loop variable `i`). The body reads the def param's value.
+    #[test]
+    fn def_param_shadows_outer_doc_param() {
+        let src = "param val = 1n\n\
+                   def rc param val=999n {\n  inst C1 Cap p:value=(val)\n}\n\
+                   inst a rc";
+        let Parsed { source, .. } = parse(src).expect("parse");
+        let doc = placed(source);
+        assert_eq!(
+            doc.components[&EntityId::new("a.C1")].params["value"],
+            "999n",
+            "the def param shadows the outer doc param"
+        );
+    }
+
+    /// An outer doc param is visible inside a def body when not shadowed.
+    #[test]
+    fn def_body_sees_outer_param() {
+        let src = "param gain = 5\n\
+                   def amp {\n  inst C1 Cap p:g=(gain)\n}\n\
+                   inst a amp";
+        let Parsed { source, .. } = parse(src).expect("parse");
+        let doc = placed(source);
+        assert_eq!(doc.components[&EntityId::new("a.C1")].params["g"], "5");
+    }
+
+    /// Def instantiation composes with a range: `inst sense[0..n] SenseDef` stamps the
+    /// body under each `sense[i]` prefix, and the loop variable is usable in `p:`.
+    #[test]
+    fn def_instantiation_with_range() {
+        let src = "param n = 2\n\
+                   def sensor {\n  inst U Cap\n}\n\
+                   inst sense[0..n] sensor";
+        let Parsed { source, .. } = parse(src).expect("parse");
+        let doc = placed(source);
+        assert!(doc.components.contains_key(&EntityId::new("sense[0].U")));
+        assert!(doc.components.contains_key(&EntityId::new("sense[1].U")));
+        assert!(!doc.components.contains_key(&EntityId::new("sense[2].U")));
+    }
+
+    /// Nested def instantiation composes paths, and a re-exported port (a def's port bound
+    /// to a nested def's port) resolves transitively to the deepest real pin.
+    #[test]
+    fn nested_def_composes_and_reexports_port() {
+        let src = "def leaf {\n  inst R Cap\n  port o = R.p2\n}\n\
+                   def mid {\n  inst inner leaf\n  port o = inner.o\n}\n\
+                   inst top mid\nnet OUT top.o";
+        let Parsed { source, .. } = parse(src).expect("parse");
+        let doc = placed(source);
+        // Path composition: top → mid.inner → leaf.R
+        assert!(
+            doc.components.contains_key(&EntityId::new("top.inner.R")),
+            "nested path did not compose: {:?}",
+            doc.components.keys().collect::<Vec<_>>()
+        );
+        // Transitive port resolution: OUT reaches top.inner.R.p2.
+        let out = net_named(&doc, "OUT");
+        assert!(
+            out.members
+                .iter()
+                .any(|m| m.comp.as_str() == "top.inner.R" && m.pin.as_str() == "p2"),
+            "OUT should reach top.inner.R.p2, got {:?}",
+            out.members
+        );
+    }
+
+    /// A def reaching itself through any instantiation chain is an `E_DEF_CYCLE` error
+    /// naming the cycle — not an infinite loop.
+    #[test]
+    fn def_cycle_is_an_error() {
+        let src = "def a {\n  inst x b\n}\n\
+                   def b {\n  inst y a\n}\n\
+                   inst top a";
+        let Parsed { source, .. } = parse(src).expect("parse");
+        let err = elab_err(&source);
+        assert!(
+            err.iter().any(|d| d.code == "E_DEF_CYCLE"),
+            "expected E_DEF_CYCLE, got {:?}",
+            err.iter().map(|d| &d.code).collect::<Vec<_>>()
+        );
+    }
+
+    /// A def whose name also names a library part is rejected at elaboration
+    /// (`E_DEF_PART_AMBIGUOUS`) rather than silently shadowing.
+    #[test]
+    fn def_name_colliding_with_part_is_ambiguous() {
+        let src = "def Cap {\n  inst X Cap\n}\ninst a Cap";
+        let Parsed { source, .. } = parse(src).expect("parse");
+        let err = elab_err(&source);
+        assert!(
+            err.iter().any(|d| d.code == "E_DEF_PART_AMBIGUOUS"),
+            "expected E_DEF_PART_AMBIGUOUS, got {:?}",
+            err.iter().map(|d| &d.code).collect::<Vec<_>>()
+        );
+    }
+
+    /// `if=false` on a def instance drops the whole stamped subtree; an external net
+    /// referencing a dropped port dangles as `W_DNP`, never an unknown-instance error.
+    #[test]
+    fn def_instance_if_false_drops_subtree() {
+        let src = "def rc {\n  inst R1 Cap\n  inst C1 Cap\n  port o = R1.p2\n}\n\
+                   inst a rc if=(false)\nnet OUT a.o";
+        let Parsed { source, .. } = parse(src).expect("parse");
+        let doc = placed(source);
+        // The whole subtree is gone.
+        assert!(!doc.components.contains_key(&EntityId::new("a.R1")));
+        assert!(!doc.components.contains_key(&EntityId::new("a.C1")));
+        // The external reference to the dropped instance dangles as a warning.
+        assert!(
+            doc.report.dnp_dangling.iter().any(|(_, p)| p == "a"),
+            "dangling connection to dropped def instance recorded: {:?}",
+            doc.report.dnp_dangling
+        );
+    }
+
+    /// Refdes stays board-global flat across hierarchical def paths (industry
+    /// convention): two `Cap` instances stamped from two def instances get R1/R2 (or the
+    /// class prefix), numbered over all instances regardless of their hierarchical path.
+    #[test]
+    fn def_refdes_stays_board_global_flat() {
+        let src = "def rc {\n  inst K Cap\n}\n\
+                   inst a rc\ninst b rc";
+        let Parsed { source, .. } = parse(src).expect("parse");
+        let doc = placed(source);
+        let lib = part_library();
+        let rd = crate::annotate::refdes(&doc, &lib, &crate::annotate::registry(&[]));
+        let designators: BTreeSet<String> = [
+            rd[&EntityId::new("a.K")].clone(),
+            rd[&EntityId::new("b.K")].clone(),
+        ]
+        .into_iter()
+        .collect();
+        // Two distinct board-global designators over the two hierarchical instances.
+        assert_eq!(
+            designators.len(),
+            2,
+            "two stamped Caps must get two distinct board-global refdes, got {designators:?}"
+        );
+    }
+
+    /// A `def` document round-trips byte-identically through parse → serialize → parse →
+    /// serialize (canonical fixpoint), preserving body directives, params, ports, and
+    /// interior trivia.
+    #[test]
+    fn def_serialize_parse_fixpoint() {
+        let authored = "def rc param val=100n {\n  # the resistor\n  inst R1 Cap p:value=(val)\n\n  \
+                        inst C1 Cap\n  port out = R1.p2\n}\ninst a rc p:val=220n\n";
+        let once = serialize(&Doc {
+            source: parse(authored).unwrap().source,
+            ..Default::default()
+        });
+        let twice = serialize(&Doc {
+            source: parse(&once).unwrap().source,
+            ..Default::default()
+        });
+        assert_eq!(once, twice, "def serialization must reach a fixpoint");
+        // The fixpoint form preserves the def structure.
+        assert!(once.contains("def rc param val=100n {"));
+        assert!(once.contains("  # the resistor"));
+        assert!(once.contains("  inst R1 Cap p:value=(val)"));
+        assert!(once.contains("  port out = R1.p2"));
+    }
+
+    /// The poc guard: a document with no `def` serializes byte-identically to before this
+    /// feature — the def machinery adds nothing to a blockless program's text.
+    #[test]
+    fn defless_doc_is_byte_identical() {
+        let src = "inst U1 MCU\ninst c1 Cap\nnet GND U1.GND c1.p2\n";
+        let doc = Doc {
+            source: parse(src).unwrap().source,
+            ..Default::default()
+        };
+        assert_eq!(
+            serialize(&doc),
+            src,
+            "a def-free doc must be byte-identical"
+        );
+    }
+
+    /// A `p:` override naming a param the def does not declare is a hard error (a typo,
+    /// never silently ignored).
+    #[test]
+    fn def_unknown_param_override_is_an_error() {
+        let src = "def rc param val=1n {\n  inst C1 Cap\n}\ninst a rc p:nope=2n";
+        let Parsed { source, .. } = parse(src).expect("parse");
+        let err = elab_err(&source);
+        assert!(
+            err.iter().any(|d| d.code == "E_DEF"),
+            "expected E_DEF, got {:?}",
+            err.iter().map(|d| &d.code).collect::<Vec<_>>()
+        );
+    }
+
+    /// A nested def *definition* (a `def` inside a `def` body) is rejected — definitions
+    /// stay top-level in v1.
+    #[test]
+    fn nested_def_definition_is_rejected() {
+        let src = "def outer {\n  def inner {\n    inst X Cap\n  }\n}\ninst a outer";
+        let errs = parse(src).expect_err("a nested def definition must fail parsing");
+        assert!(
+            errs.iter().any(|d| d.code == "E_DEF"),
+            "expected E_DEF, got {:?}",
+            errs.iter().map(|d| &d.code).collect::<Vec<_>>()
+        );
+    }
+
+    /// An override pinned to a stamped def-instance path survives a def param change and
+    /// orphans (surfaced, not dropped) when the instance disappears — reconciliation flows
+    /// through stamped paths exactly as for hand-written ones.
+    #[test]
+    fn def_override_survives_and_decays_by_stamped_path() {
+        let lib = part_library();
+        let mut h = History::new(Default::default());
+        let base = "param n = 2\ndef s {\n  inst U Cap\n}\ninst sense[0..n] s";
+        let Parsed { source: s2, .. } = parse(base).expect("parse");
+        h.commit(Transaction::one(Command::SetSource(s2)), &lib, "n2")
+            .unwrap();
+        // Pin a stamped path.
+        h.commit(
+            Transaction::one(Command::Pin(EntityId::new("sense[1].U"), Point::mm(5, 5))),
+            &lib,
+            "pin",
+        )
+        .unwrap();
+        assert_eq!(
+            h.doc().components[&EntityId::new("sense[1].U")].pos.value,
+            Point::mm(5, 5),
+            "pin holds the stamped path"
+        );
+        // Shrink the range: sense[1] disappears; the pin orphans, is not silently dropped.
+        let Parsed { source: s1, .. } =
+            parse("param n = 1\ndef s {\n  inst U Cap\n}\ninst sense[0..n] s").expect("parse1");
+        h.commit(Transaction::one(Command::SetSource(s1)), &lib, "n1")
+            .unwrap();
+        assert!(
+            !h.doc()
+                .components
+                .contains_key(&EntityId::new("sense[1].U"))
+        );
+        assert!(
+            h.doc()
+                .report
+                .orphaned
+                .contains(&EntityId::new("sense[1].U")),
+            "the removed stamped instance's override is surfaced as an orphan"
         );
     }
 }

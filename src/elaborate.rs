@@ -71,6 +71,36 @@ pub enum GenDirective {
         /// evaluated by [`crate::expr`]; never pre-evaluated (serializes as authored).
         expr: String,
     },
+    /// A **`def`** — a named, reusable sub-circuit (Decision 21a). The React-component
+    /// mental model: `def` ≈ component, ports ≈ props. Its `body` is an ordinary
+    /// [`Source`] fragment (parts, internal nets, nested def *instantiations*) authored
+    /// against the def's own scope; `params` are declared parameters with default
+    /// expression texts (evaluated in the def's scope, overridable at each instantiation
+    /// via `p:`); `ports` is the typed I/O surface — each maps an outward port name to a
+    /// `(internal-path, selector)` pin the port exposes.
+    ///
+    /// A `def` is **not** a materialized directive: it declares a template, consumed by
+    /// [`expand_defs`] when an `inst <path> <def-name>` names it. Definitions are
+    /// **top-level only** (v1): a def body may *instantiate* another def but may not
+    /// *define* one. Elaboration's placement/connectivity passes never see a `Def` — the
+    /// def-expansion pre-pass strips every one and stamps its body per instantiation.
+    Def {
+        name: String,
+        /// Declared parameters, in authored order: `(param-name, default-expr-text)`.
+        /// The default is evaluated in the def's scope when an instantiation omits it.
+        params: Vec<(String, String)>,
+        /// The def body — a source fragment authored in the def's local scope (paths and
+        /// net names are def-relative; they gain the instance path prefix when stamped),
+        /// interleaved with the comment/blank trivia between directives so a
+        /// mixed-authorship def body round-trips (Decision 21). [`expand_defs`] reads only
+        /// the [`DefNode::Directive`] entries; serialization reproduces the trivia.
+        body: Vec<DefNode>,
+        /// The port surface: port name → `(internal-path, selector)`. A connection to a
+        /// def instance's `<inst-path>.<port>` resolves through to this bound internal
+        /// pin's PAD identity (Decision 21: pad number is THE identity — no new
+        /// namespace). `BTreeMap` for canonical serialization order.
+        ports: BTreeMap<String, (String, String)>,
+    },
     /// A **generative instance** (Decision 21b) — the expression-bearing form of `inst`
     /// that lowers, during elaboration, into one or more plain [`Instance`](Self::Instance)
     /// directives. Kept a distinct variant so the common `inst` (plain verbatim params,
@@ -258,6 +288,22 @@ pub enum GenDirective {
 /// The generative program (tier 1 authoritative).
 pub type Source = Vec<GenDirective>;
 
+/// One entry in a [`Def`](GenDirective::Def) body: a body directive, or a preserved
+/// trivia line (a comment or a blank) so a mixed-authorship def body round-trips
+/// (Decision 21). Mirrors [`crate::schematic::LayoutNode`]'s trivia handling; the
+/// def-expansion pre-pass ([`expand_defs`]) reads only the [`Directive`](Self::Directive)
+/// entries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DefNode {
+    /// A body directive (a part instance, an internal net, a nested def instantiation).
+    Directive(GenDirective),
+    /// A whole-line comment, stored without its leading `#` (re-emitted at canonical
+    /// indent) — same convention as [`crate::text::Node::Comment`].
+    Comment(String),
+    /// A blank line.
+    Blank,
+}
+
 /// Every coordinate/length (nm) a directive contributes — the values an ingest
 /// boundary range-checks against [`crate::geom::MAX_COORD`] (issue 0018). Points
 /// contribute both components; scalar spans (widths/gaps/heights, slab z-faces) their
@@ -307,11 +353,46 @@ pub const MAX_RANGE_INSTANCES: i64 = 10_000;
 /// unknown param, type error, inexact division, cycle, out-of-range/huge bound) is
 /// collected as a house diagnostic; on any fault the whole expansion fails so no partial
 /// program elaborates.
-fn expand_generative(source: &Source) -> Result<(Source, BTreeSet<String>), Vec<Diagnostic>> {
+fn expand_generative(
+    source: &Source,
+    lib: &PartLib,
+) -> Result<(Source, BTreeSet<String>), Vec<Diagnostic>> {
     use crate::expr;
     let mut errors: Vec<Diagnostic> = Vec::new();
 
-    // Step 1: params → environment.
+    // Collect the def table (Decision 21a). A duplicate def name is an authoring conflict;
+    // a def name that also names a library part is ambiguous — an `inst … <name>` could
+    // mean either, so we reject the *definition* rather than silently letting one win
+    // (the chosen rule: surface the collision, never guess). Both are hard faults.
+    let mut defs: BTreeMap<String, &GenDirective> = BTreeMap::new();
+    for d in source {
+        if let GenDirective::Def { name, .. } = d {
+            if defs.insert(name.clone(), d).is_some() {
+                errors.push(Diagnostic::error(
+                    "E_DEF",
+                    format!("duplicate def `{name}`"),
+                    Location::None,
+                ));
+            }
+            if lib.contains_key(name) {
+                errors.push(
+                    Diagnostic::error(
+                        "E_DEF_PART_AMBIGUOUS",
+                        format!(
+                            "def `{name}` has the same name as a library part; an `inst … {name}` \
+                             would be ambiguous"
+                        ),
+                        Location::None,
+                    )
+                    .with_help("rename the def (or the part) so instantiation is unambiguous"),
+                );
+            }
+        }
+    }
+
+    // Top-level param environment (Decision 21b). Def bodies extend a *clone* of this with
+    // their bound params (outer params visible, def params shadow — the same
+    // innermost-wins rule as the range loop variable `i`).
     let decls: BTreeMap<String, String> = source
         .iter()
         .filter_map(|d| match d {
@@ -319,8 +400,6 @@ fn expand_generative(source: &Source) -> Result<(Source, BTreeSet<String>), Vec<
             _ => None,
         })
         .collect();
-    // A duplicate `param` name is an authoring conflict (the last would silently win in
-    // the map); surface it rather than dropping one.
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     for d in source {
         if let GenDirective::Param { name, .. } = d
@@ -337,34 +416,115 @@ fn expand_generative(source: &Source) -> Result<(Source, BTreeSet<String>), Vec<
         Ok(env) => env,
         Err(e) => {
             errors.push(Diagnostic::error("E_EXPR", e, Location::None));
-            // Without an environment we cannot evaluate consumers; fail now with what we
-            // have (param faults + the duplicate report above).
             return Err(errors);
         }
     };
 
+    // If the def table itself is malformed (dup/ambiguous), fail now — stamping against a
+    // broken table would cascade confusingly.
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+
     let mut out: Source = Vec::new();
     let mut dropped: BTreeSet<String> = BTreeSet::new();
+    // Port map: `<full-inst-path>.<port>` → the internal pin it binds, as
+    // `(<full-comp-path>, <selector>)`. Built while stamping; a binding may itself target
+    // another port (a def re-exporting a nested def's port), so it is resolved
+    // transitively before rewriting outer connections.
+    let mut port_map: BTreeMap<(String, String), (String, String)> = BTreeMap::new();
 
-    let eval_at = |text: &str, i: Option<i64>| -> Result<expr::Value, String> {
-        match i {
-            // Bind the implicit loop variable `i` for this evaluation. Shadowing rule:
-            // the innermost binding wins — inside a ranged `inst`, `i` is the loop index
-            // even if a doc-level `param i = …` exists (the insert overwrites the cloned
-            // env entry). Deterministic and tested; a doc that both declares `param i` and
-            // uses a range simply cannot read that param's value from within the range.
-            Some(idx) => {
-                let mut scope = env.clone();
-                scope.insert("i".to_string(), expr::Value::Int(idx));
-                expr::eval_str(text, &scope)
-            }
-            None => expr::eval_str(text, &env),
-        }
+    let mut ctx = ExpandCtx {
+        defs: &defs,
+        errors: &mut errors,
+        out: &mut out,
+        dropped: &mut dropped,
+        port_map: &mut port_map,
     };
+    // Stamp the whole program at the empty prefix. Connections are emitted with their
+    // paths prefixed but *ports unresolved*; the rewrite pass below threads them through
+    // the port map.
+    expand_scope(source, &env, "", &mut Vec::new(), &mut ctx);
 
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+
+    // Resolve every emitted connection's pins through the port map (transitively — a port
+    // may bind another port). `out` at this point holds only concrete `Instance`s and
+    // path-prefixed connections; rewrite the connections in place.
+    resolve_ports_in_source(&mut out, &port_map, &mut errors);
+
+    if errors.is_empty() {
+        Ok((out, dropped))
+    } else {
+        Err(errors)
+    }
+}
+
+/// Depth cap on def instantiation nesting (Decision 21a anti-footgun, consistent with the
+/// range-count and expression-depth caps). A def reaching itself through any chain is
+/// caught earlier as an explicit cycle error; this bounds a pathological but acyclic
+/// nesting before it exhausts the stack.
+const MAX_DEF_DEPTH: usize = 64;
+
+/// The mutable sinks threaded through the recursive def-stamping walk, bundled so the
+/// recursion signature stays legible.
+struct ExpandCtx<'a> {
+    defs: &'a BTreeMap<String, &'a GenDirective>,
+    errors: &'a mut Vec<Diagnostic>,
+    out: &'a mut Source,
+    dropped: &'a mut BTreeSet<String>,
+    port_map: &'a mut BTreeMap<(String, String), (String, String)>,
+}
+
+/// Prefix a def-relative path/name with the instance path (`""` at top level → unchanged;
+/// `"sense[0]"` → `"sense[0].fb"`). Internal nets are path-prefixed the same way so two
+/// instances of the same def never collide on a net name (`sense[0].fb` vs `sense[1].fb`).
+fn prefix_path(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_string()
+    } else {
+        format!("{prefix}.{name}")
+    }
+}
+
+/// Stamp a source fragment (the top-level program, or a def body) at `prefix`, evaluating
+/// its expressions in `env`. Emits concrete `Instance`s and path-prefixed connections into
+/// `ctx.out`; a def instantiation recurses. `chain` is the active def-name stack for cycle
+/// detection.
+fn expand_scope(
+    source: &Source,
+    env: &crate::expr::Env,
+    prefix: &str,
+    chain: &mut Vec<String>,
+    ctx: &mut ExpandCtx,
+) {
+    use crate::expr;
     for d in source {
         match d {
-            GenDirective::Param { .. } => {} // resolved above; not a materialized directive
+            // Declarations, not materialized directives.
+            GenDirective::Param { .. } | GenDirective::Def { .. } => {}
+            GenDirective::Instance {
+                path,
+                part,
+                params,
+                label,
+            } => {
+                let ipath = prefix_path(prefix, path);
+                if ctx.defs.contains_key(part) {
+                    // A plain (non-generative) def instantiation. Its verbatim `p:` params
+                    // are the def-param overrides.
+                    stamp_def(part, &ipath, params, env, chain, ctx);
+                } else {
+                    ctx.out.push(GenDirective::Instance {
+                        path: ipath,
+                        part: part.clone(),
+                        params: params.clone(),
+                        label: label.clone(),
+                    });
+                }
+            }
             GenDirective::InstGenerative {
                 path,
                 part,
@@ -374,68 +534,26 @@ fn expand_generative(source: &Source) -> Result<(Source, BTreeSet<String>), Vec<
                 range,
                 if_expr,
             } => {
-                // Determine the index set: a range yields `lo..hi`, else a single unindexed
-                // instance (index `None`).
-                let indices: Vec<Option<i64>> = match range {
-                    Some((lo_s, hi_s)) => {
-                        let lo = eval_at(lo_s, None).and_then(|v| v.as_index());
-                        let hi = eval_at(hi_s, None).and_then(|v| v.as_index());
-                        match (lo, hi) {
-                            (Ok(lo), Ok(hi)) => {
-                                if lo < 0 || hi < 0 {
-                                    errors.push(Diagnostic::error(
-                                        "E_EXPR",
-                                        format!("range `{path}[{lo}..{hi}]` has a negative bound"),
-                                        Location::None,
-                                    ));
-                                    continue;
-                                }
-                                let count = (hi - lo).max(0);
-                                if count > MAX_RANGE_INSTANCES {
-                                    errors.push(Diagnostic::error(
-                                        "E_EXPR",
-                                        format!(
-                                            "range `{path}[{lo}..{hi}]` expands to {count} \
-                                             instances, over the {MAX_RANGE_INSTANCES} cap"
-                                        ),
-                                        Location::None,
-                                    ));
-                                    continue;
-                                }
-                                (lo..hi).map(Some).collect()
-                            }
-                            (lo, hi) => {
-                                for r in [lo, hi] {
-                                    if let Err(e) = r {
-                                        errors.push(Diagnostic::error(
-                                            "E_EXPR",
-                                            format!("range bound of `{path}`: {e}"),
-                                            Location::None,
-                                        ));
-                                    }
-                                }
-                                continue;
-                            }
-                        }
-                    }
-                    None => vec![None],
+                let Some(indices) = eval_range(path, range, env, ctx.errors) else {
+                    continue;
                 };
-
                 for idx in indices {
-                    let ipath = match idx {
+                    let rel = match idx {
                         Some(i) => format!("{path}[{i}]"),
                         None => path.clone(),
                     };
-                    // Conditional: a false `if=` depopulates this instance.
+                    let ipath = prefix_path(prefix, &rel);
+                    // Evaluate `if=`/params in the current scope with `i` bound.
+                    let scope = bind_index(env, idx);
                     if let Some(cond) = if_expr {
-                        match eval_at(cond, idx).and_then(|v| v.as_bool()) {
+                        match expr::eval_str(cond, &scope).and_then(|v| v.as_bool()) {
                             Ok(true) => {}
                             Ok(false) => {
-                                dropped.insert(ipath);
+                                ctx.dropped.insert(ipath);
                                 continue;
                             }
                             Err(e) => {
-                                errors.push(Diagnostic::error(
+                                ctx.errors.push(Diagnostic::error(
                                     "E_EXPR",
                                     format!("`if=` on `{ipath}`: {e}"),
                                     Location::None,
@@ -444,45 +562,314 @@ fn expand_generative(source: &Source) -> Result<(Source, BTreeSet<String>), Vec<
                             }
                         }
                     }
-                    // Evaluate expression params into display-normal strings, merged over
-                    // the verbatim ones (an expression key never collides with a verbatim
-                    // key — the parser routes each token to exactly one map).
-                    let mut merged = params.clone();
-                    let mut param_err = false;
-                    for (k, ex) in param_exprs {
-                        match eval_at(ex, idx) {
-                            Ok(v) => {
-                                merged.insert(k.clone(), format_value(v));
-                            }
-                            Err(e) => {
-                                errors.push(Diagnostic::error(
-                                    "E_EXPR",
-                                    format!("param `p:{k}` on `{ipath}`: {e}"),
-                                    Location::None,
-                                ));
-                                param_err = true;
-                            }
-                        }
-                    }
-                    if param_err {
+                    let Some(merged) = eval_params(&ipath, params, param_exprs, &scope, ctx.errors)
+                    else {
                         continue;
+                    };
+                    if ctx.defs.contains_key(part) {
+                        stamp_def(part, &ipath, &merged, env, chain, ctx);
+                    } else {
+                        ctx.out.push(GenDirective::Instance {
+                            path: ipath,
+                            part: part.clone(),
+                            params: merged,
+                            label: label.clone(),
+                        });
                     }
-                    out.push(GenDirective::Instance {
-                        path: ipath,
-                        part: part.clone(),
-                        params: merged,
-                        label: label.clone(),
-                    });
                 }
             }
-            other => out.push(other.clone()),
+            // Connectivity: prefix the component paths and net name; ports are resolved
+            // later. Copied through with paths rewritten.
+            GenDirective::ConnectPins { net, pins } => {
+                ctx.out.push(GenDirective::ConnectPins {
+                    net: prefix_path(prefix, net),
+                    pins: pins
+                        .iter()
+                        .map(|(c, s)| (prefix_path(prefix, c), s.clone()))
+                        .collect(),
+                });
+            }
+            GenDirective::NoConnect { pins } => {
+                ctx.out.push(GenDirective::NoConnect {
+                    pins: pins
+                        .iter()
+                        .map(|(c, s)| (prefix_path(prefix, c), s.clone()))
+                        .collect(),
+                });
+            }
+            GenDirective::ConnectInterface { a, b } => {
+                ctx.out.push(GenDirective::ConnectInterface {
+                    a: (prefix_path(prefix, &a.0), a.1.clone()),
+                    b: (prefix_path(prefix, &b.0), b.1.clone()),
+                });
+            }
+            // Everything else is only legal at the top level (a def body's grammar admits
+            // only inst/net/nc/connect/port). At the top level (`prefix.is_empty()`) copy
+            // it through unchanged; inside a def body it cannot occur (the parser rejects
+            // it), so no prefixing of placement/geometry is needed.
+            other => ctx.out.push(other.clone()),
         }
     }
+}
 
-    if errors.is_empty() {
-        Ok((out, dropped))
-    } else {
-        Err(errors)
+/// Evaluate a def instance's port surface and stamp its body at `ipath`. `overrides` are
+/// the resolved `p:` param values from the instantiation (display-normal strings);
+/// `outer_env` is the scope the *overrides were already evaluated in* — the def's own
+/// param env is built here from overrides-or-defaults. Records the instance's ports into
+/// `ctx.port_map`, then recurses into the body.
+fn stamp_def(
+    def_name: &str,
+    ipath: &str,
+    overrides: &BTreeMap<String, String>,
+    outer_env: &crate::expr::Env,
+    chain: &mut Vec<String>,
+    ctx: &mut ExpandCtx,
+) {
+    use crate::expr;
+    // Cycle: a def reaching itself through any chain of instantiations.
+    if chain.iter().any(|n| n == def_name) {
+        chain.push(def_name.to_string());
+        ctx.errors.push(Diagnostic::error(
+            "E_DEF_CYCLE",
+            format!("def cycle: {}", chain.join(" → ")),
+            Location::None,
+        ));
+        chain.pop();
+        return;
+    }
+    if chain.len() >= MAX_DEF_DEPTH {
+        ctx.errors.push(Diagnostic::error(
+            "E_DEF_DEPTH",
+            format!(
+                "def nesting exceeds the depth cap ({MAX_DEF_DEPTH}) at `{ipath}` — likely an \
+                 unintended explosion"
+            ),
+            Location::None,
+        ));
+        return;
+    }
+
+    let (params, body, ports) = match ctx.defs.get(def_name) {
+        Some(GenDirective::Def {
+            params,
+            body,
+            ports,
+            ..
+        }) => (params, body, ports),
+        _ => return, // unreachable: caller checked `defs.contains_key`
+    };
+
+    // Build the def's param environment. A declared param takes its value from the `p:`
+    // override if given, else its default expression evaluated in the def's scope. Outer
+    // params are visible; a def param shadows an outer one of the same name (innermost
+    // wins — the range-`i` rule, documented). Unknown `p:` overrides (not a declared
+    // param) are a hard fault (a typo, never silently ignored).
+    let declared: BTreeSet<&str> = params.iter().map(|(k, _)| k.as_str()).collect();
+    for k in overrides.keys() {
+        if !declared.contains(k.as_str()) {
+            ctx.errors.push(Diagnostic::error(
+                "E_DEF",
+                format!("`{ipath}` sets `p:{k}`, which def `{def_name}` does not declare"),
+                Location::None,
+            ));
+        }
+    }
+    let mut def_env = outer_env.clone();
+    let mut param_err = false;
+    for (k, default) in params {
+        let value = match overrides.get(k) {
+            // An override arrived as a display-normal string (already evaluated in the
+            // outer scope by the caller). Re-parse it as an expression so `p:gain=2` and a
+            // default of `2` both land as the same `Value`. A quantity like `4.7k` parses
+            // back through the same grammar.
+            Some(s) => expr::eval_str(s, outer_env),
+            None => expr::eval_str(default, &def_env),
+        };
+        match value {
+            Ok(v) => {
+                def_env.insert(k.clone(), v);
+            }
+            Err(e) => {
+                ctx.errors.push(Diagnostic::error(
+                    "E_EXPR",
+                    format!("def `{def_name}` param `{k}` at `{ipath}`: {e}"),
+                    Location::None,
+                ));
+                param_err = true;
+            }
+        }
+    }
+    if param_err {
+        return;
+    }
+
+    // Record this instance's ports (paths prefixed by `ipath`). A port target's internal
+    // path is def-relative, so it gains the instance prefix; its binding may itself be a
+    // port (chased transitively in `resolve_ports_in_source`).
+    for (pname, (tpath, tsel)) in ports {
+        ctx.port_map.insert(
+            (ipath.to_string(), pname.clone()),
+            (prefix_path(ipath, tpath), tsel.clone()),
+        );
+    }
+
+    // Stamp the body in the def's scope at the instance prefix.
+    chain.push(def_name.to_string());
+    let body_src: Source = body
+        .iter()
+        .filter_map(|n| match n {
+            DefNode::Directive(d) => Some(d.clone()),
+            DefNode::Comment(_) | DefNode::Blank => None,
+        })
+        .collect();
+    expand_scope(&body_src, &def_env, ipath, chain, ctx);
+    chain.pop();
+}
+
+/// Evaluate a ranged `inst`'s index set (`Some(lo..hi)` → `[Some(lo)..]`, `None` → a
+/// single `[None]`). Returns `None` (and pushes diagnostics) on a bad/over-cap/negative
+/// bound so the caller skips the directive. Shared by the top-level and def-body walks.
+fn eval_range(
+    path: &str,
+    range: &Option<(String, String)>,
+    env: &crate::expr::Env,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<Vec<Option<i64>>> {
+    use crate::expr;
+    let Some((lo_s, hi_s)) = range else {
+        return Some(vec![None]);
+    };
+    let lo = expr::eval_str(lo_s, env).and_then(|v| v.as_index());
+    let hi = expr::eval_str(hi_s, env).and_then(|v| v.as_index());
+    match (lo, hi) {
+        (Ok(lo), Ok(hi)) => {
+            if lo < 0 || hi < 0 {
+                errors.push(Diagnostic::error(
+                    "E_EXPR",
+                    format!("range `{path}[{lo}..{hi}]` has a negative bound"),
+                    Location::None,
+                ));
+                return None;
+            }
+            let count = (hi - lo).max(0);
+            if count > MAX_RANGE_INSTANCES {
+                errors.push(Diagnostic::error(
+                    "E_EXPR",
+                    format!(
+                        "range `{path}[{lo}..{hi}]` expands to {count} instances, over the \
+                         {MAX_RANGE_INSTANCES} cap"
+                    ),
+                    Location::None,
+                ));
+                return None;
+            }
+            Some((lo..hi).map(Some).collect())
+        }
+        (lo, hi) => {
+            for r in [lo, hi] {
+                if let Err(e) = r {
+                    errors.push(Diagnostic::error(
+                        "E_EXPR",
+                        format!("range bound of `{path}`: {e}"),
+                        Location::None,
+                    ));
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Clone `env` and bind the range loop variable `i` when an index is present (innermost
+/// wins — shadows a doc/def `param i`, the documented rule). Returns `env` unchanged
+/// (cloned) for an unindexed instance.
+fn bind_index(env: &crate::expr::Env, idx: Option<i64>) -> crate::expr::Env {
+    let mut scope = env.clone();
+    if let Some(i) = idx {
+        scope.insert("i".to_string(), crate::expr::Value::Int(i));
+    }
+    scope
+}
+
+/// Evaluate an `inst`'s expression params into display-normal strings, merged over its
+/// verbatim ones. Returns `None` (pushing diagnostics) if any expression faults.
+fn eval_params(
+    ipath: &str,
+    params: &BTreeMap<String, String>,
+    param_exprs: &BTreeMap<String, String>,
+    scope: &crate::expr::Env,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<BTreeMap<String, String>> {
+    use crate::expr;
+    let mut merged = params.clone();
+    let mut ok = true;
+    for (k, ex) in param_exprs {
+        match expr::eval_str(ex, scope) {
+            Ok(v) => {
+                merged.insert(k.clone(), format_value(v));
+            }
+            Err(e) => {
+                errors.push(Diagnostic::error(
+                    "E_EXPR",
+                    format!("param `p:{k}` on `{ipath}`: {e}"),
+                    Location::None,
+                ));
+                ok = false;
+            }
+        }
+    }
+    ok.then_some(merged)
+}
+
+/// Rewrite every connection pin in `out` that names a def-instance port through to the
+/// bound internal pin (Decision 21a). A port binding may target another port (a def
+/// re-exporting a nested def's port), so each `(comp, sel)` is chased transitively until
+/// it names a real component pin — with cycle protection (a self-referential port map is
+/// a bug, reported rather than looped).
+fn resolve_ports_in_source(
+    out: &mut Source,
+    port_map: &BTreeMap<(String, String), (String, String)>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    if port_map.is_empty() {
+        return;
+    }
+    let mut resolve = |comp: &str, sel: &str| -> (String, String) {
+        let mut cur = (comp.to_string(), sel.to_string());
+        let mut hops = 0;
+        while let Some(next) = port_map.get(&cur) {
+            cur = next.clone();
+            hops += 1;
+            if hops > port_map.len() + 1 {
+                errors.push(Diagnostic::error(
+                    "E_DEF",
+                    format!("port binding cycle resolving `{comp}.{sel}`"),
+                    Location::None,
+                ));
+                break;
+            }
+        }
+        cur
+    };
+    for d in out.iter_mut() {
+        match d {
+            GenDirective::ConnectPins { pins, .. } | GenDirective::NoConnect { pins } => {
+                for (c, s) in pins.iter_mut() {
+                    let (nc, ns) = resolve(c, s);
+                    *c = nc;
+                    *s = ns;
+                }
+            }
+            GenDirective::ConnectInterface { a, b } => {
+                let (ca, sa) = resolve(&a.0, &a.1);
+                a.0 = ca;
+                a.1 = sa;
+                let (cb, sb) = resolve(&b.0, &b.1);
+                b.0 = cb;
+                b.1 = sb;
+            }
+            _ => {}
+        }
     }
 }
 
@@ -579,7 +966,7 @@ pub fn elaborate(
     // reconciliation, which addresses instances by their `path[i]` — sees only plain
     // `Instance` directives (Decision 21b). A generative fault (bad expression, cycle,
     // out-of-range bound) aborts the whole transaction, like any structural fault.
-    let (expanded, dnp_dropped) = expand_generative(source)?;
+    let (expanded, dnp_dropped) = expand_generative(source, lib)?;
     let source = &expanded;
 
     let mut components: BTreeMap<EntityId, Component> = BTreeMap::new();

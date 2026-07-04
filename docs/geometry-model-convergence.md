@@ -900,7 +900,32 @@ excludes it); pins, names, and net tags carry the electrical content meanwhile.
 A layout tree inside a `def` (Decision 21) is stamped per instance — reused circuits
 render identically everywhere, the thing hierarchical-sheet tools never quite deliver.
 
-### Decision 21 — the source language: declarative core, hermetic expressions, `def` reuse; computation stays at the rim (2026-07-04, drafted — not yet implemented)
+### Decision 21 — the source language: declarative core, hermetic expressions, `def` reuse; computation stays at the rim (2026-07-04, drafted)
+
+**§21a `def` implemented (branch feat/def-construct).** Grammar:
+`def <name> [param <k>=<default> ...] { body }`, a **top-level-only** block (a def body
+may *instantiate* another def but may not *define* one — a nested `def { … }` is a hard
+`E_DEF`). Body directives are `inst` / `net` / `nc` / `connect` / `port`; layout,
+placement, board/stackup, and route directives are out of a def body in v1 (Phase 3 owns
+layout trees inside defs). Instantiation reuses the ordinary `inst` grammar
+(`inst <path> <def-name> [p:<k>=<v|(expr)>] [if=] [range]`); part-vs-def is decided by
+name lookup at elaboration, and a def whose name **also** names a library part is rejected
+as `E_DEF_PART_AMBIGUOUS` (surface the collision, never silently let one win). Ports are
+**bare typed** v1: `port <name> = <internal-path>.<selector>` exposes an internal pin
+outward; a connection to `<inst>.<port>` resolves through to the bound pin's **pad
+identity** (no new namespace — Decision 21's pad-number-is-identity), transitively (a def
+may re-export a nested def's port). Named-InterfaceDef ports (`port <name> : <iface>`) are
+**descoped** — not implemented; the interface-port spelling fails loud rather than silently.
+Elaboration stamps a def body per instantiation with **path prefixing** (`sense[0].R1`,
+internal nets `sense[0].fb`); def params bind from the instantiation's `p:` (defaults
+else), evaluated in the def's scope where **outer doc params are visible and a def param
+shadows an outer one of the same name** (innermost-wins, the same rule as the range loop
+variable `i`). Recursion (a def reaching itself through any chain) is `E_DEF_CYCLE` naming
+the cycle; nesting is depth-capped (`MAX_DEF_DEPTH`). `if=false` on a def instance drops
+the whole stamped subtree (external refs dangle as `W_DNP`). Refdes stays **board-global
+flat** over the hierarchical paths (stamped instances flow through annotation unchanged).
+Def bodies round-trip (interior trivia preserved via `DefNode`); ports serialize in
+canonical name order after the body; def-free docs stay byte-identical.
 
 Settles, deliberately and in advance, the language question that `def` + parameters +
 ranges would otherwise decide by accretion — the **Onshape trap**: FeatureScript began
