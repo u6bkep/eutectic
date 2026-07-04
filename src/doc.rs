@@ -382,6 +382,16 @@ pub struct ReconReport {
     /// with the part absent, so this does **not** dirty [`is_clean`](Self::is_clean). Each
     /// entry is `(referencing_context, dropped_path)`, deduped and sorted.
     pub dnp_dangling: Vec<(String, String)>,
+    /// Components not placed by the authored schematic layout tree (Decision 20). A
+    /// **degrade**, not a fault (like [`font_load_failure`](Self::font_load_failure)):
+    /// the schematic view stays total (§20c) by dropping each into the derived unplaced
+    /// bin, so this does **not** dirty [`is_clean`](ReconReport::is_clean); it surfaces as
+    /// a `W_SCHEMATIC_UNPLACED` warning per component. Empty when there is no `schematic`
+    /// block *or* every component is placed. A `sym` pointing at an `if=false`
+    /// (DNP-dropped) component also lands here — the schematic degrades like any other
+    /// unplaced part rather than hard-aborting a legitimate variant toggle (§20c). In
+    /// `EntityId` (path) order.
+    pub unplaced_components: Vec<EntityId>,
 }
 
 impl ReconReport {
@@ -392,10 +402,12 @@ impl ReconReport {
             && self.orphaned.is_empty()
             && self.refdes_pin_dups.is_empty()
             && self.courtyard_overlaps.is_empty()
-        // NB: `font_load_failure` and `unmasked_copper` are deliberately excluded — a
-        // font that fails to load degrades to the stroke font (Decision 17), and unmasked
-        // outer copper (issue 0024) still elaborates/exports honestly. Both are warnings
-        // that leave the doc clean.
+        // NB: `font_load_failure`, `unmasked_copper`, `dnp_dangling`, and
+        // `unplaced_components` are deliberately excluded — a font that fails to load
+        // degrades to the stroke font (Decision 17), unmasked outer copper (issue 0024)
+        // still elaborates/exports honestly, a DNP dangling reference is an intentional
+        // variant toggle (Decision 21b), and an unplaced component still renders in the
+        // derived bin (Decision 20c). All are warnings that leave the doc clean.
     }
 }
 
@@ -507,6 +519,18 @@ impl crate::diagnostic::Diagnose for ReconReport {
                 .with_help("add a `Role::Mask` slab outboard of this copper, or remove all mask slabs for a deliberately bare-copper board"),
             );
         }
+        for id in &self.unplaced_components {
+            // Degrade, not fault (Decision 20c): a warning, and `is_clean` ignores it. The
+            // component still renders — in the derived unplaced bin.
+            out.push(
+                Diagnostic::warning(
+                    "W_SCHEMATIC_UNPLACED",
+                    format!("`{id}` is not placed in the schematic layout; it renders in the unplaced bin"),
+                    Location::Entity(id.clone()),
+                )
+                .with_help("add a `sym {id}` to a `row`/`column` in the `schematic` block to place it"),
+            );
+        }
         out
     }
 }
@@ -526,6 +550,12 @@ pub struct Doc {
     pub source: crate::elaborate::Source,
     /// tier 1: ID-keyed exceptions.
     pub overrides: BTreeMap<EntityId, Override>,
+    /// tier 1: authored **schematic layout tree** (Decision 20). `None` when the document
+    /// has no `schematic` block. This is authored structure (a `row`/`column`/`sym`
+    /// flexbox subtree), *not* a state zone — the *coordinates* are re-derived on demand
+    /// by [`crate::schematic::reflow`] and never stored. Round-trips through
+    /// [`crate::text`] like `source`; a blockless doc serializes byte-identically.
+    pub schematic: Option<crate::schematic::SchematicLayout>,
     /// tier 1: ID-keyed **reference-designator pins** (Decision 14's reserved
     /// stability mechanism). A pinned entity takes its string verbatim in the
     /// [`annotate::refdes`](crate::annotate::refdes) query; the auto counter skips a
@@ -567,6 +597,25 @@ pub enum InputId {
 }
 
 impl Doc {
+    /// Reflow the authored schematic layout into per-component schematic placements
+    /// (Decision 20 — the derived-tier coordinates, computed on demand, never stored). A
+    /// convenience over [`crate::schematic::reflow`] that reduces `components` to the
+    /// path→part map sizing needs. Returns an empty map only when there are no
+    /// components; with no `schematic` block, every component lands in the unplaced bin
+    /// (the view stays total, §20c).
+    pub fn reflow_schematic(
+        &self,
+        lib: &crate::part::PartLib,
+    ) -> BTreeMap<EntityId, crate::schematic::Placement> {
+        let layout = self.schematic.clone().unwrap_or_default();
+        let parts: BTreeMap<EntityId, String> = self
+            .components
+            .iter()
+            .map(|(id, c)| (id.clone(), c.part.clone()))
+            .collect();
+        crate::schematic::reflow(&layout, &parts, lib)
+    }
+
     pub fn input_rev(&self, which: InputId) -> u64 {
         match which {
             InputId::Connectivity => self.conn_rev,

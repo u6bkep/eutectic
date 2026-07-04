@@ -173,6 +173,10 @@ pub fn apply(
                 // AddTrace/AddVia hit.
                 next.traces = parsed.traces;
                 next.vias = parsed.vias;
+                // The authored schematic layout tree (Decision 20). Tier-1 authored state,
+                // like `source`; validated post-elaborate below (it needs the elaborated
+                // component universe to resolve `sym` paths).
+                next.schematic = parsed.schematic;
             }
             Command::Resolve(id, res) => {
                 apply_resolution(&mut next, id, res).map_err(|d| vec![d])?
@@ -283,6 +287,23 @@ pub fn apply(
     // AddTrace whose net is dropped by a same-transaction SetSource is caught here even
     // though the per-command AddTrace check passed against the pre-elaborate net set).
     validate_routes(&next)?;
+
+    // Commit-time schematic-layout validation (Decision 20). Like `validate_routes`, this
+    // is a post-elaborate gate over tier-1 authored state that `elaborate` does not own:
+    // it needs the freshly-elaborated component universe to resolve `sym` paths. Hard
+    // `E_SCHEMATIC` errors (unknown/duplicate paths, duplicate sibling names) abort the
+    // transaction (atomicity); the `W_SCHEMATIC_UNPLACED` finding is non-blocking and
+    // rides on the `ReconReport` (the `W_FONT_LOAD` idiom — the view stays total, §20c).
+    if let Some(layout) = &next.schematic {
+        let ids: std::collections::BTreeSet<EntityId> = next.components.keys().cloned().collect();
+        let (errors, unplaced) = crate::schematic::validate(layout, &ids);
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+        next.report.unplaced_components = unplaced;
+    } else {
+        next.report.unplaced_components.clear();
+    }
 
     // Decay: garbage-collect hints that the reconciliation found ineffective.
     // Removing them does not change positions (they had no effect), so the

@@ -106,6 +106,10 @@ pub struct Parsed {
     pub refdes_pins: BTreeMap<EntityId, String>,
     pub traces: BTreeMap<TraceId, Trace>,
     pub vias: BTreeMap<ViaId, Via>,
+    /// tier-1 authored schematic layout tree (Decision 20). `None` when the document has
+    /// no `schematic` block — the common case, and what keeps a blockless doc's
+    /// serialization byte-identical. The last `schematic` block wins (mirrors `board`).
+    pub schematic: Option<crate::schematic::SchematicLayout>,
 }
 
 // ----------------------------------------------------------------------------
@@ -120,6 +124,12 @@ pub fn serialize(doc: &Doc) -> String {
     for d in &doc.source {
         out.push_str(&render_directive(d));
         out.push('\n');
+    }
+    // The authored schematic layout tree (Decision 20), after the flat directives. Only
+    // emitted when present, so a blockless doc's text is byte-identical to before this
+    // feature (the poc round-trip guard).
+    if let Some(layout) = &doc.schematic {
+        out.push_str(&serialize_layout(layout));
     }
     // Overrides last, in deterministic id order across both kinds — an entity's pos
     // override and refdes pin land together. (Empty pos overrides — pos == None — are
@@ -694,8 +704,10 @@ fn keyword_takes_block(keyword: &str) -> bool {
     if keyword == TEST_BLOCK_KEYWORD {
         return true;
     }
-    let _ = keyword;
-    false
+    // Decision 20 layout tree: the `schematic` block and its nested `row`/`column`
+    // containers accept block bodies. `sym` leaves do not (they are single-line
+    // directives inside a container).
+    matches!(keyword, "schematic" | "row" | "column")
 }
 
 /// A `cfg(test)` sentinel keyword that accepts a block, used to exercise the
@@ -1020,7 +1032,35 @@ fn parse_forest(
             parse_forest(&b.children, &mut scratch, &mut t, &mut v, errors);
             continue;
         }
-        if b.opened_block {
+        if b.opened_block && b.keyword == "schematic" {
+            // Decision 20: lower the whole `schematic { … }` subtree into the tier-1
+            // layout. The last block wins (mirrors `board`). Header takes no tokens.
+            if b.tokens.len() > 1 {
+                errors.push(Diagnostic::error(
+                    "E_SCHEMATIC",
+                    format!("`schematic` takes no arguments (got `{}`)", b.rest),
+                    Location::Span {
+                        line: b.line,
+                        col: 1,
+                    },
+                ));
+            }
+            let roots = parse_layout_nodes(&b.children, errors);
+            parsed.schematic = Some(crate::schematic::SchematicLayout { roots });
+        } else if b.opened_block && matches!(b.keyword.as_str(), "row" | "column") {
+            // A `row`/`column` opened outside a `schematic` block: the allowlist lets it
+            // *parse* as a block (so its body's own errors surface), but it is not a
+            // top-level directive. Reject it here and descend for child diagnostics.
+            errors.push(Diagnostic::error(
+                "E_SCHEMATIC",
+                format!("`{}` is only valid inside a `schematic` block", b.keyword),
+                Location::Span {
+                    line: b.line,
+                    col: 1,
+                },
+            ));
+            let _ = parse_layout_nodes(&b.children, errors);
+        } else if b.opened_block {
             // An accepted block (only the `cfg(test)` sentinel today). A real consumer's
             // arm parses the header its own way and stores the body; the generic stand-in
             // here just descends into the children (lowered as ordinary directives into
@@ -1077,6 +1117,319 @@ fn lower_directive(
             },
         )),
     }
+}
+
+// ----------------------------------------------------------------------------
+// Decision-20 layout tree: parse
+// ----------------------------------------------------------------------------
+
+use crate::schematic::{Align, Container, Direction, LayoutNode, Symbol};
+
+/// Lower a `schematic`/`row`/`column` block body (a [`Node`] sequence) into layout
+/// nodes. Trivia (comments/blanks) is **preserved** as [`LayoutNode::Comment`]/`Blank`
+/// so mixed authorship inside a `schematic` block round-trips (the Decision-20/21
+/// requirement); the semantic walks ([`reflow`](crate::schematic::reflow), validation)
+/// skip it. Only `row`/`column` (nested containers) and `sym` (leaves) are valid
+/// directive children; anything else is an `E_SCHEMATIC` error. Collect-all: every
+/// malformed child is reported.
+fn parse_layout_nodes(nodes: &[Node], errors: &mut Vec<Diagnostic>) -> Vec<LayoutNode> {
+    let mut out = Vec::new();
+    for node in nodes {
+        let b = match node {
+            Node::Block(b) => b,
+            Node::Comment(text) => {
+                out.push(LayoutNode::Comment(text.clone()));
+                continue;
+            }
+            Node::Blank => {
+                out.push(LayoutNode::Blank);
+                continue;
+            }
+        };
+        match b.keyword.as_str() {
+            "row" | "column" => {
+                if !b.opened_block {
+                    errors.push(err_line(
+                        "E_SCHEMATIC",
+                        format!("`{}` must open a `{{ … }}` block", b.keyword),
+                        b.line,
+                    ));
+                    continue;
+                }
+                let dir = if b.keyword == "row" {
+                    Direction::Row
+                } else {
+                    Direction::Column
+                };
+                match parse_container_header(dir, &b.tokens[1..], b.line) {
+                    Ok((name, gap, align)) => {
+                        let children = parse_layout_nodes(&b.children, errors);
+                        out.push(LayoutNode::Container(Container {
+                            dir,
+                            name,
+                            gap,
+                            align,
+                            children,
+                        }));
+                    }
+                    Err(e) => errors.push(err_line("E_SCHEMATIC", e, b.line)),
+                }
+            }
+            "sym" => {
+                if b.opened_block {
+                    errors.push(err_line(
+                        "E_SCHEMATIC",
+                        "`sym` is a leaf and takes no block".to_string(),
+                        b.line,
+                    ));
+                    // Fall through to also report any header error, but a block sym is
+                    // already rejected; skip parsing its (nonexistent leaf) header.
+                    continue;
+                }
+                match parse_sym_header(&b.tokens[1..], b.line) {
+                    Ok(sym) => out.push(LayoutNode::Symbol(sym)),
+                    Err(e) => errors.push(err_line("E_SCHEMATIC", e, b.line)),
+                }
+            }
+            other => errors.push(err_line(
+                "E_SCHEMATIC",
+                format!("`{other}` is not valid inside a layout container (expected `row`, `column`, or `sym`)"),
+                b.line,
+            )),
+        }
+    }
+    out
+}
+
+/// A span-located diagnostic at column 1 — the layout parsers' one shape.
+fn err_line(code: &'static str, msg: String, line: u32) -> Diagnostic {
+    Diagnostic::error(code, msg, Location::Span { line, col: 1 })
+}
+
+/// Parse a container header tail (`[name] [gap=<len>] [align=start|center|end]`). The
+/// optional name is a single leading bare token (no `=`); the rest are `key=value`
+/// attributes in any order. An unknown attribute or a repeated one is an error. A
+/// **quoted** leading token is always the name (its content is opaque — so a name may
+/// contain `=`, `#`, or spaces and still round-trip); a bare token with an `=` is an
+/// attribute.
+fn parse_container_header(
+    _dir: Direction,
+    toks: &[String],
+    _line: u32,
+) -> Result<(Option<String>, Nm, Align), String> {
+    let mut name: Option<String> = None;
+    let mut gap: Option<Nm> = None;
+    let mut align: Option<Align> = None;
+    for (i, tok) in toks.iter().enumerate() {
+        // A quoted leading token is the name verbatim (opaque content, may hold `=`).
+        if i == 0 && name.is_none() && tok.starts_with('"') {
+            name = Some(unquote(tok).to_string());
+        } else if let Some((k, v)) = tok.split_once('=') {
+            match k {
+                "gap" => {
+                    if gap.is_some() {
+                        return Err("duplicate `gap`".into());
+                    }
+                    gap = Some(parse_len(v)?);
+                }
+                "align" => {
+                    if align.is_some() {
+                        return Err("duplicate `align`".into());
+                    }
+                    align = Some(parse_align(v)?);
+                }
+                _ => return Err(format!("unknown container attribute `{k}`")),
+            }
+        } else if i == 0 && name.is_none() {
+            // The one bare token is the optional container name (must lead).
+            name = Some(unquote(tok).to_string());
+        } else {
+            return Err(format!(
+                "unexpected token `{tok}` (a container name must come first)"
+            ));
+        }
+    }
+    Ok((name, gap.unwrap_or(0), align.unwrap_or_default()))
+}
+
+fn parse_align(v: &str) -> Result<Align, String> {
+    Ok(match v {
+        "start" => Align::Start,
+        "center" => Align::Center,
+        "end" => Align::End,
+        _ => return Err(format!("unknown align `{v}` (start | center | end)")),
+    })
+}
+
+/// Parse a `sym` leaf header (`<comp-path> [rot=0|90|180|270] [dx=<len> dy=<len>]`). The
+/// comp path is the leading token; the rest are `key=value` attributes. A **quoted** path
+/// token is opaque (so a comp path containing `=`/`#`/spaces — all legal in an `inst`
+/// path — round-trips); an unquoted token with an `=` is an attribute.
+fn parse_sym_header(toks: &[String], _line: u32) -> Result<Symbol, String> {
+    let mut path: Option<String> = None;
+    let mut rot = Orient::IDENTITY;
+    let (mut dx, mut dy) = (0i64, 0i64);
+    let (mut saw_rot, mut saw_dx, mut saw_dy) = (false, false, false);
+    for tok in toks {
+        if path.is_none() && tok.starts_with('"') {
+            // A quoted leading token is the comp path verbatim.
+            path = Some(unquote(tok).to_string());
+        } else if let Some((k, v)) = tok.split_once('=') {
+            match k {
+                "rot" => {
+                    if saw_rot {
+                        return Err("duplicate `rot`".into());
+                    }
+                    rot = parse_sym_rot(v)?;
+                    saw_rot = true;
+                }
+                "dx" => {
+                    if saw_dx {
+                        return Err("duplicate `dx`".into());
+                    }
+                    dx = parse_len(v)?;
+                    saw_dx = true;
+                }
+                "dy" => {
+                    if saw_dy {
+                        return Err("duplicate `dy`".into());
+                    }
+                    dy = parse_len(v)?;
+                    saw_dy = true;
+                }
+                _ => return Err(format!("unknown `sym` attribute `{k}`")),
+            }
+        } else if path.is_none() {
+            path = Some(tok.clone());
+        } else {
+            return Err(format!("unexpected token `{tok}` after the component path"));
+        }
+    }
+    let path = path.ok_or("`sym` needs a component path")?;
+    Ok(Symbol { path, rot, dx, dy })
+}
+
+/// Parse a `sym` `rot=` value: only the four cardinals are legal in v1 (§20b — authored
+/// orientation, no arbitrary angles on the layout leaf). Yields the tiny exact cardinal
+/// quaternion.
+fn parse_sym_rot(v: &str) -> Result<Orient, String> {
+    let d: i32 = v
+        .parse()
+        .map_err(|_| format!("`rot={v}` must be one of 0, 90, 180, 270"))?;
+    match d.rem_euclid(360) {
+        0 | 90 | 180 | 270 => Ok(Orient::from_deg(d).unwrap()),
+        _ => Err(format!("`rot={v}` must be one of 0, 90, 180, 270")),
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Decision-20 layout tree: serialize
+// ----------------------------------------------------------------------------
+
+/// Render a [`SchematicLayout`](crate::schematic::SchematicLayout) as canonical block
+/// text: a `schematic { … }` wrapper around the emitted node forest, indented one level.
+/// Deterministic and round-tripping: [`parse`] of the output reproduces the tree,
+/// including trivia. Emitted only by [`serialize`], and only when a layout is present.
+fn serialize_layout(layout: &crate::schematic::SchematicLayout) -> String {
+    let mut out = String::from("schematic {\n");
+    let mut indent = String::from(BLOCK_INDENT);
+    emit_layout_nodes(&layout.roots, &mut indent, &mut out);
+    out.push_str("}\n");
+    out
+}
+
+/// Emit a layout node forest at the current `indent`. Containers open a `{ … }` block and
+/// recurse; symbols and trivia are single lines. Mirrors [`emit_nodes`]'s trivia style so
+/// the two block emitters agree.
+fn emit_layout_nodes(nodes: &[LayoutNode], indent: &mut String, out: &mut String) {
+    for n in nodes {
+        match n {
+            LayoutNode::Container(c) => {
+                out.push_str(indent);
+                out.push_str(&container_header(c));
+                out.push_str(" {\n");
+                indent.push_str(BLOCK_INDENT);
+                emit_layout_nodes(&c.children, indent, out);
+                indent.truncate(indent.len() - BLOCK_INDENT.len());
+                out.push_str(indent);
+                out.push_str("}\n");
+            }
+            LayoutNode::Symbol(s) => {
+                out.push_str(indent);
+                out.push_str(&sym_line(s));
+                out.push('\n');
+            }
+            LayoutNode::Comment(text) => {
+                out.push_str(indent);
+                if text.is_empty() {
+                    out.push_str("#\n");
+                } else {
+                    out.push_str("# ");
+                    out.push_str(text);
+                    out.push('\n');
+                }
+            }
+            LayoutNode::Blank => out.push('\n'),
+        }
+    }
+}
+
+/// Quote a bare layout token (container name / comp path) when a structural character
+/// would otherwise break re-parsing: whitespace, `#` (the comment stripper), `"`, or `=`
+/// (the attribute separator). A comp path or name may legally contain `=` (an `inst`
+/// path is unrestricted), so this quoting is what keeps such a token round-tripping. The
+/// parsers ([`parse_container_header`]/[`parse_sym_header`]) treat a leading quoted token
+/// as the opaque name/path.
+fn quote_token(v: &str) -> String {
+    let needs = v.is_empty()
+        || v.chars()
+            .any(|c| c.is_whitespace() || c == '#' || c == '"' || c == '=');
+    if needs {
+        format!("\"{v}\"")
+    } else {
+        v.to_string()
+    }
+}
+
+/// The header line of a container (without the trailing ` {`): `row`/`column`, then an
+/// optional name, `gap=` (omitted when zero), and `align=` (omitted when `Start`, the
+/// default) — the minimal canonical form.
+fn container_header(c: &crate::schematic::Container) -> String {
+    use crate::schematic::{Align, Direction};
+    let mut s = String::from(match c.dir {
+        Direction::Row => "row",
+        Direction::Column => "column",
+    });
+    if let Some(name) = &c.name {
+        s.push(' ');
+        s.push_str(&quote_token(name));
+    }
+    if c.gap != 0 {
+        s.push_str(&format!(" gap={}", fmt_len(c.gap)));
+    }
+    match c.align {
+        Align::Start => {}
+        Align::Center => s.push_str(" align=center"),
+        Align::End => s.push_str(" align=end"),
+    }
+    s
+}
+
+/// A `sym` leaf line: `sym <path>`, then `rot=` (omitted for identity) and `dx=`/`dy=`
+/// (each omitted when zero) — the minimal canonical form.
+fn sym_line(s: &crate::schematic::Symbol) -> String {
+    let mut out = format!("sym {}", quote_token(&s.path));
+    if s.rot != Orient::IDENTITY {
+        // v1 rot is cardinal-only (the parser enforces it), so `to_deg` is exact.
+        out.push_str(&format!(" rot={}", s.rot.to_deg()));
+    }
+    if s.dx != 0 {
+        out.push_str(&format!(" dx={}", fmt_len(s.dx)));
+    }
+    if s.dy != 0 {
+        out.push_str(&format!(" dy={}", fmt_len(s.dy)));
+    }
+    out
 }
 
 /// Push an `E_COORD_RANGE` error for each coordinate/length exceeding
@@ -4197,5 +4550,223 @@ inst top MCU
         ] {
             assert!(parse(junk).is_err(), "expected Err for `{junk}`");
         }
+    }
+
+    // ---- Decision-20 schematic layout grammar ---------------------------
+
+    use crate::schematic::{Align, Direction, LayoutNode, SchematicLayout};
+
+    /// Parse a schematic block, asserting success, and return its layout.
+    fn parse_layout(text: &str) -> SchematicLayout {
+        parse(text)
+            .unwrap_or_else(|e| panic!("parse failed: {e:?}"))
+            .schematic
+            .expect("a schematic block")
+    }
+
+    #[test]
+    fn schematic_block_parses_containers_and_syms() {
+        let layout = parse_layout(
+            "schematic {\n  row power gap=2mm align=center {\n    sym C1\n    sym U1 rot=90 dx=1mm dy=-2mm\n  }\n  column {\n    sym C2\n  }\n}\n",
+        );
+        assert_eq!(layout.roots.len(), 2);
+        let LayoutNode::Container(power) = &layout.roots[0] else {
+            panic!("expected a container");
+        };
+        assert_eq!(power.dir, Direction::Row);
+        assert_eq!(power.name.as_deref(), Some("power"));
+        assert_eq!(power.gap, 2_000_000);
+        assert_eq!(power.align, Align::Center);
+        // The second child of the row is a rotated, pinned symbol.
+        let LayoutNode::Symbol(u1) = &power.children[1] else {
+            panic!("expected a symbol");
+        };
+        assert_eq!(u1.path, "U1");
+        assert_eq!(u1.rot, Orient::from_deg(90).unwrap());
+        assert_eq!(u1.dx, 1_000_000);
+        assert_eq!(u1.dy, -2_000_000);
+    }
+
+    #[test]
+    fn schematic_round_trips_byte_identical() {
+        // Canonical text -> parse -> serialize reproduces the input exactly. Note the
+        // canonical omissions (align=start, rot=0, dx/dy=0, gap=0 are all elided).
+        let canonical = "inst C1 Cap\ninst U1 MCU\nschematic {\n  row power gap=2mm {\n    sym C1\n    sym U1 rot=90\n  }\n  column align=end {\n    sym C1 dx=1mm\n  }\n}\n";
+        let parsed = parse(canonical).unwrap();
+        let doc = Doc {
+            source: parsed.source,
+            schematic: parsed.schematic,
+            ..Default::default()
+        };
+        assert_eq!(serialize(&doc), canonical);
+    }
+
+    #[test]
+    fn schematic_preserves_trivia_round_trip() {
+        // Comments and blank lines inside the block survive a round-trip (Decision 20/21).
+        let canonical =
+            "schematic {\n  # power section\n  row {\n    sym C1\n\n    sym C2\n  }\n}\n";
+        let parsed = parse(canonical).unwrap();
+        let doc = Doc {
+            schematic: parsed.schematic,
+            ..Default::default()
+        };
+        assert_eq!(serialize(&doc), canonical);
+    }
+
+    #[test]
+    fn schematic_serialize_parse_fixpoint() {
+        // A second round is a fixpoint even from a non-canonical (extra-spaced) authoring.
+        let authored = "schematic {\n   row   power   gap=2mm   {\n      sym C1\n   }\n}\n";
+        let doc1 = Doc {
+            schematic: parse(authored).unwrap().schematic,
+            ..Default::default()
+        };
+        let once = serialize(&doc1);
+        let doc2 = Doc {
+            schematic: parse(&once).unwrap().schematic,
+            ..Default::default()
+        };
+        assert_eq!(serialize(&doc2), once);
+    }
+
+    #[test]
+    fn nesting_is_arbitrary() {
+        let layout = parse_layout(
+            "schematic {\n  row {\n    column {\n      row {\n        sym C1\n      }\n    }\n  }\n}\n",
+        );
+        // Walk three levels down to the symbol.
+        let mut node = &layout.roots[0];
+        for _ in 0..3 {
+            let LayoutNode::Container(c) = node else {
+                panic!("expected container");
+            };
+            node = &c.children[0];
+        }
+        assert!(matches!(node, LayoutNode::Symbol(s) if s.path == "C1"));
+    }
+
+    #[test]
+    fn doc_without_schematic_block_is_byte_identical() {
+        // The poc guard: a blockless doc serializes exactly as before this feature.
+        let src = "inst C1 Cap\ninst C2 Cap\nnet N1 C1.p1 C2.p1\n";
+        let doc = Doc {
+            source: parse(src).unwrap().source,
+            ..Default::default()
+        };
+        assert_eq!(serialize(&doc), src);
+        assert!(doc.schematic.is_none());
+    }
+
+    #[test]
+    fn last_schematic_block_wins() {
+        let layout = parse_layout("schematic {\n  sym C1\n}\nschematic {\n  sym C2\n}\n");
+        // The second block replaces the first.
+        assert_eq!(layout.roots.len(), 1);
+        assert!(matches!(&layout.roots[0], LayoutNode::Symbol(s) if s.path == "C2"));
+    }
+
+    #[test]
+    fn bad_child_keyword_is_e_schematic() {
+        let err = parse("schematic {\n  inst C1 Cap\n}\n").unwrap_err();
+        assert!(err.iter().any(|d| d.code == "E_SCHEMATIC"));
+    }
+
+    #[test]
+    fn row_outside_schematic_is_e_schematic() {
+        let err = parse("row {\n  sym C1\n}\n").unwrap_err();
+        assert!(err.iter().any(|d| d.code == "E_SCHEMATIC"));
+    }
+
+    #[test]
+    fn sym_with_block_is_e_schematic() {
+        let err = parse("schematic {\n  sym C1 {\n  }\n}\n").unwrap_err();
+        assert!(err.iter().any(|d| d.code == "E_SCHEMATIC"));
+    }
+
+    #[test]
+    fn bad_align_and_rot_are_errors() {
+        assert!(parse("schematic {\n  row align=middle {\n    sym C1\n  }\n}\n").is_err());
+        assert!(parse("schematic {\n  row {\n    sym C1 rot=45\n  }\n}\n").is_err());
+        assert!(parse("schematic {\n  row {\n    sym C1 bogus=1\n  }\n}\n").is_err());
+    }
+
+    #[test]
+    fn schematic_takes_no_args() {
+        assert!(parse("schematic foo {\n  sym C1\n}\n").is_err());
+    }
+
+    #[test]
+    fn names_and_paths_with_structural_chars_round_trip() {
+        // An `inst` path is unrestricted, so a comp path (and a container name) may hold
+        // `=`, `#`, or spaces. Such tokens must serialize quoted and re-parse identically
+        // (regression: unquoted, `=` split the token into a bogus attribute and `#` was
+        // silently truncated by the comment stripper).
+        for (name, path) in [
+            ("a=b", "u=1"),
+            ("has space", "sens[0].fb"),
+            ("with#hash", "n#2"),
+        ] {
+            let layout = SchematicLayout {
+                roots: vec![LayoutNode::Container(crate::schematic::Container {
+                    dir: Direction::Row,
+                    name: Some(name.into()),
+                    gap: 0,
+                    align: Align::Start,
+                    children: vec![LayoutNode::Symbol(crate::schematic::Symbol {
+                        path: path.into(),
+                        rot: Orient::IDENTITY,
+                        dx: 0,
+                        dy: 0,
+                    })],
+                })],
+            };
+            let doc = Doc {
+                schematic: Some(layout.clone()),
+                ..Default::default()
+            };
+            let text = serialize(&doc);
+            let reparsed = parse(&text).unwrap().schematic.unwrap();
+            assert_eq!(
+                reparsed, layout,
+                "round-trip failed for name={name:?} path={path:?} via `{text}`"
+            );
+        }
+    }
+
+    #[test]
+    fn load_text_carries_and_validates_schematic() {
+        // End-to-end: LoadText parses the block, the post-elaborate gate validates paths,
+        // and an unplaced component surfaces as a non-blocking W_SCHEMATIC_UNPLACED.
+        let lib = part_library();
+        let text = "inst C1 Cap\ninst C2 Cap\nnet N1 C1.p1 C2.p1\nnet N2 C1.p2 C2.p2\nschematic {\n  row {\n    sym C1\n  }\n}\n";
+        let mut h = History::new(Default::default());
+        h.commit(
+            Transaction::one(Command::LoadText(text.into())),
+            &lib,
+            "load",
+        )
+        .unwrap();
+        let doc = h.doc();
+        assert!(doc.schematic.is_some());
+        // C2 is not placed -> reported, but the commit still succeeded (view is total).
+        assert_eq!(doc.report.unplaced_components, vec![EntityId::new("C2")]);
+        assert!(doc.report.is_clean()); // unplaced is a warning, not a dirtying finding.
+    }
+
+    #[test]
+    fn load_text_rejects_unknown_sym_path() {
+        let lib = part_library();
+        // `sym NOPE` names no instance -> E_SCHEMATIC aborts the transaction (atomic).
+        let text = "inst C1 Cap\nschematic {\n  sym NOPE\n}\n";
+        let mut h = History::new(Default::default());
+        let err = h
+            .commit(
+                Transaction::one(Command::LoadText(text.into())),
+                &lib,
+                "load",
+            )
+            .unwrap_err();
+        assert!(err.iter().any(|d| d.code == "E_SCHEMATIC"));
     }
 }
