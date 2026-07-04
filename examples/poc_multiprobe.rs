@@ -50,7 +50,11 @@ use ecad_core::kicad::{
 use ecad_core::part::{PartDef, PartLib, PinRole};
 use ecad_core::query::{Engine, Key};
 use ecad_core::route::DesignRules;
-use ecad_core::text::serialize;
+use ecad_core::schematic::{
+    Align, Container, Direction, LayoutNode, SchematicLayout, Symbol, Wire, WireEnd,
+};
+use ecad_core::schematic_svg::schematic_svg;
+use ecad_core::text::{serialize, serialize_schematic_block};
 use std::collections::BTreeMap;
 
 const PARTS: &str = "poc/parts";
@@ -663,6 +667,231 @@ fn build_source() -> Source {
 }
 
 // ---------------------------------------------------------------------------
+// Schematic authoring (Round 3 / Task 4) — the doc-level layout tree
+// ---------------------------------------------------------------------------
+//
+// The schematic is the *second derived view* of the same netlist truth (Decision 20): an
+// authored `row`/`column`/`sym` flow tree, reflowed to coordinates and rendered to SVG. It
+// is board-independent — it never touches placement or routing. There is no `SetSchematic`
+// command (a finding — see the Round-3 ledger); the only ingest is a `schematic { … }`
+// text block, so `main` serializes this tree with `serialize_schematic_block`, appends it
+// to the source text, and lets the round-trip parse it back (which is exactly what proves
+// the block is byte-lossless).
+
+/// A placed `sym` leaf for an instance path (identity orientation, no pinned offset — the
+/// common "just flow it" case).
+fn sym(path: &str) -> LayoutNode {
+    LayoutNode::Symbol(Symbol {
+        path: path.into(),
+        rot: ecad_core::doc::Orient::IDENTITY,
+        dx: 0,
+        dy: 0,
+    })
+}
+
+/// A named container (`row`/`column`) with a main-axis gap (mm) and cross-axis alignment.
+fn group(
+    dir: Direction,
+    name: &str,
+    gap_mm: i64,
+    align: Align,
+    children: Vec<LayoutNode>,
+) -> LayoutNode {
+    LayoutNode::Container(Container {
+        dir,
+        name: Some(name.into()),
+        gap: gap_mm * MM,
+        align,
+        children,
+    })
+}
+
+/// The doc-level board schematic (Decision 20): a top row of functional sections, each a
+/// named column — power, the MCU + its support, the SWD channel bank (the 10 repeated
+/// headers, in two columns of five like the physical edges), and the USB/user I/O. A
+/// couple of presentational wires with waypoints draw the crystal net for readability
+/// (§20d — a wire is a *picture* of the netlist, carrying no connectivity of its own).
+fn build_board_schematic() -> SchematicLayout {
+    // The SWD header bank: J1–J5 (left edge) and J6–J10 (right edge), each a column so the
+    // reused-connector structure reads as two stacks — the visual echo of the board edges.
+    let jcol = |lo: usize, hi: usize, name: &str| -> LayoutNode {
+        let syms = (lo..=hi).map(|i| sym(&format!("J{i}"))).collect();
+        group(Direction::Column, name, 3, Align::Center, syms)
+    };
+
+    // Power section: the regulator, its input/output caps, the buck inductor, the LED.
+    let power = group(
+        Direction::Column,
+        "power",
+        4,
+        Align::Center,
+        vec![sym("U3"), sym("C_IN"), sym("C_OUT"), sym("L1"), sym("D1")],
+    );
+
+    // The MCU decoupling bank (C0–C13): one cap per power pin. A `column` of the fourteen
+    // caps beside the QFN — the layout tree has no "place every member of net +3V3"
+    // affordance, so each is named by hand (a Round-3 finding); a 2-wide grid keeps the
+    // stack from running off the page.
+    let decouple = {
+        let mut rows = Vec::new();
+        for pair in (0..14).step_by(2) {
+            let mut r = vec![sym(&format!("C{pair}"))];
+            if pair + 1 < 14 {
+                r.push(sym(&format!("C{}", pair + 1)));
+            }
+            rows.push(group(
+                Direction::Row,
+                &format!("dec{pair}"),
+                12,
+                Align::Center,
+                r,
+            ));
+        }
+        group(Direction::Column, "decoupling", 2, Align::Center, rows)
+    };
+
+    // MCU section: the QFN in the middle, its close-in support (flash + crystal + the
+    // crystal's load caps / bias resistor) stacked on one side and the decoupling bank on
+    // the other. A wire draws the crystal terminals to XIN/XOUT with a waypoint bend.
+    // The row gap here is deliberately wide (30 mm): the reflow packs sibling boxes by
+    // their box extent ONLY — it does not reserve room for the pin-name labels that hang
+    // off each box edge (a Round-3 finding). The RP2350A has long functional pin names on
+    // both sides, so without a generous manual gap the decoupling bank overprints them.
+    let mcu = group(
+        Direction::Row,
+        "mcu",
+        30,
+        Align::Center,
+        vec![
+            group(
+                Direction::Column,
+                "mcu-support",
+                4,
+                Align::Center,
+                vec![sym("U2"), sym("Y1"), sym("C_X1"), sym("C_X2"), sym("R_X")],
+            ),
+            sym("U1"),
+            decouple,
+        ],
+    );
+
+    let channels = group(
+        Direction::Row,
+        "swd-channels",
+        6,
+        Align::Start,
+        vec![jcol(1, 5, "ch-left"), jcol(6, 10, "ch-right")],
+    );
+
+    // User I/O + the series/pull resistors that ride the connector nets (USB CC/DM/DP
+    // terminations, the ADC bias, the BOOTSEL series R). Grouped here rather than left in
+    // the bin so the view is complete — again each resistor named by hand.
+    let series_r = group(
+        Direction::Column,
+        "series-r",
+        2,
+        Align::Center,
+        vec![
+            sym("R_CC1"),
+            sym("R_CC2"),
+            sym("R_DM"),
+            sym("R_DP"),
+            sym("R_AVDD"),
+            sym("R_BOOT"),
+        ],
+    );
+    let user_io = group(
+        Direction::Column,
+        "user-io",
+        4,
+        Align::Center,
+        vec![sym("J11"), sym("SW1"), sym("SW2"), series_r],
+    );
+
+    // Presentational crystal wires (§20d): Y1 pin1/pin3 (X1/X2) to the MCU XIN/XOUT. These
+    // agree with the netlist (XIN / XOUT nets), so they draw silently — a wire that
+    // disagreed would earn W_SCHEMATIC_WIRE. Drawn as straight segments: authored waypoints
+    // are absolute schematic-space coordinates, but reflow decides where the symbols land,
+    // so an author has no way to pick a sensible bend without reading back the reflowed
+    // positions first (a Round-3 finding — waypoints want to be relative or pin-anchored).
+    let wire = |ac: &str, ap: &str, bc: &str, bp: &str| -> LayoutNode {
+        LayoutNode::Wire(Wire {
+            a: WireEnd {
+                comp: ac.into(),
+                pin: ap.into(),
+            },
+            b: WireEnd {
+                comp: bc.into(),
+                pin: bp.into(),
+            },
+            waypoints: vec![],
+        })
+    };
+
+    SchematicLayout {
+        roots: vec![
+            LayoutNode::Comment(
+                "RP2350A multi-SWD probe — board schematic (Decision 20 view)".into(),
+            ),
+            group(
+                Direction::Row,
+                "board",
+                12,
+                Align::Start,
+                vec![power, mcu, channels, user_io],
+            ),
+            LayoutNode::Blank,
+            LayoutNode::Comment("crystal net, drawn for readability (agrees with XIN/XOUT)".into()),
+            wire("Y1", "1", "U1", "XIN"),
+            wire("Y1", "3", "U1", "XOUT"),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Def-embedded layout demonstration (Round 3 / Task 1) — a SEPARATE section
+// ---------------------------------------------------------------------------
+//
+// The capstone board's 10 SWD channels repeat at the NETLIST level (two signal nets + GND
+// per JST header), but each channel is a *single connector* with no internal multi-part
+// sub-circuit — there is nothing structural to encapsulate in a `def`, and folding the ten
+// flat `inst`s into defs would change the component count and cascade through every
+// downstream stage assertion (a finding — F-def-fit in the ledger). So the def-embedded
+// layout FEATURE (Decision 20 inside a def: a layout fragment stamped per instance, reused
+// circuits rendering identically everywhere) is demonstrated here as its own small board:
+// a per-channel RC input filter `def` with an embedded `schematic { … }` fragment,
+// instantiated three times. This authors as text (the whole point — the fragment must
+// round-trip), elaborates, and reflows to a schematic where all three channels render with
+// byte-identical relative geometry.
+
+const CHANNEL_DEF_DEMO: &str = "\
+def rc_input {
+  inst Rs R
+  inst Cf C
+  net node Rs.2 Cf.1
+  port sig = Rs.1
+  port flt = Cf.2
+  schematic {
+    row gap=5mm {
+      sym Rs
+      sym Cf
+    }
+  }
+}
+inst ch0 rc_input
+inst ch1 rc_input
+inst ch2 rc_input
+net GND ch0.flt ch1.flt ch2.flt
+schematic {
+  column gap=6mm {
+    sym ch0
+    sym ch1
+    sym ch2
+  }
+}
+";
+
+// ---------------------------------------------------------------------------
 
 fn main() {
     let (lib, rp2350) = build_lib();
@@ -705,7 +934,14 @@ fn main() {
     // doc — this is the code+lockfile model applied to the capstone: the text file is
     // the authoritative artifact, and everything downstream consumes what parsed back.
     println!("\n== Stage 3b: text round-trip (serialize -> parse -> re-serialize) ==");
-    let text1 = serialize(doc);
+    // The doc-level schematic layout tree (Decision 20 / Task 4) is authored in Rust
+    // (`build_board_schematic`) but ingests only as text — there is no `SetSource`-style
+    // command for it (a Round-3 finding). So serialize the tree to its canonical
+    // `schematic { … }` block and append it to the source text: it now rides the SAME
+    // round-trip as everything else, which is exactly what proves the block is byte-lossless
+    // with a schematic present (the Task-3 invariant).
+    let schematic_block = serialize_schematic_block(&build_board_schematic());
+    let text1 = format!("{}{}", serialize(doc), schematic_block);
     let mut h2 = History::new(Default::default());
     h2.commit(
         Transaction::one(Command::LoadText(text1.clone())),
@@ -755,6 +991,54 @@ fn main() {
         doc.components.len(),
         doc.nets.len()
     );
+
+    // == Stage 3c: def-embedded schematic layout (Task 1) ====================
+    // A SEPARATE small board (see CHANNEL_DEF_DEMO's rationale): a per-channel RC-input
+    // `def` carrying a Decision-20 `schematic { … }` fragment, instantiated three times.
+    // The fragment is stamped per instance (paths prefixed `ch0.Rs`, `ch1.Rs`, …), so the
+    // doc-level `sym ch0` expands to that group and all three channels reflow to identical
+    // relative geometry — the "reused circuit renders identically everywhere" payoff.
+    println!("\n== Stage 3c: def-embedded schematic layout (stamped per instance) ==");
+    {
+        let mut hd = History::new(Default::default());
+        hd.commit(
+            Transaction::one(Command::LoadText(CHANNEL_DEF_DEMO.to_string())),
+            &lib,
+            "def-demo",
+        )
+        .expect("def-with-layout demo commits cleanly");
+        let dd = hd.doc();
+        // Byte-lossless round-trip WITH the def's embedded fragment present.
+        let rt = serialize(dd);
+        let mut hd2 = History::new(Default::default());
+        hd2.commit(Transaction::one(Command::LoadText(rt.clone())), &lib, "rt")
+            .unwrap();
+        let lossless = rt == serialize(hd2.doc());
+        println!(
+            "  3 channels stamped from one def; def_fragments keyed: {:?}",
+            dd.def_fragments.keys().collect::<Vec<_>>()
+        );
+        println!(
+            "  embedded-fragment round-trip: {}",
+            if lossless { "byte-lossless" } else { "LOSSY" }
+        );
+        // Reflow and confirm identical relative internal geometry across the three stamps.
+        let placed = dd.reflow_schematic(&lib);
+        let offset = |ch: &str| {
+            use ecad_core::id::EntityId;
+            let r = placed[&EntityId::new(format!("{ch}.Rs"))].center;
+            let c = placed[&EntityId::new(format!("{ch}.Cf"))].center;
+            (c.x - r.x, c.y - r.y)
+        };
+        let (o0, o1, o2) = (offset("ch0"), offset("ch1"), offset("ch2"));
+        println!(
+            "  per-channel R->C offset (nm): ch0={o0:?} ch1={o1:?} ch2={o2:?} -> identical={}",
+            o0 == o1 && o1 == o2
+        );
+        std::fs::create_dir_all("poc/out").unwrap();
+        std::fs::write("poc/out/schematic-def-demo.svg", schematic_svg(dd, &lib)).unwrap();
+        println!("  wrote poc/out/schematic-def-demo.svg");
+    }
 
     // ERC
     let mut eng = Engine::new();
@@ -936,6 +1220,11 @@ fn main() {
     write("netlist.txt", &netlist(doc), &mut wrote);
     write("placement.csv", &placement_csv(doc), &mut wrote);
     write("board.svg", &svg(doc, &lib).unwrap(), &mut wrote);
+    // The schematic view (Decision 20 / Task 4): the second derived projection of the same
+    // netlist truth, rendered from the round-tripped doc's `schematic` tree. A tracked
+    // artifact like the Gerbers. Every component is drawn (§20c totality) — any not named
+    // by the layout tree lands in the derived unplaced bin below a labelled divider.
+    write("schematic.svg", &schematic_svg(doc, &lib), &mut wrote);
     // gerber_set already includes the split drill file(s) (== excellon_drill(doc, lib));
     // call it explicitly too only to assert the two agree.
     let gset = gerber_set(doc, &lib).unwrap();

@@ -1,0 +1,770 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-23.270000 -112.900000 353.040000 116.400000">
+  <polyline class="wire" points="33.130000,-76.570000 84.830000,-81.460000" fill="none" stroke="#0a0" stroke-width="0.15"/>
+  <polyline class="wire" points="33.130000,-74.030000 120.270000,-81.460000" fill="none" stroke="#0a0" stroke-width="0.15"/>
+  <g class="symbol" data-id="C0">
+    <rect class="body" x="149.000000" y="-98.890000" width="11.900000" height="7.620000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="149.000000" y="-99.390000" font-size="1.500000">C1 (C)</text>
+    <line class="stub" x1="149.000000" y1="-96.350000" x2="147.730000" y2="-96.350000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="149.317500" y="-96.016667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="147.095000" y="-96.016667" font-size="1.000000" text-anchor="end">+3V3</text>
+    <line class="stub" x1="160.900000" y1="-96.350000" x2="162.170000" y2="-96.350000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="160.582500" y="-96.016667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="162.805000" y="-96.016667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="C1">
+    <rect class="body" x="172.900000" y="-98.890000" width="11.900000" height="7.620000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="172.900000" y="-99.390000" font-size="1.500000">C2 (C)</text>
+    <line class="stub" x1="172.900000" y1="-96.350000" x2="171.630000" y2="-96.350000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="173.217500" y="-96.016667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="170.995000" y="-96.016667" font-size="1.000000" text-anchor="end">+3V3</text>
+    <line class="stub" x1="184.800000" y1="-96.350000" x2="186.070000" y2="-96.350000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="184.482500" y="-96.016667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="186.705000" y="-96.016667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="C10">
+    <rect class="body" x="149.000000" y="-50.790000" width="11.900000" height="7.620000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="149.000000" y="-51.290000" font-size="1.500000">C3 (C)</text>
+    <line class="stub" x1="149.000000" y1="-48.250000" x2="147.730000" y2="-48.250000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="149.317500" y="-47.916667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="147.095000" y="-47.916667" font-size="1.000000" text-anchor="end">+DVDD</text>
+    <line class="stub" x1="160.900000" y1="-48.250000" x2="162.170000" y2="-48.250000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="160.582500" y="-47.916667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="162.805000" y="-47.916667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="C11">
+    <rect class="body" x="172.900000" y="-50.790000" width="11.900000" height="7.620000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="172.900000" y="-51.290000" font-size="1.500000">C4 (C)</text>
+    <line class="stub" x1="172.900000" y1="-48.250000" x2="171.630000" y2="-48.250000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="173.217500" y="-47.916667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="170.995000" y="-47.916667" font-size="1.000000" text-anchor="end">+DVDD</text>
+    <line class="stub" x1="184.800000" y1="-48.250000" x2="186.070000" y2="-48.250000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="184.482500" y="-47.916667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="186.705000" y="-47.916667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="C12">
+    <rect class="body" x="149.000000" y="-41.170000" width="11.900000" height="7.620000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="149.000000" y="-41.670000" font-size="1.500000">C5 (C)</text>
+    <line class="stub" x1="149.000000" y1="-38.630000" x2="147.730000" y2="-38.630000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="149.317500" y="-38.296667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="147.095000" y="-38.296667" font-size="1.000000" text-anchor="end">+DVDD</text>
+    <line class="stub" x1="160.900000" y1="-38.630000" x2="162.170000" y2="-38.630000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="160.582500" y="-38.296667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="162.805000" y="-38.296667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="C13">
+    <rect class="body" x="172.900000" y="-41.170000" width="11.900000" height="7.620000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="172.900000" y="-41.670000" font-size="1.500000">C6 (C)</text>
+    <line class="stub" x1="172.900000" y1="-38.630000" x2="171.630000" y2="-38.630000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="173.217500" y="-38.296667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="170.995000" y="-38.296667" font-size="1.000000" text-anchor="end">VREG_AVDD</text>
+    <line class="stub" x1="184.800000" y1="-38.630000" x2="186.070000" y2="-38.630000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="184.482500" y="-38.296667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="186.705000" y="-38.296667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="C2">
+    <rect class="body" x="149.000000" y="-89.270000" width="11.900000" height="7.620000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="149.000000" y="-89.770000" font-size="1.500000">C7 (C)</text>
+    <line class="stub" x1="149.000000" y1="-86.730000" x2="147.730000" y2="-86.730000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="149.317500" y="-86.396667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="147.095000" y="-86.396667" font-size="1.000000" text-anchor="end">+3V3</text>
+    <line class="stub" x1="160.900000" y1="-86.730000" x2="162.170000" y2="-86.730000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="160.582500" y="-86.396667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="162.805000" y="-86.396667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="C3">
+    <rect class="body" x="172.900000" y="-89.270000" width="11.900000" height="7.620000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="172.900000" y="-89.770000" font-size="1.500000">C8 (C)</text>
+    <line class="stub" x1="172.900000" y1="-86.730000" x2="171.630000" y2="-86.730000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="173.217500" y="-86.396667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="170.995000" y="-86.396667" font-size="1.000000" text-anchor="end">+3V3</text>
+    <line class="stub" x1="184.800000" y1="-86.730000" x2="186.070000" y2="-86.730000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="184.482500" y="-86.396667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="186.705000" y="-86.396667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="C4">
+    <rect class="body" x="149.000000" y="-79.650000" width="11.900000" height="7.620000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="149.000000" y="-80.150000" font-size="1.500000">C9 (C)</text>
+    <line class="stub" x1="149.000000" y1="-77.110000" x2="147.730000" y2="-77.110000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="149.317500" y="-76.776667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="147.095000" y="-76.776667" font-size="1.000000" text-anchor="end">+3V3</text>
+    <line class="stub" x1="160.900000" y1="-77.110000" x2="162.170000" y2="-77.110000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="160.582500" y="-76.776667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="162.805000" y="-76.776667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="C5">
+    <rect class="body" x="172.900000" y="-79.650000" width="11.900000" height="7.620000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="172.900000" y="-80.150000" font-size="1.500000">C10 (C)</text>
+    <line class="stub" x1="172.900000" y1="-77.110000" x2="171.630000" y2="-77.110000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="173.217500" y="-76.776667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="170.995000" y="-76.776667" font-size="1.000000" text-anchor="end">+3V3</text>
+    <line class="stub" x1="184.800000" y1="-77.110000" x2="186.070000" y2="-77.110000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="184.482500" y="-76.776667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="186.705000" y="-76.776667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="C6">
+    <rect class="body" x="149.000000" y="-70.030000" width="11.900000" height="7.620000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="149.000000" y="-70.530000" font-size="1.500000">C11 (C)</text>
+    <line class="stub" x1="149.000000" y1="-67.490000" x2="147.730000" y2="-67.490000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="149.317500" y="-67.156667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="147.095000" y="-67.156667" font-size="1.000000" text-anchor="end">+3V3</text>
+    <line class="stub" x1="160.900000" y1="-67.490000" x2="162.170000" y2="-67.490000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="160.582500" y="-67.156667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="162.805000" y="-67.156667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="C7">
+    <rect class="body" x="172.900000" y="-70.030000" width="11.900000" height="7.620000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="172.900000" y="-70.530000" font-size="1.500000">C12 (C)</text>
+    <line class="stub" x1="172.900000" y1="-67.490000" x2="171.630000" y2="-67.490000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="173.217500" y="-67.156667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="170.995000" y="-67.156667" font-size="1.000000" text-anchor="end">+3V3</text>
+    <line class="stub" x1="184.800000" y1="-67.490000" x2="186.070000" y2="-67.490000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="184.482500" y="-67.156667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="186.705000" y="-67.156667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="C8">
+    <rect class="body" x="149.000000" y="-60.410000" width="11.900000" height="7.620000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="149.000000" y="-60.910000" font-size="1.500000">C13 (C)</text>
+    <line class="stub" x1="149.000000" y1="-57.870000" x2="147.730000" y2="-57.870000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="149.317500" y="-57.536667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="147.095000" y="-57.536667" font-size="1.000000" text-anchor="end">+3V3</text>
+    <line class="stub" x1="160.900000" y1="-57.870000" x2="162.170000" y2="-57.870000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="160.582500" y="-57.536667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="162.805000" y="-57.536667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="C9">
+    <rect class="body" x="172.900000" y="-60.410000" width="11.900000" height="7.620000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="172.900000" y="-60.910000" font-size="1.500000">C14 (C)</text>
+    <line class="stub" x1="172.900000" y1="-57.870000" x2="171.630000" y2="-57.870000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="173.217500" y="-57.536667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="170.995000" y="-57.536667" font-size="1.000000" text-anchor="end">+3V3</text>
+    <line class="stub" x1="184.800000" y1="-57.870000" x2="186.070000" y2="-57.870000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="184.482500" y="-57.536667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="186.705000" y="-57.536667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="C_IN">
+    <rect class="body" x="5.250000" y="-92.700000" width="11.900000" height="7.620000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="5.250000" y="-93.200000" font-size="1.500000">C15 (C)</text>
+    <line class="stub" x1="5.250000" y1="-90.160000" x2="3.980000" y2="-90.160000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="5.567500" y="-89.826667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="3.345000" y="-89.826667" font-size="1.000000" text-anchor="end">VBUS</text>
+    <line class="stub" x1="17.150000" y1="-90.160000" x2="18.420000" y2="-90.160000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="16.832500" y="-89.826667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="19.055000" y="-89.826667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="C_OUT">
+    <rect class="body" x="5.250000" y="-81.080000" width="11.900000" height="7.620000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="5.250000" y="-81.580000" font-size="1.500000">C16 (C)</text>
+    <line class="stub" x1="5.250000" y1="-78.540000" x2="3.980000" y2="-78.540000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="5.567500" y="-78.206667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="3.345000" y="-78.206667" font-size="1.000000" text-anchor="end">+3V3</text>
+    <line class="stub" x1="17.150000" y1="-78.540000" x2="18.420000" y2="-78.540000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="16.832500" y="-78.206667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="19.055000" y="-78.206667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="C_X1">
+    <rect class="body" x="39.300000" y="-64.950000" width="11.900000" height="7.620000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="39.300000" y="-65.450000" font-size="1.500000">C17 (C)</text>
+    <line class="stub" x1="39.300000" y1="-62.410000" x2="38.030000" y2="-62.410000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="39.617500" y="-62.076667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="37.395000" y="-62.076667" font-size="1.000000" text-anchor="end">XIN</text>
+    <line class="stub" x1="51.200000" y1="-62.410000" x2="52.470000" y2="-62.410000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="50.882500" y="-62.076667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="53.105000" y="-62.076667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="C_X2">
+    <rect class="body" x="39.300000" y="-53.330000" width="11.900000" height="7.620000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="39.300000" y="-53.830000" font-size="1.500000">C18 (C)</text>
+    <line class="stub" x1="39.300000" y1="-50.790000" x2="38.030000" y2="-50.790000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="39.617500" y="-50.456667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="37.395000" y="-50.456667" font-size="1.000000" text-anchor="end">XTAL2</text>
+    <line class="stub" x1="51.200000" y1="-50.790000" x2="52.470000" y2="-50.790000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="50.882500" y="-50.456667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="53.105000" y="-50.456667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="D1">
+    <rect class="body" x="0.000000" y="-57.840000" width="22.400000" height="10.160000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="0.000000" y="-58.340000" font-size="1.500000">LED1 (LED)</text>
+    <line class="stub" x1="0.000000" y1="-55.300000" x2="-1.270000" y2="-55.300000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="0.317500" y="-54.966667" font-size="1.000000" text-anchor="start">VDD</text>
+    <text class="tag" x="-1.905000" y="-54.966667" font-size="1.000000" text-anchor="end">+3V3</text>
+    <line class="stub" x1="22.400000" y1="-55.300000" x2="23.670000" y2="-55.300000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="22.082500" y="-54.966667" font-size="1.000000" text-anchor="end">DOUT</text>
+    <text class="nc" x="24.305000" y="-54.966667" font-size="1.000000" text-anchor="start">✕</text>
+    <line class="stub" x1="0.000000" y1="-52.760000" x2="-1.270000" y2="-52.760000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="0.317500" y="-52.426667" font-size="1.000000" text-anchor="start">GND</text>
+    <text class="tag" x="-1.905000" y="-52.426667" font-size="1.000000" text-anchor="end">GND</text>
+    <line class="stub" x1="22.400000" y1="-52.760000" x2="23.670000" y2="-52.760000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="22.082500" y="-52.426667" font-size="1.000000" text-anchor="end">DIN</text>
+    <text class="tag" x="24.305000" y="-52.426667" font-size="1.000000" text-anchor="start">LED_DIN</text>
+  </g>
+  <g class="symbol" data-id="J1">
+    <rect class="body" x="196.800000" y="-109.400000" width="33.600000" height="10.160000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="196.800000" y="-109.900000" font-size="1.500000">JST1 (JST_SH)</text>
+    <line class="stub" x1="196.800000" y1="-106.860000" x2="195.530000" y2="-106.860000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="197.117500" y="-106.526667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="194.895000" y="-106.526667" font-size="1.000000" text-anchor="end">A_SWCLK</text>
+    <line class="stub" x1="230.400000" y1="-106.860000" x2="231.670000" y2="-106.860000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="230.082500" y="-106.526667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="232.305000" y="-106.526667" font-size="1.000000" text-anchor="start">GND</text>
+    <line class="stub" x1="196.800000" y1="-104.320000" x2="195.530000" y2="-104.320000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="197.117500" y="-103.986667" font-size="1.000000" text-anchor="start">3</text>
+    <text class="tag" x="194.895000" y="-103.986667" font-size="1.000000" text-anchor="end">A_SWDIO</text>
+    <line class="stub" x1="230.400000" y1="-104.320000" x2="231.670000" y2="-104.320000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="230.082500" y="-103.986667" font-size="1.000000" text-anchor="end">MP</text>
+    <text class="tag" x="232.305000" y="-103.986667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="J10">
+    <rect class="body" x="236.400000" y="-56.760000" width="33.600000" height="10.160000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="236.400000" y="-57.260000" font-size="1.500000">JST2 (JST_SH)</text>
+    <line class="stub" x1="236.400000" y1="-54.220000" x2="235.130000" y2="-54.220000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="236.717500" y="-53.886667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="234.495000" y="-53.886667" font-size="1.000000" text-anchor="end">J_SWCLK</text>
+    <line class="stub" x1="270.000000" y1="-54.220000" x2="271.270000" y2="-54.220000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="269.682500" y="-53.886667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="271.905000" y="-53.886667" font-size="1.000000" text-anchor="start">GND</text>
+    <line class="stub" x1="236.400000" y1="-51.680000" x2="235.130000" y2="-51.680000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="236.717500" y="-51.346667" font-size="1.000000" text-anchor="start">3</text>
+    <text class="tag" x="234.495000" y="-51.346667" font-size="1.000000" text-anchor="end">J_SWDIO</text>
+    <line class="stub" x1="270.000000" y1="-51.680000" x2="271.270000" y2="-51.680000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="269.682500" y="-51.346667" font-size="1.000000" text-anchor="end">MP</text>
+    <text class="tag" x="271.905000" y="-51.346667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="J11">
+    <rect class="body" x="282.000000" y="-109.400000" width="24.500000" height="27.940000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="282.000000" y="-109.900000" font-size="1.500000">USB1 (USBC)</text>
+    <line class="stub" x1="282.000000" y1="-106.860000" x2="280.730000" y2="-106.860000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="282.317500" y="-106.526667" font-size="1.000000" text-anchor="start">GND</text>
+    <text class="tag" x="280.095000" y="-106.526667" font-size="1.000000" text-anchor="end">GND</text>
+    <line class="stub" x1="306.500000" y1="-106.860000" x2="307.770000" y2="-106.860000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="306.182500" y="-106.526667" font-size="1.000000" text-anchor="end">VBUS</text>
+    <text class="tag" x="308.405000" y="-106.526667" font-size="1.000000" text-anchor="start">VBUS</text>
+    <line class="stub" x1="282.000000" y1="-104.320000" x2="280.730000" y2="-104.320000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="282.317500" y="-103.986667" font-size="1.000000" text-anchor="start">CC1</text>
+    <text class="tag" x="280.095000" y="-103.986667" font-size="1.000000" text-anchor="end">CC1</text>
+    <line class="stub" x1="306.500000" y1="-104.320000" x2="307.770000" y2="-104.320000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="306.182500" y="-103.986667" font-size="1.000000" text-anchor="end">DP</text>
+    <text class="tag" x="308.405000" y="-103.986667" font-size="1.000000" text-anchor="start">DP_CONN</text>
+    <line class="stub" x1="282.000000" y1="-101.780000" x2="280.730000" y2="-101.780000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="282.317500" y="-101.446667" font-size="1.000000" text-anchor="start">DM</text>
+    <text class="tag" x="280.095000" y="-101.446667" font-size="1.000000" text-anchor="end">DM_CONN</text>
+    <line class="stub" x1="306.500000" y1="-101.780000" x2="307.770000" y2="-101.780000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="306.182500" y="-101.446667" font-size="1.000000" text-anchor="end">SBU1</text>
+    <text class="nc" x="308.405000" y="-101.446667" font-size="1.000000" text-anchor="start">✕</text>
+    <line class="stub" x1="282.000000" y1="-99.240000" x2="280.730000" y2="-99.240000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="282.317500" y="-98.906667" font-size="1.000000" text-anchor="start">VBUS</text>
+    <text class="tag" x="280.095000" y="-98.906667" font-size="1.000000" text-anchor="end">VBUS</text>
+    <line class="stub" x1="306.500000" y1="-99.240000" x2="307.770000" y2="-99.240000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="306.182500" y="-98.906667" font-size="1.000000" text-anchor="end">GND</text>
+    <text class="tag" x="308.405000" y="-98.906667" font-size="1.000000" text-anchor="start">GND</text>
+    <line class="stub" x1="282.000000" y1="-96.700000" x2="280.730000" y2="-96.700000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="282.317500" y="-96.366667" font-size="1.000000" text-anchor="start">GND</text>
+    <text class="tag" x="280.095000" y="-96.366667" font-size="1.000000" text-anchor="end">GND</text>
+    <line class="stub" x1="306.500000" y1="-96.700000" x2="307.770000" y2="-96.700000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="306.182500" y="-96.366667" font-size="1.000000" text-anchor="end">VBUS</text>
+    <text class="tag" x="308.405000" y="-96.366667" font-size="1.000000" text-anchor="start">VBUS</text>
+    <line class="stub" x1="282.000000" y1="-94.160000" x2="280.730000" y2="-94.160000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="282.317500" y="-93.826667" font-size="1.000000" text-anchor="start">CC2</text>
+    <text class="tag" x="280.095000" y="-93.826667" font-size="1.000000" text-anchor="end">CC2</text>
+    <line class="stub" x1="306.500000" y1="-94.160000" x2="307.770000" y2="-94.160000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="306.182500" y="-93.826667" font-size="1.000000" text-anchor="end">DP</text>
+    <text class="tag" x="308.405000" y="-93.826667" font-size="1.000000" text-anchor="start">DP_CONN</text>
+    <line class="stub" x1="282.000000" y1="-91.620000" x2="280.730000" y2="-91.620000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="282.317500" y="-91.286667" font-size="1.000000" text-anchor="start">DM</text>
+    <text class="tag" x="280.095000" y="-91.286667" font-size="1.000000" text-anchor="end">DM_CONN</text>
+    <line class="stub" x1="306.500000" y1="-91.620000" x2="307.770000" y2="-91.620000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="306.182500" y="-91.286667" font-size="1.000000" text-anchor="end">SBU2</text>
+    <text class="nc" x="308.405000" y="-91.286667" font-size="1.000000" text-anchor="start">✕</text>
+    <line class="stub" x1="282.000000" y1="-89.080000" x2="280.730000" y2="-89.080000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="282.317500" y="-88.746667" font-size="1.000000" text-anchor="start">VBUS</text>
+    <text class="tag" x="280.095000" y="-88.746667" font-size="1.000000" text-anchor="end">VBUS</text>
+    <line class="stub" x1="306.500000" y1="-89.080000" x2="307.770000" y2="-89.080000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="306.182500" y="-88.746667" font-size="1.000000" text-anchor="end">GND</text>
+    <text class="tag" x="308.405000" y="-88.746667" font-size="1.000000" text-anchor="start">GND</text>
+    <line class="stub" x1="282.000000" y1="-86.540000" x2="280.730000" y2="-86.540000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="282.317500" y="-86.206667" font-size="1.000000" text-anchor="start">SHIELD</text>
+    <text class="tag" x="280.095000" y="-86.206667" font-size="1.000000" text-anchor="end">GND</text>
+  </g>
+  <g class="symbol" data-id="J2">
+    <rect class="body" x="196.800000" y="-96.240000" width="33.600000" height="10.160000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="196.800000" y="-96.740000" font-size="1.500000">JST3 (JST_SH)</text>
+    <line class="stub" x1="196.800000" y1="-93.700000" x2="195.530000" y2="-93.700000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="197.117500" y="-93.366667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="194.895000" y="-93.366667" font-size="1.000000" text-anchor="end">B_SWCLK</text>
+    <line class="stub" x1="230.400000" y1="-93.700000" x2="231.670000" y2="-93.700000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="230.082500" y="-93.366667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="232.305000" y="-93.366667" font-size="1.000000" text-anchor="start">GND</text>
+    <line class="stub" x1="196.800000" y1="-91.160000" x2="195.530000" y2="-91.160000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="197.117500" y="-90.826667" font-size="1.000000" text-anchor="start">3</text>
+    <text class="tag" x="194.895000" y="-90.826667" font-size="1.000000" text-anchor="end">B_SWDIO</text>
+    <line class="stub" x1="230.400000" y1="-91.160000" x2="231.670000" y2="-91.160000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="230.082500" y="-90.826667" font-size="1.000000" text-anchor="end">MP</text>
+    <text class="tag" x="232.305000" y="-90.826667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="J3">
+    <rect class="body" x="196.800000" y="-83.080000" width="33.600000" height="10.160000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="196.800000" y="-83.580000" font-size="1.500000">JST4 (JST_SH)</text>
+    <line class="stub" x1="196.800000" y1="-80.540000" x2="195.530000" y2="-80.540000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="197.117500" y="-80.206667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="194.895000" y="-80.206667" font-size="1.000000" text-anchor="end">C_SWCLK</text>
+    <line class="stub" x1="230.400000" y1="-80.540000" x2="231.670000" y2="-80.540000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="230.082500" y="-80.206667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="232.305000" y="-80.206667" font-size="1.000000" text-anchor="start">GND</text>
+    <line class="stub" x1="196.800000" y1="-78.000000" x2="195.530000" y2="-78.000000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="197.117500" y="-77.666667" font-size="1.000000" text-anchor="start">3</text>
+    <text class="tag" x="194.895000" y="-77.666667" font-size="1.000000" text-anchor="end">C_SWDIO</text>
+    <line class="stub" x1="230.400000" y1="-78.000000" x2="231.670000" y2="-78.000000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="230.082500" y="-77.666667" font-size="1.000000" text-anchor="end">MP</text>
+    <text class="tag" x="232.305000" y="-77.666667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="J4">
+    <rect class="body" x="196.800000" y="-69.920000" width="33.600000" height="10.160000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="196.800000" y="-70.420000" font-size="1.500000">JST5 (JST_SH)</text>
+    <line class="stub" x1="196.800000" y1="-67.380000" x2="195.530000" y2="-67.380000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="197.117500" y="-67.046667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="194.895000" y="-67.046667" font-size="1.000000" text-anchor="end">D_SWCLK</text>
+    <line class="stub" x1="230.400000" y1="-67.380000" x2="231.670000" y2="-67.380000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="230.082500" y="-67.046667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="232.305000" y="-67.046667" font-size="1.000000" text-anchor="start">GND</text>
+    <line class="stub" x1="196.800000" y1="-64.840000" x2="195.530000" y2="-64.840000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="197.117500" y="-64.506667" font-size="1.000000" text-anchor="start">3</text>
+    <text class="tag" x="194.895000" y="-64.506667" font-size="1.000000" text-anchor="end">D_SWDIO</text>
+    <line class="stub" x1="230.400000" y1="-64.840000" x2="231.670000" y2="-64.840000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="230.082500" y="-64.506667" font-size="1.000000" text-anchor="end">MP</text>
+    <text class="tag" x="232.305000" y="-64.506667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="J5">
+    <rect class="body" x="196.800000" y="-56.760000" width="33.600000" height="10.160000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="196.800000" y="-57.260000" font-size="1.500000">JST6 (JST_SH)</text>
+    <line class="stub" x1="196.800000" y1="-54.220000" x2="195.530000" y2="-54.220000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="197.117500" y="-53.886667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="194.895000" y="-53.886667" font-size="1.000000" text-anchor="end">E_SWCLK</text>
+    <line class="stub" x1="230.400000" y1="-54.220000" x2="231.670000" y2="-54.220000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="230.082500" y="-53.886667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="232.305000" y="-53.886667" font-size="1.000000" text-anchor="start">GND</text>
+    <line class="stub" x1="196.800000" y1="-51.680000" x2="195.530000" y2="-51.680000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="197.117500" y="-51.346667" font-size="1.000000" text-anchor="start">3</text>
+    <text class="tag" x="194.895000" y="-51.346667" font-size="1.000000" text-anchor="end">E_SWDIO</text>
+    <line class="stub" x1="230.400000" y1="-51.680000" x2="231.670000" y2="-51.680000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="230.082500" y="-51.346667" font-size="1.000000" text-anchor="end">MP</text>
+    <text class="tag" x="232.305000" y="-51.346667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="J6">
+    <rect class="body" x="236.400000" y="-109.400000" width="33.600000" height="10.160000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="236.400000" y="-109.900000" font-size="1.500000">JST7 (JST_SH)</text>
+    <line class="stub" x1="236.400000" y1="-106.860000" x2="235.130000" y2="-106.860000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="236.717500" y="-106.526667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="234.495000" y="-106.526667" font-size="1.000000" text-anchor="end">F_SWCLK</text>
+    <line class="stub" x1="270.000000" y1="-106.860000" x2="271.270000" y2="-106.860000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="269.682500" y="-106.526667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="271.905000" y="-106.526667" font-size="1.000000" text-anchor="start">GND</text>
+    <line class="stub" x1="236.400000" y1="-104.320000" x2="235.130000" y2="-104.320000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="236.717500" y="-103.986667" font-size="1.000000" text-anchor="start">3</text>
+    <text class="tag" x="234.495000" y="-103.986667" font-size="1.000000" text-anchor="end">F_SWDIO</text>
+    <line class="stub" x1="270.000000" y1="-104.320000" x2="271.270000" y2="-104.320000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="269.682500" y="-103.986667" font-size="1.000000" text-anchor="end">MP</text>
+    <text class="tag" x="271.905000" y="-103.986667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="J7">
+    <rect class="body" x="236.400000" y="-96.240000" width="33.600000" height="10.160000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="236.400000" y="-96.740000" font-size="1.500000">JST8 (JST_SH)</text>
+    <line class="stub" x1="236.400000" y1="-93.700000" x2="235.130000" y2="-93.700000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="236.717500" y="-93.366667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="234.495000" y="-93.366667" font-size="1.000000" text-anchor="end">G_SWCLK</text>
+    <line class="stub" x1="270.000000" y1="-93.700000" x2="271.270000" y2="-93.700000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="269.682500" y="-93.366667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="271.905000" y="-93.366667" font-size="1.000000" text-anchor="start">GND</text>
+    <line class="stub" x1="236.400000" y1="-91.160000" x2="235.130000" y2="-91.160000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="236.717500" y="-90.826667" font-size="1.000000" text-anchor="start">3</text>
+    <text class="tag" x="234.495000" y="-90.826667" font-size="1.000000" text-anchor="end">G_SWDIO</text>
+    <line class="stub" x1="270.000000" y1="-91.160000" x2="271.270000" y2="-91.160000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="269.682500" y="-90.826667" font-size="1.000000" text-anchor="end">MP</text>
+    <text class="tag" x="271.905000" y="-90.826667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="J8">
+    <rect class="body" x="236.400000" y="-83.080000" width="33.600000" height="10.160000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="236.400000" y="-83.580000" font-size="1.500000">JST9 (JST_SH)</text>
+    <line class="stub" x1="236.400000" y1="-80.540000" x2="235.130000" y2="-80.540000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="236.717500" y="-80.206667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="234.495000" y="-80.206667" font-size="1.000000" text-anchor="end">H_SWCLK</text>
+    <line class="stub" x1="270.000000" y1="-80.540000" x2="271.270000" y2="-80.540000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="269.682500" y="-80.206667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="271.905000" y="-80.206667" font-size="1.000000" text-anchor="start">GND</text>
+    <line class="stub" x1="236.400000" y1="-78.000000" x2="235.130000" y2="-78.000000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="236.717500" y="-77.666667" font-size="1.000000" text-anchor="start">3</text>
+    <text class="tag" x="234.495000" y="-77.666667" font-size="1.000000" text-anchor="end">H_SWDIO</text>
+    <line class="stub" x1="270.000000" y1="-78.000000" x2="271.270000" y2="-78.000000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="269.682500" y="-77.666667" font-size="1.000000" text-anchor="end">MP</text>
+    <text class="tag" x="271.905000" y="-77.666667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="J9">
+    <rect class="body" x="236.400000" y="-69.920000" width="33.600000" height="10.160000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="236.400000" y="-70.420000" font-size="1.500000">JST10 (JST_SH)</text>
+    <line class="stub" x1="236.400000" y1="-67.380000" x2="235.130000" y2="-67.380000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="236.717500" y="-67.046667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="234.495000" y="-67.046667" font-size="1.000000" text-anchor="end">I_SWCLK</text>
+    <line class="stub" x1="270.000000" y1="-67.380000" x2="271.270000" y2="-67.380000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="269.682500" y="-67.046667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="271.905000" y="-67.046667" font-size="1.000000" text-anchor="start">GND</text>
+    <line class="stub" x1="236.400000" y1="-64.840000" x2="235.130000" y2="-64.840000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="236.717500" y="-64.506667" font-size="1.000000" text-anchor="start">3</text>
+    <text class="tag" x="234.495000" y="-64.506667" font-size="1.000000" text-anchor="end">I_SWDIO</text>
+    <line class="stub" x1="270.000000" y1="-64.840000" x2="271.270000" y2="-64.840000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="269.682500" y="-64.506667" font-size="1.000000" text-anchor="end">MP</text>
+    <text class="tag" x="271.905000" y="-64.506667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="L1">
+    <rect class="body" x="3.850000" y="-69.460000" width="14.700000" height="7.620000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="3.850000" y="-69.960000" font-size="1.500000">L1 (IND)</text>
+    <line class="stub" x1="3.850000" y1="-66.920000" x2="2.580000" y2="-66.920000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="4.167500" y="-66.586667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="1.945000" y="-66.586667" font-size="1.000000" text-anchor="end">VREG_LX</text>
+    <line class="stub" x1="18.550000" y1="-66.920000" x2="19.820000" y2="-66.920000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="18.232500" y="-66.586667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="20.455000" y="-66.586667" font-size="1.000000" text-anchor="start">+DVDD</text>
+  </g>
+  <g class="symbol" data-id="R_AVDD">
+    <rect class="body" x="288.300000" y="-15.740000" width="11.900000" height="7.620000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="288.300000" y="-16.240000" font-size="1.500000">R1 (R)</text>
+    <line class="stub" x1="288.300000" y1="-13.200000" x2="287.030000" y2="-13.200000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="288.617500" y="-12.866667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="286.395000" y="-12.866667" font-size="1.000000" text-anchor="end">+3V3</text>
+    <line class="stub" x1="300.200000" y1="-13.200000" x2="301.470000" y2="-13.200000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="299.882500" y="-12.866667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="302.105000" y="-12.866667" font-size="1.000000" text-anchor="start">VREG_AVDD</text>
+  </g>
+  <g class="symbol" data-id="R_BOOT">
+    <rect class="body" x="288.300000" y="-6.120000" width="11.900000" height="7.620000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="288.300000" y="-6.620000" font-size="1.500000">R2 (R)</text>
+    <line class="stub" x1="288.300000" y1="-3.580000" x2="287.030000" y2="-3.580000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="288.617500" y="-3.246667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="286.395000" y="-3.246667" font-size="1.000000" text-anchor="end">QSPI_CS_N</text>
+    <line class="stub" x1="300.200000" y1="-3.580000" x2="301.470000" y2="-3.580000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="299.882500" y="-3.246667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="302.105000" y="-3.246667" font-size="1.000000" text-anchor="start">BOOT_SW</text>
+  </g>
+  <g class="symbol" data-id="R_CC1">
+    <rect class="body" x="288.300000" y="-54.220000" width="11.900000" height="7.620000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="288.300000" y="-54.720000" font-size="1.500000">R3 (R)</text>
+    <line class="stub" x1="288.300000" y1="-51.680000" x2="287.030000" y2="-51.680000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="288.617500" y="-51.346667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="286.395000" y="-51.346667" font-size="1.000000" text-anchor="end">CC1</text>
+    <line class="stub" x1="300.200000" y1="-51.680000" x2="301.470000" y2="-51.680000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="299.882500" y="-51.346667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="302.105000" y="-51.346667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="R_CC2">
+    <rect class="body" x="288.300000" y="-44.600000" width="11.900000" height="7.620000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="288.300000" y="-45.100000" font-size="1.500000">R4 (R)</text>
+    <line class="stub" x1="288.300000" y1="-42.060000" x2="287.030000" y2="-42.060000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="288.617500" y="-41.726667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="286.395000" y="-41.726667" font-size="1.000000" text-anchor="end">CC2</text>
+    <line class="stub" x1="300.200000" y1="-42.060000" x2="301.470000" y2="-42.060000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="299.882500" y="-41.726667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="302.105000" y="-41.726667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="R_DM">
+    <rect class="body" x="288.300000" y="-34.980000" width="11.900000" height="7.620000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="288.300000" y="-35.480000" font-size="1.500000">R5 (R)</text>
+    <line class="stub" x1="288.300000" y1="-32.440000" x2="287.030000" y2="-32.440000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="288.617500" y="-32.106667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="286.395000" y="-32.106667" font-size="1.000000" text-anchor="end">USB_DM</text>
+    <line class="stub" x1="300.200000" y1="-32.440000" x2="301.470000" y2="-32.440000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="299.882500" y="-32.106667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="302.105000" y="-32.106667" font-size="1.000000" text-anchor="start">DM_CONN</text>
+  </g>
+  <g class="symbol" data-id="R_DP">
+    <rect class="body" x="288.300000" y="-25.360000" width="11.900000" height="7.620000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="288.300000" y="-25.860000" font-size="1.500000">R6 (R)</text>
+    <line class="stub" x1="288.300000" y1="-22.820000" x2="287.030000" y2="-22.820000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="288.617500" y="-22.486667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="286.395000" y="-22.486667" font-size="1.000000" text-anchor="end">USB_DP</text>
+    <line class="stub" x1="300.200000" y1="-22.820000" x2="301.470000" y2="-22.820000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="299.882500" y="-22.486667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="302.105000" y="-22.486667" font-size="1.000000" text-anchor="start">DP_CONN</text>
+  </g>
+  <g class="symbol" data-id="R_X">
+    <rect class="body" x="39.300000" y="-41.710000" width="11.900000" height="7.620000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="39.300000" y="-42.210000" font-size="1.500000">R7 (R)</text>
+    <line class="stub" x1="39.300000" y1="-39.170000" x2="38.030000" y2="-39.170000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="39.617500" y="-38.836667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="37.395000" y="-38.836667" font-size="1.000000" text-anchor="end">XOUT</text>
+    <line class="stub" x1="51.200000" y1="-39.170000" x2="52.470000" y2="-39.170000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="50.882500" y="-38.836667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="53.105000" y="-38.836667" font-size="1.000000" text-anchor="start">XTAL2</text>
+  </g>
+  <g class="symbol" data-id="SW1">
+    <rect class="body" x="291.710000" y="-77.460000" width="5.080000" height="7.620000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="291.710000" y="-77.960000" font-size="1.500000">EVQP1 (BTN)</text>
+    <line class="stub" x1="291.710000" y1="-74.920000" x2="290.440000" y2="-74.920000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="292.027500" y="-74.586667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="289.805000" y="-74.586667" font-size="1.000000" text-anchor="end">BOOT_SW</text>
+    <line class="stub" x1="296.790000" y1="-74.920000" x2="298.060000" y2="-74.920000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="296.472500" y="-74.586667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="298.695000" y="-74.586667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="SW2">
+    <rect class="body" x="291.710000" y="-65.840000" width="5.080000" height="7.620000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="291.710000" y="-66.340000" font-size="1.500000">EVQP2 (BTN)</text>
+    <line class="stub" x1="291.710000" y1="-63.300000" x2="290.440000" y2="-63.300000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="292.027500" y="-62.966667" font-size="1.000000" text-anchor="start">1</text>
+    <text class="tag" x="289.805000" y="-62.966667" font-size="1.000000" text-anchor="end">RUN</text>
+    <line class="stub" x1="296.790000" y1="-63.300000" x2="298.060000" y2="-63.300000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="296.472500" y="-62.966667" font-size="1.000000" text-anchor="end">2</text>
+    <text class="tag" x="298.695000" y="-62.966667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="U1">
+    <rect class="body" x="86.100000" y="-109.400000" width="32.900000" height="86.360000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="86.100000" y="-109.900000" font-size="1.500000">QFN1 (RP2350A)</text>
+    <line class="stub" x1="86.100000" y1="-106.860000" x2="84.830000" y2="-106.860000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-106.526667" font-size="1.000000" text-anchor="start">IOVDD</text>
+    <text class="tag" x="84.195000" y="-106.526667" font-size="1.000000" text-anchor="end">+3V3</text>
+    <line class="stub" x1="119.000000" y1="-106.860000" x2="120.270000" y2="-106.860000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-106.526667" font-size="1.000000" text-anchor="end">GPIO0</text>
+    <text class="tag" x="120.905000" y="-106.526667" font-size="1.000000" text-anchor="start">A_SWCLK</text>
+    <line class="stub" x1="86.100000" y1="-104.320000" x2="84.830000" y2="-104.320000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-103.986667" font-size="1.000000" text-anchor="start">GPIO1</text>
+    <text class="tag" x="84.195000" y="-103.986667" font-size="1.000000" text-anchor="end">A_SWDIO</text>
+    <line class="stub" x1="119.000000" y1="-104.320000" x2="120.270000" y2="-104.320000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-103.986667" font-size="1.000000" text-anchor="end">GPIO2</text>
+    <text class="tag" x="120.905000" y="-103.986667" font-size="1.000000" text-anchor="start">B_SWCLK</text>
+    <line class="stub" x1="86.100000" y1="-101.780000" x2="84.830000" y2="-101.780000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-101.446667" font-size="1.000000" text-anchor="start">GPIO3</text>
+    <text class="tag" x="84.195000" y="-101.446667" font-size="1.000000" text-anchor="end">B_SWDIO</text>
+    <line class="stub" x1="119.000000" y1="-101.780000" x2="120.270000" y2="-101.780000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-101.446667" font-size="1.000000" text-anchor="end">DVDD</text>
+    <text class="tag" x="120.905000" y="-101.446667" font-size="1.000000" text-anchor="start">+DVDD</text>
+    <line class="stub" x1="86.100000" y1="-99.240000" x2="84.830000" y2="-99.240000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-98.906667" font-size="1.000000" text-anchor="start">GPIO4</text>
+    <text class="tag" x="84.195000" y="-98.906667" font-size="1.000000" text-anchor="end">C_SWCLK</text>
+    <line class="stub" x1="119.000000" y1="-99.240000" x2="120.270000" y2="-99.240000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-98.906667" font-size="1.000000" text-anchor="end">GPIO5</text>
+    <text class="tag" x="120.905000" y="-98.906667" font-size="1.000000" text-anchor="start">C_SWDIO</text>
+    <line class="stub" x1="86.100000" y1="-96.700000" x2="84.830000" y2="-96.700000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-96.366667" font-size="1.000000" text-anchor="start">GPIO6</text>
+    <text class="tag" x="84.195000" y="-96.366667" font-size="1.000000" text-anchor="end">D_SWCLK</text>
+    <line class="stub" x1="119.000000" y1="-96.700000" x2="120.270000" y2="-96.700000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-96.366667" font-size="1.000000" text-anchor="end">GPIO7</text>
+    <text class="tag" x="120.905000" y="-96.366667" font-size="1.000000" text-anchor="start">D_SWDIO</text>
+    <line class="stub" x1="86.100000" y1="-94.160000" x2="84.830000" y2="-94.160000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-93.826667" font-size="1.000000" text-anchor="start">IOVDD</text>
+    <text class="tag" x="84.195000" y="-93.826667" font-size="1.000000" text-anchor="end">+3V3</text>
+    <line class="stub" x1="119.000000" y1="-94.160000" x2="120.270000" y2="-94.160000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-93.826667" font-size="1.000000" text-anchor="end">GPIO8</text>
+    <text class="tag" x="120.905000" y="-93.826667" font-size="1.000000" text-anchor="start">E_SWCLK</text>
+    <line class="stub" x1="86.100000" y1="-91.620000" x2="84.830000" y2="-91.620000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-91.286667" font-size="1.000000" text-anchor="start">GPIO9</text>
+    <text class="tag" x="84.195000" y="-91.286667" font-size="1.000000" text-anchor="end">E_SWDIO</text>
+    <line class="stub" x1="119.000000" y1="-91.620000" x2="120.270000" y2="-91.620000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-91.286667" font-size="1.000000" text-anchor="end">GPIO10</text>
+    <text class="tag" x="120.905000" y="-91.286667" font-size="1.000000" text-anchor="start">F_SWCLK</text>
+    <line class="stub" x1="86.100000" y1="-89.080000" x2="84.830000" y2="-89.080000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-88.746667" font-size="1.000000" text-anchor="start">GPIO11</text>
+    <text class="tag" x="84.195000" y="-88.746667" font-size="1.000000" text-anchor="end">F_SWDIO</text>
+    <line class="stub" x1="119.000000" y1="-89.080000" x2="120.270000" y2="-89.080000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-88.746667" font-size="1.000000" text-anchor="end">GPIO12</text>
+    <text class="tag" x="120.905000" y="-88.746667" font-size="1.000000" text-anchor="start">G_SWCLK</text>
+    <line class="stub" x1="86.100000" y1="-86.540000" x2="84.830000" y2="-86.540000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-86.206667" font-size="1.000000" text-anchor="start">GPIO13</text>
+    <text class="tag" x="84.195000" y="-86.206667" font-size="1.000000" text-anchor="end">G_SWDIO</text>
+    <line class="stub" x1="119.000000" y1="-86.540000" x2="120.270000" y2="-86.540000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-86.206667" font-size="1.000000" text-anchor="end">GPIO14</text>
+    <text class="tag" x="120.905000" y="-86.206667" font-size="1.000000" text-anchor="start">H_SWCLK</text>
+    <line class="stub" x1="86.100000" y1="-84.000000" x2="84.830000" y2="-84.000000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-83.666667" font-size="1.000000" text-anchor="start">GPIO15</text>
+    <text class="tag" x="84.195000" y="-83.666667" font-size="1.000000" text-anchor="end">H_SWDIO</text>
+    <line class="stub" x1="119.000000" y1="-84.000000" x2="120.270000" y2="-84.000000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-83.666667" font-size="1.000000" text-anchor="end">IOVDD</text>
+    <text class="tag" x="120.905000" y="-83.666667" font-size="1.000000" text-anchor="start">+3V3</text>
+    <line class="stub" x1="86.100000" y1="-81.460000" x2="84.830000" y2="-81.460000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-81.126667" font-size="1.000000" text-anchor="start">XIN</text>
+    <text class="tag" x="84.195000" y="-81.126667" font-size="1.000000" text-anchor="end">XIN</text>
+    <line class="stub" x1="119.000000" y1="-81.460000" x2="120.270000" y2="-81.460000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-81.126667" font-size="1.000000" text-anchor="end">XOUT</text>
+    <text class="tag" x="120.905000" y="-81.126667" font-size="1.000000" text-anchor="start">XOUT</text>
+    <line class="stub" x1="86.100000" y1="-78.920000" x2="84.830000" y2="-78.920000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-78.586667" font-size="1.000000" text-anchor="start">DVDD</text>
+    <text class="tag" x="84.195000" y="-78.586667" font-size="1.000000" text-anchor="end">+DVDD</text>
+    <line class="stub" x1="119.000000" y1="-78.920000" x2="120.270000" y2="-78.920000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-78.586667" font-size="1.000000" text-anchor="end">SWCLK</text>
+    <text class="nc" x="120.905000" y="-78.586667" font-size="1.000000" text-anchor="start">✕</text>
+    <line class="stub" x1="86.100000" y1="-76.380000" x2="84.830000" y2="-76.380000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-76.046667" font-size="1.000000" text-anchor="start">SWDIO</text>
+    <text class="nc" x="84.195000" y="-76.046667" font-size="1.000000" text-anchor="end">✕</text>
+    <line class="stub" x1="119.000000" y1="-76.380000" x2="120.270000" y2="-76.380000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-76.046667" font-size="1.000000" text-anchor="end">RUN</text>
+    <text class="tag" x="120.905000" y="-76.046667" font-size="1.000000" text-anchor="start">RUN</text>
+    <line class="stub" x1="86.100000" y1="-73.840000" x2="84.830000" y2="-73.840000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-73.506667" font-size="1.000000" text-anchor="start">GPIO16</text>
+    <text class="tag" x="84.195000" y="-73.506667" font-size="1.000000" text-anchor="end">I_SWCLK</text>
+    <line class="stub" x1="119.000000" y1="-73.840000" x2="120.270000" y2="-73.840000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-73.506667" font-size="1.000000" text-anchor="end">GPIO17</text>
+    <text class="tag" x="120.905000" y="-73.506667" font-size="1.000000" text-anchor="start">I_SWDIO</text>
+    <line class="stub" x1="86.100000" y1="-71.300000" x2="84.830000" y2="-71.300000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-70.966667" font-size="1.000000" text-anchor="start">GPIO18</text>
+    <text class="tag" x="84.195000" y="-70.966667" font-size="1.000000" text-anchor="end">J_SWCLK</text>
+    <line class="stub" x1="119.000000" y1="-71.300000" x2="120.270000" y2="-71.300000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-70.966667" font-size="1.000000" text-anchor="end">IOVDD</text>
+    <text class="tag" x="120.905000" y="-70.966667" font-size="1.000000" text-anchor="start">+3V3</text>
+    <line class="stub" x1="86.100000" y1="-68.760000" x2="84.830000" y2="-68.760000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-68.426667" font-size="1.000000" text-anchor="start">GPIO19</text>
+    <text class="tag" x="84.195000" y="-68.426667" font-size="1.000000" text-anchor="end">J_SWDIO</text>
+    <line class="stub" x1="119.000000" y1="-68.760000" x2="120.270000" y2="-68.760000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-68.426667" font-size="1.000000" text-anchor="end">GPIO20</text>
+    <text class="tag" x="120.905000" y="-68.426667" font-size="1.000000" text-anchor="start">LED_DIN</text>
+    <line class="stub" x1="86.100000" y1="-66.220000" x2="84.830000" y2="-66.220000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-65.886667" font-size="1.000000" text-anchor="start">GPIO21</text>
+    <text class="nc" x="84.195000" y="-65.886667" font-size="1.000000" text-anchor="end">✕</text>
+    <line class="stub" x1="119.000000" y1="-66.220000" x2="120.270000" y2="-66.220000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-65.886667" font-size="1.000000" text-anchor="end">GPIO22</text>
+    <text class="nc" x="120.905000" y="-65.886667" font-size="1.000000" text-anchor="start">✕</text>
+    <line class="stub" x1="86.100000" y1="-63.680000" x2="84.830000" y2="-63.680000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-63.346667" font-size="1.000000" text-anchor="start">GPIO23</text>
+    <text class="nc" x="84.195000" y="-63.346667" font-size="1.000000" text-anchor="end">✕</text>
+    <line class="stub" x1="119.000000" y1="-63.680000" x2="120.270000" y2="-63.680000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-63.346667" font-size="1.000000" text-anchor="end">GPIO24</text>
+    <text class="nc" x="120.905000" y="-63.346667" font-size="1.000000" text-anchor="start">✕</text>
+    <line class="stub" x1="86.100000" y1="-61.140000" x2="84.830000" y2="-61.140000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-60.806667" font-size="1.000000" text-anchor="start">GPIO25</text>
+    <text class="nc" x="84.195000" y="-60.806667" font-size="1.000000" text-anchor="end">✕</text>
+    <line class="stub" x1="119.000000" y1="-61.140000" x2="120.270000" y2="-61.140000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-60.806667" font-size="1.000000" text-anchor="end">IOVDD</text>
+    <text class="tag" x="120.905000" y="-60.806667" font-size="1.000000" text-anchor="start">+3V3</text>
+    <line class="stub" x1="86.100000" y1="-58.600000" x2="84.830000" y2="-58.600000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-58.266667" font-size="1.000000" text-anchor="start">DVDD</text>
+    <text class="tag" x="84.195000" y="-58.266667" font-size="1.000000" text-anchor="end">+DVDD</text>
+    <line class="stub" x1="119.000000" y1="-58.600000" x2="120.270000" y2="-58.600000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-58.266667" font-size="1.000000" text-anchor="end">GPIO26/ADC0</text>
+    <text class="nc" x="120.905000" y="-58.266667" font-size="1.000000" text-anchor="start">✕</text>
+    <line class="stub" x1="86.100000" y1="-56.060000" x2="84.830000" y2="-56.060000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-55.726667" font-size="1.000000" text-anchor="start">GPIO27/ADC1</text>
+    <text class="nc" x="84.195000" y="-55.726667" font-size="1.000000" text-anchor="end">✕</text>
+    <line class="stub" x1="119.000000" y1="-56.060000" x2="120.270000" y2="-56.060000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-55.726667" font-size="1.000000" text-anchor="end">GPIO28/ADC2</text>
+    <text class="nc" x="120.905000" y="-55.726667" font-size="1.000000" text-anchor="start">✕</text>
+    <line class="stub" x1="86.100000" y1="-53.520000" x2="84.830000" y2="-53.520000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-53.186667" font-size="1.000000" text-anchor="start">GPIO29/ADC3</text>
+    <text class="nc" x="84.195000" y="-53.186667" font-size="1.000000" text-anchor="end">✕</text>
+    <line class="stub" x1="119.000000" y1="-53.520000" x2="120.270000" y2="-53.520000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-53.186667" font-size="1.000000" text-anchor="end">ADC_AVDD</text>
+    <text class="tag" x="120.905000" y="-53.186667" font-size="1.000000" text-anchor="start">+3V3</text>
+    <line class="stub" x1="86.100000" y1="-50.980000" x2="84.830000" y2="-50.980000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-50.646667" font-size="1.000000" text-anchor="start">IOVDD</text>
+    <text class="tag" x="84.195000" y="-50.646667" font-size="1.000000" text-anchor="end">+3V3</text>
+    <line class="stub" x1="119.000000" y1="-50.980000" x2="120.270000" y2="-50.980000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-50.646667" font-size="1.000000" text-anchor="end">VREG_AVDD</text>
+    <text class="tag" x="120.905000" y="-50.646667" font-size="1.000000" text-anchor="start">VREG_AVDD</text>
+    <line class="stub" x1="86.100000" y1="-48.440000" x2="84.830000" y2="-48.440000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-48.106667" font-size="1.000000" text-anchor="start">VREG_PGND</text>
+    <text class="tag" x="84.195000" y="-48.106667" font-size="1.000000" text-anchor="end">GND</text>
+    <line class="stub" x1="119.000000" y1="-48.440000" x2="120.270000" y2="-48.440000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-48.106667" font-size="1.000000" text-anchor="end">VREG_LX</text>
+    <text class="tag" x="120.905000" y="-48.106667" font-size="1.000000" text-anchor="start">VREG_LX</text>
+    <line class="stub" x1="86.100000" y1="-45.900000" x2="84.830000" y2="-45.900000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-45.566667" font-size="1.000000" text-anchor="start">VREG_VIN</text>
+    <text class="tag" x="84.195000" y="-45.566667" font-size="1.000000" text-anchor="end">+3V3</text>
+    <line class="stub" x1="119.000000" y1="-45.900000" x2="120.270000" y2="-45.900000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-45.566667" font-size="1.000000" text-anchor="end">VREG_FB</text>
+    <text class="tag" x="120.905000" y="-45.566667" font-size="1.000000" text-anchor="start">+DVDD</text>
+    <line class="stub" x1="86.100000" y1="-43.360000" x2="84.830000" y2="-43.360000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-43.026667" font-size="1.000000" text-anchor="start">USB_DM</text>
+    <text class="tag" x="84.195000" y="-43.026667" font-size="1.000000" text-anchor="end">USB_DM</text>
+    <line class="stub" x1="119.000000" y1="-43.360000" x2="120.270000" y2="-43.360000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-43.026667" font-size="1.000000" text-anchor="end">USB_DP</text>
+    <text class="tag" x="120.905000" y="-43.026667" font-size="1.000000" text-anchor="start">USB_DP</text>
+    <line class="stub" x1="86.100000" y1="-40.820000" x2="84.830000" y2="-40.820000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-40.486667" font-size="1.000000" text-anchor="start">USB_OTP_VDD</text>
+    <text class="tag" x="84.195000" y="-40.486667" font-size="1.000000" text-anchor="end">+3V3</text>
+    <line class="stub" x1="119.000000" y1="-40.820000" x2="120.270000" y2="-40.820000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-40.486667" font-size="1.000000" text-anchor="end">QSPI_IOVDD</text>
+    <text class="tag" x="120.905000" y="-40.486667" font-size="1.000000" text-anchor="start">+3V3</text>
+    <line class="stub" x1="86.100000" y1="-38.280000" x2="84.830000" y2="-38.280000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-37.946667" font-size="1.000000" text-anchor="start">QSPI_SD3</text>
+    <text class="tag" x="84.195000" y="-37.946667" font-size="1.000000" text-anchor="end">QSPI_SD3</text>
+    <line class="stub" x1="119.000000" y1="-38.280000" x2="120.270000" y2="-38.280000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-37.946667" font-size="1.000000" text-anchor="end">QSPI_SCLK</text>
+    <text class="tag" x="120.905000" y="-37.946667" font-size="1.000000" text-anchor="start">QSPI_SCLK</text>
+    <line class="stub" x1="86.100000" y1="-35.740000" x2="84.830000" y2="-35.740000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-35.406667" font-size="1.000000" text-anchor="start">QSPI_SD0</text>
+    <text class="tag" x="84.195000" y="-35.406667" font-size="1.000000" text-anchor="end">QSPI_SD0</text>
+    <line class="stub" x1="119.000000" y1="-35.740000" x2="120.270000" y2="-35.740000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-35.406667" font-size="1.000000" text-anchor="end">QSPI_SD2</text>
+    <text class="tag" x="120.905000" y="-35.406667" font-size="1.000000" text-anchor="start">QSPI_SD2</text>
+    <line class="stub" x1="86.100000" y1="-33.200000" x2="84.830000" y2="-33.200000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-32.866667" font-size="1.000000" text-anchor="start">QSPI_SD1</text>
+    <text class="tag" x="84.195000" y="-32.866667" font-size="1.000000" text-anchor="end">QSPI_SD1</text>
+    <line class="stub" x1="119.000000" y1="-33.200000" x2="120.270000" y2="-33.200000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-32.866667" font-size="1.000000" text-anchor="end">~{QSPI_SS}</text>
+    <text class="tag" x="120.905000" y="-32.866667" font-size="1.000000" text-anchor="start">QSPI_CS_N</text>
+    <line class="stub" x1="86.100000" y1="-30.660000" x2="84.830000" y2="-30.660000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-30.326667" font-size="1.000000" text-anchor="start">GND</text>
+    <text class="tag" x="84.195000" y="-30.326667" font-size="1.000000" text-anchor="end">GND</text>
+    <line class="stub" x1="119.000000" y1="-30.660000" x2="120.270000" y2="-30.660000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="118.682500" y="-30.326667" font-size="1.000000" text-anchor="end">swclk</text>
+    <line class="stub" x1="86.100000" y1="-28.120000" x2="84.830000" y2="-28.120000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="86.417500" y="-27.786667" font-size="1.000000" text-anchor="start">swdio</text>
+  </g>
+  <g class="symbol" data-id="U2">
+    <rect class="body" x="36.850000" y="-98.350000" width="16.800000" height="15.240000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="36.850000" y="-98.850000" font-size="1.500000">SOIC1 (W25Q)</text>
+    <line class="stub" x1="36.850000" y1="-95.810000" x2="35.580000" y2="-95.810000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="37.167500" y="-95.476667" font-size="1.000000" text-anchor="start">CS_N</text>
+    <text class="tag" x="34.945000" y="-95.476667" font-size="1.000000" text-anchor="end">QSPI_CS_N</text>
+    <line class="stub" x1="53.650000" y1="-95.810000" x2="54.920000" y2="-95.810000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="53.332500" y="-95.476667" font-size="1.000000" text-anchor="end">IO1</text>
+    <text class="tag" x="55.555000" y="-95.476667" font-size="1.000000" text-anchor="start">QSPI_SD1</text>
+    <line class="stub" x1="36.850000" y1="-93.270000" x2="35.580000" y2="-93.270000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="37.167500" y="-92.936667" font-size="1.000000" text-anchor="start">IO2</text>
+    <text class="tag" x="34.945000" y="-92.936667" font-size="1.000000" text-anchor="end">QSPI_SD2</text>
+    <line class="stub" x1="53.650000" y1="-93.270000" x2="54.920000" y2="-93.270000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="53.332500" y="-92.936667" font-size="1.000000" text-anchor="end">GND</text>
+    <text class="tag" x="55.555000" y="-92.936667" font-size="1.000000" text-anchor="start">GND</text>
+    <line class="stub" x1="36.850000" y1="-90.730000" x2="35.580000" y2="-90.730000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="37.167500" y="-90.396667" font-size="1.000000" text-anchor="start">IO0</text>
+    <text class="tag" x="34.945000" y="-90.396667" font-size="1.000000" text-anchor="end">QSPI_SD0</text>
+    <line class="stub" x1="53.650000" y1="-90.730000" x2="54.920000" y2="-90.730000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="53.332500" y="-90.396667" font-size="1.000000" text-anchor="end">CLK</text>
+    <text class="tag" x="55.555000" y="-90.396667" font-size="1.000000" text-anchor="start">QSPI_SCLK</text>
+    <line class="stub" x1="36.850000" y1="-88.190000" x2="35.580000" y2="-88.190000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="37.167500" y="-87.856667" font-size="1.000000" text-anchor="start">IO3</text>
+    <text class="tag" x="34.945000" y="-87.856667" font-size="1.000000" text-anchor="end">QSPI_SD3</text>
+    <line class="stub" x1="53.650000" y1="-88.190000" x2="54.920000" y2="-88.190000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="53.332500" y="-87.856667" font-size="1.000000" text-anchor="end">VCC</text>
+    <text class="tag" x="55.555000" y="-87.856667" font-size="1.000000" text-anchor="start">+3V3</text>
+  </g>
+  <g class="symbol" data-id="U3">
+    <rect class="body" x="7.480000" y="-109.400000" width="7.440000" height="12.700000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="7.480000" y="-109.900000" font-size="1.500000">SOT1 (REG)</text>
+    <line class="stub" x1="7.480000" y1="-106.860000" x2="6.210000" y2="-106.860000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="7.797500" y="-106.526667" font-size="1.000000" text-anchor="start">VIN</text>
+    <text class="tag" x="5.575000" y="-106.526667" font-size="1.000000" text-anchor="end">VBUS</text>
+    <line class="stub" x1="14.920000" y1="-106.860000" x2="16.190000" y2="-106.860000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="14.602500" y="-106.526667" font-size="1.000000" text-anchor="end">GND</text>
+    <text class="tag" x="16.825000" y="-106.526667" font-size="1.000000" text-anchor="start">GND</text>
+    <line class="stub" x1="7.480000" y1="-104.320000" x2="6.210000" y2="-104.320000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="7.797500" y="-103.986667" font-size="1.000000" text-anchor="start">EN</text>
+    <text class="tag" x="5.575000" y="-103.986667" font-size="1.000000" text-anchor="end">VBUS</text>
+    <line class="stub" x1="14.920000" y1="-104.320000" x2="16.190000" y2="-104.320000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="14.602500" y="-103.986667" font-size="1.000000" text-anchor="end">NC</text>
+    <text class="nc" x="16.825000" y="-103.986667" font-size="1.000000" text-anchor="start">✕</text>
+    <line class="stub" x1="7.480000" y1="-101.780000" x2="6.210000" y2="-101.780000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="7.797500" y="-101.446667" font-size="1.000000" text-anchor="start">VOUT</text>
+    <text class="tag" x="5.575000" y="-101.446667" font-size="1.000000" text-anchor="end">+3V3</text>
+  </g>
+  <g class="symbol" data-id="Y1">
+    <rect class="body" x="34.400000" y="-79.110000" width="21.700000" height="10.160000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="34.400000" y="-79.610000" font-size="1.500000">Crystal1 (XTAL)</text>
+    <line class="stub" x1="34.400000" y1="-76.570000" x2="33.130000" y2="-76.570000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="34.717500" y="-76.236667" font-size="1.000000" text-anchor="start">X1</text>
+    <text class="tag" x="32.495000" y="-76.236667" font-size="1.000000" text-anchor="end">XIN</text>
+    <line class="stub" x1="56.100000" y1="-76.570000" x2="57.370000" y2="-76.570000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="55.782500" y="-76.236667" font-size="1.000000" text-anchor="end">GNDa</text>
+    <text class="tag" x="58.005000" y="-76.236667" font-size="1.000000" text-anchor="start">GND</text>
+    <line class="stub" x1="34.400000" y1="-74.030000" x2="33.130000" y2="-74.030000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="34.717500" y="-73.696667" font-size="1.000000" text-anchor="start">X2</text>
+    <text class="tag" x="32.495000" y="-73.696667" font-size="1.000000" text-anchor="end">XTAL2</text>
+    <line class="stub" x1="56.100000" y1="-74.030000" x2="57.370000" y2="-74.030000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="55.782500" y="-73.696667" font-size="1.000000" text-anchor="end">GNDb</text>
+    <text class="tag" x="58.005000" y="-73.696667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+</svg>

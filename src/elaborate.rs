@@ -100,6 +100,10 @@ pub enum GenDirective {
         /// pin's PAD identity (Decision 21: pad number is THE identity — no new
         /// namespace). `BTreeMap` for canonical serialization order.
         ports: BTreeMap<String, (String, String)>,
+        /// An optional Decision-20 schematic layout fragment authored over the def's
+        /// INTERNAL paths (`R1`, not `sense[0].R1`), stamped per instance so a reused
+        /// circuit renders identically everywhere it is instantiated.
+        layout: Option<crate::schematic::SchematicLayout>,
     },
     /// A **generative instance** (Decision 21b) — the expression-bearing form of `inst`
     /// that lowers, during elaboration, into one or more plain [`Instance`](Self::Instance)
@@ -353,10 +357,18 @@ pub const MAX_RANGE_INSTANCES: i64 = 10_000;
 /// unknown param, type error, inexact division, cycle, out-of-range/huge bound) is
 /// collected as a house diagnostic; on any fault the whole expansion fails so no partial
 /// program elaborates.
+#[allow(clippy::type_complexity)]
 fn expand_generative(
     source: &Source,
     lib: &PartLib,
-) -> Result<(Source, BTreeSet<String>), Vec<Diagnostic>> {
+) -> Result<
+    (
+        Source,
+        BTreeSet<String>,
+        BTreeMap<String, crate::schematic::SchematicLayout>,
+    ),
+    Vec<Diagnostic>,
+> {
     use crate::expr;
     let mut errors: Vec<Diagnostic> = Vec::new();
 
@@ -435,6 +447,10 @@ fn expand_generative(
     let mut port_map: BTreeMap<(String, String), (String, String)> = BTreeMap::new();
     let mut authored_nets: BTreeSet<String> = BTreeSet::new();
     let mut internal_nets: BTreeMap<String, String> = BTreeMap::new();
+    // Per-instance stamped schematic fragments (Decision 20 embedded in a def), keyed by
+    // def-instance path. Filled by `stamp_def` for every instance whose def carries a
+    // `schematic { … }` block; consumed by the derived reflow to expand a def-instance sym.
+    let mut def_fragments: BTreeMap<String, crate::schematic::SchematicLayout> = BTreeMap::new();
 
     let mut ctx = ExpandCtx {
         defs: &defs,
@@ -444,6 +460,7 @@ fn expand_generative(
         port_map: &mut port_map,
         authored_nets: &mut authored_nets,
         internal_nets: &mut internal_nets,
+        def_fragments: &mut def_fragments,
     };
     // Stamp the whole program at the empty prefix. Connections are emitted with their
     // paths prefixed but *ports unresolved*; the rewrite pass below threads them through
@@ -488,7 +505,7 @@ fn expand_generative(
     resolve_ports_in_source(&mut out, &port_map, &mut errors);
 
     if errors.is_empty() {
-        Ok((out, dropped))
+        Ok((out, dropped, def_fragments))
     } else {
         Err(errors)
     }
@@ -516,6 +533,55 @@ struct ExpandCtx<'a> {
     /// mapped to the def-instance path that produced it — for a collision diagnostic that
     /// names both sides.
     internal_nets: &'a mut BTreeMap<String, String>,
+    /// Per-instance stamped schematic layout fragments (Decision 20 embedded in a def):
+    /// keyed by the def-instance path (`sense[0]`), the value is the def's layout fragment
+    /// with every internal `sym` path and wire endpoint prefixed by that instance path. The
+    /// derived reflow expands a doc-level `sym <instance>` into this fragment. Only def
+    /// instances whose def carries a `schematic { … }` block appear here.
+    def_fragments: &'a mut BTreeMap<String, crate::schematic::SchematicLayout>,
+}
+
+/// Deep-copy a def's internal layout fragment, prefixing every addressable path by the
+/// instance path (`ipath`) so a stamped fragment addresses the same instances the body
+/// stamping produced. `Symbol.path` and both `Wire` endpoint `comp`s gain the prefix (via
+/// [`prefix_path`], the same idiom the body/net stamping uses); container structure, wire
+/// waypoints/pins, and comment/blank trivia are copied unchanged (waypoints are
+/// schematic-space coordinates, not paths; a pin is a selector on the now-prefixed comp).
+fn prefix_fragment(
+    frag: &crate::schematic::SchematicLayout,
+    ipath: &str,
+) -> crate::schematic::SchematicLayout {
+    use crate::schematic::{LayoutNode, SchematicLayout};
+    fn walk(nodes: &[LayoutNode], ipath: &str) -> Vec<LayoutNode> {
+        nodes
+            .iter()
+            .map(|n| match n {
+                LayoutNode::Symbol(s) => LayoutNode::Symbol(crate::schematic::Symbol {
+                    path: prefix_path(ipath, &s.path),
+                    ..s.clone()
+                }),
+                LayoutNode::Wire(w) => LayoutNode::Wire(crate::schematic::Wire {
+                    a: crate::schematic::WireEnd {
+                        comp: prefix_path(ipath, &w.a.comp),
+                        pin: w.a.pin.clone(),
+                    },
+                    b: crate::schematic::WireEnd {
+                        comp: prefix_path(ipath, &w.b.comp),
+                        pin: w.b.pin.clone(),
+                    },
+                    waypoints: w.waypoints.clone(),
+                }),
+                LayoutNode::Container(c) => LayoutNode::Container(crate::schematic::Container {
+                    children: walk(&c.children, ipath),
+                    ..c.clone()
+                }),
+                LayoutNode::Comment(_) | LayoutNode::Blank => n.clone(),
+            })
+            .collect()
+    }
+    SchematicLayout {
+        roots: walk(&frag.roots, ipath),
+    }
 }
 
 /// Prefix a def-relative path/name with the instance path (`""` at top level → unchanged;
@@ -710,13 +776,14 @@ fn stamp_def(
         return;
     }
 
-    let (params, body, ports) = match ctx.defs.get(def_name) {
+    let (params, body, ports, layout) = match ctx.defs.get(def_name) {
         Some(GenDirective::Def {
             params,
             body,
             ports,
+            layout,
             ..
-        }) => (params, body, ports),
+        }) => (params, body, ports, layout),
         _ => return, // unreachable: caller checked `defs.contains_key`
     };
 
@@ -773,6 +840,17 @@ fn stamp_def(
             (ipath.to_string(), pname.clone()),
             (prefix_path(ipath, tpath), tsel.clone()),
         );
+    }
+
+    // Record this instance's schematic layout fragment (Decision 20 embedded in a def), if
+    // the def declares one. Every internal path is prefixed by `ipath` so the stamped
+    // fragment addresses the instances the body stamping produced; the derived reflow later
+    // expands a doc-level `sym <ipath>` into this fragment. Two instances of the same def
+    // thus record byte-identical fragments modulo their distinct instance prefixes — the
+    // "renders identically everywhere" guarantee.
+    if let Some(frag) = layout {
+        ctx.def_fragments
+            .insert(ipath.to_string(), prefix_fragment(frag, ipath));
     }
 
     // Stamp the body in the def's scope at the instance prefix.
@@ -1009,6 +1087,13 @@ pub struct Elaborated {
     /// (e.g. the schematic-layout gate, Decision 20c) reads this rather than treating an
     /// absent path as an error. Empty when no `if=` dropped anything.
     pub dnp_dropped: BTreeSet<String>,
+    /// Per-instance stamped schematic layout fragments (Decision 20 embedded in a def),
+    /// keyed by def-instance path (`sense[0]`). Each is the def's internal `schematic { … }`
+    /// fragment with every `sym` path / wire endpoint prefixed by the instance path, so the
+    /// derived reflow can expand a doc-level `sym <instance>` into the fragment's placements
+    /// (a reused circuit renders identically at every instantiation). Empty when no
+    /// instantiated def carries a layout fragment.
+    pub def_fragments: BTreeMap<String, crate::schematic::SchematicLayout>,
 }
 
 /// Elaborate a source program into materialized instances + connectivity,
@@ -1028,7 +1113,7 @@ pub fn elaborate(
     // reconciliation, which addresses instances by their `path[i]` — sees only plain
     // `Instance` directives (Decision 21b). A generative fault (bad expression, cycle,
     // out-of-range bound) aborts the whole transaction, like any structural fault.
-    let (expanded, dnp_dropped) = expand_generative(source, lib)?;
+    let (expanded, dnp_dropped, def_fragments) = expand_generative(source, lib)?;
     let source = &expanded;
 
     let mut components: BTreeMap<EntityId, Component> = BTreeMap::new();
@@ -1725,6 +1810,7 @@ pub fn elaborate(
         no_connects,
         report,
         dnp_dropped,
+        def_fragments,
     })
 }
 

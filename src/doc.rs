@@ -400,6 +400,15 @@ pub struct ReconReport {
     /// block or no wire earns a warning. (Hard wire errors — an unknown endpoint comp/pin —
     /// abort the commit and never reach here.)
     pub schematic_wire_warnings: Vec<crate::diagnostic::Diagnostic>,
+    /// Override findings on the def-embedded schematic layout (Decision 20 embedded in a
+    /// def): a **degrade**, not a fault. When a doc-level `sym <inst.internal>` places an
+    /// internal path that a def instance's stamped fragment ALSO places, the doc-level
+    /// placement wins (the reflow drops the fragment's copy) and this records a
+    /// `W_SCHEMATIC` "your doc-level sym overrides the fragment" warning so the supersession
+    /// is visible. Pre-built by [`crate::schematic::validate`]. Non-blocking (`is_clean`
+    /// ignores it — it is a deliberate authoring choice, not an error). Empty when no such
+    /// collision exists.
+    pub schematic_override_warnings: Vec<crate::diagnostic::Diagnostic>,
 }
 
 impl ReconReport {
@@ -417,7 +426,9 @@ impl ReconReport {
         // variant toggle (Decision 21b), an unplaced component still renders in the
         // derived bin (Decision 20c), and a `schematic_wire_warnings` finding is a
         // presentational-wire disagreement with the netlist (Decision 20d) — the netlist
-        // is still the truth. All are warnings that leave the doc clean.
+        // is still the truth. `schematic_override_warnings` is likewise excluded (a doc-level
+        // sym deliberately superseding a stamped fragment placement, Decision 20 — an
+        // authoring choice, not an error). All are warnings that leave the doc clean.
     }
 }
 
@@ -545,6 +556,10 @@ impl crate::diagnostic::Diagnose for ReconReport {
         // (a wire is presentational): each is a `W_SCHEMATIC_WIRE` warning, and `is_clean`
         // ignores them.
         out.extend(self.schematic_wire_warnings.iter().cloned());
+        // Def-embedded layout override findings (Decision 20 embedded in a def): a doc-level
+        // sym superseded a stamped fragment's placement. Degrade, not fault — a deliberate
+        // authoring choice; already `W_SCHEMATIC` diagnostics, and `is_clean` ignores them.
+        out.extend(self.schematic_override_warnings.iter().cloned());
         out
     }
 }
@@ -585,6 +600,13 @@ pub struct Doc {
     /// (issue 0001's completeness guarantee). Members are pad identities, same as
     /// [`PinRef`] (a pad number, or `port.signal`).
     pub no_connects: BTreeSet<PinRef>,
+    /// Derived (tier 2): per-instance stamped schematic layout fragments (Decision 20
+    /// embedded in a def), keyed by def-instance path (`sense[0]`). Produced by elaboration
+    /// (from a def's internal `schematic { … }` block, prefixed per instance) and consumed
+    /// by [`reflow_schematic`](Doc::reflow_schematic): a doc-level `sym <def-instance>`
+    /// expands into the matching fragment's placements. Empty when no instantiated def
+    /// carries a layout fragment.
+    pub def_fragments: BTreeMap<String, crate::schematic::SchematicLayout>,
     /// tier 2: materialized routed copper. Like placement, this is solver/hand
     /// state (not a derived query): a `Pinned` trace is hand/agent-authored, a
     /// `Free` one is a future autorouter's regen-able output. Mutated only through
@@ -627,7 +649,7 @@ impl Doc {
             .iter()
             .map(|(id, c)| (id.clone(), c.part.clone()))
             .collect();
-        crate::schematic::reflow(&layout, &parts, lib)
+        crate::schematic::reflow(&layout, &parts, lib, &self.def_fragments)
     }
 
     pub fn input_rev(&self, which: InputId) -> u64 {

@@ -277,6 +277,10 @@ pub fn apply(
     next.components = elab.components;
     next.nets = elab.nets;
     next.no_connects = elab.no_connects;
+    // Per-instance stamped schematic fragments (Decision 20 embedded in a def), consumed by
+    // `reflow_schematic` and the schematic-layout gate below (a def-instance `sym` is legal
+    // and expands, never an unknown-typo error).
+    next.def_fragments = elab.def_fragments;
     next.report = elab.report;
 
     // Commit-time route validation (Decision 18 / 13). Traces/vias are tier-2 state, so
@@ -300,11 +304,16 @@ pub fn apply(
     // `W_FONT_LOAD` idiom).
     if let Some(layout) = &next.schematic {
         let ids: std::collections::BTreeSet<EntityId> = next.components.keys().cloned().collect();
-        let (errors, unplaced) = crate::schematic::validate(layout, &ids, &elab.dnp_dropped);
+        // Pass the per-instance stamped fragment table (Decision 20 embedded in a def) so a
+        // def-instance `sym` is legal (it expands) rather than an unknown-typo error, and so
+        // any doc-level sym that overrides a fragment placement surfaces as a warning.
+        let (errors, unplaced, override_warnings) =
+            crate::schematic::validate(layout, &ids, &elab.dnp_dropped, &next.def_fragments);
         if !errors.is_empty() {
             return Err(errors);
         }
         next.report.unplaced_components = unplaced;
+        next.report.schematic_override_warnings = override_warnings;
 
         // Drawn-wire validation (Decision 20d): a sibling gate that also needs the part
         // library (to resolve endpoint pins) and the elaborated netlist (to spot a wire
@@ -333,6 +342,7 @@ pub fn apply(
     } else {
         next.report.unplaced_components.clear();
         next.report.schematic_wire_warnings.clear();
+        next.report.schematic_override_warnings.clear();
     }
 
     // Decay: garbage-collect hints that the reconciliation found ineffective.
@@ -694,6 +704,71 @@ mod route_commit_tests {
             "provenance round-trips"
         );
         assert_eq!(h2.doc().traces[&TraceId(1)].layer, "F.Cu");
+    }
+
+    /// End-to-end def-embedded layout stamping (Decision 20 embedded in a def): a `def`
+    /// with a `schematic { … }` fragment, instantiated twice at the doc level, elaborates
+    /// so `Doc::def_fragments` holds a per-instance stamped fragment, and
+    /// `reflow_schematic` expands each doc-level `sym <instance>` into its group — with the
+    /// two instances rendering at identical relative internal geometry.
+    #[test]
+    fn def_embedded_layout_stamps_per_instance() {
+        let lib = crate::part::part_library();
+        let text = "\
+def rc {
+  inst R1 Cap
+  inst C1 Cap
+  net mid R1.p2 C1.p1
+  schematic {
+    column {
+      sym R1
+      sym C1
+    }
+  }
+}
+inst a rc
+inst b rc
+schematic {
+  row {
+    sym a
+    sym b
+  }
+}
+";
+        let mut h = History::new(Default::default());
+        h.commit(
+            Transaction::one(Command::LoadText(text.to_string())),
+            &lib,
+            "load",
+        )
+        .expect("def-with-layout doc commits cleanly");
+        let doc = h.doc();
+        // Both instances recorded a stamped fragment, keyed by instance path.
+        assert!(doc.def_fragments.contains_key("a"));
+        assert!(doc.def_fragments.contains_key("b"));
+        // The internal components elaborated at the prefixed paths.
+        assert!(doc.components.contains_key(&EntityId::new("a.R1")));
+        assert!(doc.components.contains_key(&EntityId::new("b.C1")));
+
+        // Reflow expands each def-instance sym into its fragment group. All four internal
+        // components get a coordinate (none fall to the unplaced bin).
+        let placed = doc.reflow_schematic(&lib);
+        for p in ["a.R1", "a.C1", "b.R1", "b.C1"] {
+            assert!(placed.contains_key(&EntityId::new(p)), "`{p}` placed");
+        }
+        // Identical relative internal geometry across the two instances.
+        let off = |inst: &str| {
+            let r = placed[&EntityId::new(format!("{inst}.R1"))].center;
+            let c = placed[&EntityId::new(format!("{inst}.C1"))].center;
+            (c.x - r.x, c.y - r.y)
+        };
+        assert_eq!(off("a"), off("b"), "reused circuit renders identically");
+        // No unplaced-bin warning (every internal component is placed via its fragment).
+        assert!(
+            doc.report.unplaced_components.is_empty(),
+            "all placed: {:?}",
+            doc.report.unplaced_components
+        );
     }
 
     /// Commit-time slab validation: a trace on a typo'd slab is a hard `E_UNKNOWN_SLAB`

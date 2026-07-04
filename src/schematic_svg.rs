@@ -41,6 +41,12 @@ const MARGIN: Nm = 2 * MM;
 pub fn schematic_svg(doc: &Doc, lib: &PartLib) -> String {
     let placements = doc.reflow_schematic(lib);
 
+    // The derived reference designators (Decision 14): the header shows the real refdes
+    // (`C3 (Cap)`), not the raw instance path. `refdes` is total over the elaborated
+    // component universe, so every drawn symbol has an entry; the header still falls back
+    // to the instance path for any id the query somehow omits (a belt-and-braces default).
+    let refdes = crate::annotate::refdes(doc, lib, &crate::annotate::registry(&doc.source));
+
     // Authored schematic rotation per component path (the `Symbol.rot` leaf, §20b), so pin
     // stubs rotate with the box. Absent ⇒ identity (unplaced parts, or no `schematic`).
     let rots = symbol_rotations(doc);
@@ -153,14 +159,19 @@ pub fn schematic_svg(doc: &Doc, lib: &PartLib) -> String {
             fmt_mm(pl.extent.h),
         ));
 
-        // Header: refdes/name above the box top-left.
-        let header = comp.part.clone();
+        // Header: refdes + part name above the box top-left. The refdes is the annotated
+        // designator (`C3`), falling back to the raw instance path when the annotation has
+        // none (the view stays total either way — §20c).
+        let designator = refdes
+            .get(id)
+            .map(String::as_str)
+            .unwrap_or_else(|| id.as_str());
         out.push_str(&format!(
             "    <text class=\"header\" x=\"{}\" y=\"{}\" font-size=\"{}\">{}</text>\n",
             fmt_mm(pl.center.x - hw),
             fmt_mm(flip(pl.center.y + hh) - fmt_gap()),
             fmt_mm(HEADER_TEXT_H),
-            xml_escape(&format!("{id} ({header})")),
+            xml_escape(&format!("{designator} ({})", comp.part)),
         ));
 
         // Pin stubs + names + net tags, per the sizing convention (only when the part is
@@ -454,13 +465,40 @@ mod tests {
         );
         assert!(s.contains("class=\"symbol\" data-id=\"C1\""), "{s}");
         assert!(s.contains("class=\"body\""), "symbol box expected:\n{s}");
+        // The header carries the *annotated* refdes, not the raw instance path: the test
+        // lib's `Cap` class prefixes with its own name, so `C1`/`C2` annotate to
+        // `Cap1`/`Cap2` (the `data-id` group still keys on the path).
         assert!(
-            s.contains(">C1 (Cap)<"),
+            s.contains(">Cap1 (Cap)<"),
             "refdes+name header expected:\n{s}"
         );
         // The net tag is drawn at the connected pin (§20c: tags are the default rendering).
         assert!(s.contains("class=\"tag\""), "net tag expected:\n{s}");
         assert!(s.contains(">VCC<"), "net name tag expected:\n{s}");
+    }
+
+    #[test]
+    fn header_shows_annotated_refdes_not_the_path() {
+        // Two caps under non-refdes instance paths (`CA`, `CB`): the annotator assigns
+        // `Cap1`/`Cap2` (the test lib's `Cap` class prefixes with its own name), but a
+        // `refdes` pin overrides the second to `C7`. The header must read the annotated
+        // designator (`C7`), proving it wires the annotate query rather than echoing the
+        // instance path.
+        let s = render(
+            "inst CA Cap\ninst CB Cap\nrefdes CB C7\nschematic {\n  row {\n    sym CA\n    sym CB\n  }\n}\n",
+        );
+        assert!(
+            s.contains(">Cap1 (Cap)<"),
+            "auto refdes header expected:\n{s}"
+        );
+        assert!(
+            s.contains(">C7 (Cap)<"),
+            "pinned refdes header expected (not the path `CB`):\n{s}"
+        );
+        assert!(
+            !s.contains(">CB (Cap)<"),
+            "header must not echo the instance path when a refdes exists:\n{s}"
+        );
     }
 
     #[test]

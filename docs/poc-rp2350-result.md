@@ -290,3 +290,135 @@ clearance on the actual copper is never checked.
   primary finding: the load-bearing gaps for real boards are **name-keyed pins with
   duplicate power names, no plane/pour/multilayer, no fine-pitch escape routing, and
   no courtyard-based overlap avoidance.**
+
+## Round 3 — schematic authoring (Decision 20 view + def-embedded layout)
+
+Round 3 exercised the **schematic front** (Decision 20): the second derived view of the
+same netlist truth — an authored `row`/`column`/`sym` flow tree, reflowed to coordinates,
+rendered to SVG. Two features landed this round and were driven end-to-end by authoring the
+capstone: **def-embedded layout stamping** (a `def` may carry a `schematic { … }` fragment
+that is stamped per instance — reused circuits render identically everywhere) and
+**refdes headers** (the schematic header shows the annotated designator `C3 (C)`, not the
+raw instance path). The invariant held: the doc-level `schematic { … }` block round-trips
+byte-lossless through `serialize → LoadText → serialize`, and the pipeline continues on the
+parsed doc.
+
+**Artifacts:** `poc/out/schematic.svg` (the 44-component board schematic — all placed, no
+bin overflow) and `poc/out/schematic-def-demo.svg` (three RC channels stamped from one def,
+byte-identical relative geometry).
+
+### Capstone structure — defs used, and why the board itself is flat
+
+The board's 10 SWD channels genuinely repeat *at the netlist level* (two signal nets + GND
+per JST header), but each channel is a **single connector** — there is no internal
+multi-part sub-circuit to encapsulate, and each channel already differs (distinct GPIO map,
+distinct net names). Folding the ten flat `inst`s into a `def` would (a) buy nothing
+structurally — a one-connector def has a trivial fragment — and (b) change the component
+count and cascade through every downstream stage's assertions. **So the board schematic is
+authored flat** (a doc-level layout tree organizing power / MCU+support+decoupling /
+channel bank / user-I/O), and the def-embedded-layout FEATURE is demonstrated in a
+**separate small section** (`CHANNEL_DEF_DEMO` in the example): a per-channel RC-input
+filter `def` with an embedded `schematic { … }` fragment, instantiated three times. This is
+called out plainly rather than contrived into the board. **See F-def-fit below.**
+
+### Findings ledger (F1–F10)
+
+Recorded while authoring; **none fixed this round** except the two trivial one-liners noted.
+Repro is against `cargo run --example poc_multiprobe` / the schematic SVGs.
+
+- **F1 — the schematic layout tree has no programmatic ingest (no `SetSchematic`).** A
+  `SchematicLayout` can only enter a `Doc` by parsing a `schematic { … }` **text** block via
+  `LoadText`; there is no `Command` to set it (the symmetric partner to `SetSource`). The
+  capstone works around this by serializing the tree (`serialize_schematic_block`, a new
+  `pub` one-liner added this round) and appending it to the source text. *Direction:* add a
+  `Command::SetSchematic(SchematicLayout)` so a GUI / programmatic author isn't forced
+  through text. (The text round-trip is the *check*, not the only authoring path it should be.)
+
+- **F2 — reflow packs boxes by extent only; it ignores pin-label width.** Sibling symbols
+  are spaced by their box `w`/`h`, but each box's pin **names** hang off the edges (and net
+  tags past the stubs). On the RP2350A (long functional pin names both sides) the decoupling
+  bank overprinted the QFN's pin labels until the `mcu` row gap was hand-cranked to 30 mm.
+  *Repro:* set the `mcu` gap back to 6 mm; the C1–C14 headers land on top of the QFN's
+  right-edge names. *Direction:* fold a per-side label-extent estimate into `symbol_extent`
+  (or reserve a label gutter), so a default gap produces non-overlapping siblings.
+
+- **F3 — net tags at facing pins overprint.** Where two symbols sit close with stubs
+  pointing at each other (R.pin2 ↔ C.pin1 in the def-demo; the JST channel tags), both pins'
+  net-name tags render at nearly the same point and collide (`ch0.node`/`node` overlap in
+  `schematic-def-demo.svg`; the JST `SWCLK`/`GND`/`SWDIO` tags overlap in `schematic.svg`).
+  *Direction:* the renderer should offset a tag along the stub by text length, or suppress
+  the tag on one side of a drawn wire.
+
+- **F4 — wire waypoints are absolute schematic-space coordinates the author can't predict.**
+  A `wire … via (x,y)` bend is an absolute nm coordinate, but **reflow** decides where the
+  symbols land, so an author has no way to choose a sensible waypoint without first running
+  reflow and reading back positions. The capstone's first crystal wires (waypoints guessed
+  at `(40,120)`) drew huge diagonal spikes across the whole sheet; they were changed to
+  straight segments. *Direction:* waypoints want to be **relative** (to a pin, or to the
+  wire's own endpoints) rather than absolute, or the grammar needs a pin-anchored elbow.
+
+- **F5 — straight wires cut through symbol bodies.** With no routing, a `wire` is a literal
+  straight segment between two pin positions; when reflow places the endpoints on opposite
+  sides of an intervening symbol (Y1 → U1 across the support column), the wire crosses that
+  symbol's box. This is honest ("a wire is a dumb picture", §20d) but reads as a short.
+  *Direction:* even a one-elbow auto-dogleg around box bounds would help; full wire routing
+  is explicitly out of scope, but crossing *its own* group's boxes is avoidable.
+
+- **F6 — no "place every member of net/group" affordance; every part is named by hand.** The
+  14 decoupling caps and 6 series resistors each needed an explicit `sym Cn` / `sym R_x`
+  line. There is no `sym-net +3V3` or "flow the rest here" construct, so a real board's
+  hundreds of passives would be hundreds of hand-written `sym` lines (or they silently fall
+  to the unplaced bin). *Direction:* a container that enumerates a net's members, or a
+  "remaining unplaced" sink container that captures the bin into a named group.
+
+- **F7 — `rot`/`dx`/`dy` on a def-instance `sym` are silently ignored.** A def instance
+  expands to a *group*, not a leaf box, so an authored cardinal rotation or pinned offset on
+  `sym <instance>` has no v1 meaning and is dropped (documented on `expand_def_syms`). An
+  author might reasonably expect `sym ch0 rot=90` to rotate the whole stamped channel.
+  *Direction:* a group-level transform (rotate/offset the whole fragment's coordinate frame),
+  or at minimum a `W_SCHEMATIC` warning that the attribute was ignored on a def-instance sym.
+
+- **F8 — Comment/Blank round-trip is asymmetric on a leading space.** A `LayoutNode::Comment`
+  stores text *without* the leading `# ` separator; the serializer re-adds `# `. Authoring a
+  `Comment(" text")` (with a leading space) serializes to `#  text` (two spaces), which the
+  parser then strips back to one — a **lossy** round-trip caught by the capstone's byte
+  compare (fixed by dropping the authored leading space). *Direction:* normalize on parse (or
+  on construction), so a stray leading space can't silently break losslessness.
+
+- **F9 — refdes header uses the *instance path* class, and a def-internal passive gets the
+  library part's class, not a schematic-friendly prefix.** In the def-demo the internal
+  `Rs`/`Cf` annotate to `R1`/`C1` correctly, but only because the parts are named `R`/`C`
+  (whose class prefix matches). The test-lib `Cap` class prefixes with its own name (`Cap1`),
+  so a part's *name* leaking into the refdes prefix is a latent surprise. *Direction:* this
+  is really an annotate/registry concern surfaced by the schematic header — the class
+  registry should own the prefix independent of the part name. (Not new to Round 3; the
+  header just made it visible.)
+
+- **F-def-fit — the def-reuse feature wants sub-circuits with internal structure; this board
+  hasn't got them.** As above: the capstone's repeats are single connectors, so the genuine
+  def-with-layout demonstration had to be a separate synthetic circuit. *Not a framework
+  bug* — a note that the *demo vehicle* (this particular board) under-exercises the feature;
+  a board with, e.g., a repeated per-channel level-shifter + RC + ESD cluster would show it
+  properly. The mechanism itself is verified (three channels, byte-identical geometry).
+
+- **F11 — `sym <def-instance>` for a def with NO fragment hard-errors with a misleading
+  message.** `validate` treats a def-instance path as legal only when it is a `def_fragments`
+  **key** (i.e. the def carried a `schematic` block). A `sym` naming a *fragmentless* def
+  instance is neither a component, a DNP path, nor a fragment key, so it aborts with
+  `sym <path> names no component instance` — technically true (there's nothing to place) but
+  confusing, since the author wrote a real instance path. The scoped behaviour is "don't
+  write a sym for a fragmentless def; its internals bin automatically", but the error should
+  say *that*, not "names no component". *Direction:* thread the full def-instance set (not
+  just fragment keys) into `validate` so a fragmentless def-instance sym gets a tailored
+  `W_SCHEMATIC` ("def instance has no layout fragment; its components bin individually")
+  instead of a hard typo error. Deferred — needs the instance set surfaced from elaboration.
+
+**Trivial fixes applied this round (flagged, not deferred):** the `pub`
+`serialize_schematic_block` wrapper (F1's workaround — a one-line re-export of the existing
+private `serialize_layout`), and the F8 leading-space normalization *in the capstone author*
+(not the parser — the parser fix is still open).
+
+**Worked cleanly (no friction):** def-fragment stamping + path prefixing; the doc-wins
+override precedence (`W_SCHEMATIC` when a doc-level `sym` supersedes a fragment placement);
+totality (every one of 44 components drawn); the refdes header wiring; and the byte-lossless
+round-trip with both a doc-level `schematic` block **and** a def-embedded fragment present.

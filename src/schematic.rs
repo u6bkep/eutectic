@@ -222,14 +222,26 @@ use crate::diagnostic::{Diagnostic, Location};
 ///
 /// `component_ids` is the elaborated (populated) instance universe (keys of
 /// `Doc::components`); `dnp_dropped` is the depopulated-path set from
-/// [`crate::elaborate::Elaborated`]. Returns the hard errors (empty ⇒ clean) and the
-/// sorted list of unplaced ids (never-placed populated parts + DNP-dropped placed paths).
+/// [`crate::elaborate::Elaborated`]; `def_fragments` is the per-instance stamped layout
+/// table (Decision 20 embedded in a def, keyed by def-instance path) — a `sym` whose path
+/// is a key is **legal** (it expands into the fragment at reflow), NOT an unknown-typo error
+/// and NOT a placed component. Its values (the fragments, holding the internal paths each
+/// stamps) drive the override-warning channel.
+///
+/// Returns three channels: the hard errors (empty ⇒ clean), the sorted list of unplaced ids
+/// (never-placed populated parts + DNP-dropped placed paths), and a set of NON-BLOCKING
+/// `W_SCHEMATIC` override warnings — one per internal path that both the stamped fragment
+/// AND a doc-level `sym` place, where the doc-level placement wins (the reflow drops the
+/// fragment's copy, so this is never a duplicate error, just a visible "your doc-level sym
+/// overrides the fragment" signal).
 pub fn validate(
     layout: &SchematicLayout,
     component_ids: &BTreeSet<EntityId>,
     dnp_dropped: &BTreeSet<String>,
-) -> (Vec<Diagnostic>, Vec<EntityId>) {
+    def_fragments: &BTreeMap<String, SchematicLayout>,
+) -> (Vec<Diagnostic>, Vec<EntityId>, Vec<Diagnostic>) {
     let mut errors = Vec::new();
+    let mut warnings = Vec::new();
 
     // Duplicate sibling container names, walked over the whole tree (siblings = the
     // children of one container, and the root list). Reported once per collision.
@@ -252,7 +264,10 @@ pub fn validate(
     }
     check_names(&layout.roots, &mut errors);
 
-    // Symbol paths, in pre-order. Four cases:
+    // Symbol paths, in pre-order. Five cases:
+    //   - a def-instance path (a `def_fragments` key, Decision 20 embedded in a def): LEGAL
+    //     — it is a group that expands into the stamped fragment at reflow, not a placed
+    //     component and not a typo. Skip it entirely (it reserves no placement here).
     //   - populated (in `component_ids`): a real placement; duplicate placement is an error.
     //   - DNP-dropped (in `dnp_dropped`): the source declared it but `if=false` turned it
     //     off — NOT an error; collect it as unplaced so it warns and the view degrades.
@@ -260,7 +275,10 @@ pub fn validate(
     let mut placed: BTreeSet<&str> = BTreeSet::new();
     let mut dnp_placed: BTreeSet<EntityId> = BTreeSet::new();
     for path in layout.symbol_paths() {
-        if component_ids.contains(&EntityId::new(path)) {
+        if def_fragments.contains_key(path) {
+            // A def-instance sym: legal, expands at reflow. Not a component placement.
+            continue;
+        } else if component_ids.contains(&EntityId::new(path)) {
             if !placed.insert(path) {
                 errors.push(Diagnostic::error(
                     "E_SCHEMATIC",
@@ -280,11 +298,45 @@ pub fn validate(
         }
     }
 
+    // Override warnings (§20, doc-wins precedence): a doc-level `sym <inst.internal>` placed
+    // explicitly in the tree overrides the stamped fragment's placement of that same path.
+    // The reflow drops the fragment's copy (never a double-placement, so never a duplicate
+    // error), but the collision is worth surfacing so the author knows the fragment default
+    // was superseded. `placed` holds exactly the doc-level explicit component paths (a
+    // def-instance sym was skipped above); a fragment that stamps one of them earns a
+    // non-blocking `W_SCHEMATIC` warning. Deterministic order: fragments are a `BTreeMap`
+    // and each fragment's paths walk in pre-order.
+    for (inst, frag) in def_fragments {
+        for fp in frag.symbol_paths() {
+            if placed.contains(fp) {
+                warnings.push(Diagnostic::warning(
+                    "W_SCHEMATIC",
+                    format!(
+                        "doc-level `sym {fp}` overrides the stamped fragment placement from def \
+                         instance `{inst}`"
+                    ),
+                    Location::Entity(EntityId::new(fp)),
+                ));
+            }
+        }
+    }
+
     // Unplaced (a warning, not an error), deterministic id order: every populated component
     // the tree never names, plus every DNP-dropped path a `sym` did name (so a placed but
     // depopulated part is still visibly accounted for). The union is a `BTreeSet` so the
     // result is sorted and dedup'd.
-    let placed_ids: BTreeSet<EntityId> = placed.iter().map(|p| EntityId::new(*p)).collect();
+    //
+    // A component placed by a def instance's stamped fragment (Decision 20 embedded in a
+    // def) is genuinely placed — the reflow expands the def-instance sym into that
+    // fragment's group — even though its `sym` never appears in the doc-level tree. So the
+    // fragments' internal paths join the placed set; otherwise every stamped internal would
+    // spuriously warn as unplaced despite rendering in its group.
+    let mut placed_ids: BTreeSet<EntityId> = placed.iter().map(|p| EntityId::new(*p)).collect();
+    for frag in def_fragments.values() {
+        for fp in frag.symbol_paths() {
+            placed_ids.insert(EntityId::new(fp));
+        }
+    }
     let mut unplaced: BTreeSet<EntityId> = component_ids
         .iter()
         .filter(|id| !placed_ids.contains(id))
@@ -292,7 +344,7 @@ pub fn validate(
         .collect();
     unplaced.extend(dnp_placed);
 
-    (errors, unplaced.into_iter().collect())
+    (errors, unplaced.into_iter().collect(), warnings)
 }
 
 /// Validate the drawn wires (§20d) against the elaborated universe — a sibling of
@@ -608,7 +660,20 @@ pub fn reflow(
     layout: &SchematicLayout,
     components: &BTreeMap<EntityId, String>,
     lib: &PartLib,
+    def_fragments: &BTreeMap<String, SchematicLayout>,
 ) -> BTreeMap<EntityId, Placement> {
+    // Decision 20 (def-embedded layout): before the prune/place pipeline, expand every
+    // def-instance `sym` (a `sym` whose path is a `def_fragments` key) into the def's
+    // stamped fragment as a nested group. A doc-level `sym <inst.internal>` (a real internal
+    // component path, placed explicitly in the doc tree) OVERRIDES the fragment's placement
+    // of that same path — last-writer-wins with the doc as authority — so we collect the
+    // doc-explicit paths first (before expansion) and drop any fragment sym that collides.
+    let doc_explicit = doc_explicit_paths(&layout.roots, def_fragments);
+    let expanded_layout = SchematicLayout {
+        roots: expand_def_syms(&layout.roots, def_fragments, &doc_explicit, 0),
+    };
+    let layout = &expanded_layout;
+
     // Extent of an instance path: look up its part in the universe, then size via the lib;
     // an unknown path or missing part degrades to the min box (totality).
     let extent_of = |path: &str| -> Extent {
@@ -660,6 +725,125 @@ pub fn reflow(
         place_bin(&unplaced, &extent_of, placed_extent, &mut out);
     }
 
+    out
+}
+
+/// Recursion depth cap on def-fragment expansion (Decision 20 embedded in a def). A
+/// fragment may itself contain a def-instance `sym` (a nested reused circuit), which
+/// expands recursively; distinct instance paths make genuine nesting acyclic and shallow,
+/// but the guard bounds a pathological fragment before it blows the stack — consistent with
+/// [`crate::elaborate::MAX_DEF_DEPTH`].
+const MAX_FRAGMENT_DEPTH: usize = 64;
+
+/// The set of component paths a doc-level `sym` places explicitly — every `sym` path in the
+/// tree that is NOT itself a def-instance key (i.e. a real leaf-component path the author
+/// wrote directly, including a one-off `sym sense[0].R1` into an instance). Collected over
+/// the *pre-expansion* tree so the override rule (§20, doc wins) can drop the fragment's
+/// copy of any such path. A def-instance `sym` is not "explicit placement of a component" —
+/// it is a group that expands — so it is excluded here.
+fn doc_explicit_paths(
+    nodes: &[LayoutNode],
+    def_fragments: &BTreeMap<String, SchematicLayout>,
+) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    fn walk(
+        nodes: &[LayoutNode],
+        def_fragments: &BTreeMap<String, SchematicLayout>,
+        out: &mut BTreeSet<String>,
+    ) {
+        for n in nodes {
+            match n {
+                LayoutNode::Symbol(s) if !def_fragments.contains_key(&s.path) => {
+                    out.insert(s.path.clone());
+                }
+                LayoutNode::Container(c) => walk(&c.children, def_fragments, out),
+                _ => {}
+            }
+        }
+    }
+    walk(nodes, def_fragments, &mut out);
+    out
+}
+
+/// Expand every def-instance `sym` (a `sym` whose path is a `def_fragments` key) into the
+/// def's stamped fragment as a nested `Container` group (Decision 20 embedded in a def). The
+/// container is a plain zero-gap `Start`-aligned column with no name; its children are the
+/// fragment's already-prefixed roots, recursively expanded (a fragment may nest another def
+/// instance). A fragment `sym` whose prefixed path is in `doc_explicit` is DROPPED — the
+/// doc-level placement of that internal path wins (override precedence).
+///
+/// A `sym` whose path is neither a def-instance key nor otherwise special is left as-is (a
+/// real component, or an unknown/DNP path the ordinary prune step handles). In particular a
+/// def instance with NO fragment (its def declared no `schematic` block) is not a key here,
+/// so it passes through unchanged and — being neither a component nor a fragment — prunes
+/// away, its internal components landing in the unplaced bin (documented totality behaviour).
+///
+/// **v1 limitation (documented):** a def-instance `sym`'s authored `rot`/`dx`/`dy` are
+/// **IGNORED**. A def instance is a GROUP, not a leaf box, so a cardinal rotation or a
+/// pinned offset on the group has no well-defined v1 meaning (it would have to transform the
+/// whole subtree's coordinate frame). They are silently dropped rather than half-applied;
+/// group-level transforms are a follow-up.
+fn expand_def_syms(
+    nodes: &[LayoutNode],
+    def_fragments: &BTreeMap<String, SchematicLayout>,
+    doc_explicit: &BTreeSet<String>,
+    depth: usize,
+) -> Vec<LayoutNode> {
+    let mut out = Vec::new();
+    for n in nodes {
+        match n {
+            LayoutNode::Symbol(s) => {
+                if let Some(frag) = def_fragments.get(&s.path) {
+                    // A def-instance sym: replace with a group of the fragment's roots. Guard
+                    // against pathological nesting (should be unreachable for well-formed
+                    // fragments, since instance paths are distinct and acyclic).
+                    if depth >= MAX_FRAGMENT_DEPTH {
+                        continue;
+                    }
+                    // Drop fragment syms the doc places explicitly (override precedence).
+                    let children = expand_def_syms(
+                        &drop_explicit(&frag.roots, doc_explicit),
+                        def_fragments,
+                        doc_explicit,
+                        depth + 1,
+                    );
+                    out.push(LayoutNode::Container(Container {
+                        dir: Direction::Column,
+                        name: None,
+                        gap: 0,
+                        align: Align::Start,
+                        children,
+                    }));
+                } else {
+                    // A real component (or unknown/DNP path handled by the prune step).
+                    out.push(n.clone());
+                }
+            }
+            LayoutNode::Container(c) => out.push(LayoutNode::Container(Container {
+                children: expand_def_syms(&c.children, def_fragments, doc_explicit, depth),
+                ..c.clone()
+            })),
+            other => out.push(other.clone()),
+        }
+    }
+    out
+}
+
+/// Drop every fragment `sym` whose path a doc-level `sym` places explicitly (override
+/// precedence, §20): the doc-level placement wins, so the fragment's copy is removed rather
+/// than double-placing the same component. Recurses into containers; trivia/wires kept.
+fn drop_explicit(nodes: &[LayoutNode], doc_explicit: &BTreeSet<String>) -> Vec<LayoutNode> {
+    let mut out = Vec::new();
+    for n in nodes {
+        match n {
+            LayoutNode::Symbol(s) if doc_explicit.contains(&s.path) => {} // doc wins; drop it
+            LayoutNode::Container(c) => out.push(LayoutNode::Container(Container {
+                children: drop_explicit(&c.children, doc_explicit),
+                ..c.clone()
+            })),
+            other => out.push(other.clone()),
+        }
+    }
     out
 }
 
@@ -970,7 +1154,7 @@ mod tests {
         let r = SchematicLayout {
             roots: vec![row(vec![sym("C1"), sym("C2")])],
         };
-        let pr = reflow(&r, &u, &lib);
+        let pr = reflow(&r, &u, &lib, &BTreeMap::new());
         // In a row, C2 sits to the right of C1 (greater x), same y.
         assert!(pr[&EntityId::new("C2")].center.x > pr[&EntityId::new("C1")].center.x);
         assert_eq!(
@@ -981,7 +1165,7 @@ mod tests {
         let c = SchematicLayout {
             roots: vec![column(vec![sym("C1"), sym("C2")])],
         };
-        let pc = reflow(&c, &u, &lib);
+        let pc = reflow(&c, &u, &lib, &BTreeMap::new());
         // In a column, C2 sits below C1 (lesser y), same x.
         assert!(pc[&EntityId::new("C2")].center.y < pc[&EntityId::new("C1")].center.y);
         assert_eq!(
@@ -1003,8 +1187,8 @@ mod tests {
                 children: vec![sym("C1"), sym("C2")],
             })],
         };
-        let close = reflow(&mk(0), &u, &lib);
-        let far = reflow(&mk(10 * 1_000_000), &u, &lib);
+        let close = reflow(&mk(0), &u, &lib, &BTreeMap::new());
+        let far = reflow(&mk(10 * 1_000_000), &u, &lib, &BTreeMap::new());
         let dx0 = close[&EntityId::new("C2")].center.x - close[&EntityId::new("C1")].center.x;
         let dx1 = far[&EntityId::new("C2")].center.x - far[&EntityId::new("C1")].center.x;
         assert_eq!(dx1 - dx0, 10 * 1_000_000);
@@ -1024,9 +1208,9 @@ mod tests {
                 children: vec![sym("U1"), sym("C1")],
             })],
         };
-        let start = reflow(&mk(Align::Start), &u, &lib);
-        let center = reflow(&mk(Align::Center), &u, &lib);
-        let end = reflow(&mk(Align::End), &u, &lib);
+        let start = reflow(&mk(Align::Start), &u, &lib, &BTreeMap::new());
+        let center = reflow(&mk(Align::Center), &u, &lib, &BTreeMap::new());
+        let end = reflow(&mk(Align::End), &u, &lib, &BTreeMap::new());
         let cap_y = |m: &BTreeMap<EntityId, Placement>| m[&EntityId::new("C1")].center.y;
         // Start puts the short box at the top; End at the bottom; Center between.
         assert!(cap_y(&start) > cap_y(&center));
@@ -1044,7 +1228,7 @@ mod tests {
                 row(vec![sym("C3")]),
             ])],
         };
-        let p = reflow(&layout, &u, &lib);
+        let p = reflow(&layout, &u, &lib, &BTreeMap::new());
         assert_eq!(p.len(), 3);
         // The second row (C3) sits below the first (C1/C2).
         assert!(p[&EntityId::new("C3")].center.y < p[&EntityId::new("C1")].center.y);
@@ -1065,8 +1249,8 @@ mod tests {
                 dy: -2_000_000,
             })])],
         };
-        let pb = reflow(&base, &u, &lib);
-        let ps = reflow(&shifted, &u, &lib);
+        let pb = reflow(&base, &u, &lib, &BTreeMap::new());
+        let ps = reflow(&shifted, &u, &lib, &BTreeMap::new());
         let b = pb[&EntityId::new("C1")].center;
         let s = ps[&EntityId::new("C1")].center;
         // dx/dy applied on top of the (unchanged, centered) flow position.
@@ -1087,7 +1271,7 @@ mod tests {
                 dy: 0,
             })])],
         };
-        let p = reflow(&layout, &u, &lib);
+        let p = reflow(&layout, &u, &lib, &BTreeMap::new());
         let e = p[&EntityId::new("U1")].extent;
         assert_eq!(e.w, upright.h);
         assert_eq!(e.h, upright.w);
@@ -1103,7 +1287,7 @@ mod tests {
         let layout = SchematicLayout {
             roots: vec![row(vec![sym("C1")])],
         };
-        let p = reflow(&layout, &u, &lib);
+        let p = reflow(&layout, &u, &lib, &BTreeMap::new());
         assert_eq!(p.len(), 3); // totality: every component has a coordinate.
         // The bin sits below the placed content (negative y region well under C1).
         assert!(p[&EntityId::new("C2")].center.y < p[&EntityId::new("C1")].center.y);
@@ -1114,7 +1298,7 @@ mod tests {
     fn empty_layout_puts_everything_in_the_bin() {
         let lib = part_library();
         let u = universe(&[("C1", "Cap"), ("C2", "Cap")]);
-        let p = reflow(&SchematicLayout::default(), &u, &lib);
+        let p = reflow(&SchematicLayout::default(), &u, &lib, &BTreeMap::new());
         assert_eq!(p.len(), 2);
     }
 
@@ -1123,7 +1307,7 @@ mod tests {
         let lib = part_library();
         // A component whose part is not in the lib: the view stays total (min box).
         let u = universe(&[("X1", "NoSuchPart")]);
-        let p = reflow(&SchematicLayout::default(), &u, &lib);
+        let p = reflow(&SchematicLayout::default(), &u, &lib, &BTreeMap::new());
         assert_eq!(p[&EntityId::new("X1")].extent, MIN_EXTENT);
     }
 
@@ -1143,8 +1327,8 @@ mod tests {
         // Two runs must be byte-equal. BTreeMap iteration is deterministic, so a
         // Debug-rendered dump is a faithful byte-level proxy for the placement set.
         let dump = |m: &BTreeMap<EntityId, Placement>| format!("{m:?}");
-        let a = reflow(&layout, &u, &lib);
-        let b = reflow(&layout, &u, &lib);
+        let a = reflow(&layout, &u, &lib, &BTreeMap::new());
+        let b = reflow(&layout, &u, &lib, &BTreeMap::new());
         assert_eq!(dump(&a), dump(&b));
         assert_eq!(a, b);
     }
@@ -1156,7 +1340,7 @@ mod tests {
         let layout = SchematicLayout {
             roots: vec![row(vec![sym("C1"), sym("NOPE")])],
         };
-        let (errors, _) = validate(&layout, &ids(&[("C1", "Cap")]), &dnp(&[]));
+        let (errors, _, _) = validate(&layout, &ids(&[("C1", "Cap")]), &dnp(&[]), &BTreeMap::new());
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].code, "E_SCHEMATIC");
     }
@@ -1166,7 +1350,7 @@ mod tests {
         let layout = SchematicLayout {
             roots: vec![row(vec![sym("C1"), sym("C1")])],
         };
-        let (errors, _) = validate(&layout, &ids(&[("C1", "Cap")]), &dnp(&[]));
+        let (errors, _, _) = validate(&layout, &ids(&[("C1", "Cap")]), &dnp(&[]), &BTreeMap::new());
         assert_eq!(errors.len(), 1);
         assert!(errors[0].message.contains("more than one"));
     }
@@ -1185,7 +1369,7 @@ mod tests {
         let layout = SchematicLayout {
             roots: vec![named("power"), named("power")],
         };
-        let (errors, _) = validate(&layout, &ids(&[]), &dnp(&[]));
+        let (errors, _, _) = validate(&layout, &ids(&[]), &dnp(&[]), &BTreeMap::new());
         assert_eq!(errors.len(), 1);
         assert!(errors[0].message.contains("duplicate sibling"));
     }
@@ -1205,7 +1389,7 @@ mod tests {
         let layout = SchematicLayout {
             roots: vec![row(vec![inner("col")]), row(vec![inner("col")])],
         };
-        let (errors, _) = validate(&layout, &ids(&[]), &dnp(&[]));
+        let (errors, _, _) = validate(&layout, &ids(&[]), &dnp(&[]), &BTreeMap::new());
         assert!(errors.is_empty());
     }
 
@@ -1214,8 +1398,12 @@ mod tests {
         let layout = SchematicLayout {
             roots: vec![row(vec![sym("C1")])],
         };
-        let (errors, unplaced) =
-            validate(&layout, &ids(&[("C1", "Cap"), ("C2", "Cap")]), &dnp(&[]));
+        let (errors, unplaced, _) = validate(
+            &layout,
+            &ids(&[("C1", "Cap"), ("C2", "Cap")]),
+            &dnp(&[]),
+            &BTreeMap::new(),
+        );
         assert!(errors.is_empty());
         assert_eq!(unplaced, vec![EntityId::new("C2")]);
     }
@@ -1229,7 +1417,12 @@ mod tests {
             roots: vec![row(vec![sym("C1"), sym("C2")])],
         };
         // C1 is populated; C2 was dropped by `if=false`. No component universe entry for C2.
-        let (errors, unplaced) = validate(&layout, &ids(&[("C1", "Cap")]), &dnp(&["C2"]));
+        let (errors, unplaced, _) = validate(
+            &layout,
+            &ids(&[("C1", "Cap")]),
+            &dnp(&["C2"]),
+            &BTreeMap::new(),
+        );
         assert!(errors.is_empty(), "DNP-dropped placed sym must not error");
         // C2 surfaces as unplaced (so it warns), and is absent from the placed set.
         assert_eq!(unplaced, vec![EntityId::new("C2")]);
@@ -1342,6 +1535,191 @@ mod tests {
         assert!(warnings[0].message.contains("depopulated"));
     }
 
+    // --- def-embedded layout stamping (Decision 20 embedded in a def) ------
+
+    /// Build a stamped fragment table `{ ipath -> layout }` where each layout is a
+    /// prefixed `column` of `sym`s at the given internal paths (already instance-prefixed by
+    /// the caller — mirroring what `elaborate::prefix_fragment` produces).
+    fn frag_column(ipath: &str, prefixed_paths: &[&str]) -> (String, SchematicLayout) {
+        let children = prefixed_paths.iter().map(|p| sym(p)).collect();
+        (
+            ipath.to_string(),
+            SchematicLayout {
+                roots: vec![column(children)],
+            },
+        )
+    }
+
+    #[test]
+    fn def_instance_sym_expands_to_the_stamped_fragment() {
+        let lib = part_library();
+        // One def instance `sense[0]` with internal R1/C1; the doc tree places the instance.
+        let u = universe(&[("sense[0].R1", "R"), ("sense[0].C1", "Cap")]);
+        let fragments: BTreeMap<String, SchematicLayout> =
+            [frag_column("sense[0]", &["sense[0].R1", "sense[0].C1"])]
+                .into_iter()
+                .collect();
+        let layout = SchematicLayout {
+            roots: vec![row(vec![sym("sense[0]")])],
+        };
+        let p = reflow(&layout, &u, &lib, &fragments);
+        // Totality: both internal components got a coordinate, as a group (not the bin).
+        assert_eq!(p.len(), 2);
+        // The fragment is a column: C1 sits below R1 (lesser y), same x.
+        assert!(
+            p[&EntityId::new("sense[0].C1")].center.y < p[&EntityId::new("sense[0].R1")].center.y
+        );
+    }
+
+    #[test]
+    fn two_instances_render_with_identical_relative_geometry() {
+        let lib = part_library();
+        // Two instances of the same def, placed side by side in a row.
+        let u = universe(&[
+            ("a.R1", "R"),
+            ("a.C1", "Cap"),
+            ("b.R1", "R"),
+            ("b.C1", "Cap"),
+        ]);
+        let fragments: BTreeMap<String, SchematicLayout> = [
+            frag_column("a", &["a.R1", "a.C1"]),
+            frag_column("b", &["b.R1", "b.C1"]),
+        ]
+        .into_iter()
+        .collect();
+        let layout = SchematicLayout {
+            roots: vec![row(vec![sym("a"), sym("b")])],
+        };
+        let p = reflow(&layout, &u, &lib, &fragments);
+        assert_eq!(p.len(), 4);
+        // Internal relative geometry: (C1 - R1) offset must be identical across instances —
+        // the "renders identically everywhere" guarantee.
+        let off = |inst: &str| {
+            let r = p[&EntityId::new(format!("{inst}.R1"))].center;
+            let c = p[&EntityId::new(format!("{inst}.C1"))].center;
+            (c.x - r.x, c.y - r.y)
+        };
+        assert_eq!(off("a"), off("b"));
+    }
+
+    #[test]
+    fn nested_def_instance_expands_recursively() {
+        let lib = part_library();
+        // `outer` is a def instance whose fragment contains ANOTHER def instance `outer.in`.
+        // Both are fragment keys; the inner one expands recursively.
+        let u = universe(&[("outer.in.R1", "R"), ("outer.C1", "Cap")]);
+        let fragments: BTreeMap<String, SchematicLayout> = [
+            // `outer`'s fragment places its own C1 and a nested def-instance sym `outer.in`.
+            (
+                "outer".to_string(),
+                SchematicLayout {
+                    roots: vec![column(vec![sym("outer.C1"), sym("outer.in")])],
+                },
+            ),
+            frag_column("outer.in", &["outer.in.R1"]),
+        ]
+        .into_iter()
+        .collect();
+        let layout = SchematicLayout {
+            roots: vec![row(vec![sym("outer")])],
+        };
+        let p = reflow(&layout, &u, &lib, &fragments);
+        // Both the outer C1 and the nested R1 land — the nested instance expanded.
+        assert_eq!(p.len(), 2);
+        assert!(p.contains_key(&EntityId::new("outer.in.R1")));
+        assert!(p.contains_key(&EntityId::new("outer.C1")));
+    }
+
+    #[test]
+    fn doc_level_sym_overrides_fragment_placement() {
+        let lib = part_library();
+        let u = universe(&[("sense[0].R1", "R"), ("sense[0].C1", "Cap")]);
+        let fragments: BTreeMap<String, SchematicLayout> =
+            [frag_column("sense[0]", &["sense[0].R1", "sense[0].C1"])]
+                .into_iter()
+                .collect();
+        // The doc places the instance AND overrides `sense[0].R1` with an explicit pinned
+        // offset. The doc-level placement must win (the fragment's R1 copy is dropped).
+        let layout = SchematicLayout {
+            roots: vec![row(vec![
+                sym("sense[0]"),
+                LayoutNode::Symbol(Symbol {
+                    path: "sense[0].R1".into(),
+                    rot: Orient::IDENTITY,
+                    dx: 7_000_000,
+                    dy: 0,
+                }),
+            ])],
+        };
+        let p = reflow(&layout, &u, &lib, &fragments);
+        assert_eq!(p.len(), 2);
+
+        // The doc-level R1 wins: its placement carries the authored dx (+7mm). The fragment
+        // would have placed R1 in a column with no dx, so a +7mm-shifted x proves the
+        // doc-level sym (a row child with dx) is what reflow kept — the fragment copy was
+        // dropped. Reflow the same tree with the doc-level R1 at dx=0 to get the un-shifted
+        // baseline for R1's slot, and assert the +7mm delta.
+        let base_layout = SchematicLayout {
+            roots: vec![row(vec![
+                sym("sense[0]"),
+                LayoutNode::Symbol(Symbol {
+                    path: "sense[0].R1".into(),
+                    rot: Orient::IDENTITY,
+                    dx: 0,
+                    dy: 0,
+                }),
+            ])],
+        };
+        let pb = reflow(&base_layout, &u, &lib, &fragments);
+        assert_eq!(
+            p[&EntityId::new("sense[0].R1")].center.x - pb[&EntityId::new("sense[0].R1")].center.x,
+            7_000_000,
+            "R1 carries the doc-level authored dx (fragment copy was dropped)"
+        );
+
+        // And `validate` surfaces the override as a single non-blocking W_SCHEMATIC warning.
+        let ids: BTreeSet<EntityId> = u.keys().cloned().collect();
+        let (errors, _unplaced, warnings) = validate(&layout, &ids, &dnp(&[]), &fragments);
+        assert!(errors.is_empty(), "override is not an error: {errors:?}");
+        assert_eq!(warnings.len(), 1, "one override warning: {warnings:?}");
+        assert_eq!(warnings[0].code, "W_SCHEMATIC");
+        assert!(warnings[0].message.contains("overrides"));
+    }
+
+    #[test]
+    fn def_instance_with_no_fragment_lands_in_the_bin() {
+        let lib = part_library();
+        // `sense[0]` is a def instance but has NO fragment (its def declared no schematic
+        // block). Its internal components are ordinary components in the universe; the
+        // instance sym is neither a component nor a fragment key, so it prunes away and its
+        // internals fall to the unplaced bin (unchanged totality behaviour).
+        let u = universe(&[("sense[0].R1", "R"), ("sense[0].C1", "Cap")]);
+        let fragments: BTreeMap<String, SchematicLayout> = BTreeMap::new();
+        let layout = SchematicLayout {
+            roots: vec![row(vec![sym("sense[0]")])],
+        };
+        let p = reflow(&layout, &u, &lib, &fragments);
+        // Totality: both internal components still get a coordinate (in the bin).
+        assert_eq!(p.len(), 2);
+    }
+
+    #[test]
+    fn def_instance_sym_does_not_error_but_unknown_still_does() {
+        // A def-instance sym path is legal (expands); an unknown-typo path still errors.
+        let fragments: BTreeMap<String, SchematicLayout> =
+            [frag_column("sense[0]", &["sense[0].R1"])]
+                .into_iter()
+                .collect();
+        let layout = SchematicLayout {
+            roots: vec![row(vec![sym("sense[0]"), sym("NOPE")])],
+        };
+        let ids = ids(&[("sense[0].R1", "R")]);
+        let (errors, _unplaced, _warnings) = validate(&layout, &ids, &dnp(&[]), &fragments);
+        // Only `NOPE` errors — the def-instance sym `sense[0]` is legal.
+        assert_eq!(errors.len(), 1, "only the typo errors: {errors:?}");
+        assert!(errors[0].message.contains("NOPE"));
+    }
+
     #[test]
     fn unknown_path_still_aborts_even_with_dnp_set() {
         // A typo'd path (unknown to both the populated universe AND the DNP-dropped set)
@@ -1349,7 +1727,12 @@ mod tests {
         let layout = SchematicLayout {
             roots: vec![row(vec![sym("TYPO"), sym("C2")])],
         };
-        let (errors, _) = validate(&layout, &ids(&[("C1", "Cap")]), &dnp(&["C2"]));
+        let (errors, _, _) = validate(
+            &layout,
+            &ids(&[("C1", "Cap")]),
+            &dnp(&["C2"]),
+            &BTreeMap::new(),
+        );
         assert_eq!(errors.len(), 1);
         assert!(errors[0].message.contains("TYPO"));
     }

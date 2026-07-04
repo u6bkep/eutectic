@@ -447,7 +447,8 @@ fn render_directive(d: &GenDirective) -> String {
             params,
             body,
             ports,
-        } => render_def(name, params, body, ports),
+            layout,
+        } => render_def(name, params, body, ports, layout),
     }
 }
 
@@ -459,12 +460,16 @@ fn render_directive(d: &GenDirective) -> String {
 /// deterministic canonical position independent of where they were authored. Body
 /// directives round-trip through the same [`render_directive`] the flat program uses
 /// (nested def instantiations are ordinary `inst` lines), so a def body is byte-stable
-/// across a parse→serialize→parse fixpoint.
+/// across a parse→serialize→parse fixpoint. When the def carries a Decision-20 `schematic`
+/// layout fragment (over its internal paths), it emits last — after the ports — as an
+/// indented `schematic { … }` block, reusing the same [`emit_layout_nodes`] the doc-level
+/// block uses so the two agree on indentation and trivia.
 fn render_def(
     name: &str,
     params: &[(String, String)],
     body: &[DefNode],
     ports: &BTreeMap<String, (String, String)>,
+    layout: &Option<crate::schematic::SchematicLayout>,
 ) -> String {
     let mut s = format!("def {name}");
     for (k, v) in params {
@@ -493,6 +498,19 @@ fn render_def(
     for (pname, (path, sel)) in ports {
         s.push_str(BLOCK_INDENT);
         s.push_str(&format!("port {pname} = {path}.{sel}\n"));
+    }
+    // The Decision-20 layout fragment (if any) emits last, as an indented `schematic { … }`
+    // block inside the def body. One extra indent level over the doc-level `serialize_layout`
+    // (the def body is already one level in), reusing `emit_layout_nodes` so trivia and
+    // container indentation match the doc-level block exactly.
+    if let Some(layout) = layout {
+        s.push_str(BLOCK_INDENT);
+        s.push_str("schematic {\n");
+        let mut indent = String::from(BLOCK_INDENT);
+        indent.push_str(BLOCK_INDENT);
+        emit_layout_nodes(&layout.roots, &mut indent, &mut s);
+        s.push_str(BLOCK_INDENT);
+        s.push_str("}\n");
     }
     s.push('}');
     s
@@ -1383,6 +1401,10 @@ fn parse_def(b: &Block, parsed: &mut Parsed, errors: &mut Vec<Diagnostic>) {
     // a def body (Phase 3). A nested `def { … }` is a hard error.
     let mut body: Vec<DefNode> = Vec::new();
     let mut ports: BTreeMap<String, (String, String)> = BTreeMap::new();
+    // A def body may carry ONE Decision-20 `schematic { … }` layout fragment over its
+    // INTERNAL paths (`R1`, not `sense[0].R1`), stamped per instance at expansion time. The
+    // last one wins (mirrors the doc-level `schematic` block).
+    let mut layout: Option<crate::schematic::SchematicLayout> = None;
     for node in &b.children {
         let child = match node {
             Node::Block(c) => c,
@@ -1396,9 +1418,26 @@ fn parse_def(b: &Block, parsed: &mut Parsed, errors: &mut Vec<Diagnostic>) {
                 continue;
             }
         };
+        // A `schematic { … }` layout fragment is the one block a def body admits (Decision
+        // 20 embedded in a def): special-case it BEFORE the generic block rejection so it is
+        // not treated like a stray nested block. Its `row`/`column`/`sym`/`wire` children
+        // parse through the ordinary layout grammar; the paths are def-internal.
+        if child.opened_block && child.keyword == "schematic" {
+            if child.tokens.len() > 1 {
+                errors.push(err_line(
+                    "E_SCHEMATIC",
+                    format!("`schematic` takes no arguments (got `{}`)", child.rest),
+                    child.line,
+                ));
+            }
+            let roots = parse_layout_nodes(&child.children, errors);
+            // Last `schematic` block wins, mirroring the doc-level rule.
+            layout = Some(crate::schematic::SchematicLayout { roots });
+            continue;
+        }
         if child.opened_block {
-            // The only block-opening keyword reachable here is `def` (the allowlist); a
-            // nested def definition is rejected. Any other block opener already errored in
+            // The only other block-opening keyword reachable here is `def` (the allowlist);
+            // a nested def definition is rejected. Any other block opener already errored in
             // `parse_forest`'s block-rejection arm, but a `def` inside a `def` reaches here.
             errors.push(err_line(
                 "E_DEF",
@@ -1459,6 +1498,7 @@ fn parse_def(b: &Block, parsed: &mut Parsed, errors: &mut Vec<Diagnostic>) {
         params,
         body,
         ports,
+        layout,
     });
 }
 
@@ -1663,6 +1703,16 @@ fn parse_sym_rot(v: &str) -> Result<Orient, String> {
 // ----------------------------------------------------------------------------
 // Decision-20 layout tree: serialize
 // ----------------------------------------------------------------------------
+
+/// Render just the doc-level `schematic { … }` block for a [`SchematicLayout`] as canonical
+/// text — the same bytes [`serialize`] emits for `doc.schematic`, exposed so a caller
+/// authoring a layout tree programmatically can append it to a serialized source and feed
+/// the whole thing through [`parse`]/`LoadText` (the only ingest path for a schematic tree —
+/// there is no `SetSchematic` command). A thin `pub` wrapper over [`serialize_layout`]; the
+/// output round-trips byte-identically.
+pub fn serialize_schematic_block(layout: &crate::schematic::SchematicLayout) -> String {
+    serialize_layout(layout)
+}
 
 /// Render a [`SchematicLayout`](crate::schematic::SchematicLayout) as canonical block
 /// text: a `schematic { … }` wrapper around the emitted node forest, indented one level.
@@ -4679,6 +4729,46 @@ def amp {
         );
     }
 
+    /// A `def` carrying a Decision-20 `schematic { … }` layout fragment (over its internal
+    /// paths) parses into `GenDirective::Def { layout: Some(..) }` and round-trips
+    /// byte-identically: the fragment re-emits as an indented block after the body/ports.
+    #[test]
+    fn def_with_layout_fragment_round_trips() {
+        let text = "\
+def rc {
+  inst R1 R
+  inst C1 Cap
+  net mid R1.p2 C1.p1
+  port out = C1.p2
+  schematic {
+    row {
+      sym R1
+      sym C1
+    }
+  }
+}
+";
+        let parsed = parse(text).expect("parse");
+        // The def carries the parsed layout fragment (last-block-wins; here the only one).
+        let layout = match &parsed.source[0] {
+            GenDirective::Def { layout, .. } => layout.clone(),
+            other => panic!("expected a def, got {other:?}"),
+        };
+        let frag = layout.expect("def carries a schematic layout fragment");
+        // Two internal syms (`R1`, `C1`), def-relative — NOT yet instance-prefixed.
+        assert_eq!(frag.symbol_paths(), vec!["R1", "C1"]);
+
+        // Byte-lossless round-trip: serialize the doc and re-parse to the canonical form.
+        let doc = doc_of(parsed.source.clone(), BTreeMap::new());
+        let canon = serialize(&doc);
+        assert_eq!(canon, text, "def-with-layout serializes byte-identically");
+        assert_eq!(
+            parse(&canon).unwrap().source,
+            parsed.source,
+            "re-parse of the canonical form reproduces the source"
+        );
+    }
+
     /// An unbalanced `{` (a block never closed) is an `E_BLOCK` error located at the
     /// opener's line.
     #[test]
@@ -5213,7 +5303,8 @@ inst top MCU
             (EntityId::new("C2"), "Cap".to_string()),
         ]);
         // Must not panic (debug add-overflow) — the whole point of the range check.
-        let placed = crate::schematic::reflow(&doc.schematic.unwrap(), &parts, &lib);
+        let placed =
+            crate::schematic::reflow(&doc.schematic.unwrap(), &parts, &lib, &BTreeMap::new());
         assert_eq!(placed.len(), 2);
     }
 

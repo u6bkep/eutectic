@@ -153,6 +153,91 @@ net CC2 J11.CC2 R_CC2.1
 net BOOT_SW R_BOOT.2 SW1.1
 net RUN U1.RUN SW2.1
 net LED_DIN U1.GPIO20 D1.DIN
+schematic {
+  # RP2350A multi-SWD probe — board schematic (Decision 20 view)
+  row board gap=12mm {
+    column power gap=4mm align=center {
+      sym U3
+      sym C_IN
+      sym C_OUT
+      sym L1
+      sym D1
+    }
+    row mcu gap=30mm align=center {
+      column mcu-support gap=4mm align=center {
+        sym U2
+        sym Y1
+        sym C_X1
+        sym C_X2
+        sym R_X
+      }
+      sym U1
+      column decoupling gap=2mm align=center {
+        row dec0 gap=12mm align=center {
+          sym C0
+          sym C1
+        }
+        row dec2 gap=12mm align=center {
+          sym C2
+          sym C3
+        }
+        row dec4 gap=12mm align=center {
+          sym C4
+          sym C5
+        }
+        row dec6 gap=12mm align=center {
+          sym C6
+          sym C7
+        }
+        row dec8 gap=12mm align=center {
+          sym C8
+          sym C9
+        }
+        row dec10 gap=12mm align=center {
+          sym C10
+          sym C11
+        }
+        row dec12 gap=12mm align=center {
+          sym C12
+          sym C13
+        }
+      }
+    }
+    row swd-channels gap=6mm {
+      column ch-left gap=3mm align=center {
+        sym J1
+        sym J2
+        sym J3
+        sym J4
+        sym J5
+      }
+      column ch-right gap=3mm align=center {
+        sym J6
+        sym J7
+        sym J8
+        sym J9
+        sym J10
+      }
+    }
+    column user-io gap=4mm align=center {
+      sym J11
+      sym SW1
+      sym SW2
+      column series-r gap=2mm align=center {
+        sym R_CC1
+        sym R_CC2
+        sym R_DM
+        sym R_DP
+        sym R_AVDD
+        sym R_BOOT
+      }
+    }
+  }
+
+  # crystal net, drawn for readability (agrees with XIN/XOUT)
+  wire Y1.1 U1.XIN
+  wire Y1.3 U1.XOUT
+}
 
 # routes
 route BOOT_SW F.Cu w=0.15mm (44.51mm, 34mm) (45.3mm, 33.9mm)
