@@ -545,17 +545,257 @@ fn strip_comment(raw: &str) -> &str {
     raw
 }
 
+// ----------------------------------------------------------------------------
+// Block tree (nested-block grammar infrastructure — Phase 0)
+// ----------------------------------------------------------------------------
+//
+// The base grammar is one directive per line. A directive line may additionally
+// *open a block* by ending with a trailing `{`; the block closes with a `}` alone
+// on its own line, and blocks nest to arbitrary depth. This module owns only the
+// generic nested representation and its (de)serialization — no directive here
+// consumes a block yet (see [`keyword_takes_block`]). The Decision-20 layout tree
+// (`row`/`column`) and Decision-21 `def` bodies are the consumers-to-be: they will
+// walk a [`Block`]'s header + children without re-tokenizing.
+
+/// A directive together with any block body it opened. Header tokens are pre-split
+/// (whitespace-aware, keeping quoted runs intact — the same tokenization the flat
+/// directive path uses), so a consumer walks `keyword`/`tokens`/`children` directly.
+/// `line` is the 1-based source line of the header, for diagnostics.
+///
+/// A leaf directive (no trailing `{`) has an empty `children` and `opened_block ==
+/// false`; a block opener has `opened_block == true` (even when the body is empty).
+/// The distinction matters to the flat path, which must reject a block on a keyword
+/// that does not accept one — an *empty* block is still a block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Block {
+    /// The leading bare token (the directive keyword).
+    pub keyword: String,
+    /// Every whitespace-separated header token (including the keyword at index 0),
+    /// with quoted runs kept intact. Consumers walk these; they are never re-split.
+    pub tokens: Vec<String>,
+    /// The header with its keyword removed and surrounding whitespace trimmed — the
+    /// exact `rest` the flat directive path feeds to [`parse_line`]. Preserves the
+    /// original spacing/quoting so coordinate- and quote-sensitive parsers still work.
+    pub rest: String,
+    /// Whether this directive opened a `{ … }` block (true even if the body is empty).
+    pub opened_block: bool,
+    /// Child directives inside this directive's block, in source order.
+    pub children: Vec<Block>,
+    /// 1-based source line of the header.
+    pub line: u32,
+}
+
+impl Block {
+    /// The full header line as it feeds the flat directive path: `keyword` then
+    /// `rest` (when non-empty). This is what [`parse_line`] receives for a leaf.
+    fn header_line(&self) -> String {
+        if self.rest.is_empty() {
+            self.keyword.clone()
+        } else {
+            format!("{} {}", self.keyword, self.rest)
+        }
+    }
+}
+
+/// The per-keyword block allowlist. No existing directive accepts a block, so this is
+/// `false` for every keyword today: a block opened on any current keyword is a parse
+/// error, leaving all existing documents unchanged. Phase-1/2 consumers (the
+/// Decision-20 layout containers, Decision-21 `def`) flip their keyword to `true`
+/// here when they land; the block tree is already built for every keyword, so a
+/// consumer only needs to opt in and walk [`Block::children`].
+fn keyword_takes_block(_keyword: &str) -> bool {
+    false
+}
+
+/// Split a block-tree header into its tokens, keeping quoted runs intact. The leading
+/// token is the keyword; `rest` is the original header with the keyword and one run of
+/// separating whitespace removed (so coordinate/quote-sensitive per-directive parsers
+/// see exactly what the flat path gives them today).
+fn split_header(header: &str) -> (String, Vec<String>, String) {
+    let tokens = split_ws_quoted(header);
+    let keyword = tokens.first().cloned().unwrap_or_default();
+    let rest = match header.trim_start().split_once(char::is_whitespace) {
+        Some((_, r)) => r.trim().to_string(),
+        None => String::new(),
+    };
+    (keyword, tokens, rest)
+}
+
+/// Detect a block-opening trailing `{` on an already comment-stripped line. Returns
+/// `(header, opened_block)`: for an opener the trailing `{` is removed and `header`
+/// is the directive part; otherwise `header` is the line unchanged. A `{` only opens
+/// a block when it is the final non-whitespace character *outside* a quoted string —
+/// a brace inside a quoted value (`text "a{b}"`) is literal. The scan is quote-aware
+/// and runs on the unquoted remainder after comment stripping, so a `{` after a `#`
+/// comment never opens a block either (the comment is already gone).
+fn split_block_open(line: &str) -> (&str, bool) {
+    let trimmed = line.trim_end();
+    // The last character must be `{` *and* lie outside any quoted run to open a block.
+    if !trimmed.ends_with('{') {
+        return (line, false);
+    }
+    let mut in_str = false;
+    let brace_at = trimmed.len() - 1; // `{` is ASCII, one byte.
+    for (i, c) in trimmed.char_indices() {
+        match c {
+            '"' => in_str = !in_str,
+            '{' if !in_str && i == brace_at => {
+                return (trimmed[..i].trim_end(), true);
+            }
+            _ => {}
+        }
+    }
+    // The trailing `{` was inside a quoted string — literal, not a block opener.
+    (line, false)
+}
+
+/// Is this comment-stripped, trimmed line a lone block close (`}`)? A `}` only closes
+/// a block when it stands alone on its line; a `}` embedded in a directive or inside a
+/// quoted value is not a close (quoted values are handled by the tokenizer downstream).
+fn is_block_close(line: &str) -> bool {
+    line == "}"
+}
+
+/// Parse text into a forest of [`Block`]s: the nested-block grammar's generic
+/// representation. Comment stripping is quote-aware (a `#` inside a quoted value is
+/// literal) and happens *before* brace detection on the unquoted remainder. Blank
+/// lines are skipped. Errors — an unbalanced `{` (a block left open at end of input)
+/// and a `}` with no open block — are `E_BLOCK` diagnostics located by line number,
+/// collected in the house *collect-all* style. On any error the whole parse fails and
+/// no partial tree escapes.
+pub fn parse_blocks(text: &str) -> Result<Vec<Block>, Vec<Diagnostic>> {
+    // A stack of (open-block header, its accumulating children). The bottom frame is
+    // the synthetic top-level forest, whose "header" is never read.
+    let mut stack: Vec<(Option<Block>, Vec<Block>)> = vec![(None, Vec::new())];
+    let mut errors: Vec<Diagnostic> = Vec::new();
+
+    for (i, raw) in text.lines().enumerate() {
+        let lineno = (i + 1) as u32;
+        let stripped = strip_comment(raw).trim();
+        if stripped.is_empty() {
+            continue;
+        }
+        if is_block_close(stripped) {
+            if stack.len() <= 1 {
+                errors.push(Diagnostic::error(
+                    "E_BLOCK",
+                    "`}` with no open block".to_string(),
+                    Location::Span {
+                        line: lineno,
+                        col: 1,
+                    },
+                ));
+                continue;
+            }
+            // Pop the frame, attach its finished children, and push the completed
+            // block onto its parent.
+            let (opener, children) = stack.pop().expect("checked len > 1");
+            let mut block = opener.expect("non-bottom frame always carries an opener");
+            block.children = children;
+            stack
+                .last_mut()
+                .expect("bottom frame is never popped")
+                .1
+                .push(block);
+            continue;
+        }
+        let (header, opened) = split_block_open(stripped);
+        let (keyword, tokens, rest) = split_header(header);
+        let block = Block {
+            keyword,
+            tokens,
+            rest,
+            opened_block: opened,
+            children: Vec::new(),
+            line: lineno,
+        };
+        if opened {
+            // Open a new frame; its children accumulate until the matching `}`.
+            stack.push((Some(block), Vec::new()));
+        } else {
+            stack
+                .last_mut()
+                .expect("bottom frame is never popped")
+                .1
+                .push(block);
+        }
+    }
+
+    // Any frame still open at end of input is an unbalanced `{`. Report each, located
+    // at its opener's line.
+    while stack.len() > 1 {
+        let (opener, _) = stack.pop().expect("checked len > 1");
+        let opener = opener.expect("non-bottom frame always carries an opener");
+        let header = opener.header_line();
+        errors.push(Diagnostic::error(
+            "E_BLOCK",
+            format!("unbalanced `{{`: block opened by `{header}` is never closed"),
+            Location::Span {
+                line: opener.line,
+                col: 1,
+            },
+        ));
+    }
+
+    if errors.is_empty() {
+        Ok(stack.pop().expect("bottom frame is always present").1)
+    } else {
+        // Report opener errors in source order (the pop order above is innermost-first).
+        errors.sort_by_key(|d| match d.location {
+            Location::Span { line, .. } => line,
+            _ => 0,
+        });
+        Err(errors)
+    }
+}
+
+/// The canonical indent for a nested block: two spaces per depth level. Matches the
+/// existing serializer's flat, space-based style (it emits no tabs anywhere).
+const BLOCK_INDENT: &str = "  ";
+
+/// Serialize a forest of [`Block`]s back to canonical block-grammar text, deterministic
+/// and round-tripping ([`parse_blocks`] of the output reproduces the forest). Each
+/// directive renders as its header line; a block opener appends ` {`, its children
+/// render indented one level deeper, and a `}` closes at the opener's indent. This is
+/// the emission half consumers reuse once their keyword opts into blocks; the flat
+/// [`serialize`] on a `Doc` is unchanged (routeless/blockless docs stay byte-identical).
+pub fn serialize_blocks(blocks: &[Block]) -> String {
+    let mut out = String::new();
+    emit_blocks(blocks, 0, &mut out);
+    out
+}
+
+fn emit_blocks(blocks: &[Block], depth: usize, out: &mut String) {
+    for b in blocks {
+        for _ in 0..depth {
+            out.push_str(BLOCK_INDENT);
+        }
+        out.push_str(&b.header_line());
+        if b.opened_block {
+            out.push_str(" {\n");
+            emit_blocks(&b.children, depth + 1, out);
+            for _ in 0..depth {
+                out.push_str(BLOCK_INDENT);
+            }
+            out.push_str("}\n");
+        } else {
+            out.push('\n');
+        }
+    }
+}
+
 /// Parse canonical (or human-authored) text back into tier-1 state. Comments
 /// (`#`...) and blank lines are skipped. Never panics. *Collect-all*: every
 /// malformed line is reported (located by line number via [`Location::Span`]), so
 /// one parse surfaces all syntax errors at once; on any error the whole parse fails
 /// with `Err(Vec<Diagnostic>)` and no partial state escapes.
 pub fn parse(text: &str) -> Result<Parsed, Vec<Diagnostic>> {
-    let mut source: Source = Vec::new();
-    let mut overrides: BTreeMap<EntityId, Override> = BTreeMap::new();
-    let mut refdes_pins: BTreeMap<EntityId, String> = BTreeMap::new();
-    let mut traces: BTreeMap<TraceId, Trace> = BTreeMap::new();
-    let mut vias: BTreeMap<ViaId, Via> = BTreeMap::new();
+    // First shape the input into the nested block tree (quote-aware comment stripping,
+    // brace balancing). A blockless document produces a flat forest of leaf blocks, so
+    // this path is byte-for-byte equivalent to the old per-line loop for existing docs.
+    let blocks = parse_blocks(text)?;
+
+    let mut parsed = Parsed::default();
     // Session-local id mints (Decision 18 — ids are never serialized). File order
     // becomes the id order, which is stable across a round-trip because serialize emits
     // in BTreeMap (id) order.
@@ -563,39 +803,73 @@ pub fn parse(text: &str) -> Result<Parsed, Vec<Diagnostic>> {
     let mut next_vid: u64 = 1;
     let mut errors: Vec<Diagnostic> = Vec::new();
 
-    for (i, raw) in text.lines().enumerate() {
-        let lineno = (i + 1) as u32;
-        // Strip comments and surrounding whitespace. The `#` scan is **quote-aware**:
-        // a `#` inside a double-quoted string (a text label) is literal, not a comment,
-        // so `text "A#1" …` round-trips. (Embedded `"`/`\` in a string still need
-        // escaping — a documented follow-up.)
-        let line = strip_comment(raw).trim();
-        if line.is_empty() {
+    parse_forest(
+        &blocks,
+        &mut parsed,
+        &mut next_tid,
+        &mut next_vid,
+        &mut errors,
+    );
+
+    if errors.is_empty() {
+        Ok(parsed)
+    } else {
+        Err(errors)
+    }
+}
+
+/// Walk a [`Block`] forest, lowering each directive into `parsed`. Today no keyword
+/// accepts a block (see [`keyword_takes_block`]): a directive that opened a block is a
+/// hard `E_BLOCK` error and its children are not descended into, so every existing
+/// (blockless) document flows through the exact same per-directive path as before.
+/// When a consumer opts a keyword into blocks, this is where the block header + its
+/// already-parsed children get handed to that consumer.
+fn parse_forest(
+    blocks: &[Block],
+    parsed: &mut Parsed,
+    next_tid: &mut u64,
+    next_vid: &mut u64,
+    errors: &mut Vec<Diagnostic>,
+) {
+    for b in blocks {
+        let lineno = b.line;
+        if b.opened_block && !keyword_takes_block(&b.keyword) {
+            errors.push(Diagnostic::error(
+                "E_BLOCK",
+                format!("directive `{}` does not take a block", b.keyword),
+                Location::Span {
+                    line: lineno,
+                    col: 1,
+                },
+            ));
+            // Do not descend: the children belong to a directive we could not accept.
             continue;
         }
-        match parse_line(line) {
+        // A leaf directive lowers through the flat line grammar, exactly as before.
+        let line = b.header_line();
+        match parse_line(&line) {
             Ok(Item::Directive(d)) => {
-                check_coord_range(directive_coords(&d), lineno, &mut errors);
-                source.push(d);
+                check_coord_range(directive_coords(&d), lineno, errors);
+                parsed.source.push(d);
             }
             Ok(Item::Override(id, ov)) => {
                 let coords = ov.pos.map_or(vec![], |p| vec![p.x, p.y]);
-                check_coord_range(coords, lineno, &mut errors);
-                overrides.insert(id, ov);
+                check_coord_range(coords, lineno, errors);
+                parsed.overrides.insert(id, ov);
             }
             Ok(Item::RefdesPin(id, refdes)) => {
-                refdes_pins.insert(id, refdes);
+                parsed.refdes_pins.insert(id, refdes);
             }
             Ok(Item::Route(t)) => {
                 let coords = t.path.iter().flat_map(|p| [p.x, p.y]).chain([t.width]);
-                check_coord_range(coords.collect(), lineno, &mut errors);
-                traces.insert(TraceId(next_tid), t);
-                next_tid += 1;
+                check_coord_range(coords.collect(), lineno, errors);
+                parsed.traces.insert(TraceId(*next_tid), t);
+                *next_tid += 1;
             }
             Ok(Item::Via(v)) => {
-                check_coord_range(vec![v.at.x, v.at.y, v.drill, v.pad], lineno, &mut errors);
-                vias.insert(ViaId(next_vid), v);
-                next_vid += 1;
+                check_coord_range(vec![v.at.x, v.at.y, v.drill, v.pad], lineno, errors);
+                parsed.vias.insert(ViaId(*next_vid), v);
+                *next_vid += 1;
             }
             Err(e) => errors.push(Diagnostic::error(
                 "E_PARSE",
@@ -606,17 +880,6 @@ pub fn parse(text: &str) -> Result<Parsed, Vec<Diagnostic>> {
                 },
             )),
         }
-    }
-    if errors.is_empty() {
-        Ok(Parsed {
-            source,
-            overrides,
-            refdes_pins,
-            traces,
-            vias,
-        })
-    } else {
-        Err(errors)
     }
 }
 
@@ -2843,6 +3106,189 @@ region conductor layer=F.Cu (0mm, 0mm) quad (2mm, 3mm) (4mm, 0mm) cubic (5mm, 2m
         assert!(
             err.iter().any(|d| d.code == "E_COORD_RANGE"),
             "expected E_COORD_RANGE: {err:?}"
+        );
+    }
+
+    // ---- nested block grammar (Phase 0 infrastructure) -------------------
+
+    /// A leaf block, for building expected trees compactly in assertions.
+    fn leaf(header: &str, line: u32) -> Block {
+        let (keyword, tokens, rest) = split_header(header);
+        Block {
+            keyword,
+            tokens,
+            rest,
+            opened_block: false,
+            children: Vec::new(),
+            line,
+        }
+    }
+
+    /// Nesting to 3+ levels builds the expected tree, with header tokens pre-split and
+    /// children in source order. (No keyword accepts a block yet, so this exercises the
+    /// generic representation via `parse_blocks`, not `parse`.)
+    #[test]
+    fn blocks_nest_to_arbitrary_depth() {
+        let text = "\
+row main gap=2mm {
+  column left {
+    def inner {
+      inst r1 R
+    }
+  }
+  inst c1 Cap
+}";
+        let forest = parse_blocks(text).expect("parse_blocks");
+        // Top level: one `row` opener.
+        assert_eq!(forest.len(), 1);
+        let row = &forest[0];
+        assert_eq!(row.keyword, "row");
+        assert_eq!(row.tokens, vec!["row", "main", "gap=2mm"]);
+        assert_eq!(row.rest, "main gap=2mm");
+        assert!(row.opened_block);
+        // `row` has two children: `column` (a block) then `inst c1` (a leaf), in order.
+        assert_eq!(row.children.len(), 2);
+        let col = &row.children[0];
+        assert_eq!(col.keyword, "column");
+        assert!(col.opened_block);
+        assert_eq!(row.children[1], leaf("inst c1 Cap", 7));
+        // `column` -> `def` (block) -> `inst r1` (leaf), 3 levels below the row.
+        let def = &col.children[0];
+        assert_eq!(def.keyword, "def");
+        assert!(def.opened_block);
+        assert_eq!(def.children, vec![leaf("inst r1 R", 4)]);
+    }
+
+    /// An empty block still round-trips as a block (opened_block true, no children) —
+    /// the distinction the flat path relies on to reject an empty block on a keyword
+    /// that does not take one.
+    #[test]
+    fn empty_block_is_still_a_block() {
+        let forest = parse_blocks("def empty {\n}").expect("parse");
+        assert_eq!(forest.len(), 1);
+        assert!(forest[0].opened_block);
+        assert!(forest[0].children.is_empty());
+    }
+
+    /// An unbalanced `{` (a block never closed) is an `E_BLOCK` error located at the
+    /// opener's line.
+    #[test]
+    fn unbalanced_open_is_an_error() {
+        let err = parse_blocks("row a {\n  inst r1 R\n").unwrap_err();
+        assert!(err.iter().any(|d| d.code == "E_BLOCK"), "got: {err:?}");
+        let rendered = crate::diagnostic::render(&err);
+        assert!(rendered.contains("1:1"), "located at opener: {rendered}");
+        assert!(
+            rendered.contains("never closed"),
+            "names the failure: {rendered}"
+        );
+    }
+
+    /// A `}` with no open block is an `E_BLOCK` error located at the stray close.
+    #[test]
+    fn stray_close_is_an_error() {
+        let err = parse_blocks("inst r1 R\n}").unwrap_err();
+        assert!(err.iter().any(|d| d.code == "E_BLOCK"), "got: {err:?}");
+        let rendered = crate::diagnostic::render(&err);
+        assert!(
+            rendered.contains("2:1"),
+            "located at the stray `}}`: {rendered}"
+        );
+        assert!(
+            rendered.contains("no open block"),
+            "names the failure: {rendered}"
+        );
+    }
+
+    /// Braces inside a quoted value are literal: a trailing `{` inside quotes does not
+    /// open a block, and `{`/`}` within a quoted run do not confuse balancing.
+    #[test]
+    fn braces_inside_quotes_are_literal() {
+        // Trailing `{` inside a quoted value: NOT a block opener.
+        let forest = parse_blocks("inst r1 R label=\"a { b\"").expect("parse");
+        assert_eq!(forest.len(), 1);
+        assert!(
+            !forest[0].opened_block,
+            "a `{{` inside quotes must not open a block"
+        );
+        // A lone-looking `}` that is actually inside a quoted value is not a close: the
+        // whole thing is one directive, and the quoted braces are preserved verbatim.
+        let forest = parse_blocks("text \"x{y}z\" (0,0) h=1mm").expect("parse");
+        assert_eq!(forest.len(), 1);
+        assert!(!forest[0].opened_block);
+        assert!(forest[0].rest.contains("x{y}z"), "quoted braces preserved");
+    }
+
+    /// Comment stripping is quote-aware and runs *before* brace detection: a `{` after
+    /// a `#` comment is stripped away and never opens a block; a `{` before a comment
+    /// still opens one.
+    #[test]
+    fn brace_after_comment_does_not_open_a_block() {
+        // `{` lives in the comment: stripped, so no block opens.
+        let forest = parse_blocks("inst r1 R  # note { not a block").expect("parse");
+        assert_eq!(forest.len(), 1);
+        assert!(!forest[0].opened_block, "commented `{{` is not an opener");
+        // `{` before the comment DOES open a block (comment stripped off the tail first).
+        let forest = parse_blocks("row a {  # opens here\n}").expect("parse");
+        assert_eq!(forest.len(), 1);
+        assert!(forest[0].opened_block, "pre-comment `{{` opens a block");
+    }
+
+    /// No existing keyword accepts a block, so a block opened on a current keyword is a
+    /// hard parse error through the full `parse` surface — existing documents are
+    /// unchanged, and a stray block cannot silently become an empty directive.
+    #[test]
+    fn block_on_existing_keyword_is_rejected() {
+        let err = parse("inst r1 R {\n}").unwrap_err();
+        assert!(err.iter().any(|d| d.code == "E_BLOCK"), "got: {err:?}");
+        let rendered = crate::diagnostic::render(&err);
+        assert!(
+            rendered.contains("does not take a block"),
+            "clear message: {rendered}"
+        );
+        // The children of the rejected block are not lowered as directives.
+        assert!(
+            !rendered.contains("unknown directive"),
+            "children not descended into: {rendered}"
+        );
+    }
+
+    /// serialize -> parse -> serialize is a fixed point for a block tree, with canonical
+    /// two-space-per-depth indentation.
+    #[test]
+    fn block_serialize_is_a_fixpoint() {
+        let text = "\
+row main gap=2mm {
+  column left {
+    inst r1 R
+  }
+  inst c1 Cap
+}
+inst top MCU
+";
+        let forest = parse_blocks(text).expect("parse");
+        let once = serialize_blocks(&forest);
+        // Canonical indentation is exactly what we authored above.
+        assert_eq!(once, text, "canonical two-space indent per depth");
+        let reforest = parse_blocks(&once).expect("re-parse");
+        let twice = serialize_blocks(&reforest);
+        assert_eq!(once, twice, "serialize is a fixed point");
+        assert_eq!(forest, reforest, "the tree round-trips structurally");
+    }
+
+    /// The flat (blockless) document path is byte-for-byte unchanged: a full-coverage
+    /// source serialized by the `Doc` serializer parses back through the new
+    /// block-aware `parse` identically to before.
+    #[test]
+    fn flat_documents_are_unchanged_through_blocks() {
+        let doc = doc_of(all_variants(), BTreeMap::new());
+        let text = serialize(&doc);
+        // parse -> the same source, and the flat forest has no openers.
+        assert_eq!(parse(&text).unwrap().source, doc.source);
+        let forest = parse_blocks(&text).expect("parse_blocks");
+        assert!(
+            forest.iter().all(|b| !b.opened_block),
+            "a canonical Doc serialization contains no blocks"
         );
     }
 
