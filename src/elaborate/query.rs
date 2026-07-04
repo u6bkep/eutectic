@@ -7,7 +7,7 @@ use crate::geom::{Feature, NetFeature, Role, Shape2D, Slab, Stackup, ZRange};
 use crate::id::NetId;
 use crate::ir::{GenDirective, RegionDecl, Source};
 
-/// The board as a filled [`Region`](crate::region::Region): the last `Board` directive's
+/// The board as a filled [`Region`](crate::geom::kernel::Region): the last `Board` directive's
 /// outline **minus** every `Cutout` (Decision 16c). `None` if there is no `Board` (the
 /// solver then leaves placement unbounded). This is the single shared board-geometry
 /// reader — elaboration (the substrate/mask `Area` features), the solver (containment),
@@ -18,14 +18,14 @@ use crate::ir::{GenDirective, RegionDecl, Source};
 /// construction, Decision 16b): a curved board edge or round cutout becomes a fine
 /// polyline. The authored arcs survive in the `Board`/`Cutout` directives; this derived
 /// region does not carry them.
-pub fn board_region(source: &Source) -> Option<crate::region::Region> {
-    use crate::region::{DEFAULT_CIRCLE_SEGS, difference, shape_to_region, union_all};
+pub fn board_region(source: &Source) -> Option<crate::geom::kernel::Region> {
+    use crate::geom::kernel::{DEFAULT_CIRCLE_SEGS, difference, shape_to_region, union_all};
     let outline = source.iter().rev().find_map(|d| match d {
         GenDirective::Board { outline } => Some(outline),
         _ => None,
     })?;
     let mut region = shape_to_region(outline, DEFAULT_CIRCLE_SEGS);
-    let cutouts: Vec<crate::region::Region> = source
+    let cutouts: Vec<crate::geom::kernel::Region> = source
         .iter()
         .filter_map(|d| match d {
             GenDirective::Cutout { shape } => Some(shape_to_region(shape, DEFAULT_CIRCLE_SEGS)),

@@ -35,6 +35,7 @@
 pub mod feature;
 pub mod kernel;
 pub mod limits;
+mod seg;
 pub mod shape;
 
 #[cfg(test)]
@@ -42,8 +43,7 @@ mod geom_tests;
 
 // Re-export the whole subsystem at the facade so every existing `crate::geom::` path
 // keeps resolving after the split (shape vocabulary, feature model, ceilings/limits).
-// The boolean/offset `kernel` keeps its own `crate::geom::kernel::` namespace and is
-// additionally surfaced crate-wide through the `crate::region` shim.
+// The boolean/offset `kernel` keeps its own `crate::geom::kernel::` namespace.
 pub use feature::*;
 pub use limits::*;
 pub use shape::*;

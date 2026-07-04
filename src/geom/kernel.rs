@@ -35,6 +35,7 @@
 //!   the kernel consumes, never stored — keeping the door open to an arc-exact boolean
 //!   later with no change to the representation or to export.
 
+use super::seg::{pt_seg_d2, segs_intersect};
 use crate::coord::{Nm, Point};
 use crate::geom::Shape2D;
 
@@ -131,56 +132,11 @@ fn round_div(num: i128, den: i128) -> i128 {
     }
 }
 
-/// Squared distance from point `p` to segment `a`–`b`, as `(num, den)` with
-/// `dist² = num/den`, `den > 0` (exact i128). Mirrors the geom kernel; kept local so
-/// `region` stays self-contained.
-fn pt_seg_d2(p: Point, a: Point, b: Point) -> (i128, i128) {
-    // Worst i128 chain (`|w|²·den ≤ 64·C⁴`) — the true ceiling is `KERNEL_SAFE_COORD`
-    // (composition-frame, above the `MAX_COORD` ingest bound).
-    debug_assert!(
-        [p, a, b].iter().all(|&q| crate::geom::point_kernel_safe(q)),
-        "region::pt_seg_d2 coordinate exceeds KERNEL_SAFE_COORD; i128 product may overflow (issue 0018)"
-    );
-    let (vx, vy) = ((b.x - a.x) as i128, (b.y - a.y) as i128);
-    let (wx, wy) = ((p.x - a.x) as i128, (p.y - a.y) as i128);
-    let den = vx * vx + vy * vy;
-    if den == 0 {
-        return (wx * wx + wy * wy, 1);
-    }
-    let t = wx * vx + wy * vy;
-    if t <= 0 {
-        (wx * wx + wy * wy, 1)
-    } else if t >= den {
-        let (ux, uy) = ((p.x - b.x) as i128, (p.y - b.y) as i128);
-        (ux * ux + uy * uy, 1)
-    } else {
-        // |w|² − t²/den = (|w|²·den − t²)/den. Exact in i128 at board scale (±1e9 nm:
-        // |w|²·den ≲ 4e36 ≪ i128::MAX).
-        let ww = wx * wx + wy * wy;
-        (ww * den - t * t, den)
-    }
-}
-
 /// Is `dist²(p, seg a–b) < thr2`? Compared as `num < thr2·den` (no cross-multiplying
 /// two large numerators — that would overflow i128 at board scale).
 fn pt_seg_lt(p: Point, a: Point, b: Point, thr2: i128) -> bool {
     let (num, den) = pt_seg_d2(p, a, b);
     num < thr2 * den
-}
-
-/// Do segments `a1a2` and `b1b2` intersect (touch / collinear-overlap counts)?
-fn segs_intersect(a1: Point, a2: Point, b1: Point, b2: Point) -> bool {
-    let d1 = cross(b1, b2, a1).signum();
-    let d2 = cross(b1, b2, a2).signum();
-    let d3 = cross(a1, a2, b1).signum();
-    let d4 = cross(a1, a2, b2).signum();
-    if d1 != d2 && d3 != d4 {
-        return true;
-    }
-    (d1 == 0 && on_seg_bbox(b1, b2, a1))
-        || (d2 == 0 && on_seg_bbox(b1, b2, a2))
-        || (d3 == 0 && on_seg_bbox(a1, a2, b1))
-        || (d4 == 0 && on_seg_bbox(a1, a2, b2))
 }
 
 /// Is the minimum distance between segments `a1a2` and `b1b2` `< thr` (thr² = `thr2`)?

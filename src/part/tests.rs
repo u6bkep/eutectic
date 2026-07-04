@@ -1033,11 +1033,11 @@ fn text_features_ttf_bottom_side_keeps_counter_a_hole() {
     };
     assert_eq!(region.rings.len(), 2, "outer + counter");
     assert!(
-        crate::region::signed_area2(&region.rings[0]) > 0,
+        crate::geom::kernel::signed_area2(&region.rings[0]) > 0,
         "outer stays CCW after the bottom-side reflection"
     );
     assert!(
-        crate::region::signed_area2(&region.rings[1]) < 0,
+        crate::geom::kernel::signed_area2(&region.rings[1]) < 0,
         "counter stays CW (a hole) after the reflection"
     );
 }

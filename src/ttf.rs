@@ -1,7 +1,7 @@
 //! Outline (TTF/OpenType) text — the second font slice (Decision 17, the continuation
 //! of Decision 9). Where [`crate::font`] emits *centreline strokes* traced at a pen
 //! width, this module emits **filled glyph outlines**: each glyph's TrueType contours
-//! flatten to integer polygons, land in the [`region`](crate::region) kernel as
+//! flatten to integer polygons, land in the [`kernel`](crate::geom::kernel) as
 //! `outer ∖ counters`, and become one [`Shape2D::Area`] per glyph. Text then lowers
 //! like any other filled graphic — silk export needs no new path.
 //!
@@ -29,8 +29,8 @@
 //! font-dependent, so after flattening we normalize once: if the glyph's total signed
 //! area is negative, every ring is reversed. This flips the whole glyph, preserving the
 //! *relative* orientation of counters (holes stay holes under non-zero winding) while
-//! making outers read as CCW islands — what [`Region::islands`](crate::region::Region::islands)
-//! / [`holes`](crate::region::Region::holes) and the reflection-safe
+//! making outers read as CCW islands — what [`Region::islands`](crate::geom::kernel::Region::islands)
+//! / [`holes`](crate::geom::kernel::Region::holes) and the reflection-safe
 //! [`Shape2D::map_points`] expect.
 //!
 //! # Kerning
@@ -72,8 +72,8 @@
 
 use crate::doc::{Nm, Point};
 use crate::font::Justify;
+use crate::geom::kernel::Region;
 use crate::geom::{Path, Seg, Shape2D, point_kernel_safe};
-use crate::region::Region;
 
 /// A parsed outline font. Owns the file bytes; a [`ttf_parser::Face`] borrows them and is
 /// re-parsed per operation (parsing only validates the table directory — cheap). Built
@@ -719,7 +719,7 @@ fn build_test_ttf_impl(kern: Option<Vec<u8>>) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::region::signed_area2;
+    use crate::geom::kernel::signed_area2;
 
     /// The hand-built fixture parses, and its metrics come out as designed: cap height
     /// falls back to the `H` ink height (700 units, no OS/2), so at height 700 000 nm the

@@ -510,8 +510,12 @@ pub(super) fn pad_on_own_copper(doc: &Doc, _su: &Stackup, cur: &NetId, p: &Pad) 
 /// Is the distance from point `p` to segment `a`–`b` within `r` (inclusive)? Exact
 /// i128 squared-distance comparison (a rational `num/den`) — no float, deterministic.
 ///
-/// NOTE: duplicated against `route`'s segment kernel; a later wave dedups both into
-/// `geom`. Left here unchanged for now.
+/// NOTE: the `(num, den)` computation is body-identical to
+/// [`crate::geom::seg::pt_seg_d2`], but this function is deliberately not unified with
+/// it: it applies an *inclusive* threshold (`num <= r²·den`) where geom's only exposed
+/// squared-distance predicate (`kernel::pt_seg_lt`) is strict and private, and it omits
+/// the `point_kernel_safe` debug_assert that `pt_seg_d2` carries. Left standalone; the
+/// near-match primitive is `crate::geom::seg::pt_seg_d2`.
 pub(super) fn within(p: Point, a: Point, b: Point, r: Nm) -> bool {
     let (vx, vy) = ((b.x - a.x) as i128, (b.y - a.y) as i128);
     let (wx, wy) = ((p.x - a.x) as i128, (p.y - a.y) as i128);

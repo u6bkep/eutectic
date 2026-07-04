@@ -643,7 +643,7 @@ fn determinism_same_inputs_same_answer() {
 /// respect the hole.
 #[test]
 fn area_shape_geometry_ops() {
-    use crate::region::{DEFAULT_CIRCLE_SEGS, difference, shape_to_region};
+    use crate::geom::kernel::{DEFAULT_CIRCLE_SEGS, difference, shape_to_region};
     let outer = shape_to_region(
         &Shape2D::rect(pt(0, 0), 10 * MM, 10 * MM),
         DEFAULT_CIRCLE_SEGS,
@@ -695,7 +695,7 @@ fn area_shape_geometry_ops() {
 /// overlap), a shape deep in a hole clears, and a shape near a hole wall violates.
 #[test]
 fn area_clears_island_versus_hole() {
-    use crate::region::{DEFAULT_CIRCLE_SEGS, difference, shape_to_region};
+    use crate::geom::kernel::{DEFAULT_CIRCLE_SEGS, difference, shape_to_region};
     // 20 mm square, 4 mm square hole (walls at ±2 mm).
     let outer = shape_to_region(
         &Shape2D::rect(pt(0, 0), 20 * MM, 20 * MM),
@@ -746,7 +746,7 @@ fn area_clears_island_versus_hole() {
 /// `islands()` invert (a wave-2 bottom-silk glyph would render as its own negative).
 #[test]
 fn area_map_points_preserves_orientation_under_reflection() {
-    use crate::region::{DEFAULT_CIRCLE_SEGS, difference, shape_to_region, signed_area2};
+    use crate::geom::kernel::{DEFAULT_CIRCLE_SEGS, difference, shape_to_region, signed_area2};
     // 10 mm square centred at +6 mm x (so a reflection across x=0 relocates it), with
     // a 4 mm hole. Filled ring x∈[1,11]∖[4,8]; hole centre at (6,0).
     let outer = shape_to_region(

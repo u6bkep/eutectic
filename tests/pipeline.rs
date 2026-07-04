@@ -4,11 +4,11 @@ use ecad_core::command::{Command, Resolution, Transaction, suggested_resolutions
 use ecad_core::doc::{DecayReason, Doc, MM, Nm, Point, Provenance};
 use ecad_core::elaborate::{GenDirective, Source, board_rect, psu_module};
 use ecad_core::geom::Shape2D;
+use ecad_core::geom::kernel::{DEFAULT_CIRCLE_SEGS, difference, shape_to_region};
 use ecad_core::history::History;
 use ecad_core::id::{EntityId, NetId, TraceId, ViaId};
 use ecad_core::part::part_library;
 use ecad_core::query::{Engine, Key};
-use ecad_core::region::{DEFAULT_CIRCLE_SEGS, difference, shape_to_region};
 use ecad_core::route::{Trace, Via, Violation};
 use ecad_core::solve::{Constraint, PLACE_TOL, Problem, dist, solve};
 use std::collections::{BTreeMap, BTreeSet};

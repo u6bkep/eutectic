@@ -7,9 +7,9 @@
 //! ring-to-Gerber emitter [`gerber_region_fill`].
 
 use crate::doc::{MM, Nm, Point};
+use crate::geom::kernel::Region;
 use crate::geom::{DEFAULT_CHORD_TOL, Extent, Path, Role, Seg, Shape2D, Slab, Stackup, ZRange};
 use crate::part::{PartLib, pin_world};
-use crate::region::Region;
 use crate::route::{Trace, Via};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -399,7 +399,7 @@ pub fn gerber_edge_cuts(doc: &crate::doc::Doc, lib: &PartLib) -> String {
     // The board region (outline ∖ cutouts); fall back to a rectangle around all geometry.
     let region = source_board(doc).unwrap_or_else(|| {
         let (min, max) = placement_bbox(doc, lib);
-        crate::region::shape_to_region(
+        crate::geom::kernel::shape_to_region(
             &Shape2D::rect(
                 Point {
                     x: (min.x + max.x) / 2,
@@ -408,7 +408,7 @@ pub fn gerber_edge_cuts(doc: &crate::doc::Doc, lib: &PartLib) -> String {
                 max.x - min.x,
                 max.y - min.y,
             ),
-            crate::region::DEFAULT_CIRCLE_SEGS,
+            crate::geom::kernel::DEFAULT_CIRCLE_SEGS,
         )
     });
     let mut out = String::new();

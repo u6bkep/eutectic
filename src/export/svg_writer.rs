@@ -8,8 +8,8 @@
 //! integer predicates so the SVG is byte-stable.
 
 use crate::doc::{MM, Nm, Point};
+use crate::geom::kernel::Region;
 use crate::geom::{Seg, Shape2D, circumcenter};
-use crate::region::Region;
 
 /// Format a fixed-point nanometre coordinate as a millimetre decimal string with
 /// exactly six fractional digits. Pure integer arithmetic — no float, so the

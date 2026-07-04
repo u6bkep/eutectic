@@ -5,10 +5,10 @@
 
 use crate::doc::{Doc, Nm};
 use crate::elaborate::stackup;
+use crate::geom::kernel::{DEFAULT_CIRCLE_SEGS, Region, difference, shape_to_region, union_all};
 use crate::geom::{Extent, Feature, KeepoutKind, Role, Shape2D, Stackup};
 use crate::id::{NetId, TraceId};
 use crate::part::{PartLib, PinRole, pin_world};
-use crate::region::{DEFAULT_CIRCLE_SEGS, Region, difference, shape_to_region, union_all};
 use std::collections::BTreeMap;
 
 use super::connect::{PinPoint, pin_islands, pin_point};

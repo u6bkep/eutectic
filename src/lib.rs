@@ -33,7 +33,6 @@ pub mod part;
 pub mod project;
 pub mod quantity;
 pub mod query;
-pub mod region;
 pub mod route;
 pub mod schematic;
 pub mod schematic_svg;

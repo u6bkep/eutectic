@@ -5,6 +5,7 @@
 //! kernel-safety live in [`limits`](super::limits).
 
 use super::limits::*;
+use super::seg::{pt_seg_d2, segs_intersect};
 use crate::coord::{Nm, Point};
 
 // ----------------------------------------------------------------------------
@@ -155,13 +156,13 @@ pub enum Shape2D {
     /// `radius` (`0` ⇒ sharp; a rectangle with `radius` ⇒ a rounded rect). Edges may be
     /// arcs (e.g. a D-shaped or slotted board outline).
     Polygon { path: Path, radius: Nm },
-    /// A filled area with holes: a [`Region`](crate::region::Region) of oriented rings
+    /// A filled area with holes: a [`Region`](crate::geom::kernel::Region) of oriented rings
     /// (CCW islands minus CW holes) carried as a first-class shape (Decision 16a). Unlike
     /// `Stroke`/`Polygon` it has no skeleton+radius — the rings *are* the boundary, already
     /// polygonized (a board outline ∖ cutouts, a pour fill, a glyph with counters). Its
     /// `radius()` is `0`; [`inflated`](Shape2D::inflated) uses the region kernel's exact
-    /// dilation ([`region::dilate`](crate::region::dilate)).
-    Area { region: crate::region::Region },
+    /// dilation ([`region::dilate`](crate::geom::kernel::dilate)).
+    Area { region: crate::geom::kernel::Region },
 }
 
 impl Shape2D {
@@ -293,7 +294,7 @@ impl Shape2D {
 
     /// The region of a [`Shape2D::Area`], else `None`. The one accessor that reaches an
     /// `Area`'s rings without going through the (panicking) skeleton [`path`](Shape2D::path).
-    pub fn region(&self) -> Option<&crate::region::Region> {
+    pub fn region(&self) -> Option<&crate::geom::kernel::Region> {
         match self {
             Shape2D::Area { region } => Some(region),
             _ => None,
@@ -329,14 +330,14 @@ impl Shape2D {
             // An `Area` is already realised rings, so inflation is the region kernel's
             // exact Minkowski dilation by a disc of `d` (same decomposition
             // `shape_to_region` uses). `d == 0` is identity; **negative `d` (erosion) is
-            // not implemented and panics** in [`region::dilate`](crate::region::dilate) —
+            // not implemented and panics** in [`region::dilate`](crate::geom::kernel::dilate) —
             // no consumer needs it (clearance offsets are always positive) and a silent
             // wrong answer is worse than a loud one.
             Shape2D::Area { region } => Shape2D::Area {
                 region: if d == 0 {
                     region.clone()
                 } else {
-                    crate::region::dilate(region, d, crate::region::DEFAULT_CIRCLE_SEGS)
+                    crate::geom::kernel::dilate(region, d, crate::geom::kernel::DEFAULT_CIRCLE_SEGS)
                 },
             },
         }
@@ -356,19 +357,19 @@ impl Shape2D {
                 radius: *radius,
             },
             Shape2D::Area { region } => Shape2D::Area {
-                region: crate::region::Region {
+                region: crate::geom::kernel::Region {
                     rings: region
                         .rings
                         .iter()
                         .map(|ring| {
-                            let before = crate::region::signed_area2(ring);
+                            let before = crate::geom::kernel::signed_area2(ring);
                             let mut mapped: Vec<Point> = ring.iter().map(|&p| f(p)).collect();
                             // A reflecting transform (negative determinant — e.g. a
                             // bottom-side flip (x,y)→(−x,y)) reverses every ring's signed
                             // area, so CCW islands would read as CW holes and vice versa.
                             // Restore each ring's original winding sign so the region's
                             // fill semantics survive the map (containment / holes()).
-                            let after = crate::region::signed_area2(&mapped);
+                            let after = crate::geom::kernel::signed_area2(&mapped);
                             if after != 0 && (before > 0) != (after > 0) {
                                 mapped.reverse();
                             }
@@ -557,35 +558,6 @@ fn skeletons_overlap(a: &Shape2D, b: &Shape2D) -> bool {
         }
     }
     false
-}
-
-/// Exact squared distance from point `p` to segment `a`–`b`, as `(num, den)` with
-/// `dist² = num/den` and `den > 0`.
-fn pt_seg_d2(p: Point, a: Point, b: Point) -> (i128, i128) {
-    // The worst i128 chain in the kernel (`|w|²·den ≤ 64·C⁴`); [`KERNEL_SAFE_COORD`] is
-    // its true ceiling. Assert against that (not the tighter ingest [`MAX_COORD`]) so
-    // legal composition — a placement + courtyard within the headroom — never panics.
-    debug_assert!(
-        point_kernel_safe(p) && point_kernel_safe(a) && point_kernel_safe(b),
-        "pt_seg_d2 coordinate exceeds KERNEL_SAFE_COORD; the i128 product may overflow (issue 0018)"
-    );
-    let (vx, vy) = ((b.x - a.x) as i128, (b.y - a.y) as i128);
-    let (wx, wy) = ((p.x - a.x) as i128, (p.y - a.y) as i128);
-    let den = vx * vx + vy * vy;
-    if den == 0 {
-        return (wx * wx + wy * wy, 1); // degenerate segment = point a
-    }
-    let t = wx * vx + wy * vy;
-    if t <= 0 {
-        (wx * wx + wy * wy, 1)
-    } else if t >= den {
-        let (ux, uy) = ((p.x - b.x) as i128, (p.y - b.y) as i128);
-        (ux * ux + uy * uy, 1)
-    } else {
-        // Perpendicular: |w|² − t²/den = (|w|²·den − t²)/den.
-        let ww = wx * wx + wy * wy;
-        (ww * den - t * t, den)
-    }
 }
 
 /// The point on segment `a`–`b` closest to `p`: project, clamp the parameter to
@@ -803,21 +775,6 @@ pub(super) fn orient(a: Point, b: Point, c: Point) -> i32 {
 
 fn on_seg(a: Point, b: Point, p: Point) -> bool {
     p.x >= a.x.min(b.x) && p.x <= a.x.max(b.x) && p.y >= a.y.min(b.y) && p.y <= a.y.max(b.y)
-}
-
-/// Do segments `a1a2` and `b1b2` intersect (including touching/collinear overlap)?
-fn segs_intersect(a1: Point, a2: Point, b1: Point, b2: Point) -> bool {
-    let d1 = orient(b1, b2, a1);
-    let d2 = orient(b1, b2, a2);
-    let d3 = orient(a1, a2, b1);
-    let d4 = orient(a1, a2, b2);
-    if d1 != d2 && d3 != d4 {
-        return true;
-    }
-    (d1 == 0 && on_seg(b1, b2, a1))
-        || (d2 == 0 && on_seg(b1, b2, a2))
-        || (d3 == 0 && on_seg(a1, a2, b1))
-        || (d4 == 0 && on_seg(a1, a2, b2))
 }
 
 /// Point-in-polygon (crossing number), exact integer; boundary counts as inside.

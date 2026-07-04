@@ -6,9 +6,9 @@
 //! builders in [`super::svg_writer`], keeping the output byte-stable and diffable.
 
 use crate::doc::{MM, Nm, Point};
+use crate::geom::kernel::Region;
 use crate::geom::{Extent, Role, Shape2D, Slab, Stackup, ZRange};
 use crate::part::{PartLib, pin_world};
-use crate::region::Region;
 use crate::route::Layer;
 
 use super::features::{pours_of, role_features};

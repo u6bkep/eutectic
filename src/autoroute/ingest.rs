@@ -165,7 +165,7 @@ pub(super) fn verify_and_prune(
         })
         .map(|nf| &nf.feature)
         .collect();
-    let substrate: Option<&crate::region::Region> = world.iter().find_map(|nf| {
+    let substrate: Option<&crate::geom::kernel::Region> = world.iter().find_map(|nf| {
         if nf.feature.role != Role::Substrate {
             return None;
         }
@@ -205,11 +205,11 @@ pub(super) fn verify_and_prune(
         // Board-edge: solid copper grown by the edge rule must stay inside the board.
         let edge_clash = substrate.is_some_and(|board| {
             let Extent::Prism { shape, .. } = &p.feature.extent;
-            let grown = crate::region::shape_to_region(
+            let grown = crate::geom::kernel::shape_to_region(
                 &shape.inflated(rules.edge_clearance),
-                crate::region::DEFAULT_CIRCLE_SEGS,
+                crate::geom::kernel::DEFAULT_CIRCLE_SEGS,
             );
-            !crate::region::difference(&grown, board).is_empty()
+            !crate::geom::kernel::difference(&grown, board).is_empty()
         });
         if copper_clash || keepout_clash || edge_clash {
             unclean.insert(pnet.clone());

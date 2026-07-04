@@ -111,7 +111,7 @@ pub(super) fn pin_islands(
     pins: &[PinPoint],
     traces: &[&Trace],
     vias: &[&Via],
-    pour_islands: &[(String, crate::region::Region)],
+    pour_islands: &[(String, crate::geom::kernel::Region)],
     su: &Stackup,
     tol: Nm,
 ) -> usize {
@@ -234,8 +234,19 @@ pub(super) fn pin_islands(
 // Integer geometry. All comparisons are exact (i128, squared thresholds); nothing
 // here uses floating point.
 //
-// NOTE: this kernel is duplicated against `autoroute`'s `within`; a later wave
-// dedups both into `geom`. It is sectioned here unchanged for now.
+// NOTE: this kernel overlaps `geom::seg` (`pt_seg_d2`, `segs_intersect`) and
+// `autoroute`'s `within`, but is deliberately NOT unified with them:
+//   - `point_seg_dist2` is body-identical to `geom::seg::pt_seg_d2` but omits its
+//     `point_kernel_safe` debug_assert; adopting the geom copy would introduce a
+//     debug-only panic on router coordinates that this kernel does not currently guard.
+//   - `segments_intersect` formulates the proper-crossing test as strict opposite-sign
+//     pairs `(d1>0 && d2<0)||…`, where `geom::seg::segs_intersect` uses
+//     `d1.signum() != d2.signum()`. These are equal on generic input but take
+//     different branches on collinear/touching cases, so they are not token-identical.
+//   - `seg_within`/`point_seg_cmp` carry `strict` (`<` vs `<=`) and an `Nm` tolerance
+//     that the geom primitives do not expose.
+// Unification here is real behaviour-risk work (DRC honesty), out of scope for a
+// mechanical reorg. The near-match primitive is `crate::geom::seg`.
 // ----------------------------------------------------------------------------
 
 /// `(a-o) × (b-o)` — twice the signed area of triangle o,a,b. Sign = orientation.
