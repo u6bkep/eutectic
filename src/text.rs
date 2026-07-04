@@ -5409,6 +5409,102 @@ inst top MCU
         );
     }
 
+    /// A ref to a *leaf pin* of a def instance dropped by `if=false` degrades to `W_DNP`,
+    /// exactly like a ref to the instance itself — not a hard `E_UNKNOWN_INSTANCE` (the
+    /// prefix rule: a path beneath a dropped subtree is intentionally-absent). With
+    /// `if=true` the same connection resolves normally; a genuinely unknown deep path (no
+    /// such def instance ever) still hard-errors.
+    #[test]
+    fn deep_ref_into_dropped_def_degrades_to_warning() {
+        let def = "def rc {\n  inst R1 Cap\n  inst C1 Cap\n}\n";
+        // if=false: deep pin ref into the never-stamped subtree degrades.
+        let src = format!("{def}inst a rc if=(false)\nnet OUT a.R1.p2");
+        let Parsed { source, .. } = parse(&src).expect("parse");
+        let doc = placed(source);
+        assert!(!doc.components.contains_key(&EntityId::new("a.R1")));
+        assert!(
+            doc.report.dnp_dangling.iter().any(|(_, p)| p == "a.R1"),
+            "deep ref into dropped subtree should be W_DNP, got {:?}",
+            doc.report.dnp_dangling
+        );
+
+        // if=true: the same deep ref connects normally.
+        let src_on = format!("{def}inst a rc if=(true)\nnet OUT a.R1.p2");
+        let Parsed { source: on, .. } = parse(&src_on).expect("parse on");
+        let doc_on = placed(on);
+        let out = net_named(&doc_on, "OUT");
+        assert!(
+            out.members
+                .iter()
+                .any(|m| m.comp.as_str() == "a.R1" && m.pin.as_str() == "p2"),
+            "with if=true the deep pin connects, got {:?}",
+            out.members
+        );
+
+        // A genuinely unknown deep path (no def instance `zzz` ever) still hard-errors.
+        let bad = format!("{def}inst a rc\nnet OUT zzz.R1.p2");
+        let Parsed { source: b, .. } = parse(&bad).expect("parse bad");
+        let err = elab_err(&b);
+        assert!(
+            err.iter().any(|d| d.code == "E_UNKNOWN_INSTANCE"),
+            "an unknown deep path must still hard-error, got {:?}",
+            err.iter().map(|d| &d.code).collect::<Vec<_>>()
+        );
+    }
+
+    /// An authored top-level net whose name equals a stamped def-internal net is a hard
+    /// `E_DEF_NET_COLLISION` (not a silent merge), naming both sides. Tested in both
+    /// authoring orders (authored-before-def-inst and after), since a silent merge would
+    /// be order-independent too.
+    #[test]
+    fn authored_net_colliding_with_internal_net_is_an_error() {
+        let def = "def rc {\n  inst R1 Cap\n  inst C1 Cap\n  net fb R1.p2 C1.p1\n}\n";
+        // The stamped internal net is `a.fb`; author a top-level `net a.fb …` that collides.
+        for order in [
+            format!("{def}inst a rc\nnet a.fb R1.p1"),
+            format!("{def}net a.fb R1.p1\ninst a rc"),
+        ] {
+            let Parsed { source, .. } = parse(&order).expect("parse");
+            let err = elab_err(&source);
+            assert!(
+                err.iter().any(|d| d.code == "E_DEF_NET_COLLISION"),
+                "expected E_DEF_NET_COLLISION for `{order}`, got {:?}",
+                err.iter().map(|d| &d.code).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// The range loop variable `i` is NOT visible inside a def body (the body is a pure
+    /// function of its declared params). A body expression referencing `i` is an `E_EXPR`
+    /// unknown variable — the index must be passed explicitly via a `p:`.
+    #[test]
+    fn range_index_not_visible_inside_def_body() {
+        let src = "param n = 2\n\
+                   def s {\n  inst U Cap p:idx=(i)\n}\n\
+                   inst sense[0..n] s";
+        let Parsed { source, .. } = parse(src).expect("parse");
+        let err = elab_err(&source);
+        assert!(
+            err.iter().any(|d| d.code == "E_EXPR"),
+            "referencing `i` inside a def body must be E_EXPR, got {:?}",
+            err.iter().map(|d| &d.code).collect::<Vec<_>>()
+        );
+        // The explicit-forward form works: pass the index as a param.
+        let ok = "param n = 2\n\
+                  def s param idx=0 {\n  inst U Cap p:tag=(idx)\n}\n\
+                  inst sense[0..n] s p:idx=(i)";
+        let Parsed { source: oks, .. } = parse(ok).expect("parse ok");
+        let doc = placed(oks);
+        assert_eq!(
+            doc.components[&EntityId::new("sense[0].U")].params["tag"],
+            "0"
+        );
+        assert_eq!(
+            doc.components[&EntityId::new("sense[1].U")].params["tag"],
+            "1"
+        );
+    }
+
     /// An override pinned to a stamped def-instance path survives a def param change and
     /// orphans (surfaced, not dropped) when the instance disappears — reconciliation flows
     /// through stamped paths exactly as for hand-written ones.

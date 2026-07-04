@@ -433,6 +433,8 @@ fn expand_generative(
     // another port (a def re-exporting a nested def's port), so it is resolved
     // transitively before rewriting outer connections.
     let mut port_map: BTreeMap<(String, String), (String, String)> = BTreeMap::new();
+    let mut authored_nets: BTreeSet<String> = BTreeSet::new();
+    let mut internal_nets: BTreeMap<String, String> = BTreeMap::new();
 
     let mut ctx = ExpandCtx {
         defs: &defs,
@@ -440,12 +442,42 @@ fn expand_generative(
         out: &mut out,
         dropped: &mut dropped,
         port_map: &mut port_map,
+        authored_nets: &mut authored_nets,
+        internal_nets: &mut internal_nets,
     };
     // Stamp the whole program at the empty prefix. Connections are emitted with their
     // paths prefixed but *ports unresolved*; the rewrite pass below threads them through
     // the port map.
     expand_scope(source, &env, "", &mut Vec::new(), &mut ctx);
 
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+
+    // Net-name collision (Decision 21a): an authored top-level `net` whose name equals a
+    // stamped def-internal net (`net sense[0].fb …` at top level colliding with instance
+    // `sense[0]`'s internal `fb`) would silently *merge* the two — a silent-wrong-
+    // connectivity class. Reject it, naming both sides. Deliberate internal-net tapping is
+    // a future feature behind explicit syntax; silence is not it. Order-independent (both
+    // sets are collected across the whole walk before this check).
+    for name in &authored_nets {
+        if let Some(inst) = internal_nets.get(name) {
+            errors.push(
+                Diagnostic::error(
+                    "E_DEF_NET_COLLISION",
+                    format!(
+                        "authored net `{name}` collides with the internal net of def instance \
+                         `{inst}` (which elaborates to the same path-prefixed name)"
+                    ),
+                    Location::Net(NetId::new(name.clone())),
+                )
+                .with_help(
+                    "rename the authored net, or connect to the module through a `port` instead \
+                     of tapping its internal net by name",
+                ),
+            );
+        }
+    }
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -476,6 +508,14 @@ struct ExpandCtx<'a> {
     out: &'a mut Source,
     dropped: &'a mut BTreeSet<String>,
     port_map: &'a mut BTreeMap<(String, String), (String, String)>,
+    /// Net names emitted at the top level (authored `net`/`nc` with no def prefix), each
+    /// paired with the `nc`/`net` context. Used to catch an authored net that silently
+    /// collides with a stamped def-internal net (see `internal_nets`).
+    authored_nets: &'a mut BTreeSet<String>,
+    /// Stamped def-internal net names (a `net` emitted under a non-empty instance prefix),
+    /// mapped to the def-instance path that produced it — for a collision diagnostic that
+    /// names both sides.
+    internal_nets: &'a mut BTreeMap<String, String>,
 }
 
 /// Prefix a def-relative path/name with the instance path (`""` at top level → unchanged;
@@ -581,8 +621,16 @@ fn expand_scope(
             // Connectivity: prefix the component paths and net name; ports are resolved
             // later. Copied through with paths rewritten.
             GenDirective::ConnectPins { net, pins } => {
+                let full = prefix_path(prefix, net);
+                if prefix.is_empty() {
+                    ctx.authored_nets.insert(full.clone());
+                } else {
+                    // A stamped def-internal net; remember which instance produced it so a
+                    // collision with an authored net names both sides.
+                    ctx.internal_nets.insert(full.clone(), prefix.to_string());
+                }
                 ctx.out.push(GenDirective::ConnectPins {
-                    net: prefix_path(prefix, net),
+                    net: full,
                     pins: pins
                         .iter()
                         .map(|(c, s)| (prefix_path(prefix, c), s.clone()))
@@ -617,6 +665,15 @@ fn expand_scope(
 /// `outer_env` is the scope the *overrides were already evaluated in* — the def's own
 /// param env is built here from overrides-or-defaults. Records the instance's ports into
 /// `ctx.port_map`, then recurses into the body.
+///
+/// Scope rule: the def body is stamped in the def's param env layered over `outer_env`
+/// (the doc/enclosing-def params). The **range loop variable `i` is deliberately NOT
+/// visible inside the body** — a ranged def instantiation (`inst sense[0..n] S`) binds `i`
+/// only when evaluating the instantiation's *own* `if=`/`p:` (in `expand_scope`), and
+/// `stamp_def` receives the un-indexed `outer_env`. So a body expression referring to `i`
+/// is an unknown-variable `E_EXPR`. This keeps the body a pure function of its declared
+/// params: to make the index available inside, pass it explicitly as a param
+/// (`inst sense[0..n] S p:idx=(i)`), which the body then reads as `idx`.
 fn stamp_def(
     def_name: &str,
     ipath: &str,
@@ -626,7 +683,11 @@ fn stamp_def(
     ctx: &mut ExpandCtx,
 ) {
     use crate::expr;
-    // Cycle: a def reaching itself through any chain of instantiations.
+    // Cycle: a def reaching itself through any chain of instantiations. This is *dynamic*
+    // (walk-time) detection: a recursive instantiation reachable only through a false
+    // `if=` is never stamped, so it is never walked and never reported — consistent with
+    // `if=false` dropping the whole subtree. A statically-present-but-dead cycle is thus
+    // silent by design, not a missed diagnostic.
     if chain.iter().any(|n| n == def_name) {
         chain.push(def_name.to_string());
         ctx.errors.push(Diagnostic::error(
@@ -662,8 +723,9 @@ fn stamp_def(
     // Build the def's param environment. A declared param takes its value from the `p:`
     // override if given, else its default expression evaluated in the def's scope. Outer
     // params are visible; a def param shadows an outer one of the same name (innermost
-    // wins — the range-`i` rule, documented). Unknown `p:` overrides (not a declared
-    // param) are a hard fault (a typo, never silently ignored).
+    // wins — the same shadowing principle as the range loop variable, though note `i`
+    // itself is *not* forwarded into the body; see this fn's doc comment). Unknown `p:`
+    // overrides (not a declared param) are a hard fault (a typo, never silently ignored).
     let declared: BTreeSet<&str> = params.iter().map(|(k, _)| k.as_str()).collect();
     for k in overrides.keys() {
         if !declared.contains(k.as_str()) {
@@ -989,10 +1051,27 @@ pub fn elaborate(
     for p in &dnp_dropped {
         reported_missing.insert(EntityId::new(p.clone()));
     }
+    // A reference is "into a dropped subtree" if its path equals a dropped path *or* lies
+    // beneath one (`<dropped>.…`). The latter matters for a `def` instance depopulated by
+    // `if=false` (Decision 21a): the whole stamped subtree is never materialized, so a
+    // ref to a *leaf pin* of that module (`net OUT a.R1.p2` when `inst a … if=false`) is
+    // as intentionally-absent as a ref to `a` itself — it must degrade to `W_DNP`, not
+    // hard-error `E_UNKNOWN_INSTANCE`. The prefix rule captures both.
+    let is_dnp_dropped = |path: &str| -> bool {
+        dnp_dropped.iter().any(|d| {
+            path == d.as_str() || path.starts_with(d.as_str()) && path[d.len()..].starts_with('.')
+        })
+    };
     if !dnp_dropped.is_empty() {
         for d in source {
             for (ctx, path) in directive_refs(d) {
-                if dnp_dropped.contains(&path) {
+                if is_dnp_dropped(&path) {
+                    // Pre-seed the cascade-suppression set so the pass that would resolve
+                    // this ref finds it already "reported" and skips it silently (no
+                    // `E_UNKNOWN_INSTANCE`), exactly as an exact dropped-path ref is
+                    // suppressed. This handles deep refs (`a.R1`) whose specific id was
+                    // never in `dnp_dropped` (which holds only the dropped instance path).
+                    reported_missing.insert(EntityId::new(path.clone()));
                     dnp_dangling.push((ctx, path));
                 }
             }

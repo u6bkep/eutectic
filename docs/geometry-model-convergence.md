@@ -919,13 +919,24 @@ may re-export a nested def's port). Named-InterfaceDef ports (`port <name> : <if
 Elaboration stamps a def body per instantiation with **path prefixing** (`sense[0].R1`,
 internal nets `sense[0].fb`); def params bind from the instantiation's `p:` (defaults
 else), evaluated in the def's scope where **outer doc params are visible and a def param
-shadows an outer one of the same name** (innermost-wins, the same rule as the range loop
-variable `i`). Recursion (a def reaching itself through any chain) is `E_DEF_CYCLE` naming
-the cycle; nesting is depth-capped (`MAX_DEF_DEPTH`). `if=false` on a def instance drops
-the whole stamped subtree (external refs dangle as `W_DNP`). Refdes stays **board-global
-flat** over the hierarchical paths (stamped instances flow through annotation unchanged).
-Def bodies round-trip (interior trivia preserved via `DefNode`); ports serialize in
-canonical name order after the body; def-free docs stay byte-identical.
+shadows an outer one of the same name** (innermost-wins). The **range loop variable `i` is
+deliberately NOT visible inside a def body** — the body is a pure function of its declared
+params; a ranged instantiation (`inst sense[0..n] S`) binds `i` only in its own
+`if=`/`p:`, so to use the index inside, forward it explicitly (`inst sense[0..n] S
+p:idx=(i)`). A body reference to `i` is an `E_EXPR` unknown variable (pinned by test).
+Recursion (a def reaching itself through any chain) is `E_DEF_CYCLE` naming the cycle —
+*dynamic* detection: a cycle reachable only through a false `if=` is never walked, hence
+silent by design. Nesting is depth-capped (`MAX_DEF_DEPTH`). `if=false` on a def instance
+drops the whole stamped subtree; an external ref to the instance **or to any pin beneath
+it** (`net OUT a.R1.p2` when `inst a … if=false`) dangles as `W_DNP` via a prefix rule
+(path == dropped **or** `<dropped>.…`), never a hard `E_UNKNOWN_INSTANCE`. An authored
+top-level `net` whose name collides with a stamped def-internal net (`net sense[0].fb …`
+vs instance `sense[0]`'s internal `fb`) is a hard `E_DEF_NET_COLLISION` naming both sides —
+silent merge (a silent-wrong-connectivity class) is refused; deliberate internal-net
+tapping is a future feature behind explicit syntax. Refdes stays **board-global flat** over
+the hierarchical paths (stamped instances flow through annotation unchanged). Def bodies
+round-trip (interior trivia preserved via `DefNode`); ports serialize in canonical name
+order after the body; def-free docs stay byte-identical.
 
 Settles, deliberately and in advance, the language question that `def` + parameters +
 ranges would otherwise decide by accretion — the **Onshape trap**: FeatureScript began
