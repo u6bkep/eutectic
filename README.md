@@ -160,7 +160,8 @@ cargo run --example m3           # least-change placement (mini RP2350-carrier s
 cargo run --example export       # netlist + pick-and-place + SVG from a small board
 cargo run --example autoroute    # place → autoroute → DRC-clean, end to end
 cargo run --example gerber       # Gerber/Excellon fab output
-cargo run --example svg_outline  # board outline + graphics → SVG
+cargo run --example schematic    # authored schematic layout → rendered schematic SVG
+cargo run --example svg_outline  # SVG import: outline + cutout → board → rendered SVG
 cargo run --example poc_multiprobe  # the capstone: 4-layer RP2350A board, full pipeline
 ```
 
