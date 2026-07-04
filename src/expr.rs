@@ -4,7 +4,10 @@
 //! params. Nothing else. There are, deliberately and by architectural invariant, **no
 //! user-defined functions, no strings, no recursion, no loops, and no I/O** — the
 //! Onshape clause (Decision 21c) forbids growing this into a language. Every expression
-//! is pure, terminating, and evaluates in time linear in its own size.
+//! is pure, terminating, and evaluates in time linear in its own size. Nesting depth is
+//! bounded ([`MAX_EXPR_DEPTH`]) so the recursive parser/evaluator cannot overflow the
+//! native stack on a pathological input — an over-deep expression is an `E_EXPR` error,
+//! never a process abort (the commit gate must degrade to a diagnostic, never crash).
 //!
 //! # Why a separate value type instead of reusing [`Quantity`]
 //!
@@ -317,9 +320,21 @@ pub enum BinOp {
     Or,
 }
 
+/// The maximum nesting depth of parenthesization / unary chains the parser and evaluator
+/// accept. Recursive-descent parsing and recursive evaluation both consume native stack
+/// per level; without a bound, a pathological input (e.g. 2000 nested parens) overflows
+/// the stack and *aborts the process* — unacceptable for a commit gate that must degrade
+/// to a diagnostic, never crash (Decision 21b). 64 is far beyond anything a human or
+/// agent authors while leaving generous native-stack headroom. Enforced in `parse_unary`
+/// / `parse_primary` (the two recursion points), in `eval` (recursive), and in
+/// `collect_refs` (recursive) — every tree-walker that recurses on nesting.
+pub const MAX_EXPR_DEPTH: u32 = 64;
+
 struct Parser {
     toks: Vec<Tok>,
     pos: usize,
+    /// Current parenthesization/unary nesting depth (see [`MAX_EXPR_DEPTH`]).
+    depth: u32,
 }
 
 impl Parser {
@@ -418,12 +433,32 @@ impl Parser {
         }
         Ok(lhs)
     }
+    /// Enter one nesting level, erroring past [`MAX_EXPR_DEPTH`] (M1 — the parser recurses
+    /// per unary op and per paren group; an unbounded input would overflow the stack).
+    fn descend(&mut self) -> Result<(), String> {
+        self.depth += 1;
+        if self.depth > MAX_EXPR_DEPTH {
+            return Err(format!(
+                "expression nests deeper than the {MAX_EXPR_DEPTH}-level limit"
+            ));
+        }
+        Ok(())
+    }
+    fn ascend(&mut self) {
+        self.depth -= 1;
+    }
     fn parse_unary(&mut self) -> Result<Expr, String> {
         if self.eat(&Tok::Minus) {
-            return Ok(Expr::Neg(Box::new(self.parse_unary()?)));
+            self.descend()?;
+            let inner = self.parse_unary()?;
+            self.ascend();
+            return Ok(Expr::Neg(Box::new(inner)));
         }
         if self.eat(&Tok::Not) {
-            return Ok(Expr::Not(Box::new(self.parse_unary()?)));
+            self.descend()?;
+            let inner = self.parse_unary()?;
+            self.ascend();
+            return Ok(Expr::Not(Box::new(inner)));
         }
         self.parse_primary()
     }
@@ -436,7 +471,9 @@ impl Parser {
                 _ => Expr::Ref(name),
             }),
             Some(Tok::LParen) => {
+                self.descend()?;
                 let e = self.parse_or()?;
+                self.ascend();
                 if !self.eat(&Tok::RParen) {
                     return Err("expected `)`".into());
                 }
@@ -455,7 +492,11 @@ pub fn parse(s: &str) -> Result<Expr, String> {
     if toks.is_empty() {
         return Err("empty expression".into());
     }
-    let mut p = Parser { toks, pos: 0 };
+    let mut p = Parser {
+        toks,
+        pos: 0,
+        depth: 0,
+    };
     let e = p.parse_or()?;
     if p.pos != p.toks.len() {
         return Err(format!(
@@ -471,10 +512,22 @@ pub fn parse(s: &str) -> Result<Expr, String> {
 // ----------------------------------------------------------------------------
 
 /// Evaluate an [`Expr`] against a parameter environment. Pure and terminating (the AST
-/// has no loop or call node). Every failure — unknown param, type mismatch, inexact
-/// division, overflow — is an `E_EXPR`-class `Err(String)`; the caller wraps it in a
-/// house [`Diagnostic`](crate::diagnostic::Diagnostic).
+/// has no loop or call node) — and **stack-safe**: it recurses per nesting level and is
+/// depth-bounded ([`MAX_EXPR_DEPTH`]) so a hand-constructed deep tree (bypassing
+/// [`parse`], which already caps depth) degrades to an `E_EXPR` error rather than an
+/// abort. Every failure — unknown param, type mismatch, inexact division, overflow,
+/// over-depth — is an `E_EXPR`-class `Err(String)`; the caller wraps it in a house
+/// [`Diagnostic`](crate::diagnostic::Diagnostic).
 pub fn eval(e: &Expr, env: &Env) -> Result<Value, String> {
+    eval_d(e, env, 0)
+}
+
+fn eval_d(e: &Expr, env: &Env, depth: u32) -> Result<Value, String> {
+    if depth > MAX_EXPR_DEPTH {
+        return Err(format!(
+            "expression nests deeper than the {MAX_EXPR_DEPTH}-level limit"
+        ));
+    }
     match e {
         Expr::Num(s) => eval_literal(s),
         Expr::Bool(b) => Ok(Value::Bool(*b)),
@@ -482,7 +535,7 @@ pub fn eval(e: &Expr, env: &Env) -> Result<Value, String> {
             .get(name)
             .copied()
             .ok_or_else(|| format!("unknown param `{name}`")),
-        Expr::Neg(inner) => match eval(inner, env)? {
+        Expr::Neg(inner) => match eval_d(inner, env, depth + 1)? {
             Value::Int(n) => n
                 .checked_neg()
                 .map(Value::Int)
@@ -494,10 +547,10 @@ pub fn eval(e: &Expr, env: &Env) -> Result<Value, String> {
                 .ok_or_else(|| "overflow negating quantity".to_string()),
             Value::Bool(_) => Err("cannot negate a boolean (use `!`)".into()),
         },
-        Expr::Not(inner) => Ok(Value::Bool(!eval(inner, env)?.as_bool()?)),
+        Expr::Not(inner) => Ok(Value::Bool(!eval_d(inner, env, depth + 1)?.as_bool()?)),
         Expr::Bin(op, l, r) => {
-            let lv = eval(l, env)?;
-            let rv = eval(r, env)?;
+            let lv = eval_d(l, env, depth + 1)?;
+            let rv = eval_d(r, env, depth + 1)?;
             eval_bin(*op, lv, rv)
         }
     }
@@ -792,14 +845,25 @@ fn resolve_one(
 }
 
 /// Collect every param name referenced by an expression (for dependency ordering).
+/// Depth-bounded like [`eval`]: it recurses on nesting, so it stops descending past
+/// [`MAX_EXPR_DEPTH`] rather than risking a stack overflow on a hand-built deep tree —
+/// an over-deep expression is caught with an `E_EXPR` error by the [`eval`] that follows
+/// this collection in [`resolve_one`] (and ASTs from [`parse`] are already depth-capped).
 fn collect_refs(e: &Expr, out: &mut Vec<String>) {
+    collect_refs_d(e, out, 0)
+}
+
+fn collect_refs_d(e: &Expr, out: &mut Vec<String>, depth: u32) {
+    if depth > MAX_EXPR_DEPTH {
+        return;
+    }
     match e {
         Expr::Ref(n) => out.push(n.clone()),
         Expr::Num(_) | Expr::Bool(_) => {}
-        Expr::Neg(i) | Expr::Not(i) => collect_refs(i, out),
+        Expr::Neg(i) | Expr::Not(i) => collect_refs_d(i, out, depth + 1),
         Expr::Bin(_, l, r) => {
-            collect_refs(l, out);
-            collect_refs(r, out);
+            collect_refs_d(l, out, depth + 1);
+            collect_refs_d(r, out, depth + 1);
         }
     }
 }
@@ -926,6 +990,28 @@ mod tests {
         let e = Env::new();
         assert!(eval_str("9223372036854775807 + 1", &e).is_err());
         assert!(eval_str("9223372036854775807 * 2", &e).is_err());
+    }
+
+    #[test]
+    fn deep_nesting_errors_instead_of_overflowing_the_stack() {
+        // At the bound: MAX_EXPR_DEPTH paren levels around a literal parses+evals fine.
+        let at = format!(
+            "{}1{}",
+            "(".repeat(MAX_EXPR_DEPTH as usize),
+            ")".repeat(MAX_EXPR_DEPTH as usize)
+        );
+        assert_eq!(eval_str(&at, &Env::new()).unwrap(), Value::Int(1));
+        // Just past the bound: an `E_EXPR` error, NOT a process abort (M1).
+        let over = format!(
+            "{}1{}",
+            "(".repeat(MAX_EXPR_DEPTH as usize + 1),
+            ")".repeat(MAX_EXPR_DEPTH as usize + 1)
+        );
+        let err = eval_str(&over, &Env::new()).unwrap_err();
+        assert!(err.contains("nests deeper"), "got: {err}");
+        // A deep unary chain is bounded too (the other parser recursion point).
+        let unary = format!("{}1", "-".repeat(MAX_EXPR_DEPTH as usize + 5));
+        assert!(eval_str(&unary, &Env::new()).is_err());
     }
 
     #[test]

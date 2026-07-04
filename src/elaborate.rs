@@ -80,15 +80,21 @@ pub enum GenDirective {
     /// It carries the three v1 consumers:
     ///   - **Range instantiation**: `range = Some((lo, hi))` expands `path[i]` for `i` in
     ///     `lo..hi` (**hi exclusive**, the Rust/`psu_module` idiom), binding the implicit
-    ///     loop variable `i` in this instance's own param/`if` expressions. Bounds are
-    ///     expression texts; the expanded count is capped (anti-footgun).
+    ///     loop variable `i` in this instance's own param/`if` expressions (the innermost
+    ///     binding wins — a range `i` shadows any doc-level `param i`). Bounds are
+    ///     expression texts; the expanded count is capped (anti-footgun). Note that
+    ///     refdes *numbering* over expanded instances follows the ordinary Decision-14
+    ///     annotation (path order), so growing/shrinking a range can renumber at a digit
+    ///     boundary (e.g. R9→R10); the stability mechanism for a shipped board is the
+    ///     EntityId-keyed refdes override (`refdes <path> <string>`), not the range.
     ///   - **Expression params**: `param_exprs` are `p:<key>=(<expr>)` values evaluated
     ///     and formatted into the plain instance's verbatim `params` (display-normal
     ///     spelling). `params` here are the *verbatim* `p:` values (non-expression),
     ///     copied through unchanged.
     ///   - **Population conditional**: `if_expr = Some(<expr>)` — a boolean that, when
-    ///     false, drops the instance (and, with a `W_DNP` warning, silently skips any
-    ///     connection referencing the dropped path — DNP variants).
+    ///     false, drops the instance; any directive still referencing the dropped path
+    ///     (connection *or* placement) is skipped and surfaced as a `W_DNP` warning
+    ///     (DNP variants — see [`directive_refs`]).
     ///
     /// Lowered by [`expand_generative`] into concrete `Instance` directives *before* the
     /// reconciliation passes, so overrides/refdes address the expanded `path[i]` by path
@@ -342,9 +348,11 @@ fn expand_generative(source: &Source) -> Result<(Source, BTreeSet<String>), Vec<
 
     let eval_at = |text: &str, i: Option<i64>| -> Result<expr::Value, String> {
         match i {
-            // Bind the implicit loop variable `i` for this evaluation (shadowing is not a
-            // concern — params cannot be named `i` and also be a loop var in the same
-            // scope; a param named `i` is simply visible unless a range provides one).
+            // Bind the implicit loop variable `i` for this evaluation. Shadowing rule:
+            // the innermost binding wins — inside a ranged `inst`, `i` is the loop index
+            // even if a doc-level `param i = …` exists (the insert overwrites the cloned
+            // env entry). Deterministic and tested; a doc that both declares `param i` and
+            // uses a range simply cannot read that param's value from within the range.
             Some(idx) => {
                 let mut scope = env.clone();
                 scope.insert("i".to_string(), expr::Value::Int(idx));
@@ -492,6 +500,54 @@ fn format_value(v: crate::expr::Value) -> String {
     }
 }
 
+/// Every instance path a directive *references* (not the path it declares), paired with
+/// a human context label. Used only to surface DNP dangling references (Decision 21b):
+/// when a false `if=` depopulates an instance, any directive that still points at it is
+/// reported as a `W_DNP` warning — uniformly across connectivity (`net`/`nc`/`connect`)
+/// and placement (`near`/`minsep`/`align`/`place`/`fix`/`rotate`/`nearpin`) directives.
+/// A directive that declares or references nothing (a `Board`, `Slab`, `Text`, …) yields
+/// an empty list.
+fn directive_refs(d: &GenDirective) -> Vec<(String, String)> {
+    match d {
+        GenDirective::Place { path, .. } => vec![(format!("place `{path}`"), path.clone())],
+        GenDirective::Fix { path, .. } => vec![(format!("fix `{path}`"), path.clone())],
+        GenDirective::Rotate { path, .. } => vec![(format!("rotate `{path}`"), path.clone())],
+        GenDirective::Near { a, b, .. } => vec![
+            (format!("near `{a}`"), a.clone()),
+            (format!("near `{b}`"), b.clone()),
+        ],
+        GenDirective::MinSep { a, b, .. } => vec![
+            (format!("minsep `{a}`"), a.clone()),
+            (format!("minsep `{b}`"), b.clone()),
+        ],
+        GenDirective::NearPin { a, b_comp, .. } => vec![
+            (format!("nearpin `{a}`"), a.clone()),
+            (format!("nearpin `{b_comp}`"), b_comp.clone()),
+        ],
+        GenDirective::AlignX { nodes } => nodes
+            .iter()
+            .map(|n| (format!("alignx `{n}`"), n.clone()))
+            .collect(),
+        GenDirective::AlignY { nodes } => nodes
+            .iter()
+            .map(|n| (format!("aligny `{n}`"), n.clone()))
+            .collect(),
+        GenDirective::ConnectInterface { a, b } => vec![
+            (format!("connect `{}`", a.0), a.0.clone()),
+            (format!("connect `{}`", b.0), b.0.clone()),
+        ],
+        GenDirective::ConnectPins { net, pins } => pins
+            .iter()
+            .map(|(comp, _)| (format!("net `{net}`"), comp.clone()))
+            .collect(),
+        GenDirective::NoConnect { pins } => pins
+            .iter()
+            .map(|(comp, _)| ("no-connect".to_string(), comp.clone()))
+            .collect(),
+        _ => vec![],
+    }
+}
+
 /// Result of elaboration before it is folded into a Doc.
 pub struct Elaborated {
     pub components: BTreeMap<EntityId, Component>,
@@ -531,24 +587,24 @@ pub fn elaborate(
     let mut errors: Vec<Diagnostic> = Vec::new();
     let mut reported_missing: BTreeSet<EntityId> = BTreeSet::new();
     // A path depopulated by a false `if=` (Decision 21b DNP) is *intentionally* absent,
-    // not a fault: seed it into the cascade-suppression set so any reference to it skips
-    // silently instead of raising `E_UNKNOWN_INSTANCE`. Connection references are
-    // additionally surfaced as `W_DNP` warnings at their sites below (a placement
-    // constraint on a depopulated part just skips). `dnp_dangling` collects those.
+    // not a fault: seed it into the cascade-suppression set so **every** reference to it
+    // (connection *or* placement) skips silently via `note_missing` instead of raising
+    // `E_UNKNOWN_INSTANCE`. The dangling references are surfaced uniformly as `W_DNP`
+    // warnings by the single scan below (symmetric across directive kinds — a `near` on a
+    // depopulated part is as visible as a `net` on it). `dnp_dangling` collects those.
     let mut dnp_dangling: Vec<(String, String)> = Vec::new();
     for p in &dnp_dropped {
         reported_missing.insert(EntityId::new(p.clone()));
     }
-    // Whether a `(comp, _)` reference points at a depopulated instance — records the
-    // dangling connection for a `W_DNP` warning and returns true so the caller skips it.
-    let note_dnp = |comp: &str, ctx: &str, sink: &mut Vec<(String, String)>| -> bool {
-        if dnp_dropped.contains(comp) {
-            sink.push((ctx.to_string(), comp.to_string()));
-            true
-        } else {
-            false
+    if !dnp_dropped.is_empty() {
+        for d in source {
+            for (ctx, path) in directive_refs(d) {
+                if dnp_dropped.contains(&path) {
+                    dnp_dangling.push((ctx, path));
+                }
+            }
         }
-    };
+    }
 
     // Pass 1: instances.
     for d in source {
@@ -823,13 +879,6 @@ pub fn elaborate(
     for d in source {
         match d {
             GenDirective::ConnectInterface { a, b } => {
-                // A depopulated (`if=false`) endpoint makes the whole interface connect a
-                // no-op — skip it with a `W_DNP` rather than an unknown-instance error.
-                let ad = note_dnp(&a.0, "interface connect", &mut dnp_dangling);
-                let bd = note_dnp(&b.0, "interface connect", &mut dnp_dangling);
-                if ad || bd {
-                    continue;
-                }
                 let aid = EntityId::new(a.0.clone());
                 let bid = EntityId::new(b.0.clone());
                 let am = note_missing(
@@ -859,11 +908,8 @@ pub fn elaborate(
                     members: BTreeSet::new(),
                 });
                 for (comp, sel) in pins {
-                    let ctx = format!("net `{net}`");
-                    if note_dnp(comp, &ctx, &mut dnp_dangling) {
-                        continue;
-                    }
                     let cid = EntityId::new(comp.clone());
+                    let ctx = format!("net `{net}`");
                     if note_missing(&cid, &components, &mut reported_missing, &mut errors, &ctx) {
                         continue;
                     }
@@ -890,9 +936,6 @@ pub fn elaborate(
             }
             GenDirective::NoConnect { pins } => {
                 for (comp, sel) in pins {
-                    if note_dnp(comp, "no-connect", &mut dnp_dangling) {
-                        continue;
-                    }
                     let cid = EntityId::new(comp.clone());
                     if note_missing(
                         &cid,

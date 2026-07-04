@@ -228,7 +228,7 @@ fn render_directive(d: &GenDirective) -> String {
                 s.push_str(&format!(" label={}", quote_value(l)));
             }
             for (k, v) in params {
-                s.push_str(&format!(" p:{k}={}", quote_value(v)));
+                s.push_str(&format!(" p:{k}={}", quote_param_value(v)));
             }
             s
         }
@@ -262,10 +262,13 @@ fn render_directive(d: &GenDirective) -> String {
                 s.push_str(&format!(" label={}", quote_value(l)));
             }
             if let Some(cond) = if_expr {
-                s.push_str(&format!(" if={}", quote_value(cond)));
+                // Canonical paren form `if=(<expr>)` (m2): the parens both delimit an
+                // expression that may contain spaces and re-parse back to the same
+                // `if_expr` (the parser strips one outer pair). No re-quoting.
+                s.push_str(&format!(" if=({cond})"));
             }
             for (k, v) in params {
-                s.push_str(&format!(" p:{k}={}", quote_value(v)));
+                s.push_str(&format!(" p:{k}={}", quote_param_value(v)));
             }
             // Expression params wear parentheses — the unambiguous "evaluate me" marker.
             for (k, e) in param_exprs {
@@ -1140,17 +1143,21 @@ fn parse_line(line: &str) -> Result<Item, String> {
                 if let Some(v) = tok.strip_prefix("label=") {
                     label = Some(unquote(v).to_string());
                 } else if let Some(v) = tok.strip_prefix("if=") {
-                    if_expr = Some(strip_expr_parens(unquote(v)));
+                    if_expr = Some(parse_if_clause(v)?);
                 } else if let Some(kv) = tok.strip_prefix("p:") {
                     let (k, v) = kv
                         .split_once('=')
                         .ok_or_else(|| format!("inst param needs p:<key>=<value>: `{tok}`"))?;
-                    // A parenthesized value is an *expression* param; anything else is a
-                    // verbatim string (the existing behavior — existing docs untouched).
-                    if let Some(inner) = as_expr_value(v) {
-                        param_exprs.insert(k.to_string(), inner);
-                    } else {
-                        params.insert(k.to_string(), unquote(v).to_string());
+                    // A bare `(...)` value is an *expression* param; a quoted value is
+                    // always verbatim (M2); any other bare value is verbatim too. An
+                    // unbalanced bare `(...)` is a parse-time error (m1).
+                    match as_expr_value(v)? {
+                        Some(inner) => {
+                            param_exprs.insert(k.to_string(), inner);
+                        }
+                        None => {
+                            params.insert(k.to_string(), unquote(v).to_string());
+                        }
                     }
                 } else {
                     return Err(format!("inst: unexpected token `{tok}` ({USAGE})"));
@@ -1695,6 +1702,19 @@ fn quote_value(v: &str) -> String {
     }
 }
 
+/// Quote a **verbatim `p:` param value** for emission. Like [`quote_value`], but *also*
+/// forces quoting when the value starts with `(` — otherwise a literal value such as
+/// `(5V)` would serialize bare and re-parse as an *expression* param (M2). A quoted value
+/// re-parses as verbatim, closing that round-trip hole. (Expression params are emitted
+/// separately as `p:k=(<expr>)` and never pass through here.)
+fn quote_param_value(v: &str) -> String {
+    if v.starts_with('(') && !quote_value(v).starts_with('"') {
+        format!("\"{v}\"")
+    } else {
+        quote_value(v)
+    }
+}
+
 /// Split on whitespace, but keep a double-quoted run (which may hold spaces) intact as
 /// part of its token — so `p:desc="a b"` is one token. Quote characters are retained;
 /// [`unquote`] strips them from an extracted value.
@@ -1780,25 +1800,106 @@ fn split_range_suffix(tok: &str) -> (String, Option<(String, String)>) {
     (tok.to_string(), None)
 }
 
-/// A `p:key=value` value that is an *expression* (parenthesized) yields the inner
-/// expression text with the outer parens stripped; a non-parenthesized value is a
-/// verbatim string and yields `None`. The parens are the unambiguous "evaluate this"
-/// marker (Decision 21b), keeping every existing `p:value=10k` verbatim.
-fn as_expr_value(v: &str) -> Option<String> {
-    let v = unquote(v).trim();
-    v.strip_prefix('(')
-        .and_then(|s| s.strip_suffix(')'))
-        .map(|inner| inner.trim().to_string())
+/// Is the whole value a double-quoted run (`"..."`)? A quoted value is **always
+/// verbatim** — never expression-detected (M2): quoting is the escape hatch that lets a
+/// literal value legitimately start with `(` (`p:v="(5V)"`). We check quoting on the
+/// *raw* token before any unquoting so the layering cannot be inverted.
+fn is_quoted(v: &str) -> bool {
+    v.len() >= 2 && v.starts_with('"') && v.ends_with('"')
 }
 
-/// Strip one pair of surrounding parens off an `if=` expression, if present, so both
-/// `if=(n > 0)` and `if=n>0` are accepted; the inner text is what the evaluator parses.
-fn strip_expr_parens(v: &str) -> String {
-    let v = v.trim();
-    match v.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
-        Some(inner) => inner.trim().to_string(),
-        None => v.to_string(),
+/// Classify a raw `p:key=value` value (M2 — quote-then-paren layering):
+///   - a **quoted** value is verbatim → `Ok(None)`;
+///   - a bare value **starting with `(`** is an *expression*; it must be a single
+///     balanced `(...)` spanning the whole value → `Ok(Some(inner))`, else an unbalanced
+///     `Err` at parse time (m1 — no deferred eval-time surprise, and no silent
+///     "`(1` is verbatim but `(1)` evaluates" inconsistency);
+///   - any other bare value is verbatim → `Ok(None)`.
+///
+/// The parens are the unambiguous "evaluate this" marker (Decision 21b); every existing
+/// `p:value=10k` stays verbatim.
+fn as_expr_value(raw: &str) -> Result<Option<String>, String> {
+    let raw = raw.trim();
+    if is_quoted(raw) {
+        return Ok(None); // quoted ⇒ always verbatim (M2)
     }
+    if !raw.starts_with('(') {
+        return Ok(None); // ordinary verbatim value
+    }
+    // Bare, starts with `(` ⇒ intended as an expression. Require a single balanced group
+    // that spans the whole value.
+    match balanced_paren_body(raw) {
+        Some(inner) => Ok(Some(inner.trim().to_string())),
+        None => Err(format!(
+            "expression value `{raw}` has unbalanced parentheses (write `(<expr>)`)"
+        )),
+    }
+}
+
+/// Parse an `if=` clause value into its expression text with a **parse-time** balance
+/// check (m1). `if=` is *always* an expression, so a quoted value is unquoted (quoting
+/// only protects whitespace) and a single surrounding `(...)` is stripped; the result
+/// must be parenthesis-balanced, else an `Err` here rather than a deferred eval error.
+fn parse_if_clause(raw: &str) -> Result<String, String> {
+    let v = if is_quoted(raw) {
+        unquote(raw).trim()
+    } else {
+        raw.trim()
+    };
+    // Strip one balanced outer pair if the whole thing is `(...)`, so both `if=(n>0)` and
+    // `if=n>0` are accepted. Then require the remainder to be balanced.
+    let inner = balanced_paren_body(v).unwrap_or_else(|| v.to_string());
+    if paren_depth_ok(&inner) {
+        Ok(inner.trim().to_string())
+    } else {
+        Err(format!("`if=` expression `{v}` has unbalanced parentheses"))
+    }
+}
+
+/// If `s` is exactly one balanced parenthesis group spanning its whole (trimmed) length —
+/// `(...)` with the opening `(` matched by the *final* `)` — return the inner text; else
+/// `None`. Distinguishes `(a+b)` (a wrapped group) from `(a)+(b)` (two groups, not a
+/// single wrapper) and from `(a` (unbalanced).
+fn balanced_paren_body(s: &str) -> Option<String> {
+    let s = s.trim();
+    let inner = s.strip_prefix('(')?.strip_suffix(')')?;
+    // Walk the inner text: depth must stay ≥ 0 and never return to 0 before the end
+    // (which would mean the opening `(` closed early, so the outer pair is not a single
+    // wrapper — e.g. `(a)+(b)`).
+    let mut depth = 0i32;
+    for c in inner.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                // Depth going negative means this `)` matched the *outer* `(` before the
+                // end — the outer pair is not a single wrapper (e.g. `(a)+(b)`).
+                if depth < 0 {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+    (depth == 0).then(|| inner.to_string())
+}
+
+/// Are the parentheses in `s` balanced (every `(` matched, none closing before opening)?
+fn paren_depth_ok(s: &str) -> bool {
+    let mut depth = 0i32;
+    for c in s.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    depth == 0
 }
 
 /// Is `s` a single expression-tier identifier (an ASCII-ish letters/digits/underscore
@@ -2869,6 +2970,85 @@ slab F.Cu 1.565mm 1.6mm conductor copper";
         let gnd = &doc.nets[&crate::id::NetId::new("GND")];
         assert!(gnd.members.iter().any(|m| m.comp.as_str() == "c1"));
         assert!(!gnd.members.iter().any(|m| m.comp.as_str() == "c2"));
+    }
+
+    /// A QUOTED `p:` value is always verbatim, even when it starts with `(` (M2 — the
+    /// escape hatch): `p:v="(5V)"` stores the literal `(5V)` and round-trips, while a
+    /// bare `p:v=(5)` is an expression.
+    #[test]
+    fn quoted_paren_value_is_verbatim_not_an_expression() {
+        let Parsed { source, .. } = parse("inst c1 Cap p:v=\"(5V)\"").expect("parse");
+        // Quoted ⇒ verbatim ⇒ stays a plain Instance with the literal value.
+        assert_eq!(
+            source,
+            vec![GenDirective::Instance {
+                path: "c1".into(),
+                part: "Cap".into(),
+                params: {
+                    let mut m = BTreeMap::new();
+                    m.insert("v".into(), "(5V)".into());
+                    m
+                },
+                label: None,
+            }]
+        );
+        let doc = doc_of(source.clone(), BTreeMap::new());
+        assert_eq!(parse(&serialize(&doc)).unwrap().source, source);
+        // A bare `(...)` IS an expression (routes to InstGenerative).
+        let Parsed { source: ex, .. } = parse("inst c1 Cap p:v=(5)").expect("expr");
+        assert!(matches!(ex[0], GenDirective::InstGenerative { .. }));
+    }
+
+    /// Unbalanced parentheses on the expression path are a PARSE-time error (m1), not a
+    /// deferred eval error — and `(1` no longer silently stays verbatim.
+    #[test]
+    fn unbalanced_parens_error_at_parse_time() {
+        assert!(parse("inst c1 Cap p:v=(1").is_err()); // bare `(1` — was silently verbatim
+        assert!(parse("inst c1 Cap if=(n > 0").is_err()); // unbalanced if=
+        // A well-formed expression still parses.
+        assert!(parse("inst c1 Cap p:v=(1)").is_ok());
+        assert!(parse("inst c1 Cap if=(n > 0)").is_ok());
+    }
+
+    /// `if=(…)` re-serializes as the canonical paren form `if=(…)` (m2), not re-quoted.
+    #[test]
+    fn if_clause_serializes_as_canonical_parens() {
+        let Parsed { source, .. } = parse("inst c1 Cap if=(n > 0)").expect("parse");
+        let doc = doc_of(source.clone(), BTreeMap::new());
+        let text = serialize(&doc);
+        assert!(text.contains("if=(n > 0)"), "canonical paren form: {text}");
+        assert!(!text.contains("if=\""), "not re-quoted: {text}");
+        assert_eq!(parse(&text).unwrap().source, source);
+    }
+
+    /// A range's loop variable `i` shadows a doc-level `param i` (innermost wins) —
+    /// deterministic, per the documented rule.
+    #[test]
+    fn range_loop_variable_shadows_doc_level_param() {
+        let src = "param i = 99\ninst r[0..2] Cap p:idx=(i)";
+        let Parsed { source, .. } = parse(src).expect("parse");
+        let doc = placed(source);
+        // Inside the range, `i` is the loop index (0, 1), not the doc-level 99.
+        assert_eq!(doc.components[&EntityId::new("r[0]")].params["idx"], "0");
+        assert_eq!(doc.components[&EntityId::new("r[1]")].params["idx"], "1");
+    }
+
+    /// A PLACEMENT directive referencing a depopulated part is folded into the same
+    /// `W_DNP` dangling report as a connection (symmetric visibility), not silently
+    /// vanished.
+    #[test]
+    fn placement_ref_to_depopulated_part_warns() {
+        let src = "inst anchor Cap\n\
+                   inst c1 Cap if=(false)\n\
+                   near c1 anchor 3mm";
+        let Parsed { source, .. } = parse(src).expect("parse");
+        let doc = placed(source);
+        assert!(!doc.components.contains_key(&EntityId::new("c1")));
+        assert!(
+            doc.report.dnp_dangling.iter().any(|(_, p)| p == "c1"),
+            "placement ref to c1 recorded as DNP dangle: {:?}",
+            doc.report.dnp_dangling
+        );
     }
 
     /// Every `E_EXPR` fault class aborts the commit (collect-all structural fault).
