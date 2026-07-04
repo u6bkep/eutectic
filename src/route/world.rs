@@ -4,10 +4,10 @@
 //! `crate::route::` reachability is preserved via the facade.
 
 use crate::doc::{Doc, PinRef};
+use crate::geom::kernel::{DEFAULT_CIRCLE_SEGS, Region, difference, shape_to_region, union_all};
 use crate::geom::{Extent, Feature, Material, NetFeature, Role, Shape2D, Stackup, ZRange};
 use crate::id::NetId;
 use crate::part::{PartLib, PinRole};
-use crate::region::{DEFAULT_CIRCLE_SEGS, Region, difference, shape_to_region, union_all};
 use std::collections::BTreeMap;
 
 use super::model::Layer;
@@ -323,6 +323,25 @@ pub fn pours(
                 }),
                 _ => None,
             }
+        })
+        .collect()
+}
+
+/// The membership netlist from the materialized nets (roles are irrelevant to the
+/// geometry producer). The bridge every exporter uses to feed the unified
+/// [`world_features`] / [`pours`] queries; it lives here beside the derivations it
+/// feeds rather than with the human-readable netlist artifact in `export`.
+pub(crate) fn doc_netlist(doc: &Doc) -> BTreeMap<NetId, Vec<(PinRef, PinRole)>> {
+    doc.nets
+        .iter()
+        .map(|(nid, net)| {
+            (
+                nid.clone(),
+                net.members
+                    .iter()
+                    .map(|pr| (pr.clone(), PinRole::Passive))
+                    .collect(),
+            )
         })
         .collect()
 }

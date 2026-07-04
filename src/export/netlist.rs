@@ -1,9 +1,9 @@
-//! The connectivity artifact: the human-readable [`netlist`] and the [`doc_netlist`]
-//! membership map every geometry exporter feeds into the unified
-//! [`crate::route::world_features`] / [`crate::route::pours`] queries.
+//! The connectivity artifact: the human-readable [`netlist`]. The membership map that
+//! every geometry exporter feeds into the unified [`crate::route::world_features`] /
+//! [`crate::route::pours`] queries lives beside those queries as
+//! [`crate::route::doc_netlist`].
 
 use crate::doc::Doc;
-use std::collections::BTreeMap;
 
 /// The connectivity artifact: every net and the pins it joins, in canonical form.
 ///
@@ -22,25 +22,4 @@ pub fn netlist(doc: &Doc) -> String {
         out.push_str(&format!("{}: {}\n", net.name, pins.join(" ")));
     }
     out
-}
-
-/// The membership netlist from the materialized nets (roles are irrelevant to the
-/// geometry producer). The bridge every exporter uses to feed the unified
-/// [`crate::route::world_features`] / [`crate::route::pours`] queries.
-pub(crate) fn doc_netlist(
-    doc: &Doc,
-) -> BTreeMap<crate::id::NetId, Vec<(crate::doc::PinRef, crate::part::PinRole)>> {
-    use crate::part::PinRole;
-    doc.nets
-        .iter()
-        .map(|(nid, net)| {
-            (
-                nid.clone(),
-                net.members
-                    .iter()
-                    .map(|pr| (pr.clone(), PinRole::Passive))
-                    .collect(),
-            )
-        })
-        .collect()
 }

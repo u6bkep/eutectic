@@ -31,7 +31,8 @@
 //! - [`svg`] — the board SVG sketch and the per-side fab-drawing SVG.
 //! - [`gerber`] — the RS-274X Gerber backend (copper, mask, silk, fab, edge cuts).
 //! - [`excellon`] — the Excellon drill backend.
-//! - [`netlist`] — the connectivity artifact and the shared `doc_netlist` membership map.
+//! - [`netlist`] — the human-readable connectivity artifact (the shared `doc_netlist`
+//!   membership map now lives beside the derivations it feeds, in [`crate::route`]).
 //! - [`placement`] — the pick-and-place CSV and `part_pin_ids`.
 //! - [`features`] — cross-backend derived-geometry queries (`role_features`, `pours_of`).
 

@@ -8,7 +8,7 @@ use crate::doc::Doc;
 use crate::geom::{Role, Stackup};
 use crate::part::PartLib;
 
-use super::netlist::doc_netlist;
+use crate::route::doc_netlist;
 
 /// Every world-frame feature of the board carrying `role`: board-level graphics/text
 /// (from the converged [`crate::elaborate::features`] view) plus each placed component's
@@ -19,6 +19,9 @@ use super::netlist::doc_netlist;
 /// role is resolved from the slab, so both flow through the same producer). Fallible
 /// because the board-level lowering resolves slab names (an unknown one is a hard error,
 /// per Decision 13).
+///
+/// This re-derives the role-sliced surface features independently of the world-frame
+/// [`crate::route::world_features`] pipeline and is a candidate for unification with it.
 pub(crate) fn role_features(
     doc: &Doc,
     lib: &PartLib,

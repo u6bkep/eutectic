@@ -39,7 +39,7 @@ pub use drc::{Violation, check_drc};
 // World-frame producer surface. `world_features`, `Pour`, and `pours` are public; the
 // autorouter consumes the ordinal↔slab bridges via `crate::route::`.
 pub use world::{Pour, pours, world_features};
-pub(crate) use world::{copper_layers_z, layer_slab_name};
+pub(crate) use world::{copper_layers_z, doc_netlist, layer_slab_name};
 
 // `net_features` and `slab_layer` are consumed only by this module's own test suite
 // (`pour_tests`, via `use super::*`); no non-test crate consumer reaches them through

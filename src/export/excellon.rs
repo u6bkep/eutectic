@@ -9,8 +9,8 @@ use crate::geom::{Extent, Role};
 use crate::part::PartLib;
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::netlist::doc_netlist;
 use super::svg_writer::fmt_mm;
+use crate::route::doc_netlist;
 
 /// One drilled hole gathered from the unified feature stream: a round hole at a point,
 /// or a slot between two points (a routed `G85` hole). `Ord` so a tool's hits emit in a
