@@ -77,6 +77,14 @@ feat/mask-lint); TTF kerning from the legacy `kern` table, integer font-unit
 accumulation (branch feat/kerning). **Folded into `architecture.md` §8
 (2026-07-03)** — §8 now states the current model; this record remains the
 decision-by-decision history.
+**Decisions 20 + 21 drafted (2026-07-04, design agreed in discussion, NOT yet
+implemented)** — the schematic front: the schematic as the second derived projection
+(authored flexbox-style layout tree elaborated to coordinates, tags-first wires with
+presentational waypoints, no solver on the view path); and the source-language
+decision (declarative core + hermetic non-Turing-complete expression tier, `def`
+reuse with typed ports, the Onshape clause, the three-mode GUI editing model).
+Prerequisites noted in discussion: issue 0010 (interface inference from imported
+symbols) and `.kicad_sym` body-graphics import are sequenced alongside, not blockers.
 
 This record captures the foundation decisions; it *realigned the implementation* with
 what §8 already stated and sharpened three points (the single primitive, the placement
@@ -830,6 +838,141 @@ pour-island ratsnest (which already exists per-layer) honestly reports whether G
 survived its perforation as one island. The campaign's fenced question — does the
 QFN fan-out need negotiated rip-up? — gets answered by re-measuring routed/44 under
 these semantics, not before.
+
+### Decision 20 — the schematic is a derived view: authored flow layout, tags-first wires (2026-07-04, drafted — not yet implemented)
+
+Opens the schematic front. The conventional flow — draw a schematic, generate the
+netlist from the drawing — is the finger-painting failure mode this project was
+founded against, and we reject it structurally: **the schematic is the second derived
+projection of the generative truth** (the flat netlist is the first, `Key::Netlist`;
+the board is the third). The drawing is never authoritative. A future GUI wire-draw
+gesture is not "creating a wire" — it is a gesture that means `ConnectPins`; the
+command mutates truth, and the drawn wire then renders *because the netlist says so*.
+Consequence stated as a feature: **forward/back annotation ceases to exist** — text,
+schematic, and board are projections of one document and cannot disagree.
+
+**20a — no solver on the view path (the Decision-18 lesson, applied).** Schematic
+auto-layout in the classic sense (a placement/routing solver producing a diagram) is
+hard, quality-uncertain, and never runs at view time. Instead the split is:
+
+- **Authored: a structural layout tree** — nested containers with direction, symbols
+  as leaves. This is intent and persists as **tier-1 native grammar directives**
+  (siblings of `inst`, *not* a state zone — there is no solver output here), so it
+  elaborates and gets real diagnostics (`E_` unknown path in the tree, `W_` part
+  unplaced).
+- **Derived: the coordinates**, by a pure, deterministic, terminating reflow of the
+  tree — the computational class of *elaboration*, not routing. Milliseconds, same
+  output every time, never serialized (the serializer contract: re-derivable state is
+  not emitted).
+
+The structural tree is also what makes the diagram **robust to netlist evolution**:
+adding a fourth decoupling cap is "insert a child into the row" and the reflow is
+least-change by construction — where absolute coordinates would shuffle or overlap.
+The tree is the reconciliation unit.
+
+**20b — the vocabulary is a deliberately tiny flexbox subset, with literal CSS
+names.** Containers with `row`/`column` direction, `gap`, `align` (wrap TBD at
+implementation), and one escape hatch: a **pinned offset within a container** (the CSS
+absolute-positioning analog, reusing the provenance vocabulary). No cascade, no
+styling, no percentages, no renaming cleverness — agents carry enormous training
+distribution on exactly these names (the shadcn/react → damascene lesson: shape the
+API to what agents are already fluent in, without the baggage). Symbol orientation is
+an authored leaf attribute with a sensible default — no auto-orient cleverness in v1.
+
+**20c — the view is total and honest from day one.** Any symbol not in the layout
+tree renders in a derived "unplaced" bin (a plain grid); every connection renders as a
+**named net tag at the pin**. The schematic never silently omits a part or a
+connection — quality is added incrementally by authoring structure, never required
+up front. Tags remain the default connection rendering even for placed symbols
+(real schematics tag global rails and draw only local connections).
+
+**20d — drawn wires ignore the routing problem.** A drawn wire in v1 is a straight
+line or simple spline pin-to-pin. The author (human or agent) may add **waypoints**
+("routing nodes") to visually direct a wire — pure presentation, a no-op to the
+netlist truth downstream, letting an engineer draw their schematic however they like.
+No wire autorouting, ever, on the view path; anything smarter is a future *editing
+tool* proposing waypoints under Decision-18 semantics.
+
+**20e — symbol bodies are boxes-with-pins in v1.** `.kicad_sym` body graphics import
+later as additive `PartDef` data (the renderer keys on `PartDef`, so nothing here
+excludes it); pins, names, and net tags carry the electrical content meanwhile.
+
+A layout tree inside a `def` (Decision 21) is stamped per instance — reused circuits
+render identically everywhere, the thing hierarchical-sheet tools never quite deliver.
+
+### Decision 21 — the source language: declarative core, hermetic expressions, `def` reuse; computation stays at the rim (2026-07-04, drafted — not yet implemented)
+
+Settles, deliberately and in advance, the language question that `def` + parameters +
+ranges would otherwise decide by accretion — the **Onshape trap**: FeatureScript began
+as a text representation for a kernel wrapper and grew language features one
+reasonable step at a time until it was a janky JavaScript nobody chose. We are
+standing at exactly that first step, so we choose now.
+
+**21a — the truth, restated precisely.** The source of truth is not the netlist — it
+is the **generative description**; the flat netlist is its first derived view (it is
+already a query), the schematic its second. Reuse today exists only as Rust functions
+(`psu_module(n)`), i.e. outside the source language. Decision 21 completes the
+language instead: a **`def`** is a named sub-circuit — parts, internal nets, optionally
+its Decision-20 layout tree — with a **typed I/O surface** (bare typed pins and/or a
+named `InterfaceDef`, the part-level typed-mating machinery lifted one level), declared
+parameters with defaults, instantiable at a hierarchical path. The mental model is the
+React component (`def` ≈ component, ports ≈ props) — the deepest well of agent fluency
+for "reusable thing with a typed surface." Nesting is allowed (paths compose); refdes
+annotation stays board-global flat (industry convention) while paths stay
+hierarchical; internal nets elaborate path-prefixed (`sense[0].fb`).
+
+**21b — the expression tier is hermetic and non-Turing-complete, and that is an
+architectural invariant, not taste.** Two existing commitments force it:
+
+1. **Elaboration is the commit gate** — it runs on every transaction, and eventually
+   at interactive GUI rates. The document language must therefore be pure,
+   deterministic, terminating, and ~O(output size). A Turing-complete document breaks
+   all four and degrades diagnostics from "typecheck errors" to "your script crashed."
+2. **Reconciliation requires stable identity.** ID-keyed overrides address generated
+   instances by *source-analyzable* paths; parameterized ranges keep `sense[2].R1`
+   stable under `n: 3→4`. Arbitrary code generating instances makes identity an
+   accident of execution order (Onshape's derived-feature fragility).
+
+v1 power budget (HCL/Terraform-shaped — the other deep agent-fluency well):
+**parameters + arithmetic + bounded ranges (`[0..n]` iteration) + a conditional for
+population variants (DNP)**. Explicitly excluded: user-defined functions, string
+manipulation, recursion, unbounded loops, I/O. Functions are where "expression layer"
+quietly becomes "language."
+
+**21c — the Onshape clause.** If in-document scripting is ever truly needed, we embed
+an existing hermetic language (Starlark is the standing candidate: deterministic,
+sandboxed, built for exactly this at Bazel) — **we never grow our own.** General
+computation meanwhile stays **at the rim**, where it already lives: agents and Rust
+programs (the command API, `psu_module`-style generators) are the Turing-complete
+layer, and the document is the *output* of computation, never the site of it. Rust
+"not being real-time" stops mattering because Rust never runs inside the commit gate.
+
+**21d — the three-mode editing model (human-first-class, not agent-only).** The GUI
+is a full authoring surface, not an override editor — possible precisely because the
+document is declarative data, not code (the second half of the Onshape trap is a GUI
+and a language fighting over the same file; you cannot WYSIWYG-author a program, but
+you can WYSIWYG-author records):
+
+1. **Flat authored content** (instances, nets, placements, layout containers): full
+   GUI CRUD through the same command algebra the agent uses. The blank-canvas EE
+   workflow — open an empty schematic, drop parts, draw wires — is first-class with
+   zero text contact; the text updates because text is a projection.
+2. **Parameters**: direct GUI editing — they are named data (`n: 3→4` binds to a
+   slider without source surgery).
+3. **Generated content** (instances stamped from a `def`/range): per-instance edits
+   are ID-keyed overrides (survive re-elaboration, decay when stale) — *and* the def
+   itself is editable, because a def body is just mode-1 content in a scope: "edit
+   the component" opens the def as its own canvas (the Figma component model,
+   including the creation gesture: select a cluster → "make component" → the GUI
+   extracts a def and replaces the selection with an instance).
+
+Only the expression tier is text-exclusive — progressive disclosure, not relegation.
+
+**Filed as a design requirement, not a future bug report:** mixed authorship of the
+text form. When the GUI mutates the doc and the file re-serializes, hand-written
+artifacts — comments, ordering, grouping chosen for readability by an agent or human —
+need an explicit preservation story (comment anchoring, stable section ordering)
+beyond today's canonical-serialization determinism.
 
 ## 7. Convergence plan: sequential foundation → parallel fan-out → sequential spine
 
