@@ -9,8 +9,12 @@
 //! 3D models. It carries **no electrical roles** — whether a pad is power, an
 //! input, or passive comes from the *schematic symbol*, not the footprint. So
 //! every imported pin gets [`PinRole::Passive`]; roles must be supplied elsewhere
-//! when a footprint is paired with a symbol. Likewise a footprint defines no
-//! typed [`InterfaceDef`]s, so `PartDef.interfaces` is always empty here.
+//! when a footprint is paired with a symbol. A footprint alone defines no typed
+//! [`InterfaceDef`]s. Once a symbol supplies functional pin names,
+//! [`join_symbol_footprint`] runs a conservative interface-inference pass
+//! ([`iface_infer::infer_interfaces`](crate::iface_infer::infer_interfaces), issue
+//! 0010) over the joined part, so `PartDef.interfaces` gains a typed port only where
+//! the pin names form a complete, unambiguous registry match (empty otherwise).
 //!
 //! What we *do* import is the pad-to-pin geometry: one [`PinDef`] per pad, named
 //! by the pad's number/name, positioned at the pad's `(at x y)` converted mm→nm —
@@ -1468,9 +1472,8 @@ pub fn join_symbol_footprint(symbol: &Symbol, footprint: &PartDef) -> JoinReport
         .map(|p| (p.number.clone(), p.name.clone(), p.etype.role()))
         .collect();
 
-    // Name the part after the footprint (the manufacturable artifact); roles and
-    // interfaces beyond discrete pins are out of scope for this layer.
-    let part = PartDef {
+    // Name the part after the footprint (the manufacturable artifact).
+    let mut part = PartDef {
         name: footprint.name.clone(),
         pins,
         interfaces: BTreeMap::new(),
@@ -1480,6 +1483,12 @@ pub fn join_symbol_footprint(symbol: &Symbol, footprint: &PartDef) -> JoinReport
         courtyard: footprint.courtyard.clone(),
         class: None,
     };
+    // Conservatively attach typed interfaces from the now-named pins (issue 0010).
+    // This is a no-op for any part whose pin names don't form a complete, unambiguous
+    // registry signal set — the common case — so it never invents an interface; when
+    // it does fire, the pad-number binding keeps interface + discrete identity unified
+    // (see [`iface_infer`](crate::iface_infer)).
+    crate::iface_infer::infer_interfaces(&mut part);
     JoinReport {
         part,
         symbol_only,

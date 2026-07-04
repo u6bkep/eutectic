@@ -1445,10 +1445,23 @@ fn connect_interface(
             name: net_name,
             members: BTreeSet::new(),
         });
-        net.members
-            .insert(PinRef::new(&aid, &format!("{aport}.{sa}")));
-        net.members
-            .insert(PinRef::new(&bid, &format!("{bport}.{sb}")));
+        // Unify pin identity: a signal bound to a real pad (an imported part —
+        // `InterfaceDef.pads`) nets under the *pad-number* PinRef, the same identity
+        // the discrete pin and the floating-pad check use. Only an abstract interface
+        // (no pad binding — the toy library) falls back to the `port.signal` identity,
+        // which is safe there precisely because it has no underlying pad to collide
+        // with. Without this, a pad wired only via its interface looks floating, and
+        // discrete + interface wiring of one pad split across two net nodes.
+        let a_pin = match aiface.pads.get(sa) {
+            Some(num) => num.clone(),
+            None => format!("{aport}.{sa}"),
+        };
+        let b_pin = match biface.pads.get(sb) {
+            Some(num) => num.clone(),
+            None => format!("{bport}.{sb}"),
+        };
+        net.members.insert(PinRef::new(&aid, &a_pin));
+        net.members.insert(PinRef::new(&bid, &b_pin));
     }
 }
 

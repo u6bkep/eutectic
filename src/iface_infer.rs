@@ -16,18 +16,27 @@
 //!    or aliased-ambiguously attaches nothing. Convenience on top of the explicit
 //!    path, never a substitute for it.
 //!
-//! ## How an attached interface resolves
-//! An interface port is addressed as `port.signal` (`swd.swdio`); its identity flows
-//! into nets as a [`PinRef`](crate::doc::PinRef) of that spelling, and
+//! ## How an attached interface resolves (and pin identity)
+//! An interface port is addressed as `port.signal` (`swd.swdio`), and
 //! [`PartDef::pin_offset`](crate::part::PartDef::pin_offset) /
-//! [`pin_role`](crate::part::PartDef::pin_role) resolve it through the interface's own
-//! `signals`/`offsets` maps. So — exactly like a toy part — an attached
-//! [`InterfaceDef`] carries an `offsets` map; here it is **copied from the real pad
-//! offsets** of the pins it groups, so the ratsnest / router point-seeding
-//! ([`pin_world`](crate::part::pin_world)) land on the physical pads, and
-//! `connect_interface` in [`elaborate`](crate::elaborate) mates them with the baked
-//! crossing unchanged. ERC (a typecheck over roles) sees the signal directions the
-//! same way it sees a toy part's.
+//! [`pin_role`](crate::part::PartDef::pin_role) resolve that spelling through the
+//! interface's own `signals`/`offsets` maps — so an attached [`InterfaceDef`] carries
+//! an `offsets` map **copied from the real pad offsets**, and the ratsnest / router
+//! point-seeding ([`pin_world`](crate::part::pin_world)) land on the physical pads.
+//!
+//! But there is a subtlety a toy part does not have: an inferred/overlaid interface
+//! signal *is* a real pad that also has a discrete pad-number identity. To avoid a
+//! **dual identity** (the pad reported floating because the floating check enumerates
+//! by pad number while the interface netted under `port.signal`; or discrete and
+//! interface wiring of one pad splitting across two disconnected net nodes — a silent
+//! short), the [`InterfaceDef`] also carries a [`pads`](crate::part::InterfaceDef::pads)
+//! map binding each signal to its pad **number**.
+//! [`connect_interface`](crate::elaborate) nets a bound signal under that pad-number
+//! [`PinRef`](crate::doc::PinRef) — the *same* identity the discrete pin and the
+//! floating-pad check use — so identity is unified. A toy part's interface has no
+//! underlying pad (`pads` empty), so it keeps the `port.signal` identity, which is
+//! safe there precisely because nothing collides with it — zero behaviour change for
+//! toy parts. ERC (a typecheck over roles) sees the signal directions unchanged.
 //!
 //! ## Directional conservatism (why bus signals are `Bidir`)
 //! A single [`InterfaceDef`] is symmetric — both mated instances share the same
@@ -41,9 +50,17 @@
 //! is modelled `Bidir` — the same conservative default `ElecType::role` uses for
 //! `tri_state` (never invent a spurious driver conflict). Genuinely single-driver,
 //! crossed links (UART) keep their real directions.
+//!
+//! **Blind spot, stated plainly:** `connect_interface`'s only drive check is
+//! `(Out, Out)`, and ERC's driver rule never counts `Bidir`. So the `Bidir` buses get
+//! *structural* protection only — signals mate by name (SCK↔SCK, never SCK↔MOSI), and
+//! a type mismatch (SPI↔I2C) is rejected — but **no directional enforcement at all**.
+//! Only **UART** carries real directional ERC (its `Out`/`In` with the crossed mate).
+//! SPI/I2C/SWD are name-mated only; proper directional checking needs a
+//! controller/peripheral role distinction the model does not have yet.
 
 use crate::part::{Dir, InterfaceDef, PartDef, PinDef};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// One built-in interface pattern in the [`registry`].
 ///
@@ -104,16 +121,17 @@ pub const REGISTRY: &[IfacePattern] = &[
             ("miso", "miso"),
             ("cs", "cs"),
         ],
+        // NB: SDI/SDO are deliberately NOT aliased. They are common audio-codec pin
+        // names (SCK/SDI/SDO/CS), so a complete-set match on them is a false positive.
+        // Only the unambiguous SPI spellings are aliased.
         aliases: &[
             ("SCK", "sck"),
             ("SCLK", "sck"),
             ("SPI_SCK", "sck"),
             ("SPI_CLK", "sck"),
             ("MOSI", "mosi"),
-            ("SDO", "mosi"),
             ("SPI_MOSI", "mosi"),
             ("MISO", "miso"),
-            ("SDI", "miso"),
             ("SPI_MISO", "miso"),
             ("CS", "cs"),
             ("NSS", "cs"),
@@ -197,7 +215,9 @@ fn port_name(type_name: &str, inst: &str) -> String {
 
 /// Assemble an [`InterfaceDef`] for one matched instance from a canonical-signal →
 /// [`PinDef`] grouping. `offsets` are copied from the real pads so the port resolves
-/// to physical geometry exactly like a toy part's interface does.
+/// to physical geometry exactly like a toy part's interface does; `pads` binds each
+/// signal to its pad **number** so the interface signal shares identity with the
+/// discrete pad (see [`InterfaceDef::pads`]).
 fn build_iface(pat: &IfacePattern, group: &BTreeMap<&str, &PinDef>) -> InterfaceDef {
     let signals: BTreeMap<String, Dir> = pat
         .signals
@@ -209,6 +229,11 @@ fn build_iface(pat: &IfacePattern, group: &BTreeMap<&str, &PinDef>) -> Interface
         .iter()
         .map(|(s, _)| (s.to_string(), group[*s].offset))
         .collect();
+    let pads: BTreeMap<String, String> = pat
+        .signals
+        .iter()
+        .map(|(s, _)| (s.to_string(), group[*s].number.clone()))
+        .collect();
     let mate: Vec<(String, String)> = pat
         .mate
         .iter()
@@ -219,6 +244,7 @@ fn build_iface(pat: &IfacePattern, group: &BTreeMap<&str, &PinDef>) -> Interface
         signals,
         offsets,
         mate,
+        pads,
     }
 }
 
@@ -356,8 +382,19 @@ pub fn apply_interface(
             ));
         }
     }
-    // Resolve each selector to exactly one pad and pull its real offset.
+    // Pads already claimed by an existing interface port — a pad may back at most one
+    // interface signal across all ports (same aliasing hazard as inference's
+    // duplicate-candidate rule; binding one pad to two ports would re-introduce the
+    // split-identity the pad-number binding exists to prevent).
+    let claimed: BTreeSet<String> = part
+        .interfaces
+        .values()
+        .flat_map(|i| i.pads.values().cloned())
+        .collect();
+    // Resolve each selector to exactly one pad; capture its real offset and pad number.
     let mut offsets: BTreeMap<String, crate::doc::Point> = BTreeMap::new();
+    let mut pads: BTreeMap<String, String> = BTreeMap::new();
+    let mut within: BTreeSet<String> = BTreeSet::new();
     for (s, _) in pat.signals {
         let sel = bound[s];
         let ids = part.resolve_selector(sel);
@@ -367,10 +404,22 @@ pub fn apply_interface(
                 ids.len()
             ));
         }
+        let num = ids[0].clone();
+        if claimed.contains(&num) {
+            return Err(format!(
+                "apply_interface: pad `{num}` (signal `{s}`) is already bound to another interface port"
+            ));
+        }
+        if !within.insert(num.clone()) {
+            return Err(format!(
+                "apply_interface: pad `{num}` bound to two signals of this port"
+            ));
+        }
         let off = part
-            .pin_offset(&ids[0])
-            .ok_or_else(|| format!("apply_interface: pad `{}` has no offset", ids[0]))?;
+            .pin_offset(&num)
+            .ok_or_else(|| format!("apply_interface: pad `{num}` has no offset"))?;
         offsets.insert(s.to_string(), off);
+        pads.insert(s.to_string(), num);
     }
     let signals: BTreeMap<String, Dir> = pat
         .signals
@@ -389,6 +438,7 @@ pub fn apply_interface(
             signals,
             offsets,
             mate,
+            pads,
         },
     );
     Ok(())
@@ -501,6 +551,33 @@ mod tests {
         assert_eq!(part.pin_offset("uart1.rx"), Some(p(1, 1)));
     }
 
+    /// Audio-codec false-positive guard: SCK/SDI/SDO/CS is a complete SPI signal set
+    /// only if SDI/SDO alias to miso/mosi. They don't (dropped as a review fix), so an
+    /// audio codec named this way attaches NO spi.
+    #[test]
+    fn audio_codec_sdi_sdo_does_not_infer_spi() {
+        let mut part = part_with(vec![
+            pin("SCK", "1", p(0, 0)),
+            pin("SDI", "2", p(0, 1)),
+            pin("SDO", "3", p(0, 2)),
+            pin("CS", "4", p(0, 3)),
+        ]);
+        assert_eq!(
+            infer_interfaces(&mut part),
+            0,
+            "SDI/SDO are not SPI aliases"
+        );
+        assert!(part.interfaces.is_empty());
+        // The genuine SPI spellings still match.
+        let mut real = part_with(vec![
+            pin("SCK", "1", p(0, 0)),
+            pin("MOSI", "2", p(0, 1)),
+            pin("MISO", "3", p(0, 2)),
+            pin("CS", "4", p(0, 3)),
+        ]);
+        assert_eq!(infer_interfaces(&mut real), 1);
+    }
+
     #[test]
     fn spi_and_i2c_buses_are_bidir_straight_mate() {
         let mut part = part_with(vec![
@@ -586,10 +663,29 @@ mod tests {
         assert!(apply_interface(&mut part, "uart", "u", &[("tx", "A"), ("rx", "B")]).is_err());
     }
 
-    /// An RP2350-style imported part gains SWD cleanly and does NOT hallucinate a UART
-    /// (the real RP2350 UART is GPIO-muxed, so there are no fixed TX/RX pins — honest
-    /// inference attaches nothing there). Built from the import path so it exercises
-    /// `join_symbol_footprint` output, not a synthetic PartDef.
+    /// A pad may back at most one interface signal across ALL ports — binding pad `A`
+    /// into a second port (even a differently-typed one) is an error, not a silent
+    /// dual identity (the same hazard the pad-number binding exists to prevent).
+    #[test]
+    fn explicit_overlay_rejects_cross_port_pad_reuse() {
+        let mut part = part_with(vec![
+            pin("A", "1", p(0, 0)),
+            pin("B", "2", p(0, 1)),
+            pin("C", "3", p(0, 2)),
+        ]);
+        apply_interface(&mut part, "uart", "u0", &[("tx", "A"), ("rx", "B")]).unwrap();
+        // Pad A ("1") is already bound to port u0.tx; reusing it under u1 must fail.
+        let err =
+            apply_interface(&mut part, "uart", "u1", &[("tx", "A"), ("rx", "C")]).unwrap_err();
+        assert!(err.contains("already bound"), "got {err}");
+        // The failed call attached nothing.
+        assert!(!part.interfaces.contains_key("u1"));
+    }
+
+    /// An RP2350-style imported part gains SWD + UART0 straight from the import join
+    /// (`join_symbol_footprint` now runs inference), and does NOT hallucinate an SPI
+    /// from a lone `QSPI_SD0` (partial set). Re-running inference is idempotent (ports
+    /// already taken). Exercises the real import path, not a synthetic PartDef.
     #[test]
     fn imported_rp2350_style_gains_swd_and_uart_when_named() {
         let sym = r#"
@@ -613,10 +709,10 @@ mod tests {
         let symbol = import_symbol(sym).unwrap();
         let footprint = import_footprint(fp).unwrap();
         let mut part = join_symbol_footprint(&symbol, &footprint).part;
-        assert!(part.interfaces.is_empty(), "join attaches no interfaces");
-        let n = infer_interfaces(&mut part);
+        // The import join itself attached the interfaces (SWD + UART0, not SPI).
         assert_eq!(
-            n, 2,
+            part.interfaces.len(),
+            2,
             "SWD + UART0, but NOT a QSPI (lone SD0 is a partial set)"
         );
         assert_eq!(part.interfaces["swd"].type_name, "SWD");
@@ -625,8 +721,11 @@ mod tests {
             !part.interfaces.keys().any(|k| k.starts_with("spi")),
             "a lone QSPI_SD0 must not hallucinate an SPI"
         );
-        // SWD signal resolves to the real pad offset (pad 1 at origin).
+        // Re-running inference is idempotent — the ports are already taken.
+        assert_eq!(infer_interfaces(&mut part), 0);
+        // SWD signal resolves to the real pad offset (pad 1 at origin) and binds pad 1.
         assert_eq!(part.pin_offset("swd.swdio"), Some(p(0, 0)));
+        assert_eq!(part.interfaces["swd"].pads["swdio"], "1");
         assert_eq!(part.pin_offset("uart0.tx"), Some(p(2_000_000, 0)));
     }
 
@@ -644,7 +743,7 @@ mod tests {
         use crate::part::PartLib;
         use crate::query::{Engine, Key};
 
-        // A UART-bearing part built from the import path, then inferred.
+        // A UART-bearing part built from the import path (which infers on join).
         let uart_part = || {
             let sym = r#"
 (symbol "X"
@@ -660,8 +759,8 @@ mod tests {
 )"#;
             let symbol = import_symbol(sym).unwrap();
             let footprint = import_footprint(fp).unwrap();
-            let mut part = join_symbol_footprint(&symbol, &footprint).part;
-            assert_eq!(infer_interfaces(&mut part), 1);
+            let part = join_symbol_footprint(&symbol, &footprint).part;
+            assert_eq!(part.interfaces.len(), 1, "join inferred the uart");
             part
         };
 
@@ -697,20 +796,176 @@ mod tests {
         let mut eng = Engine::new();
         let nl = eng.query(h.doc(), &lib, Key::Netlist);
         let nl = nl.as_netlist();
+        // Post identity-unification: the interface signal nets under its PAD NUMBER, not
+        // `uart.tx`. tx=pad "1", rx=pad "2" (from the fixture). The net carrying u1's tx
+        // pad must also carry u2's rx pad (crossed), never u2's tx pad.
         let tx_net = nl
             .iter()
             .find(|(_, pins)| {
                 pins.iter()
-                    .any(|(p, _)| p.pin == "uart.tx" && p.comp.as_str() == "u1")
+                    .any(|(p, _)| p.pin == "1" && p.comp.as_str() == "u1")
             })
-            .expect("u1 tx net");
+            .expect("u1 tx-pad net");
         let names: Vec<String> = tx_net
             .1
             .iter()
             .map(|(p, _)| format!("{}.{}", p.comp, p.pin))
             .collect();
-        // Crossed: u1.tx shares a net with u2.rx, never u2.tx.
-        assert!(names.contains(&"u2.uart.rx".to_string()), "got {names:?}");
-        assert!(!names.contains(&"u2.uart.tx".to_string()), "got {names:?}");
+        assert!(
+            names.contains(&"u2.2".to_string()),
+            "u2 rx pad, got {names:?}"
+        );
+        assert!(
+            !names.contains(&"u2.1".to_string()),
+            "not u2 tx pad, got {names:?}"
+        );
+    }
+
+    /// BLOCKER repro (a): a board whose every pad is wired — some discretely, some only
+    /// through an inferred interface — has ZERO floating pads. Before the pad-number
+    /// binding, the interface-only pads reported E_FLOATING_PAD because their net member
+    /// was `uart.tx`, not the pad number the Floating check enumerates.
+    #[test]
+    fn fully_interface_wired_board_has_no_floating_pads() {
+        use crate::command::{Command, Transaction};
+        use crate::doc::Doc;
+        use crate::elaborate::GenDirective;
+        use crate::history::History;
+        use crate::part::PartLib;
+        use crate::query::{Engine, Key};
+
+        let uart_part = |name: &str| {
+            let sym = r#"
+(symbol "X"
+    (pin output line (at 0 0 0) (length 1) (name "TX") (number "1"))
+    (pin input line (at 0 0 0) (length 1) (name "RX") (number "2"))
+    (pin passive line (at 0 0 0) (length 1) (name "GND") (number "3"))
+)"#;
+            let fp = r#"
+(footprint "X-FP"
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu"))
+    (pad "2" smd rect (at 1 0) (size 1 1) (layers "F.Cu"))
+    (pad "3" smd rect (at 2 0) (size 1 1) (layers "F.Cu"))
+)"#;
+            let symbol = import_symbol(sym).unwrap();
+            let footprint = import_footprint(fp).unwrap();
+            let mut part = join_symbol_footprint(&symbol, &footprint).part;
+            part.name = name.into();
+            part
+        };
+        let mut lib = PartLib::new();
+        lib.insert("PartA".into(), uart_part("PartA"));
+        lib.insert("PartB".into(), uart_part("PartB"));
+
+        let mk = |path: &str, part: &str| GenDirective::Instance {
+            path: path.into(),
+            part: part.into(),
+            params: BTreeMap::new(),
+            label: None,
+        };
+        let src = vec![
+            mk("u1", "PartA"),
+            mk("u2", "PartB"),
+            // tx/rx pads wired ONLY through the interface mate.
+            GenDirective::ConnectInterface {
+                a: ("u1".into(), "uart".into()),
+                b: ("u2".into(), "uart".into()),
+            },
+            // The two GND pads wired discretely — covers the remaining pads.
+            GenDirective::ConnectPins {
+                net: "GND".into(),
+                pins: vec![("u1".into(), "GND".into()), ("u2".into(), "GND".into())],
+            },
+        ];
+        let mut h = History::new(Doc::default());
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "s")
+            .unwrap();
+        let mut eng = Engine::new();
+        let floats = eng.query(h.doc(), &lib, Key::Floating);
+        assert!(
+            floats.as_floating().is_empty(),
+            "every pad is wired (tx/rx via interface, gnd discretely): {:?}",
+            floats.as_floating()
+        );
+    }
+
+    /// BLOCKER repro (b): wiring a pad discretely by name AND mating it through its
+    /// interface converge on ONE net-node identity (the pad number), so they union into
+    /// a single net rather than splitting the pad across two disconnected nodes (the
+    /// silent-short the binding prevents).
+    #[test]
+    fn discrete_and_interface_wiring_converge_on_one_identity() {
+        use crate::command::{Command, Transaction};
+        use crate::doc::Doc;
+        use crate::elaborate::GenDirective;
+        use crate::history::History;
+        use crate::id::EntityId;
+        use crate::part::PartLib;
+        use crate::query::{Engine, Key};
+
+        let uart_part = |name: &str| {
+            let sym = r#"
+(symbol "X"
+    (pin output line (at 0 0 0) (length 1) (name "TX") (number "1"))
+    (pin input line (at 0 0 0) (length 1) (name "RX") (number "2"))
+    (pin passive line (at 0 0 0) (length 1) (name "GND") (number "3"))
+)"#;
+            let fp = r#"
+(footprint "X-FP"
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu"))
+    (pad "2" smd rect (at 1 0) (size 1 1) (layers "F.Cu"))
+    (pad "3" smd rect (at 2 0) (size 1 1) (layers "F.Cu"))
+)"#;
+            let symbol = import_symbol(sym).unwrap();
+            let footprint = import_footprint(fp).unwrap();
+            let mut part = join_symbol_footprint(&symbol, &footprint).part;
+            part.name = name.into();
+            part
+        };
+        let mut lib = PartLib::new();
+        lib.insert("PartA".into(), uart_part("PartA"));
+        lib.insert("PartB".into(), uart_part("PartB"));
+
+        let mk = |path: &str, part: &str| GenDirective::Instance {
+            path: path.into(),
+            part: part.into(),
+            params: BTreeMap::new(),
+            label: None,
+        };
+        let src = vec![
+            mk("u1", "PartA"),
+            mk("u2", "PartB"),
+            GenDirective::ConnectInterface {
+                a: ("u1".into(), "uart".into()),
+                b: ("u2".into(), "uart".into()),
+            },
+            // Also wire u1's TX pad discretely by its functional name onto the SAME net
+            // the interface mate uses (`u1.uart.tx` — the auto-named interface net).
+            GenDirective::ConnectPins {
+                net: "u1.uart.tx".into(),
+                pins: vec![("u1".into(), "TX".into())],
+            },
+        ];
+        let mut h = History::new(Doc::default());
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "s")
+            .unwrap();
+        let mut eng = Engine::new();
+        let nl = eng.query(h.doc(), &lib, Key::Netlist);
+        let nl = nl.as_netlist();
+        // u1's TX pad (number "1") must appear on exactly ONE net node — the discrete
+        // and interface wiring resolved to the same PinRef, so they unioned.
+        let occurrences: Vec<String> = nl
+            .iter()
+            .filter(|(_, pins)| {
+                pins.iter()
+                    .any(|(p, _)| p.comp == EntityId::new("u1") && p.pin == "1")
+            })
+            .map(|(net, _)| net.0.clone())
+            .collect();
+        assert_eq!(
+            occurrences.len(),
+            1,
+            "u1 tx pad must be on a single net node, not split: {occurrences:?}"
+        );
     }
 }

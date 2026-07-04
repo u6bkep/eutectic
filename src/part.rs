@@ -186,6 +186,20 @@ pub struct InterfaceDef {
     /// how to mate two instances: (signal on side A, signal on side B).
     /// For UART: (tx,rx) and (rx,tx) — the crossing is baked in.
     pub mate: Vec<(String, String)>,
+    /// Optional binding of each signal to the **pad number** it physically is, for an
+    /// interface layered onto a part with real pads (an imported part — see
+    /// [`iface_infer`](crate::iface_infer)). **Empty for the toy library**, whose
+    /// interface signals have no underlying [`PinDef`].
+    ///
+    /// This is what unifies pin identity: a bound signal *is* its pad, so
+    /// [`connect_interface`](crate::elaborate) nets it under the pad-number
+    /// [`PinRef`](crate::doc::PinRef) — the same identity the discrete pin and the
+    /// floating-pad check use — instead of a distinct `port.signal` identity. Without
+    /// it a pad wired only through its interface would look floating, and discrete +
+    /// interface wiring of the same pad would land on two disconnected net nodes (a
+    /// silent short). An abstract interface (`pads` empty) keeps `port.signal` identity,
+    /// which is correct precisely because it has no colliding pad.
+    pub pads: BTreeMap<String, String>,
 }
 
 /// A part definition: discrete pins + named interface ports.
@@ -685,6 +699,9 @@ fn uart() -> InterfaceDef {
         ]),
         // The crossing that designers get wrong by hand, encoded once, correctly.
         mate: vec![("tx".into(), "rx".into()), ("rx".into(), "tx".into())],
+        // Abstract toy interface: no underlying pads, so signals keep `port.signal`
+        // identity (nothing to collide with).
+        pads: BTreeMap::new(),
     }
 }
 
