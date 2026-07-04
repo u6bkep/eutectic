@@ -178,6 +178,14 @@ pub fn autoroute(doc: &Doc, lib: &PartLib, rules: &DesignRules) -> AutorouteResu
             via_pad,
         );
 
+        // Decision 19b — same-net plane fills are stitching targets. Grid cells over this
+        // net's OWN pour fill (on the pour's slab) are pre-connected tree membership: the
+        // A* search then discovers pad→plane stitching vias as ordinary via drops. Seeding
+        // with ALL own-fill cells lets the router treat a fragmented plane as one node —
+        // acceptable because pin_islands (layer-honest, Task A) is the downstream judge and
+        // reports any remaining islands as unrouted; the router does not paper over it.
+        let plane_seeds = own_plane_cells(&grid, doc, lib, rules, &su, &netlist, nid);
+
         match route_net(
             &grid,
             &block,
@@ -185,6 +193,7 @@ pub fn autoroute(doc: &Doc, lib: &PartLib, rules: &DesignRules) -> AutorouteResu
             net_seq as i32,
             nid,
             pads,
+            &plane_seeds,
             width,
             via_pad,
             via_drill,
@@ -204,7 +213,64 @@ pub fn autoroute(doc: &Doc, lib: &PartLib, rules: &DesignRules) -> AutorouteResu
     // Don't trust the construction invariant — verify the proposed copper against the
     // real DRC and drop any net that actually clashes.
     verify_and_prune(doc, lib, rules, &mut result);
+    // Reconcile `routed` with the ratsnest (Decision 19b honesty): tree completion is not
+    // proof of connectivity once the plane is a stitching target — seeding the tree with
+    // all own-fill cells can let a net's tree "complete" while its pads land on different
+    // (fragmented) plane islands, or while a stitching via was pruned by verify. So the
+    // final `routed`/`unrouted` split is taken from the *committed* board's DRC ratsnest,
+    // not from tree completion: apply the surviving commands to a scratch doc and demote
+    // any net the ratsnest still reports as `Unrouted` (>1 island). This makes the
+    // autorouter's `routed` claim agree with the DRC the example independently runs.
+    reconcile_routed_with_ratsnest(doc, lib, rules, &mut result);
     result
+}
+
+/// Move nets the committed-board ratsnest still reports unrouted out of `result.routed`
+/// (Decision 19b). `routed` must mean DRC-connected, not tree-complete: with plane
+/// seeding a tree can complete across a fragmented plane's separate islands. Applies the
+/// surviving commands to a scratch clone and consults `check_drc`'s `Unrouted` set.
+fn reconcile_routed_with_ratsnest(
+    doc: &Doc,
+    lib: &PartLib,
+    rules: &DesignRules,
+    result: &mut AutorouteResult,
+) {
+    if result.routed.is_empty() {
+        return;
+    }
+    let txn = crate::command::Transaction(result.commands.clone());
+    let scratch = match crate::command::apply(doc, &txn, lib, 0) {
+        Ok(d) => d,
+        Err(_) => return, // ordinary AddTrace/AddVia; on the rare reject, leave as-is
+    };
+    let drc = crate::route::check_drc(&scratch, lib, &doc_netlist(&scratch), rules);
+    let still_unrouted: BTreeSet<NetId> = drc
+        .iter()
+        .filter_map(|v| match v {
+            crate::route::Violation::Unrouted { net, .. } => Some(net.clone()),
+            _ => None,
+        })
+        .collect();
+    if still_unrouted.is_empty() {
+        return;
+    }
+    // A net demoted here keeps its (clean) copper committed — it is partial progress, not
+    // a clash. Only the routed/unrouted *bookkeeping* moves, so the caller's reported count
+    // is honest while the copper the router did lay (e.g. a stitching via to one island)
+    // stays. This mirrors how a hand-routed partial net reads on the ratsnest.
+    let demoted: Vec<NetId> = result
+        .routed
+        .iter()
+        .filter(|n| still_unrouted.contains(n))
+        .cloned()
+        .collect();
+    if demoted.is_empty() {
+        return;
+    }
+    result.routed.retain(|n| !still_unrouted.contains(n));
+    result.unrouted.extend(demoted);
+    result.unrouted.sort();
+    result.unrouted.dedup();
 }
 
 /// A pad: its world centre, the copper layer ordinals its geometry occupies, and whether
@@ -838,6 +904,58 @@ impl BlockMap {
     }
 }
 
+/// The grid cells over a net's **own** pour fill, as A* seed states (Decision 19b). One
+/// state per grid node that falls inside the net's own derived-pour fill, on the pour's
+/// slab ordinal. Derived from the same `world_features` stream (the net's own `Area`
+/// conductors), so the seed geometry is exactly the fill DRC/export see. Cells outside the
+/// grid's copper layers, or on a slab the router does not model, are dropped. No board-
+/// mask filtering: a plane cell is a connection target, not a routed node the net must
+/// keep clear — a via lands on it and its legality is judged by `via_ok` at drop time.
+fn own_plane_cells(
+    grid: &Grid,
+    doc: &Doc,
+    lib: &PartLib,
+    rules: &DesignRules,
+    su: &Stackup,
+    netlist: &BTreeMap<NetId, Vec<(PinRef, PinRole)>>,
+    cur: &NetId,
+) -> Vec<State> {
+    let cu = su.copper_slabs();
+    let world = world_features(doc, lib, netlist, rules, su)
+        .expect("world_features on a committed doc (slab gate enforced at commit)");
+    let mut cells: Vec<State> = Vec::new();
+    for nf in &world {
+        if nf.net.as_ref() != Some(cur) || nf.feature.role != Role::Conductor {
+            continue;
+        }
+        let Extent::Prism { shape, z } = &nf.feature.extent;
+        // Own pours only — the `is_pour ⟺ Shape2D::Area` invariant (Decision 16).
+        let Shape2D::Area { region } = shape else {
+            continue;
+        };
+        let Some(l) = cu.iter().position(|s| s.z == *z) else {
+            continue;
+        };
+        if l >= grid.layers {
+            continue;
+        }
+        let Some((lo, hi)) = shape.bbox() else {
+            continue;
+        };
+        let (imin, imax, jmin, jmax) = grid.bbox_range(lo, hi, 0);
+        for j in jmin..=jmax {
+            for i in imin..=imax {
+                if region.contains_point(grid.world(i, j)) {
+                    cells.push((i, j, l));
+                }
+            }
+        }
+    }
+    cells.sort_unstable();
+    cells.dedup();
+    cells
+}
+
 // ----------------------------------------------------------------------------
 // Per-net maze routing.
 // ----------------------------------------------------------------------------
@@ -855,6 +973,7 @@ fn route_net(
     net_seq: i32,
     nid: &NetId,
     pads: &[Pad],
+    plane_seeds: &[State],
     width: Nm,
     via_pad: Nm,
     via_drill: Nm,
@@ -882,27 +1001,47 @@ fn route_net(
 
     let mut commands: Vec<Command> = Vec::new();
 
-    // Seed the connected tree at pin 0; stub its pad onto its grid node.
-    let (si, sj, sl) = pin_nodes[0];
-    claim(owner, si, sj, sl, &mut claimed);
-    let seed_world = grid.world(si, sj);
-    if seed_world != pads[0].at {
-        commands.push(Command::AddTrace(
-            TraceId(mint(next_tid)),
-            Trace {
-                net: nid.clone(),
-                layer: layer_names[sl].clone(),
-                path: vec![pads[0].at, seed_world],
-                width,
-                prov: Provenance::Free,
-            },
-        ));
-    }
     // The set of (node, layer) currently in the net's connected copper.
-    let mut tree: Vec<State> = vec![(si, sj, sl)];
+    let mut tree: Vec<State> = Vec::new();
+
+    // Decision 19b: if the net owns a plane, seed the tree with its own fill cells — A*
+    // zero-cost sources — and route *every* pad to it (each pad→plane stitch is a via the
+    // A* path yields). Otherwise seed at pin 0 (the classic MST start) and route pins 1..n.
+    //
+    // Plane cells are NOT `claim`ed into `owner`: the plane is derived pour copper, not a
+    // routed node, and claiming it would make a foreign net's via see the plane cell as
+    // owned and reject it — defeating 19a via-permeability. They stay `owner == -1` (free),
+    // which the own net traverses freely and a foreign net's via may punch. Other nets are
+    // already forbidden from running *traces* over the plane by their BlockMap (the pour
+    // stamps the trace mask). Seeding all own-fill cells may present a fragmented plane as
+    // one node; the ratsnest is the honest downstream judge (see `own_plane_cells`).
+    // Index of the first pin that must route to the tree.
+    let first_pin = if plane_seeds.is_empty() {
+        // Seed the connected tree at pin 0; stub its pad onto its grid node.
+        let (si, sj, sl) = pin_nodes[0];
+        claim(owner, si, sj, sl, &mut claimed);
+        let seed_world = grid.world(si, sj);
+        if seed_world != pads[0].at {
+            commands.push(Command::AddTrace(
+                TraceId(mint(next_tid)),
+                Trace {
+                    net: nid.clone(),
+                    layer: layer_names[sl].clone(),
+                    path: vec![pads[0].at, seed_world],
+                    width,
+                    prov: Provenance::Free,
+                },
+            ));
+        }
+        tree.push((si, sj, sl));
+        1
+    } else {
+        tree.extend_from_slice(plane_seeds);
+        0 // every pad stitches to the plane
+    };
 
     // Route each remaining pin to the existing tree.
-    for k in 1..pin_nodes.len() {
+    for k in first_pin..pin_nodes.len() {
         let goal = pin_nodes[k];
         let Some(path) = astar(grid, block, owner, net_seq, &tree, goal, via_clear) else {
             for idx in claimed {
@@ -2528,6 +2667,216 @@ mod tests {
         assert!(
             !block.via_layer[idx * nl + in1],
             "and the via barrel's In1.Cu room test ignores the permeable pour"
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // Decision 19b — same-net plane fills are stitching targets.
+    // ------------------------------------------------------------------------
+
+    /// A net with its own plane routes pad→plane with a stitching via. Two GND SMD pads on
+    /// F.Cu are separated by a full-height foreign wall on F.Cu (so no direct F.Cu path)
+    /// but share a GND plane on In1.Cu. The router seeds the tree with the plane cells and
+    /// drops a stitching via from each pad down to the plane, connecting GND — one island,
+    /// DRC clean. Without 19b (no plane seeding) the wall would leave GND unrouted.
+    #[test]
+    fn net_stitches_to_own_plane_via_one_via_each() {
+        let mut lib = part_library();
+        lib.insert("SP".into(), smd_pad("F.Cu"));
+        let outline = Shape2D::polygon(vec![
+            Point::mm(0, 0),
+            Point::mm(30, 0),
+            Point::mm(30, 20),
+            Point::mm(0, 20),
+        ]);
+        let mut src = four_layer_slabs();
+        src.extend(vec![
+            board_rect(Point::mm(0, 0), Point::mm(30, 20)),
+            G::Instance {
+                path: "g1".into(),
+                part: "SP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Instance {
+                path: "g2".into(),
+                part: "SP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            // A foreign net pad so WALL is a real net we can wall F.Cu with.
+            G::Instance {
+                path: "w".into(),
+                part: "SP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Place {
+                path: "g1".into(),
+                pos: Point::mm(5, 10),
+            },
+            G::Place {
+                path: "g2".into(),
+                pos: Point::mm(25, 10),
+            },
+            G::Place {
+                path: "w".into(),
+                pos: Point::mm(15, 1),
+            },
+            G::ConnectPins {
+                net: "GND".into(),
+                pins: vec![("g1".into(), "1".into()), ("g2".into(), "1".into())],
+            },
+            G::ConnectPins {
+                net: "WALL".into(),
+                pins: vec![("w".into(), "1".into())],
+            },
+            G::Region(RegionDecl {
+                shape: outline,
+                role: Role::Conductor,
+                net: Some("GND".into()),
+                layer: "In1.Cu".into(),
+            }),
+        ]);
+        let mut h = doc_of_lib(src, &lib);
+        // A full-height WALL trace on F.Cu between the two GND pads: no direct F.Cu route.
+        let wall = Trace {
+            net: NetId::new("WALL"),
+            layer: "F.Cu".into(),
+            path: vec![Point::mm(15, -2), Point::mm(15, 22)],
+            width: 200_000,
+            prov: Provenance::Pinned,
+        };
+        h.commit(
+            Transaction::one(Command::AddTrace(TraceId(1), wall)),
+            &lib,
+            "wall",
+        )
+        .unwrap();
+
+        let r = autoroute(h.doc(), &lib, &DesignRules::default());
+        assert!(
+            r.routed.contains(&NetId::new("GND")),
+            "GND stitches to its own In1.Cu plane despite the F.Cu wall: routed={:?} unrouted={:?}",
+            r.routed,
+            r.unrouted
+        );
+        assert!(
+            r.commands.iter().any(|c| matches!(c, Command::AddVia(..))),
+            "connecting a pad to an inner plane needs a stitching via: {:?}",
+            r.commands
+        );
+        apply_all_lib(&mut h, r.commands, &lib);
+        let after = drc_lib(&h, &lib);
+        assert!(
+            !after
+                .iter()
+                .any(|v| matches!(v, Violation::Unrouted { net, .. } if *net == NetId::new("GND"))),
+            "GND must be one island after stitching: {after:?}"
+        );
+        assert!(
+            !has_clearance_or_width(&after),
+            "stitched board must be clearance-clean: {after:?}"
+        );
+    }
+
+    /// A fragmented own-plane leaves honest ratsnest islands (Decision 19b): seeding the
+    /// tree with all own-fill cells does NOT let the router claim a split plane is one node
+    /// — the ratsnest (layer-honest, Task A) is the judge. Here a foreign trace cuts the
+    /// GND In1.Cu plane in two, and each GND pad can only reach the island on its own side,
+    /// so GND stays unrouted (>1 island) even though tree completion might have merged them.
+    #[test]
+    fn fragmented_own_plane_stays_unrouted() {
+        let mut lib = part_library();
+        lib.insert("SP".into(), smd_pad("F.Cu"));
+        let outline = Shape2D::polygon(vec![
+            Point::mm(0, 0),
+            Point::mm(30, 0),
+            Point::mm(30, 20),
+            Point::mm(0, 20),
+        ]);
+        let mut src = four_layer_slabs();
+        src.extend(vec![
+            board_rect(Point::mm(0, 0), Point::mm(30, 20)),
+            G::Instance {
+                path: "g1".into(),
+                part: "SP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Instance {
+                path: "g2".into(),
+                part: "SP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            // A foreign net whose full-height In1.Cu trace splits the GND plane in two.
+            G::Instance {
+                path: "w".into(),
+                part: "SP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Place {
+                path: "g1".into(),
+                pos: Point::mm(5, 10),
+            },
+            G::Place {
+                path: "g2".into(),
+                pos: Point::mm(25, 10),
+            },
+            G::Place {
+                path: "w".into(),
+                pos: Point::mm(15, 1),
+            },
+            G::ConnectPins {
+                net: "GND".into(),
+                pins: vec![("g1".into(), "1".into()), ("g2".into(), "1".into())],
+            },
+            G::ConnectPins {
+                net: "SIG".into(),
+                pins: vec![("w".into(), "1".into())],
+            },
+            G::Region(RegionDecl {
+                shape: outline,
+                role: Role::Conductor,
+                net: Some("GND".into()),
+                layer: "In1.Cu".into(),
+            }),
+        ]);
+        let mut h = doc_of_lib(src, &lib);
+        // A full-height SIG trace ON THE PLANE'S SLAB (In1.Cu) cutting it into left/right
+        // islands. The knockout carves a clearance channel through the GND fill.
+        let cut = Trace {
+            net: NetId::new("SIG"),
+            layer: "In1.Cu".into(),
+            path: vec![Point::mm(15, -2), Point::mm(15, 22)],
+            width: 600_000,
+            prov: Provenance::Pinned,
+        };
+        h.commit(
+            Transaction::one(Command::AddTrace(TraceId(1), cut)),
+            &lib,
+            "cut",
+        )
+        .unwrap();
+
+        let r = autoroute(h.doc(), &lib, &DesignRules::default());
+        apply_all_lib(&mut h, r.commands, &lib);
+        let after = drc_lib(&h, &lib);
+        // GND's two pads land on opposite plane islands; stitching each to its own island
+        // does not connect them (only a route crossing the cut would). Honest: unrouted.
+        assert!(
+            after
+                .iter()
+                .any(|v| matches!(v, Violation::Unrouted { net, .. } if *net == NetId::new("GND"))),
+            "a fragmented own-plane must leave GND with >1 ratsnest island: {after:?}"
+        );
+        assert!(
+            !r.routed.contains(&NetId::new("GND")),
+            "the router must NOT claim GND routed when its plane is fragmented (reconciled \
+             against the ratsnest): routed={:?}",
+            r.routed
         );
     }
 }

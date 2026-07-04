@@ -155,7 +155,7 @@ net RUN U1.RUN SW2.1
 net LED_DIN U1.GPIO20 D1.DIN
 
 # routes
-route A_SWDIO F.Cu w=0.15mm (4mm, 5mm) (4.8mm, 5.7mm)
-route A_SWDIO F.Cu w=0.15mm (4.8mm, 5.7mm) (4.8mm, 10.5mm) (5.1mm, 10.5mm) (5.1mm, 17.1mm) (25.2mm, 17.1mm) (25.2mm, 17.7mm) (30.9mm, 17.7mm) (30.9mm, 18mm) (31.2mm, 18mm) (31.2mm, 18.6mm) (33mm, 18.6mm) (33mm, 18.9mm) (33.3mm, 18.9mm) (33.3mm, 19.2mm) (34.8mm, 19.2mm) (34.8mm, 19.5mm) (35.1mm, 19.5mm) (35.1mm, 20.1mm) (35.4mm, 20.1mm) (35.4mm, 20.4mm) (35.7mm, 20.4mm) (35.7mm, 24.9mm) (32.4mm, 24.9mm) (32.4mm, 27.3mm) (32.1mm, 27.3mm) (32.1mm, 29.4mm) (23.4mm, 29.4mm) (23.4mm, 29.1mm) (23.1mm, 29.1mm) (23.1mm, 21.9mm) (23.7mm, 21.9mm) (24.55mm, 22mm)
 route BOOT_SW F.Cu w=0.15mm (44.51mm, 34mm) (45.3mm, 33.9mm)
 route BOOT_SW F.Cu w=0.15mm (45.3mm, 33.9mm) (45.3mm, 34.8mm) (41.7mm, 34.8mm) (41.7mm, 36.3mm) (41.8mm, 37.275mm)
+route E_SWDIO F.Cu w=0.15mm (4mm, 33mm) (4.8mm, 33mm)
+route E_SWDIO F.Cu w=0.15mm (4.8mm, 33mm) (4.8mm, 27.9mm) (5.4mm, 27.9mm) (5.4mm, 26.7mm) (5.7mm, 26.7mm) (5.7mm, 26.1mm) (23.7mm, 26.1mm) (24.55mm, 26mm)
