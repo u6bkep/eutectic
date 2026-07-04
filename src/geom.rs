@@ -33,7 +33,7 @@
 //! and `Extent::Solid` is reserved for true 3D. Net-aware *policy* (which feature
 //! pairs to check) lives in DRC; this module is the pure geometry + data model.
 
-use crate::doc::{Nm, Point};
+use crate::coord::{Nm, Point};
 use crate::id::NetId;
 
 /// Default board thickness: 1.6 mm, in nm.

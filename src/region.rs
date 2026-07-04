@@ -35,7 +35,7 @@
 //!   the kernel consumes, never stored — keeping the door open to an arc-exact boolean
 //!   later with no change to the representation or to export.
 
-use crate::doc::{Nm, Point};
+use crate::coord::{Nm, Point};
 use crate::geom::Shape2D;
 
 /// A closed ring of vertices; the closing edge joins the last vertex to the first.

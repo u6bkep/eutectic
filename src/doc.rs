@@ -19,25 +19,9 @@ use crate::id::{EntityId, NetId, TraceId, ViaId};
 use crate::route::{Trace, Via};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Fixed-point coordinate in nanometres. Integers so positions compare exactly
-/// (no float nondeterminism leaking into diffs or query equality).
-pub type Nm = i64;
-pub const MM: Nm = 1_000_000;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Point {
-    pub x: Nm,
-    pub y: Nm,
-}
-
-impl Point {
-    pub fn mm(x: i64, y: i64) -> Point {
-        Point {
-            x: x * MM,
-            y: y * MM,
-        }
-    }
-}
+// `Nm`, `MM`, and `Point` now live in the leaf `coord` module; re-exported here
+// so every existing `crate::doc::{Nm, MM, Point}` path keeps working.
+pub use crate::coord::{MM, Nm, Point};
 
 /// A component's orientation: an **integer quaternion** rotation (see
 /// docs/geometry-model-convergence.md, Decision 6). Storing the quaternion — rather

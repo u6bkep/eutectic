@@ -18,6 +18,7 @@
 pub mod annotate;
 pub mod autoroute;
 pub mod command;
+pub mod coord;
 pub mod diagnostic;
 pub mod doc;
 pub mod elaborate;
