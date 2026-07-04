@@ -70,7 +70,10 @@ pub fn import_board_outline(svg_text: &str) -> Result<(Shape2D, Vec<Shape2D>), S
                 },
                 0,
             );
-            (loop_area(&shape), shape)
+            // Shared ring-area classifier with the KiCad outline importer (identical
+            // shoelace-over-flattened-skeleton logic); dedup keeps the two front ends
+            // classifying loops the same way.
+            (crate::kicad::outline::loop_area(&shape), shape)
         })
         .collect();
     if closed.is_empty() {
@@ -116,21 +119,6 @@ fn to_nm(x: f64, y: f64) -> Point {
         x: (x * SCALE).round() as Nm,
         y: (-(y * SCALE)).round() as Nm,
     }
-}
-
-/// Signed area ×2 (magnitude) of a closed loop via the shoelace formula over its flattened
-/// skeleton (arcs/Béziers subdivided to [`DEFAULT_CHORD_TOL`]). Exact i128. Orientation is
-/// irrelevant to classification, so the magnitude is returned.
-fn loop_area(shape: &Shape2D) -> i128 {
-    let pts = shape.path().flatten(DEFAULT_CHORD_TOL);
-    let n = pts.len();
-    let mut a2: i128 = 0;
-    for i in 0..n {
-        let p = pts[i];
-        let q = pts[(i + 1) % n];
-        a2 += p.x as i128 * q.y as i128 - q.x as i128 * p.y as i128;
-    }
-    a2.abs()
 }
 
 // ----------------------------------------------------------------------------

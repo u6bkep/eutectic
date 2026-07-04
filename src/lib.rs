@@ -27,7 +27,6 @@ pub mod font;
 pub mod geom;
 pub mod history;
 pub mod id;
-pub mod iface_infer;
 pub mod ir;
 pub mod kicad;
 pub mod part;
