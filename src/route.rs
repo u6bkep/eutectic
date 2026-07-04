@@ -262,10 +262,13 @@ pub fn check_drc(
         }
     }
 
-    // World position (pad *centre*) of every net-member pad, per net. The ratsnest
-    // joins pads by incidence at these points; clearance, separately, uses the pads'
-    // real copper geometry. Through-hole assumption: a pad participates on every layer.
-    let mut net_pads: BTreeMap<NetId, Vec<Point>> = BTreeMap::new();
+    // World position (pad *centre*) of every net-member pad, per net, paired with the
+    // copper slabs the pad copper occupies (Decision 19c). The ratsnest joins pads by
+    // incidence at these points; pour-island incidence is now layer-honest (a pad joins a
+    // plane only where its copper is on that plane's slab). Clearance, separately, uses
+    // the pads' real copper geometry.
+    let su = stackup(&doc.source);
+    let mut net_pads: BTreeMap<NetId, Vec<PinPoint>> = BTreeMap::new();
     for (nid, pins) in netlist {
         let mut pts = Vec::new();
         for (pr, _role) in pins {
@@ -273,7 +276,7 @@ pub fn check_drc(
                 && let Some(def) = lib.get(&c.part)
                 && let Some(p) = pin_world(c, def, &pr.pin)
             {
-                pts.push(p);
+                pts.push(pin_point(doc, lib, &su, p, pr));
             }
         }
         net_pads.insert(nid.clone(), pts);
@@ -291,7 +294,6 @@ pub fn check_drc(
     // fail here. An `Err` means an un-elaborated doc bypassed the commit gate — a broken
     // invariant, made loud on purpose: returning an empty (⇒ "clean") violation set for a
     // doc that never materialised would silently pass a shorted board, the worst failure.
-    let su = stackup(&doc.source);
     let world = world_features(doc, lib, netlist, rules, &su)
         .expect("world_features on a committed doc (slab gate enforced at commit)");
 
@@ -804,6 +806,60 @@ pub fn pours(
 // incidence. Two pins are electrically joined iff they end up in one component.
 // ----------------------------------------------------------------------------
 
+/// A pin's world centre plus the copper slabs its pad copper actually occupies — the
+/// datum layer-honest pour incidence (Decision 19c) pivots on. `slabs` is the set of
+/// copper-slab **names** the pad's `Conductor` features land on: one slab for an SMD
+/// pad, every copper slab for a drilled/through pad. `all_layers` is the padless
+/// compatibility case (Decision 19c): a pin whose footprint carries **no** pad copper
+/// (the toy library's bare terminals — real footprints always have copper) keeps the
+/// old all-layer incidence, joining any same-net island it sits over regardless of slab.
+#[derive(Clone, Debug)]
+struct PinPoint {
+    at: Point,
+    /// Copper-slab names the pad copper occupies; empty iff `all_layers`.
+    slabs: std::collections::BTreeSet<String>,
+    /// True for a bare (padless) terminal — join islands on any slab.
+    all_layers: bool,
+}
+
+impl PinPoint {
+    /// Does this pin's copper exist on the copper slab named `layer` (so it may join a
+    /// pour island there)? The padless-compatibility pin exists on every layer.
+    fn on_slab(&self, layer: &str) -> bool {
+        self.all_layers || self.slabs.contains(layer)
+    }
+}
+
+/// The copper slabs a pin's pad occupies, as a [`PinPoint`]. Derives occupancy from the
+/// *same* pad-feature lowering `world_features`/`net_features` use (a pad's `Conductor`
+/// feature z matched to a copper slab) — never a parallel notion. A pin whose footprint
+/// carries no pad copper (or whose component/part/pin cannot be resolved) is flagged
+/// `all_layers` (Decision 19c padless compatibility).
+fn pin_point(doc: &Doc, lib: &PartLib, su: &Stackup, at: Point, pr: &PinRef) -> PinPoint {
+    let cu = su.copper_slabs();
+    let mut slabs = std::collections::BTreeSet::new();
+    if let Some(c) = doc.components.get(&pr.comp)
+        && let Some(def) = lib.get(&c.part)
+        && let Some(pin) = def.pins.iter().find(|p| p.number == pr.pin)
+    {
+        for f in pin.pad_features(c, su) {
+            if f.role != Role::Conductor {
+                continue;
+            }
+            let Extent::Prism { z, .. } = &f.extent;
+            if let Some(s) = cu.iter().find(|s| s.z == *z) {
+                slabs.insert(s.name.clone());
+            }
+        }
+    }
+    let all_layers = slabs.is_empty();
+    PinPoint {
+        at,
+        slabs,
+        all_layers,
+    }
+}
+
 struct UnionFind {
     parent: Vec<usize>,
 }
@@ -833,11 +889,14 @@ impl UnionFind {
 /// (within `tol`): pin↔pin (coincident pads), pin↔trace and pin↔via (pads are
 /// all-layer points), trace↔trace (same layer), trace↔via and via↔via (via must span
 /// the layer), and copper↔island (a pin/trace/via landing on a filled pour island
-/// joins everything else on that island). Distinct islands are *not* joined to each
-/// other, so a pour fragmented by its knockouts leaves pads on different islands in
-/// separate components — reported honestly as remaining ratsnest islands.
+/// joins everything else on that island). Pin↔island incidence is **layer-honest**
+/// (Decision 19c): a pin joins a plane only where its pad copper exists on that plane's
+/// slab (a [`PinPoint`] carries the occupancy), so an SMD pad does not falsely connect to
+/// an inner plane it merely overlaps. Distinct islands are *not* joined to each other, so
+/// a pour fragmented by its knockouts leaves pads on different islands in separate
+/// components — reported honestly as remaining ratsnest islands.
 fn pin_islands(
-    pins: &[Point],
+    pins: &[PinPoint],
     traces: &[&Trace],
     vias: &[&Via],
     pour_islands: &[(String, crate::region::Region)],
@@ -874,7 +933,7 @@ fn pin_islands(
     // pin ↔ pin
     for i in 0..np {
         for j in (i + 1)..np {
-            if seg_within(pins[i], pins[i], pins[j], pins[j], tol, false) {
+            if seg_within(pins[i].at, pins[i].at, pins[j].at, pins[j].at, tol, false) {
                 uf.union(i, j);
             }
         }
@@ -882,12 +941,12 @@ fn pin_islands(
     // pin ↔ trace, pin ↔ via
     for (pi, p) in pins.iter().enumerate() {
         for (ti, t) in traces.iter().enumerate() {
-            if point_on_polyline(*p, &t.path, tol) {
+            if point_on_polyline(p.at, &t.path, tol) {
                 uf.union(pi, trace_node(ti));
             }
         }
         for (vi, v) in vias.iter().enumerate() {
-            if seg_within(*p, *p, v.at, v.at, tol, false) {
+            if seg_within(p.at, p.at, v.at, v.at, tol, false) {
                 uf.union(pi, via_node(vi));
             }
         }
@@ -924,14 +983,18 @@ fn pin_islands(
         }
     }
     // copper ↔ pour island: a pad/trace/via whose copper lands on a filled island is
-    // electrically that island. Pins are all-layer points (matching the pad model, as
-    // pin↔trace incidence already is), so a same-net pad under its pour connects
-    // regardless of layer. Traces and vias ARE layer-specific, so they join an island
-    // only on the pour's own layer (a trace/via overlapping the pour in XY but on
-    // another layer reaches it only through a via — never implicitly).
+    // electrically that island. A pin joins an island only where its pad copper actually
+    // exists on that island's slab (Decision 19c, PoC finding F1): an SMD pad on F.Cu is
+    // NOT connected to an inner-layer plane it merely overlaps in XY — that would report
+    // connectivity with zero stitching vias, the one direction this model never lies. A
+    // drilled/through pad, whose barrel spans every copper slab, joins an island on any
+    // slab it sits over. The padless-compatibility pin (bare toy-library terminal, no pad
+    // copper) keeps all-layer incidence — see [`PinPoint`]. Traces and vias ARE
+    // layer-specific, so they join an island only on the pour's own layer (a trace/via
+    // overlapping the pour in XY but on another layer reaches it only through a via).
     for (ii, (layer, isl)) in pour_islands.iter().enumerate() {
         for (pi, p) in pins.iter().enumerate() {
-            if isl.contains_point(*p) {
+            if p.on_slab(layer) && isl.contains_point(p.at) {
                 uf.union(pi, island_node(ii));
             }
         }
@@ -2444,6 +2507,310 @@ mod pour_tests {
             &part_library(),
             &BTreeMap::new(),
             &DesignRules::default(),
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // Decision 19c — layer-honest pad incidence (closes PoC finding F1).
+    // ------------------------------------------------------------------------
+
+    /// A 4-copper stackup (F.Cu / In1.Cu / In2.Cu / B.Cu) for the layer-honesty tests,
+    /// z descending F→B, with the two outer masks so a board is fully materialised.
+    fn four_copper_slabs() -> Vec<G> {
+        let cu = |name: &str, lo: Nm, hi: Nm| {
+            G::Slab(Slab {
+                name: name.into(),
+                z: ZRange::new(lo, hi),
+                role: Role::Conductor,
+                material: Some(Material::named("copper")),
+            })
+        };
+        let other = |name: &str, lo: Nm, hi: Nm, role: Role| {
+            G::Slab(Slab {
+                name: name.into(),
+                z: ZRange::new(lo, hi),
+                role,
+                material: None,
+            })
+        };
+        vec![
+            other("B.Mask", -25_000, 0, Role::Mask),
+            cu("B.Cu", 0, 35_000),
+            other("core3", 35_000, 500_000, Role::Substrate),
+            cu("In2.Cu", 500_000, 535_000),
+            other("core2", 535_000, 1_000_000, Role::Substrate),
+            cu("In1.Cu", 1_000_000, 1_035_000),
+            other("core1", 1_035_000, 1_565_000, Role::Substrate),
+            cu("F.Cu", 1_565_000, 1_600_000),
+            other("F.Mask", 1_600_000, 1_625_000, Role::Mask),
+        ]
+    }
+
+    /// A through-hole (drilled) one-pad footprint: its barrel copper fans out to every
+    /// copper slab, so its pad exists on all layers (incl. an inner plane's slab).
+    fn one_pad_thru() -> crate::part::PartDef {
+        crate::kicad::import_footprint(
+            r#"(footprint "PTH" (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.5) (layers "*.Cu")))"#,
+        )
+        .unwrap()
+    }
+
+    /// The F1 case, distilled: an SMD pad on F.Cu is **not** joined to a same-net plane
+    /// poured on an inner slab (In1.Cu) that it merely overlaps in XY — with no stitching
+    /// via there is no copper path, and the model must not claim connectivity. Two such
+    /// F.Cu pads over an In1.Cu GND plane stay two islands.
+    #[test]
+    fn smd_pad_not_joined_to_foreign_slab_plane() {
+        let mut lib = part_library();
+        lib.insert("SP".into(), one_pad("F.Cu"));
+        let outline = Shape2D::polygon(vec![
+            Point::mm(0, 0),
+            Point::mm(20, 0),
+            Point::mm(20, 10),
+            Point::mm(0, 10),
+        ]);
+        let mut src = four_copper_slabs();
+        src.extend(vec![
+            board_rect(Point::mm(0, 0), Point::mm(20, 10)),
+            G::Instance {
+                path: "g1".into(),
+                part: "SP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Instance {
+                path: "g2".into(),
+                part: "SP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Place {
+                path: "g1".into(),
+                pos: Point::mm(5, 5),
+            },
+            G::Place {
+                path: "g2".into(),
+                pos: Point::mm(15, 5),
+            },
+            G::ConnectPins {
+                net: "GND".into(),
+                pins: vec![("g1".into(), "1".into()), ("g2".into(), "1".into())],
+            },
+            // A full-board GND plane on the INNER layer In1.Cu.
+            G::Region(RegionDecl {
+                shape: outline,
+                role: Role::Conductor,
+                net: Some("GND".into()),
+                layer: "In1.Cu".into(),
+            }),
+        ]);
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "f1")
+            .unwrap();
+        assert!(
+            drc(h.doc(), &lib).iter().any(|v| matches!(
+                v,
+                Violation::Unrouted { net, islands } if *net == NetId::new("GND") && *islands == 2
+            )),
+            "F.Cu SMD pads must NOT join an In1.Cu plane without stitching vias: {:?}",
+            drc(h.doc(), &lib)
+        );
+    }
+
+    /// The complement: a **through-hole** pad, whose barrel spans every copper slab,
+    /// DOES join an inner-layer plane it sits over — its copper genuinely exists on that
+    /// slab. Two through-hole GND pads over an In1.Cu plane collapse to one island.
+    #[test]
+    fn thru_pad_joins_foreign_slab_plane() {
+        let mut lib = part_library();
+        lib.insert("TP".into(), one_pad_thru());
+        let outline = Shape2D::polygon(vec![
+            Point::mm(0, 0),
+            Point::mm(20, 0),
+            Point::mm(20, 10),
+            Point::mm(0, 10),
+        ]);
+        let mut src = four_copper_slabs();
+        src.extend(vec![
+            board_rect(Point::mm(0, 0), Point::mm(20, 10)),
+            G::Instance {
+                path: "g1".into(),
+                part: "TP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Instance {
+                path: "g2".into(),
+                part: "TP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Place {
+                path: "g1".into(),
+                pos: Point::mm(5, 5),
+            },
+            G::Place {
+                path: "g2".into(),
+                pos: Point::mm(15, 5),
+            },
+            G::ConnectPins {
+                net: "GND".into(),
+                pins: vec![("g1".into(), "1".into()), ("g2".into(), "1".into())],
+            },
+            G::Region(RegionDecl {
+                shape: outline,
+                role: Role::Conductor,
+                net: Some("GND".into()),
+                layer: "In1.Cu".into(),
+            }),
+        ]);
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "thru")
+            .unwrap();
+        assert!(
+            !drc(h.doc(), &lib)
+                .iter()
+                .any(|v| matches!(v, Violation::Unrouted { net, .. } if *net == NetId::new("GND"))),
+            "through-hole pads span In1.Cu, so the plane connects them: {:?}",
+            drc(h.doc(), &lib)
+        );
+    }
+
+    /// A stitching via ties an F.Cu SMD pad to an inner GND plane: pad + via + plane form
+    /// one island. Same scene as `smd_pad_not_joined_to_foreign_slab_plane` but with a
+    /// through via at each pad dropping to In1.Cu — now GND is one island (connected).
+    #[test]
+    fn stitching_via_connects_smd_pad_to_inner_plane() {
+        let mut lib = part_library();
+        lib.insert("SP".into(), one_pad("F.Cu"));
+        let outline = Shape2D::polygon(vec![
+            Point::mm(0, 0),
+            Point::mm(20, 0),
+            Point::mm(20, 10),
+            Point::mm(0, 10),
+        ]);
+        let mut src = four_copper_slabs();
+        src.extend(vec![
+            board_rect(Point::mm(0, 0), Point::mm(20, 10)),
+            G::Instance {
+                path: "g1".into(),
+                part: "SP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Instance {
+                path: "g2".into(),
+                part: "SP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Place {
+                path: "g1".into(),
+                pos: Point::mm(5, 5),
+            },
+            G::Place {
+                path: "g2".into(),
+                pos: Point::mm(15, 5),
+            },
+            G::ConnectPins {
+                net: "GND".into(),
+                pins: vec![("g1".into(), "1".into()), ("g2".into(), "1".into())],
+            },
+            G::Region(RegionDecl {
+                shape: outline,
+                role: Role::Conductor,
+                net: Some("GND".into()),
+                layer: "In1.Cu".into(),
+            }),
+        ]);
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "stitch")
+            .unwrap();
+        // A through via at each pad: it spans F.Cu (touching the SMD pad) down through
+        // In1.Cu (landing on the plane), so each pad is now genuinely on the plane.
+        for (id, at) in [(1u64, Point::mm(5, 5)), (2, Point::mm(15, 5))] {
+            let v = Via {
+                net: NetId::new("GND"),
+                at,
+                span: None,
+                drill: 300_000,
+                pad: 600_000,
+                prov: crate::doc::Provenance::Pinned,
+            };
+            h.commit(
+                Transaction::one(Command::AddVia(crate::id::ViaId(id), v)),
+                &lib,
+                "via",
+            )
+            .unwrap();
+        }
+        assert!(
+            !drc(h.doc(), &lib)
+                .iter()
+                .any(|v| matches!(v, Violation::Unrouted { net, .. } if *net == NetId::new("GND"))),
+            "pad + stitching via + plane must be one island: {:?}",
+            drc(h.doc(), &lib)
+        );
+    }
+
+    /// Padless-compatibility (Decision 19c): a bare terminal (a pin whose footprint
+    /// carries NO pad copper — the toy library) keeps all-layer incidence, so it joins a
+    /// same-net plane on any slab it sits over. The default `part_library`'s `LDO`/`Cap`
+    /// pins are padless, so a GND plane on an inner slab still ties their GND pins.
+    #[test]
+    fn bare_pin_keeps_all_layer_plane_incidence() {
+        let lib = part_library();
+        let outline = Shape2D::polygon(vec![
+            Point::mm(-6, -10),
+            Point::mm(18, -10),
+            Point::mm(18, 10),
+            Point::mm(-6, 10),
+        ]);
+        let mut src = four_copper_slabs();
+        src.extend(vec![
+            board_rect(Point::mm(-6, -10), Point::mm(18, 10)),
+            G::Instance {
+                path: "reg".into(),
+                part: "LDO".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Instance {
+                path: "dec".into(),
+                part: "Cap".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Place {
+                path: "reg".into(),
+                pos: Point::mm(0, 0),
+            },
+            G::Place {
+                path: "dec".into(),
+                pos: Point::mm(12, 0),
+            },
+            G::ConnectPins {
+                net: "GND".into(),
+                pins: vec![("reg".into(), "GND".into()), ("dec".into(), "p2".into())],
+            },
+            // A GND plane on an inner slab. A bare (padless) pin has no copper on any
+            // specific slab, so under all-layer compatibility it still joins here.
+            G::Region(RegionDecl {
+                shape: outline,
+                role: Role::Conductor,
+                net: Some("GND".into()),
+                layer: "In1.Cu".into(),
+            }),
+        ]);
+        let mut h = History::new(Default::default());
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "bare")
+            .unwrap();
+        assert!(
+            !drc(h.doc(), &lib)
+                .iter()
+                .any(|v| matches!(v, Violation::Unrouted { net, .. } if *net == NetId::new("GND"))),
+            "a padless (bare) pin keeps all-layer plane incidence: {:?}",
+            drc(h.doc(), &lib)
         );
     }
 }
