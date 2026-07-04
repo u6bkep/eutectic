@@ -100,7 +100,7 @@ pub enum GenDirective {
     /// the hermetic expression tier — an integer, a decimal-exact SI quantity, or a
     /// boolean — usable by later expressions (`p:` values, range bounds, `if=`). Params
     /// are declarations, not variables: order-independent (they may reference each other),
-    /// resolved once per elaboration into an [`Env`](crate::expr::Env) with cycle
+    /// resolved once per elaboration into an `Env` (`crate::elaborate::expr::Env`) with cycle
     /// detection. The authored `expr` text is stored verbatim and round-trips as written
     /// (it *is* the generative program, Decision 21). Not a placement/connectivity
     /// directive — elaboration resolves it into the param environment before Pass 1;
@@ -108,7 +108,7 @@ pub enum GenDirective {
     Param {
         name: String,
         /// The authored expression text (e.g. `"3"`, `"n + 1"`, `"4.7k"`). Parsed and
-        /// evaluated by [`crate::expr`]; never pre-evaluated (serializes as authored).
+        /// evaluated by `crate::elaborate::expr`; never pre-evaluated (serializes as authored).
         expr: String,
     },
     /// A **`def`** — a named, reusable sub-circuit (Decision 21a). The React-component

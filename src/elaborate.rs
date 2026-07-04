@@ -45,7 +45,8 @@ use support::{assemble_problem, available_pins, component_courtyard, known_parts
 
 // Re-export the read-only source projections and demo builders so every existing
 // `crate::elaborate::{...}` path keeps compiling unchanged.
-pub use builders::{connect_interface, psu_module, ring};
+pub(crate) use builders::connect_interface;
+pub use builders::{psu_module, ring};
 pub use query::{board_region, features, font_load_failure, regions, resolve_font, stackup};
 
 // The directive IR (RegionDecl, GenDirective, Source, DefNode, MAX_RANGE_INSTANCES

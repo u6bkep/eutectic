@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Both components are assumed present (the caller cascade-checks them); any port /
 /// type / drive fault is pushed onto `errors` (the transaction aborts on it), and a
 /// fault that prevents wiring returns early without producing partial nets.
-pub fn connect_interface(
+pub(crate) fn connect_interface(
     components: &BTreeMap<EntityId, Component>,
     lib: &PartLib,
     a: &(String, String),
