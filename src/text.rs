@@ -4832,4 +4832,36 @@ inst top MCU
             .unwrap_err();
         assert!(err.iter().any(|d| d.code == "E_SCHEMATIC"));
     }
+
+    #[test]
+    fn load_text_dnp_placed_symbol_degrades_not_aborts() {
+        // End-to-end (Decision 20c × 21b): a `sym` placing a component that a false `if=`
+        // depopulates must COMMIT (not hard-abort a variant toggle) — the symbol is absent
+        // from reflow and the part surfaces as W_SCHEMATIC_UNPLACED.
+        let lib = part_library();
+        let text = "param populate = false\n\
+                    inst C1 Cap\n\
+                    inst C2 Cap if=populate\n\
+                    net N1 C1.p1 C1.p2\n\
+                    schematic {\n  row {\n    sym C1\n    sym C2\n  }\n}\n";
+        let mut h = History::new(Default::default());
+        h.commit(
+            Transaction::one(Command::LoadText(text.into())),
+            &lib,
+            "load",
+        )
+        .expect("a DNP-dropped placed symbol must not abort the commit");
+        let doc = h.doc();
+        // C2 is depopulated -> not a real component, surfaced as unplaced, and warns.
+        assert!(!doc.components.contains_key(&EntityId::new("C2")));
+        assert_eq!(doc.report.unplaced_components, vec![EntityId::new("C2")]);
+        assert!(doc.report.is_clean()); // W_SCHEMATIC_UNPLACED is a non-dirtying warning.
+        // Reflow places only the populated C1; C2 is absent from the output entirely.
+        let placed = doc.reflow_schematic(&lib);
+        assert!(placed.contains_key(&EntityId::new("C1")));
+        assert!(
+            !placed.contains_key(&EntityId::new("C2")),
+            "a depopulated part must not appear in reflow output"
+        );
+    }
 }

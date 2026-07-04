@@ -151,23 +151,32 @@ use crate::diagnostic::{Diagnostic, Location};
 /// finding, split like the rest of the codebase splits them (a fault aborts the commit;
 /// a finding rides on a valid doc — see `diagnostic.rs`):
 ///
-///   - **Hard `E_SCHEMATIC` errors** (returned): a `sym` whose comp path is not an
-///     instance in the design (unknown path), the same comp path placed by two `sym`
+///   - **Hard `E_SCHEMATIC` errors** (returned): a `sym` whose comp path the *source*
+///     never declares (a typo — unknown path), the same comp path placed by two `sym`
 ///     leaves (duplicate placement), and two sibling containers sharing a `name`
 ///     (duplicate sibling name — breaks GUI addressing). Collect-all: every offending
 ///     node is reported in one pass.
 ///
 ///   - **A `W_SCHEMATIC_UNPLACED` warning** (returned separately, for the caller to hang
 ///     on the [`ReconReport`](crate::doc::ReconReport) — the `W_FONT_LOAD` idiom): every
-///     component *not* named by any `sym`. Non-blocking; the view stays total (§20c) by
-///     dropping the unplaced part into the derived bin. Not an error, so it does **not**
-///     gate `is_clean`.
+///     component *not* named by any `sym`, plus every `sym` whose path the source declared
+///     but a false `if=` depopulated (Decision 21b DNP). Non-blocking; the view stays
+///     total (§20c). Not an error, so it does **not** gate `is_clean`.
 ///
-/// `component_ids` is the elaborated instance universe (keys of `Doc::components`).
-/// Returns the hard errors (empty ⇒ clean) and the sorted list of unplaced ids.
+/// The **DNP distinction** (Decision 20c × 21b): a `sym` path in `dnp_dropped` is a
+/// component the source *did* declare but a population conditional turned off — toggling
+/// a variant must not hard-abort a commit, so it degrades to the unplaced bin (a warning)
+/// exactly like a never-placed part, not an `E_SCHEMATIC`. Only a path the source does not
+/// know at all is the typo case that aborts.
+///
+/// `component_ids` is the elaborated (populated) instance universe (keys of
+/// `Doc::components`); `dnp_dropped` is the depopulated-path set from
+/// [`crate::elaborate::Elaborated`]. Returns the hard errors (empty ⇒ clean) and the
+/// sorted list of unplaced ids (never-placed populated parts + DNP-dropped placed paths).
 pub fn validate(
     layout: &SchematicLayout,
     component_ids: &BTreeSet<EntityId>,
+    dnp_dropped: &BTreeSet<String>,
 ) -> (Vec<Diagnostic>, Vec<EntityId>) {
     let mut errors = Vec::new();
 
@@ -192,35 +201,47 @@ pub fn validate(
     }
     check_names(&layout.roots, &mut errors);
 
-    // Symbol paths: unknown (not an instance) and duplicate (placed twice). Both reported
-    // per occurrence, in pre-order.
+    // Symbol paths, in pre-order. Four cases:
+    //   - populated (in `component_ids`): a real placement; duplicate placement is an error.
+    //   - DNP-dropped (in `dnp_dropped`): the source declared it but `if=false` turned it
+    //     off — NOT an error; collect it as unplaced so it warns and the view degrades.
+    //   - unknown to the source entirely: a typo — hard `E_SCHEMATIC` abort.
     let mut placed: BTreeSet<&str> = BTreeSet::new();
+    let mut dnp_placed: BTreeSet<EntityId> = BTreeSet::new();
     for path in layout.symbol_paths() {
-        if !component_ids.contains(&EntityId::new(path)) {
+        if component_ids.contains(&EntityId::new(path)) {
+            if !placed.insert(path) {
+                errors.push(Diagnostic::error(
+                    "E_SCHEMATIC",
+                    format!("component `{path}` is placed by more than one `sym`"),
+                    Location::Entity(EntityId::new(path)),
+                ));
+            }
+        } else if dnp_dropped.contains(path) {
+            // Depopulated variant: degrade to unplaced, do not abort (§20c × 21b).
+            dnp_placed.insert(EntityId::new(path));
+        } else {
             errors.push(Diagnostic::error(
                 "E_SCHEMATIC",
                 format!("`sym {path}` names no component instance"),
                 Location::Entity(EntityId::new(path)),
             ));
-        } else if !placed.insert(path) {
-            errors.push(Diagnostic::error(
-                "E_SCHEMATIC",
-                format!("component `{path}` is placed by more than one `sym`"),
-                Location::Entity(EntityId::new(path)),
-            ));
         }
     }
 
-    // Unplaced: every component the tree never names (deterministic, id order — the set
-    // iterates sorted). A warning, not an error.
+    // Unplaced (a warning, not an error), deterministic id order: every populated component
+    // the tree never names, plus every DNP-dropped path a `sym` did name (so a placed but
+    // depopulated part is still visibly accounted for). The union is a `BTreeSet` so the
+    // result is sorted and dedup'd.
     let placed_ids: BTreeSet<EntityId> = placed.iter().map(|p| EntityId::new(*p)).collect();
-    let unplaced: Vec<EntityId> = component_ids
+    let mut unplaced: BTreeSet<EntityId> = component_ids
         .iter()
         .filter(|id| !placed_ids.contains(id))
         .cloned()
         .collect();
+    unplaced.extend(dnp_placed);
 
-    (errors, unplaced)
+    (errors, unplaced.into_iter().collect())
 }
 
 // ----------------------------------------------------------------------------
@@ -362,6 +383,14 @@ pub fn reflow(
 
     let mut out: BTreeMap<EntityId, Placement> = BTreeMap::new();
 
+    // Prune symbols the tree names but that are not populated components (a DNP-dropped
+    // `if=false` part, or a path unknown to the source): they must not render and must not
+    // reserve a flow slot (§20c × 21b — a depopulated part is genuinely absent, and
+    // validation has already turned any real typo into a hard error before reflow runs).
+    // Pruning once here keeps the packing functions oblivious to the component universe.
+    let placeable = |path: &str| components.contains_key(&EntityId::new(path));
+    let roots = prune_unplaceable(&layout.roots, &placeable);
+
     // The authored roots lay out as an implicit top-level column at the origin. Its
     // returned extent tells the bin where "below the placed content" is.
     let root = Container {
@@ -369,7 +398,7 @@ pub fn reflow(
         name: None,
         gap: 0,
         align: Align::Start,
-        children: layout.roots.clone(),
+        children: roots,
     };
     let placed_extent = place_container(&root, Point { x: 0, y: 0 }, &sized, &mut out);
 
@@ -384,6 +413,26 @@ pub fn reflow(
         place_bin(&unplaced, &extent_of, placed_extent, &mut out);
     }
 
+    out
+}
+
+/// Drop every `sym` node whose path is not placeable (not a populated component),
+/// recursing into containers. Trivia and containers are kept (an emptied container still
+/// sizes to zero and consumes its gap slot — harmless, and preserves authored structure).
+/// A pure tree transform used by [`reflow`] to make depopulated / unknown symbols vanish
+/// from the flow entirely rather than render a phantom box.
+fn prune_unplaceable(nodes: &[LayoutNode], placeable: &impl Fn(&str) -> bool) -> Vec<LayoutNode> {
+    let mut out = Vec::new();
+    for n in nodes {
+        match n {
+            LayoutNode::Symbol(s) if !placeable(&s.path) => {} // drop it
+            LayoutNode::Container(c) => out.push(LayoutNode::Container(Container {
+                children: prune_unplaceable(&c.children, placeable),
+                ..c.clone()
+            })),
+            other => out.push(other.clone()),
+        }
+    }
     out
 }
 
@@ -621,6 +670,11 @@ mod tests {
         pairs.iter().map(|(p, _)| EntityId::new(*p)).collect()
     }
 
+    /// A DNP-dropped path set from string slices.
+    fn dnp(paths: &[&str]) -> BTreeSet<String> {
+        paths.iter().map(|p| p.to_string()).collect()
+    }
+
     // --- sizing -------------------------------------------------------------
 
     #[test]
@@ -837,7 +891,7 @@ mod tests {
         let layout = SchematicLayout {
             roots: vec![row(vec![sym("C1"), sym("NOPE")])],
         };
-        let (errors, _) = validate(&layout, &ids(&[("C1", "Cap")]));
+        let (errors, _) = validate(&layout, &ids(&[("C1", "Cap")]), &dnp(&[]));
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].code, "E_SCHEMATIC");
     }
@@ -847,7 +901,7 @@ mod tests {
         let layout = SchematicLayout {
             roots: vec![row(vec![sym("C1"), sym("C1")])],
         };
-        let (errors, _) = validate(&layout, &ids(&[("C1", "Cap")]));
+        let (errors, _) = validate(&layout, &ids(&[("C1", "Cap")]), &dnp(&[]));
         assert_eq!(errors.len(), 1);
         assert!(errors[0].message.contains("more than one"));
     }
@@ -866,7 +920,7 @@ mod tests {
         let layout = SchematicLayout {
             roots: vec![named("power"), named("power")],
         };
-        let (errors, _) = validate(&layout, &ids(&[]));
+        let (errors, _) = validate(&layout, &ids(&[]), &dnp(&[]));
         assert_eq!(errors.len(), 1);
         assert!(errors[0].message.contains("duplicate sibling"));
     }
@@ -886,7 +940,7 @@ mod tests {
         let layout = SchematicLayout {
             roots: vec![row(vec![inner("col")]), row(vec![inner("col")])],
         };
-        let (errors, _) = validate(&layout, &ids(&[]));
+        let (errors, _) = validate(&layout, &ids(&[]), &dnp(&[]));
         assert!(errors.is_empty());
     }
 
@@ -895,8 +949,36 @@ mod tests {
         let layout = SchematicLayout {
             roots: vec![row(vec![sym("C1")])],
         };
-        let (errors, unplaced) = validate(&layout, &ids(&[("C1", "Cap"), ("C2", "Cap")]));
+        let (errors, unplaced) =
+            validate(&layout, &ids(&[("C1", "Cap"), ("C2", "Cap")]), &dnp(&[]));
         assert!(errors.is_empty());
         assert_eq!(unplaced, vec![EntityId::new("C2")]);
+    }
+
+    #[test]
+    fn dnp_dropped_sym_degrades_to_unplaced_not_error() {
+        // A `sym` pointing at a component the source declared but a false `if=`
+        // depopulated must NOT be an E_SCHEMATIC abort (Decision 20c × 21b): it degrades to
+        // the unplaced warning, like a never-placed part. Only a truly unknown path aborts.
+        let layout = SchematicLayout {
+            roots: vec![row(vec![sym("C1"), sym("C2")])],
+        };
+        // C1 is populated; C2 was dropped by `if=false`. No component universe entry for C2.
+        let (errors, unplaced) = validate(&layout, &ids(&[("C1", "Cap")]), &dnp(&["C2"]));
+        assert!(errors.is_empty(), "DNP-dropped placed sym must not error");
+        // C2 surfaces as unplaced (so it warns), and is absent from the placed set.
+        assert_eq!(unplaced, vec![EntityId::new("C2")]);
+    }
+
+    #[test]
+    fn unknown_path_still_aborts_even_with_dnp_set() {
+        // A typo'd path (unknown to both the populated universe AND the DNP-dropped set)
+        // stays a hard error, even when some other path is legitimately DNP-dropped.
+        let layout = SchematicLayout {
+            roots: vec![row(vec![sym("TYPO"), sym("C2")])],
+        };
+        let (errors, _) = validate(&layout, &ids(&[("C1", "Cap")]), &dnp(&["C2"]));
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].message.contains("TYPO"));
     }
 }

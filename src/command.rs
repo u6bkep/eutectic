@@ -290,13 +290,17 @@ pub fn apply(
 
     // Commit-time schematic-layout validation (Decision 20). Like `validate_routes`, this
     // is a post-elaborate gate over tier-1 authored state that `elaborate` does not own:
-    // it needs the freshly-elaborated component universe to resolve `sym` paths. Hard
-    // `E_SCHEMATIC` errors (unknown/duplicate paths, duplicate sibling names) abort the
-    // transaction (atomicity); the `W_SCHEMATIC_UNPLACED` finding is non-blocking and
-    // rides on the `ReconReport` (the `W_FONT_LOAD` idiom — the view stays total, §20c).
+    // it needs the freshly-elaborated component universe to resolve `sym` paths. A `sym`
+    // path unknown to the *source* is a hard `E_SCHEMATIC` abort (a typo); a path the
+    // source *did* declare but a false `if=` depopulated (Decision 21b DNP) is **not** an
+    // error — it degrades to the unplaced bin like any other unplaced part, so toggling a
+    // population variant never blocks a commit (§20c totality). Duplicate paths / duplicate
+    // sibling names stay hard errors. The `W_SCHEMATIC_UNPLACED` finding (unplaced *and*
+    // DNP-dropped placed symbols) is non-blocking and rides the `ReconReport` (the
+    // `W_FONT_LOAD` idiom).
     if let Some(layout) = &next.schematic {
         let ids: std::collections::BTreeSet<EntityId> = next.components.keys().cloned().collect();
-        let (errors, unplaced) = crate::schematic::validate(layout, &ids);
+        let (errors, unplaced) = crate::schematic::validate(layout, &ids, &elab.dnp_dropped);
         if !errors.is_empty() {
             return Err(errors);
         }

@@ -554,6 +554,12 @@ pub struct Elaborated {
     pub nets: BTreeMap<NetId, Net>,
     pub no_connects: BTreeSet<PinRef>,
     pub report: ReconReport,
+    /// Instance paths a false `if=` population conditional depopulated (Decision 21b DNP).
+    /// These are *intentionally* absent from `components` — not faults, not typos — so a
+    /// consumer distinguishing "unknown to the source" from "deliberately unpopulated"
+    /// (e.g. the schematic-layout gate, Decision 20c) reads this rather than treating an
+    /// absent path as an error. Empty when no `if=` dropped anything.
+    pub dnp_dropped: BTreeSet<String>,
 }
 
 /// Elaborate a source program into materialized instances + connectivity,
@@ -1252,6 +1258,7 @@ pub fn elaborate(
         nets,
         no_connects,
         report,
+        dnp_dropped,
     })
 }
 
