@@ -291,17 +291,26 @@ fn pad_layers(
 /// dropped — its commands removed, the net moved to `unrouted`. Dropping every clashing
 /// net is conservative (it can drop a net that a smarter order/rip-up would keep — that
 /// is future work, issue 0008); the point here is honesty, not optimality.
+///
+/// Decision 19a — the pours re-derive with the proposed copper included. The proposed
+/// commands are applied to a scratch `Doc` clone and `world_features` is re-run on it, so
+/// the pour fills this check sees have **already retreated** around the proposed vias/
+/// traces (the automatic anti-pad). A via punched through a foreign plane verifies clean
+/// because the re-derived fill is no longer under it; a via too close to another net's
+/// *non-pour* copper (a trace/pad/via) still fails. Pour-vs-solid is therefore skipped
+/// here exactly as [`crate::route::check_drc`] skips it — the pour was knocked out at this
+/// same `min_clearance`, so any residual proximity is tessellation slop, not a real short.
+/// Cost: one extra `world_features` pass (one re-derivation of every pour) per autoroute
+/// call — the pour boolean ops dominate; measured acceptable on the PoC (see the branch
+/// report).
 fn verify_and_prune(doc: &Doc, lib: &PartLib, rules: &DesignRules, result: &mut AutorouteResult) {
-    let netlist = doc_netlist(doc);
     let su = stackup(&doc.source);
     let cu = su.copper_slabs();
-    // The full honest stream: existing copper, keep-outs, substrate.
-    let world = world_features(doc, lib, &netlist, rules, &su)
-        .expect("world_features on a committed doc (slab gate enforced at commit)");
 
     // This run's proposed copper, lowered the same way `net_features` lowers the doc's:
     // a trace is one Conductor prism on its named slab; a via fans out to one prism per
-    // copper slab it spans (so every feature is single-slab).
+    // copper slab it spans (so every feature is single-slab). Kept as the by-net set we
+    // judge; the re-derived `world` below is the obstacle field it is judged against.
     let mut proposed: Vec<NetFeature> = Vec::new();
     for cmd in &result.commands {
         match cmd {
@@ -321,6 +330,17 @@ fn verify_and_prune(doc: &Doc, lib: &PartLib, rules: &DesignRules, result: &mut 
             _ => {}
         }
     }
+
+    // Apply the proposed commands to a scratch clone and re-derive the world from it: the
+    // pours retreat around the proposed copper (Decision 19a), so `world` is the fill that
+    // will actually exist post-commit — not the stale pre-route fill. `command::apply` is
+    // the same atomic path a real commit takes; on the rare chance the transaction is
+    // rejected (it should not be — these are ordinary AddTrace/AddVia) fall back to the
+    // pre-route world, which is stricter (stale fill blocks more), never falsely clean.
+    let txn = crate::command::Transaction(result.commands.clone());
+    let scratch = crate::command::apply(doc, &txn, lib, 0).unwrap_or_else(|_| doc.clone());
+    let world = world_features(&scratch, lib, &doc_netlist(&scratch), rules, &su)
+        .expect("world_features on a committed doc (slab gate enforced at commit)");
 
     // Keep-out features (copper/route kinds only) and the board substrate region, for the
     // keepout + edge checks that make `routed` mean DRC-clean.
@@ -342,16 +362,29 @@ fn verify_and_prune(doc: &Doc, lib: &PartLib, rules: &DesignRules, result: &mut 
         shape.region()
     });
 
+    // Is a conductor feature a derived pour (the `is_pour ⟺ Shape2D::Area` invariant,
+    // Decision 16)? Pour-vs-solid is skipped (the pour retreated at `min_clearance`).
+    let is_pour = |f: &Feature| matches!(&f.extent, Extent::Prism { shape, .. } if matches!(shape, Shape2D::Area { .. }));
+
     let mut unclean: BTreeSet<NetId> = BTreeSet::new();
     for p in &proposed {
         let Some(pnet) = &p.net else { continue };
         if unclean.contains(pnet) {
             continue;
         }
-        // Copper-vs-copper: any different-net conductor (existing or proposed) too close.
-        let copper_clash = world.iter().chain(proposed.iter()).any(|o| {
+        // Copper-vs-copper against the re-derived world (which already contains the
+        // proposed copper, so proposed-vs-proposed different-net clashes are caught here
+        // too). A proposed solid piece is skipped against foreign *pours*, exactly as
+        // `check_drc` skips pour-vs-solid: the re-derived fill retreated around it at this
+        // same `min_clearance` (Decision 19a's automatic anti-pad), so any residual
+        // proximity is tessellation slop of the circle-approximated fill boundary, not a
+        // real short — checking it would false-positive and prune legitimate vias-in-plane
+        // (confirmed: removing this skip prunes `via_inside_foreign_plane_verifies_clean`).
+        // The via is still checked against foreign SOLID copper, keep-outs, and the edge.
+        let copper_clash = world.iter().any(|o| {
             o.feature.role == Role::Conductor
                 && o.net.as_ref() != Some(pnet)
+                && !is_pour(&o.feature)
                 && !p.feature.clears(&o.feature, rules.min_clearance)
         });
         // Keep-out intrusion (z-gated by `Feature::clears`).
@@ -529,9 +562,18 @@ impl BoardMask {
 /// (a via needs `via_pad + clearance` of room; since a through via touches every layer,
 /// the via mask is one per-cell test). Sized so a node *and the half-edges leaving it*
 /// stay clearance-clean, and starting from the board mask.
+///
+/// `via_layer[idx*nl + l]` is the per-layer room test the through-via all-layer check
+/// (`via_ok`) consults instead of `trace`: it is `trace` **minus** the via-permeable
+/// foreign-pour stamps (Decision 19a). A via barrel may touch a layer where only a
+/// foreign derived pour sits (the plane retreats around it), but not one carrying solid
+/// non-pour copper, a keep-out, a void, or the board mask — all of which stamp both
+/// `trace` and `via_layer`. So `trace` gates trace routing (pours block traces) while
+/// `via_layer` gates the via barrel's per-layer room (pours do not block vias).
 struct BlockMap {
     trace: Vec<bool>,
     via: Vec<bool>,
+    via_layer: Vec<bool>,
 }
 
 impl BlockMap {
@@ -553,6 +595,10 @@ impl BlockMap {
         let nl = grid.layers;
         let mut trace = vec![false; cells * nl];
         let mut via = vec![false; cells];
+        // `via_layer` mirrors `trace` but excludes via-permeable pour stamps; the board
+        // mask blocks a via barrel on every layer (it needs room outside the board), so
+        // it stamps both.
+        let mut via_layer = vec![false; cells * nl];
         // The board mask blocks the cell on every layer, and a via there too (it needs
         // room on all layers).
         for j in 0..grid.rows {
@@ -562,6 +608,7 @@ impl BlockMap {
                     via[idx] = true;
                     for l in 0..nl {
                         trace[idx * nl + l] = true;
+                        via_layer[idx * nl + l] = true;
                     }
                 }
             }
@@ -587,10 +634,19 @@ impl BlockMap {
                     }
                     let Extent::Prism { shape, z } = &f.extent;
                     let Some(l) = slab_ord(z) else { continue };
+                    // Decision 19a: a foreign *derived pour* fill (the `is_pour ⟺
+                    // Shape2D::Area` invariant, Decision 16) is via-permeable. It still
+                    // blocks TRACE placement on its slab — planes are not signal layers
+                    // this round — but a via may punch through it: the plane retreats
+                    // around the barrel at re-derivation (the anti-pad is automatic), so
+                    // the momentary fill is not a wall for vias. Authored/routed (non-pour)
+                    // copper — a disc/rect/trace shape — still blocks vias as before.
+                    let via_permeable = matches!(shape, Shape2D::Area { .. });
                     Self::stamp(
                         grid,
                         &mut trace,
                         &mut via,
+                        &mut via_layer,
                         nl,
                         shape,
                         Some(l),
@@ -598,6 +654,7 @@ impl BlockMap {
                         width,
                         via_pad,
                         half_edge,
+                        via_permeable,
                     );
                 }
                 Role::Keepout(KeepoutKind::Copper | KeepoutKind::Route) => {
@@ -622,6 +679,7 @@ impl BlockMap {
                                 grid,
                                 &mut trace,
                                 &mut via,
+                                &mut via_layer,
                                 nl,
                                 shape,
                                 Some(k),
@@ -629,14 +687,25 @@ impl BlockMap {
                                 width,
                                 via_pad,
                                 half_edge,
+                                false,
                             );
                             any = true;
                         }
                     }
                     if !any {
                         Self::stamp(
-                            grid, &mut trace, &mut via, nl, shape, None, clr, width, via_pad,
+                            grid,
+                            &mut trace,
+                            &mut via,
+                            &mut via_layer,
+                            nl,
+                            shape,
+                            None,
+                            clr,
+                            width,
+                            via_pad,
                             half_edge,
+                            false,
                         );
                     }
                 }
@@ -649,7 +718,18 @@ impl BlockMap {
                     // conservative stand-in for a true hole edge-clearance rule.
                     let Extent::Prism { shape, .. } = &f.extent;
                     Self::stamp(
-                        grid, &mut trace, &mut via, nl, shape, None, clr, width, via_pad, half_edge,
+                        grid,
+                        &mut trace,
+                        &mut via,
+                        &mut via_layer,
+                        nl,
+                        shape,
+                        None,
+                        clr,
+                        width,
+                        via_pad,
+                        half_edge,
+                        false,
                     );
                 }
                 _ => {}
@@ -674,6 +754,7 @@ impl BlockMap {
                         grid,
                         &mut trace,
                         &mut via,
+                        &mut via_layer,
                         nl,
                         &dot,
                         Some(l),
@@ -681,11 +762,16 @@ impl BlockMap {
                         width,
                         via_pad,
                         half_edge,
+                        false,
                     );
                 }
             }
         }
-        BlockMap { trace, via }
+        BlockMap {
+            trace,
+            via,
+            via_layer,
+        }
     }
 
     /// Stamp one obstacle `shape` onto the grid: block the trace mask on layer `l` (or all
@@ -698,10 +784,12 @@ impl BlockMap {
     /// routed edge that reaches a neighbour `pitch` away. Scans only the obstacle's grown
     /// bbox, so a small pad on a big board is cheap.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn stamp(
         grid: &Grid,
         trace: &mut [bool],
         via: &mut [bool],
+        via_layer: &mut [bool],
         nl: usize,
         shape: &Shape2D,
         l: Option<usize>,
@@ -709,6 +797,7 @@ impl BlockMap {
         width: Nm,
         via_pad: Nm,
         half_edge: Nm,
+        via_permeable: bool,
     ) {
         let trace_thr = clr + width / 2 + half_edge;
         let via_thr = clr + via_pad / 2 + half_edge;
@@ -720,15 +809,28 @@ impl BlockMap {
                 let idx = grid.idx(i, j);
                 if crate::geom::clearance_violated(shape, &node, trace_thr) {
                     match l {
-                        Some(l) => trace[idx * nl + l] = true,
+                        Some(l) => {
+                            trace[idx * nl + l] = true;
+                            // The via barrel's per-layer room test skips via-permeable
+                            // pours (Decision 19a) — only solid copper blocks it.
+                            if !via_permeable {
+                                via_layer[idx * nl + l] = true;
+                            }
+                        }
                         None => {
                             for ll in 0..nl {
                                 trace[idx * nl + ll] = true;
+                                if !via_permeable {
+                                    via_layer[idx * nl + ll] = true;
+                                }
                             }
                         }
                     }
                 }
-                if crate::geom::clearance_violated(shape, &node, via_thr) {
+                // A via-permeable obstacle (a foreign derived-pour fill, Decision 19a)
+                // does not block the via-site mask — the plane retreats around the barrel
+                // on re-derivation. Only solid (non-pour) copper stamps the via mask.
+                if !via_permeable && crate::geom::clearance_violated(shape, &node, via_thr) {
                     via[idx] = true;
                 }
             }
@@ -957,12 +1059,22 @@ fn astar(
         let lidx = grid.lidx(i, j, l);
         !block.trace[idx * nl + l] && (owner[lidx] == -1 || owner[lidx] == net_seq)
     };
+    // The per-layer room a through-via *barrel* needs (Decision 19a): identical to
+    // `passable` except it consults `via_layer` (which excludes via-permeable foreign
+    // pours) rather than `trace`. A via may punch a foreign plane — the plane retreats —
+    // but not sit where solid foreign copper, a keep-out, a void, the board mask, or
+    // another same-run net's copper occupies the layer.
+    let via_passable = |i: usize, j: usize, l: usize| -> bool {
+        let idx = grid.idx(i, j);
+        let lidx = grid.lidx(i, j, l);
+        !block.via_layer[idx * nl + l] && (owner[lidx] == -1 || owner[lidx] == net_seq)
+    };
     // A through via at (i,j) is legal only if the site clears via room (committed
-    // obstacles, in `block.via`), is passable on *every* copper layer (the barrel touches
-    // all of them), and keeps `via_clear` from any *other* net's same-run copper.
+    // obstacles, in `block.via`), has via-barrel room on *every* copper layer (the barrel
+    // touches all of them), and keeps `via_clear` from any *other* net's same-run copper.
     let via_ok = |i: usize, j: usize| -> bool {
         let idx = grid.idx(i, j);
-        if block.via[idx] || !(0..nl).all(|l| passable(i, j, l)) {
+        if block.via[idx] || !(0..nl).all(|l| via_passable(i, j, l)) {
             return false;
         }
         let c = grid.world(i, j);
@@ -2200,6 +2312,222 @@ mod tests {
         assert!(
             after.is_empty(),
             "dense routed board must be DRC clean: {after:?}"
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // Decision 19a — via-permeable foreign pours.
+    // ------------------------------------------------------------------------
+
+    /// A full-board GND plane on In1.Cu, on a 4-copper board, plus a lone SIG pad.
+    /// The scene the 19a verify/grid tests share.
+    fn plane_scene(sig_via_at: Point) -> (History, crate::part::PartLib, AutorouteResult) {
+        let mut lib = part_library();
+        lib.insert("SP".into(), smd_pad("F.Cu"));
+        let outline = Shape2D::polygon(vec![
+            Point::mm(0, 0),
+            Point::mm(20, 0),
+            Point::mm(20, 20),
+            Point::mm(0, 20),
+        ]);
+        let mut src = four_layer_slabs();
+        src.extend(vec![
+            board_rect(Point::mm(0, 0), Point::mm(20, 20)),
+            G::Instance {
+                path: "s".into(),
+                part: "SP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            // A GND pad in a corner, well away from the plane centre — declares the net
+            // the pour carries (a pour on an unconnected net is rejected at commit).
+            G::Instance {
+                path: "g".into(),
+                part: "SP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Place {
+                path: "s".into(),
+                pos: Point::mm(10, 10),
+            },
+            G::Place {
+                path: "g".into(),
+                pos: Point::mm(2, 2),
+            },
+            G::ConnectPins {
+                net: "SIG".into(),
+                pins: vec![("s".into(), "1".into())],
+            },
+            G::ConnectPins {
+                net: "GND".into(),
+                pins: vec![("g".into(), "1".into())],
+            },
+            G::Region(RegionDecl {
+                shape: outline,
+                role: Role::Conductor,
+                net: Some("GND".into()),
+                layer: "In1.Cu".into(),
+            }),
+        ]);
+        let h = doc_of_lib(src, &lib);
+        // A proposed SIG through via sitting inside the GND plane.
+        let result = AutorouteResult {
+            commands: vec![Command::AddVia(
+                crate::id::ViaId(1),
+                Via {
+                    net: NetId::new("SIG"),
+                    at: sig_via_at,
+                    span: None,
+                    drill: 300_000,
+                    pad: 600_000,
+                    prov: Provenance::Free,
+                },
+            )],
+            routed: vec![NetId::new("SIG")],
+            unrouted: vec![],
+        };
+        (h, lib, result)
+    }
+
+    /// A via punched into a foreign derived pour verifies **clean** (Decision 19a) AND is
+    /// DRC-clean once committed — the two verdicts agree, which is what `routed` means.
+    /// `verify_and_prune` re-derives the world (pours retreat around the proposed via, the
+    /// automatic anti-pad) and skips pour-vs-solid exactly as `check_drc` does, so a via
+    /// in a plane is not pruned. Non-vacuous: the via centre is well inside the plane
+    /// outline, so a naive fill-inclusion test would flag it.
+    #[test]
+    fn via_inside_foreign_plane_verifies_clean() {
+        let (mut h, lib, mut result) = plane_scene(Point::mm(10, 10));
+        verify_and_prune(h.doc(), &lib, &DesignRules::default(), &mut result);
+        assert!(
+            !result.commands.is_empty() && result.unrouted.is_empty(),
+            "a via inside a foreign plane must survive verify (fill retreats on re-derive)"
+        );
+        // End-to-end: committing the via and running the real DRC must also be clean — the
+        // committed doc's pours re-derive with the via's anti-pad, so no pour-vs-via short.
+        apply_all_lib(&mut h, result.commands, &lib);
+        let after = drc_lib(&h, &lib);
+        assert!(
+            !has_clearance_or_width(&after),
+            "the committed via-in-plane must be DRC clean (re-derived anti-pad): {after:?}"
+        );
+    }
+
+    /// The complement: a via too close to another net's **non-pour** copper still fails
+    /// verify. A GND SMD pad (solid copper) sits at (10,10); a SIG via placed right on top
+    /// of it clashes (solid-vs-solid is not exempt — only the pour retreats). Proves the
+    /// 19a exemption is scoped to pours, not a blanket "vias never clash".
+    #[test]
+    fn via_on_foreign_solid_copper_is_pruned() {
+        let mut lib = part_library();
+        lib.insert("SP".into(), smd_pad("F.Cu"));
+        let src = vec![
+            board_rect(Point::mm(0, 0), Point::mm(20, 20)),
+            G::Instance {
+                path: "g".into(),
+                part: "SP".into(),
+                params: std::collections::BTreeMap::new(),
+                label: None,
+            },
+            G::Place {
+                path: "g".into(),
+                pos: Point::mm(10, 10),
+            },
+            G::ConnectPins {
+                net: "GND".into(),
+                pins: vec![("g".into(), "1".into())],
+            },
+        ];
+        let h = doc_of_lib(src, &lib);
+        // A SIG via directly on the GND pad's F.Cu copper — a real short, must prune.
+        let mut result = AutorouteResult {
+            commands: vec![Command::AddVia(
+                crate::id::ViaId(1),
+                Via {
+                    net: NetId::new("SIG"),
+                    at: Point::mm(10, 10),
+                    span: None,
+                    drill: 300_000,
+                    pad: 600_000,
+                    prov: Provenance::Free,
+                },
+            )],
+            routed: vec![NetId::new("SIG")],
+            unrouted: vec![NetId::new("SIG")],
+        };
+        // (SIG already unrouted for its lone pad; the point is the via command is dropped.)
+        result.unrouted.clear();
+        result.routed = vec![NetId::new("SIG")];
+        verify_and_prune(h.doc(), &lib, &DesignRules::default(), &mut result);
+        assert!(
+            result.commands.is_empty(),
+            "a via on a foreign net's SOLID pad copper must be pruned (only pours yield)"
+        );
+        assert!(result.unrouted.contains(&NetId::new("SIG")));
+    }
+
+    /// A foreign plane still blocks TRACE placement on its own slab (Decision 19a: planes
+    /// are not signal layers this round). Build the grid's per-net obstacle map with a
+    /// full-board GND plane on In1.Cu and assert the trace mask on In1.Cu is set inside the
+    /// plane, while the via mask at that same cell is NOT (the via is permeable there).
+    #[test]
+    fn foreign_plane_blocks_trace_but_not_via_in_blockmap() {
+        let (h, lib, _r) = plane_scene(Point::mm(10, 10));
+        let doc = h.doc();
+        let rules = DesignRules::default();
+        let su = stackup(&doc.source);
+        let layers: Vec<Layer> = copper_layers_z(&su).into_iter().map(|(l, _)| l).collect();
+        let nl = layers.len();
+        let in1 = layers
+            .iter()
+            .position(|&l| layer_slab_name(&su, l).as_deref() == Some("In1.Cu"))
+            .expect("In1.Cu present");
+        let width = rules.min_trace_width;
+        let via_pad = 2 * rules.min_trace_width;
+        let pitch = rules.min_trace_width + rules.min_clearance;
+        let area = crate::solve::Rect {
+            min: Point::mm(0, 0),
+            max: Point::mm(20, 20),
+        };
+        let grid = Grid::new(area, pitch, nl);
+        let board_mask = BoardMask::build(doc, &grid, &rules, width);
+        let netlist = doc_netlist(doc);
+        // Per-net pads (needed for the bare-pin obstacle pass, empty here for SIG).
+        let mut net_pads: BTreeMap<NetId, Vec<Pad>> = BTreeMap::new();
+        net_pads.insert(NetId::new("SIG"), Vec::new());
+        net_pads.insert(NetId::new("GND"), Vec::new());
+        let block = BlockMap::build(
+            &grid,
+            &board_mask,
+            doc,
+            &lib,
+            &rules,
+            &su,
+            &netlist,
+            &net_pads,
+            &NetId::new("SIG"),
+            width,
+            via_pad,
+        );
+        // A cell deep inside the plane, away from the board edge AND from any pad (the
+        // SIG pad sits at (10,10), the GND pad at (2,2)).
+        let (ci, cj) = (
+            ((15 * MM - area.min.x) / pitch) as usize,
+            ((15 * MM - area.min.y) / pitch) as usize,
+        );
+        let idx = grid.idx(ci, cj);
+        assert!(
+            block.trace[idx * nl + in1],
+            "the foreign GND plane must block TRACE placement on In1.Cu"
+        );
+        assert!(
+            !block.via[idx],
+            "but a via may punch the plane — the via-site mask is clear (Decision 19a)"
+        );
+        assert!(
+            !block.via_layer[idx * nl + in1],
+            "and the via barrel's In1.Cu room test ignores the permeable pour"
         );
     }
 }
