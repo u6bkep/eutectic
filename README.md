@@ -2,7 +2,8 @@
 
 A from-scratch ECAD (electronic design automation) engine prototype — schematic capture and PCB
 layout — built around one premise: **the agent-driven / programmatic path is a first-class citizen,
-not a scripting layer bolted onto a GUI.** Zero-dependency Rust.
+not a scripting layer bolted onto a GUI.** Rust, with a single dependency (`ttf-parser`, for font
+outlines).
 
 This is a research prototype, not a product. It exists to test whether a better *data
 representation* makes a useful ECAD implementation fall out as a consequence.
@@ -19,23 +20,70 @@ Three durable frustrations with existing tools (KiCad as the reference point) mo
    redundant, weakly-invariant data model with a scripting layer bolted on.
 
 The full reasoning, including the open questions and hard parts, lives in
-[`docs/architecture.md`](docs/architecture.md). The short version of the architecture:
+[`docs/architecture.md`](docs/architecture.md).
 
-- **Three-tier model** — authoritative facts (the netlist + constraints) / materialized solver
-  state (placement, routes) / pure derived cache (ERC, DRC, ratsnest). The interesting design work
-  is at the boundaries.
-- **Provenance per degree of freedom** — every position/route is `Free` (solver-driven), `Hint`
-  (weak nudge), `Pinned` (explicit), or `Fixed` (hard constraint). One bit unifies "leave it where
-  the solver wants" vs. "I placed this by hand," for both placement and routing.
+## How it works — the pipeline
+
+The system is easiest to hold as a compiler pipeline: source text → parse → elaborate into a
+uniform IR → analysis passes over one derived world → fab back ends. With one deliberate break in
+the analogy at the solvers.
+
+**The source language.** A board is authored as `.ecad` text — declarative directives (`part`,
+`net`, `board`, `hole`, `text`, `class`, parameter overrides) plus a `# routes` state zone.
+Foreign front ends (KiCad footprint/symbol/outline import, SVG import) translate into the same
+directives.
+
+**Parsing** (`text`). Text → a flat `Parsed` structure (directives, overrides, refdes pins,
+traces, vias). Purely syntactic: quote-aware tokenizing and ingest validation (coordinate-range
+ceilings, `E_COORD_RANGE`).
+
+**Elaboration** (`elaborate`) — lowering, macro expansion and type checking rolled together.
+Directives become the real model: parts pull footprints from the library, text renders through the
+stroke font or TTF outlines into geometry, `hole` lowers to a full-stackup void, class labels
+resolve, refdes annotation assigns names. Diagnostics are rustc-inspired: `E_` errors when user
+input is wrong, `W_` warnings that degrade gracefully, and internal panics reserved for "our code
+broke" (the ICE-vs-diagnostic split).
+
+**The IR** is the `Doc`: entities carrying **Features** — the single geometric currency. A Feature
+is a 2.5D prism: a `Shape2D` (including `Area`, an exact polygon region with holes) extruded
+through named stackup slabs, with a role (conductor, mask, silk, courtyard, keepout, void).
+Everything — pads, pours, text, mounting holes, the board substrate itself — is this one
+primitive. Coordinates are integer nanometers; all geometry runs through an exact integer polygon
+kernel (`region`: booleans and offsets, no floats).
+
+**Analysis passes** (`route` queries). One producer, `world_features`, derives the physical world
+from the Doc: pour fills are *computed* (plane outline minus foreign copper dilated by clearance —
+knockouts and anti-pads fall out automatically), never stored. Everything downstream — DRC
+(clearance, keepout, edge), connectivity/ratsnest (island analysis), ERC — consumes this one
+derivation, so DRC and the exporters cannot disagree about what copper exists.
+
+**The back ends** (`export`): Gerber per stackup slab (copper, mask, silk, fab), Excellon drill
+files (plated/non-plated split, driven by void features), SVG renders, placement CSV, and the text
+projection itself.
+
+**Where the analogy breaks — on purpose.** In a compiler, optimization passes transform the IR
+in-flight and their output is ephemeral. Here the solvers (placement packer, autorouter) are
+explicitly *not* pipeline stages: the autorouter is an **editing tool**. It reads the derived
+world, searches (A\* over a multi-layer grid, potentially stochastic), and writes its result back
+into persistent state — the `# routes` zone of the text file. Loading a document never re-solves
+anything. It is less like `-O2` and more like an IDE refactoring: the tool proposes edits, the
+edits become source, and a commit-time gate (every transaction re-elaborates; `validate_routes`
+checks routes against real slabs and nets) plays the type checker on the result.
+
+The corollary is the **serializer contract**: derivable state (pour fills, DRC results, ratsnest)
+is never written to the file; solver-produced state (routes, placement) always is, tagged with
+provenance (`pinned` / `free` / `hint`) so a partial re-route can touch only what you select.
+Text ↔ Doc round-trips byte-losslessly.
+
+Beneath all of this sit the engine mechanics from the original design:
+
+- **Three-tier model** — authoritative facts (netlist + constraints) / materialized solver state
+  (placement, routes) / pure derived cache (ERC, DRC, ratsnest).
 - **Command algebra + version DAG** — the *only* mutation surface is atomic transactions over an
-  immutable document; an invalid transaction never commits (no half-applied state → the crash class
-  is gone). History is a DAG → undo / branch / replay.
+  immutable document; an invalid transaction never commits (no half-applied state → the crash
+  class is gone). History is a DAG → undo / branch / replay.
 - **Incremental query engine** — a hand-rolled, Salsa-style memoized query layer with dependency
-  tracking and early cutoff computes the derived tier (Netlist, ERC, DRC) and recomputes only what
-  actually changed.
-- **Model-as-truth, text-as-projection** — the structured model is the single source of truth; the
-  text form is a *deterministic rendering* of it (and the agent's authoring surface), so there is
-  no second artifact to keep in sync.
+  tracking and early cutoff recomputes only what actually changed.
 - **Least-change placement solver** — geometry is the *solution* to a constraint system; an
   unconstrained part doesn't move (the "why did it fling across the board" antidote).
 
@@ -47,38 +95,51 @@ A full, if prototype-grade, flow:
 
 - Typed pins & interfaces that make e.g. a serial TX/RX swap *unrepresentable*; ERC as a query.
 - A generative source elaborated into instances, with ID-keyed overrides that *reconcile* on
-  re-elaboration — casual nudges decay when they stop mattering; explicit pins are kept and conflict
-  loudly.
+  re-elaboration — casual nudges decay when they stop mattering; explicit pins are kept and
+  conflict loudly.
+- **Pad-identity net membership**: a net references pads by stable identity, and a functional name
+  is a *selector* that fans out to every matching pad — an MCU's six `IOVDD` pads all connect,
+  none silently float.
 - A deterministic least-change constraint solver (`Near` / `MinSep` / `AlignX/Y` / `Board`
-  containment) that satisfies feasible sets tightly and *reports* infeasibility.
-- Import of real **KiCad footprints** (`.kicad_mod`) and **symbols** (`.kicad_sym`), joined by pad
-  number into parts with real names, electrical roles, and pad geometry; a lightweight
-  `apply_role_map` overlays roles onto a bare footprint without a full symbol.
-- **Pad-identity net membership**: a net references pads by stable identity (pad number), and a
-  functional name is a *selector* that fans out to every matching pad — so an MCU's six `IOVDD` pads
-  all connect, none silently float. A `Floating` query reports any pad that is on no net and not
-  explicitly no-connect; an unknown pin in a connection is a hard error.
-- A trace/via/layer routing representation, a DRC query (clearance / min-width / ratsnest), and a
-  basic deterministic grid autorouter.
-- Export: netlist, pick-and-place CSV, SVG, **Gerber (RS-274X)** and **Excellon** drill.
+  containment / convex-courtyard `NoOverlap` packing) that satisfies feasible sets tightly and
+  *reports* infeasibility.
+- Import of real **KiCad footprints** (`.kicad_mod`, including graphics) and **symbols**
+  (`.kicad_sym`), joined by pad number into parts with real names, electrical roles, and pad
+  geometry; **SVG import** for arbitrary outlines/art.
+- **Named stackup slabs** with real non-copper layers: solder mask (solids + openings), silkscreen
+  (including board text via a built-in stroke font or **TTF outlines** with kerning), paste, fab.
+- **Net-bound copper pours / planes** on any copper slab: derived, self-knocking-out fills with
+  automatic anti-pads, via-permeable to stitching vias, with pour-island connectivity honesty.
+- A multi-layer trace/via routing representation serialized in the text source; a DRC query
+  (clearance / keepout / edge / ratsnest over derived world geometry); an honest N-layer grid
+  autorouter whose `routed` claim means *committed-board-DRC-connected*.
+- Export: netlist, pick-and-place CSV, SVG, **Gerber (RS-274X)** per slab, and **Excellon** drill
+  (plated/non-plated split, slots).
 
-**99 tests, zero dependencies, `cargo clippy --all-targets` clean.**
+**420 tests, one dependency, `cargo clippy --all-targets` clean.**
 
 ## Modules (`src/`)
 
 | Module | Responsibility |
 |---|---|
 | `doc` | The immutable three-tier document; provenance-tagged DOFs; coarse query inputs. |
-| `command` | The sole mutation surface — atomic transactions. |
+| `command` | The sole mutation surface — atomic transactions; the commit-time re-elaboration gate. |
 | `history` | Version DAG (undo / branch / replay). |
 | `query` | Hand-rolled incremental query engine (Netlist, ERC, DRC); dependency tracking + early cutoff. |
-| `elaborate` | Generative source → instances + ID-keyed override reconciliation/decay. |
-| `solve` | Least-change placement constraint solver with feasibility reporting. |
+| `text` | Parser + canonical serializer for the `.ecad` source (the agent/git authoring surface). |
+| `elaborate` | Directives → instances; override reconciliation/decay; text/hole/class lowering. |
+| `annotate` | Refdes annotation with explicit pinning. |
+| `diagnostic` | The rustc-style diagnostic machinery (`E_` errors, `W_` warnings). |
+| `geom` | `Shape2D` (incl. hole-capable `Area`), transforms, coordinate ceilings. |
+| `region` | Exact integer polygon kernel: booleans + offsets (pours, masks, text, courtyards). |
+| `quantity` | Integer-nanometer lengths and units. |
 | `part` | Typed pins, roles, interfaces, pad geometry; the built-in toy library. |
-| `kicad` | Import `.kicad_mod` footprints + `.kicad_sym` symbols; join into roled parts. |
-| `route` | Trace/via/layer representation + DRC (clearance / width / ratsnest). |
-| `autoroute` | Basic deterministic grid/maze A* autorouter (a transaction-proposer). |
-| `text` | Canonical serializer + parser for the tier-1 source (the agent/git authoring surface). |
+| `kicad` | Import `.kicad_mod` footprints (+ graphics) and `.kicad_sym` symbols. |
+| `svg_import` | SVG path import → regions. |
+| `font` / `ttf` | Built-in stroke font; TTF outline rendering + kerning (the one dependency lives here). |
+| `solve` | Least-change placement constraint solver; convex-courtyard packing; feasibility reporting. |
+| `route` | Trace/via/slab model; the `world_features` producer; DRC; pours; connectivity/ratsnest. |
+| `autoroute` | N-layer grid A\* autorouter (an editing tool proposing transactions; DRC-verified claims). |
 | `export` | netlist / pick-and-place / SVG / Gerber / Excellon output. |
 | `project` | Deterministic text projection of the model (human/debug view). |
 | `id` | Stable entity / net / trace / via identifiers. |
@@ -86,7 +147,7 @@ A full, if prototype-grade, flow:
 ## Build & run
 
 ```sh
-cargo test                       # 93 tests
+cargo test                       # 420 tests
 cargo clippy --all-targets
 cargo run --example m1           # typed interfaces, ERC, incremental recompute, reconciliation
 cargo run --example m2           # override strength, decay, constraint precedence
@@ -94,6 +155,7 @@ cargo run --example m3           # least-change placement (mini RP2350-carrier s
 cargo run --example export       # netlist + pick-and-place + SVG from a small board
 cargo run --example autoroute    # place → autoroute → DRC-clean, end to end
 cargo run --example gerber       # Gerber/Excellon fab output
+cargo run --example poc_multiprobe  # the capstone: 4-layer RP2350A board, full pipeline
 ```
 
 ## Repository layout
@@ -104,35 +166,41 @@ The working tree lives in a sibling worktree of a bare repository:
 ecad/
 ├── .git/         bare repository
 ├── main/         this worktree  (src/, docs/, examples/, README.md)
+├── issues/       file-based issue tracker (outside the repo; migrates to GitHub Issues on upload)
 └── reference/    KiCad + Horizon EDA source mirrors (untracked, prior-art study)
 ```
 
 Feature work is done in additional sibling worktrees
 (`git -C ../.git worktree add ../<name> -b feat/<name>`) and merged back to `main`. The bulk of the
-implementation was built this way by focused sub-agents, each verified before merge.
+implementation was built this way by focused sub-agents, each adversarially reviewed before merge.
 
 ## Documentation
 
-- [`docs/architecture.md`](docs/architecture.md) — the design of record: the reasoning (§1–§6) plus
-  a "Prototype status" section per implemented subsystem, with honest limits for each.
+- [`docs/architecture.md`](docs/architecture.md) — the design of record: the reasoning (§1–§6)
+  plus a "Prototype status" section per implemented subsystem, with honest limits for each.
+- [`docs/geometry-model-convergence.md`](docs/geometry-model-convergence.md) — the decision record
+  (Decisions 1–19) of the geometry/representation convergence: how pads, pours, masks, text, and
+  holes all became one Feature primitive, and why routes are persisted state.
 - [`docs/poc-rp2350-spec.md`](docs/poc-rp2350-spec.md) — design spec for the capstone proof of
-  concept: a chip-down rework of a multi-SWD debug probe (bare RP2350 + JST-SH headers), used to
+  concept: a chip-down rework of a multi-SWD debug probe (bare RP2350A + JST-SH headers), used to
   drive the whole flow end-to-end on a real board.
 - [`docs/poc-rp2350-result.md`](docs/poc-rp2350-result.md) — the PoC build result and, more
   valuably, the **framework-friction findings** it surfaced. See also `examples/poc_multiprobe.rs`
   and the vendored parts/outputs under `poc/`.
 
-The capstone PoC built a real 44-component / 44-net RP2350A board (ERC-clean, authoritative pinout
-verified through the importer) and was reported **honestly**: the basic autorouter completed 19/44
-nets and left the rest, which is what exposed the gaps now tracked as issues (below).
+The capstone PoC is a real 44-component / 44-net RP2350A board, now built as a 4-layer stackup
+with GND and +3V3 inner planes, mounting holes, silkscreen text, and byte-lossless text
+round-trip. It is reported **honestly**: the current greedy autorouter's verified completion is
+low (the search finds 21/44; conservative whole-net verification keeps 2/44), which is precisely
+the measurement that scopes the next round of router work. Every earlier gap the PoC exposed is
+tracked in the issue backlog.
 
 ## Honest limitations
 
-It is a prototype. The known gaps — the remaining silent-correctness issue the PoC surfaced (the
-router's clearance guarantee breaking at fine pitch) alongside missing features (no copper
-planes/multilayer; greedy autorouter; pads-as-points DRC; approximate placement solver) — are filed
-as a standing backlog. (The duplicate-power-pin float and connect-time validation, the two scariest
-findings, are now fixed — see "Prototype status (pin identity)" in `docs/architecture.md`.) That
-backlog lives in a file-based `issues/` tracker kept beside the repo (to migrate to GitHub Issues on
-upload); each subsystem's honest limits are also recorded in its "Prototype status" section in
-`docs/architecture.md`.
+It is a prototype. The dominant open front is **autorouter completion quality**: the router is
+honest (its `routed` claim is DRC-verified against the committed board) but greedy — no rip-up,
+retry, or negotiation — so verified completion on the dense capstone board is low. The placement
+solver is an approximate relaxation. Smaller representation gaps (authored voids invisible to
+mask/pour DRC, corner-radius serialization loss) and quality items are filed as a standing backlog
+in the file-based `issues/` tracker kept beside the repo; each subsystem's honest limits are also
+recorded in its "Prototype status" section in `docs/architecture.md`.
