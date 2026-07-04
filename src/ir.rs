@@ -74,7 +74,7 @@ pub enum Node {
 /// `layer` is a **slab name** (Decision 13) — an arbitrary token resolved against the
 /// [`Stackup`] at elaboration (`F.Cu`, `B.Cu`, `F.SilkS`, or any authored slab); an
 /// unknown name is a hard error, and a `Conductor` region whose slab is not copper is
-/// nonsense (rejected by [`features`]).
+/// nonsense (rejected by [`features`](crate::elaborate::features)).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegionDecl {
     pub shape: Shape2D,
@@ -120,7 +120,7 @@ pub enum GenDirective {
     /// `(internal-path, selector)` pin the port exposes.
     ///
     /// A `def` is **not** a materialized directive: it declares a template, consumed by
-    /// [`expand_defs`] when an `inst <path> <def-name>` names it. Definitions are
+    /// `expand_defs` when an `inst <path> <def-name>` names it. Definitions are
     /// **top-level only** (v1): a def body may *instantiate* another def but may not
     /// *define* one. Elaboration's placement/connectivity passes never see a `Def` — the
     /// def-expansion pre-pass strips every one and stamps its body per instantiation.
@@ -132,7 +132,7 @@ pub enum GenDirective {
         /// The def body — a source fragment authored in the def's local scope (paths and
         /// net names are def-relative; they gain the instance path prefix when stamped),
         /// interleaved with the comment/blank trivia between directives so a
-        /// mixed-authorship def body round-trips (Decision 21). [`expand_defs`] reads only
+        /// mixed-authorship def body round-trips (Decision 21). `expand_defs` reads only
         /// the [`DefNode::Directive`] entries; serialization reproduces the trivia.
         body: Vec<DefNode>,
         /// The port surface: port name → `(internal-path, selector)`. A connection to a
@@ -226,19 +226,19 @@ pub enum GenDirective {
         dia: Nm,
     },
     /// An authored filled region — a copper pour, keep-out, or filled void. See
-    /// [`RegionDecl`]. Read by [`regions`]; the knockout fill is derived downstream.
+    /// [`RegionDecl`]. Read by [`regions`](crate::elaborate::regions); the knockout fill is derived downstream.
     Region(RegionDecl),
     /// One authored board-stackup [`Slab`] (a named z-slab with a role + optional
-    /// material). Accumulated by [`stackup`] into the board [`Stackup`], mirroring how
-    /// [`Region`](Self::Region) directives are collected by [`regions`]. This is *not* a
+    /// material). Accumulated by [`stackup`](crate::elaborate::stackup) into the board [`Stackup`], mirroring how
+    /// [`Region`](Self::Region) directives are collected by [`regions`](crate::elaborate::regions). This is *not* a
     /// placement/connectivity directive — elaboration's passes ignore it; it is read
-    /// only by [`stackup`].
+    /// only by [`stackup`](crate::elaborate::stackup).
     Slab(Slab),
     /// One authored **class-registry** entry (Decision 14): the conventions —
     /// refdes `prefix`, label `template`, class-default params — for a component
     /// `class`. Accumulated by [`registry`](crate::annotate::registry) over the built-in
     /// seeds, mirroring how [`Slab`](Self::Slab) directives are collected by
-    /// [`stackup`]. A display/identity directive — elaboration's placement/connectivity
+    /// [`stackup`](crate::elaborate::stackup). A display/identity directive — elaboration's placement/connectivity
     /// passes ignore it.
     Class {
         name: String,
@@ -300,7 +300,7 @@ pub enum GenDirective {
     /// Authored **board text** — a mutable string lowered to silkscreen (per
     /// Decision 9 in docs/geometry-model-convergence.md). The **authoritative** form
     /// is exactly these fields (string + placement + `height` + `layer` + `orient`);
-    /// the `Shape2D` strokes are *derived* by [`features`] through the built-in
+    /// the `Shape2D` strokes are *derived* by [`features`](crate::elaborate::features) through the built-in
     /// stroke [`crate::font`] — never stored, so a rename re-derives. `orient`
     /// defaults to [`Orient::IDENTITY`] (rotated labels are a follow-up). This is
     /// **not** a placement/connectivity directive — elaboration's passes ignore it
@@ -322,7 +322,7 @@ pub enum GenDirective {
     /// **degrades** to the stroke font (a `W_FONT_LOAD` diagnostic, never a hard error);
     /// with no directive the stroke font is the default. Not a placement/connectivity
     /// directive — elaboration's passes ignore it; it is read only by the lowering
-    /// ([`resolve_font`]) and by [`elaborate`], which records any load failure on the
+    /// ([`resolve_font`](crate::elaborate::resolve_font)) and by [`elaborate`](crate::elaborate::elaborate), which records any load failure on the
     /// [`ReconReport`] (a `W_FONT_LOAD` warning) via [`font_load_failure`].
     Font {
         path: String,
@@ -335,7 +335,7 @@ pub type Source = Vec<GenDirective>;
 /// One entry in a [`Def`](GenDirective::Def) body: a body directive, or a preserved
 /// trivia line (a comment or a blank) so a mixed-authorship def body round-trips
 /// (Decision 21). Mirrors [`crate::schematic::LayoutNode`]'s trivia handling; the
-/// def-expansion pre-pass ([`expand_defs`]) reads only the [`Directive`](Self::Directive)
+/// def-expansion pre-pass (`expand_defs`) reads only the [`Directive`](Self::Directive)
 /// entries.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DefNode {

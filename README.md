@@ -116,38 +116,43 @@ A full, if prototype-grade, flow:
 - Export: netlist, pick-and-place CSV, SVG, **Gerber (RS-274X)** per slab, and **Excellon** drill
   (plated/non-plated split, slots).
 
-**420 tests, one dependency, `cargo clippy --all-targets` clean.**
+**559 tests (510 lib + 49 integration), one dependency, `cargo clippy --all-targets` clean.**
 
 ## Modules (`src/`)
+
+Most subsystems are a facade module (`foo.rs`) over a submodule directory (`foo/`);
+the "key submodules" note names the internal split where there is one.
 
 | Module | Responsibility |
 |---|---|
 | `doc` | The immutable three-tier document; provenance-tagged DOFs; coarse query inputs. |
+| `ir` | The directive/source intermediate representation (`GenDirective`, defs) the text tier parses into and elaboration consumes. |
+| `coord` | Integer-nanometer `Nm` / `Point` coordinate primitives (the geometry base type). |
 | `command` | The sole mutation surface — atomic transactions; the commit-time re-elaboration gate. |
 | `history` | Version DAG (undo / branch / replay). |
 | `query` | Hand-rolled incremental query engine (Netlist, ERC, DRC); dependency tracking + early cutoff. |
 | `text` | Parser + canonical serializer for the `.ecad` source (the agent/git authoring surface). |
-| `elaborate` | Directives → instances; override reconciliation/decay; text/hole/class lowering. |
+| `elaborate` | Directives → instances; override reconciliation/decay; text/hole/class lowering. Key submodules: `expr` (the expression tier), `features`/`query` (the forward views), `expand` (def-expansion). |
 | `annotate` | Refdes annotation with explicit pinning. |
 | `diagnostic` | The rustc-style diagnostic machinery (`E_` errors, `W_` warnings). |
-| `geom` | `Shape2D` (incl. hole-capable `Area`), transforms, coordinate ceilings. |
-| `region` | Exact integer polygon kernel: booleans + offsets (pours, masks, text, courtyards). |
+| `geom` | The 2.5D geometry foundation: `Shape2D` (incl. hole-capable `Area`), the `Feature`/z-stackup model, and the exact-integer boolean/offset clearance kernel. Key submodules: `shape`, `feature`, `kernel` (the former `region` polygon kernel — booleans + offsets for pours, masks, text, courtyards), `seg` (shared point/segment predicates), `limits` (coordinate ceilings). |
 | `quantity` | Integer-nanometer lengths and units. |
 | `part` | Typed pins, roles, interfaces, pad geometry; the built-in toy library. |
-| `kicad` | Import `.kicad_mod` footprints (+ graphics) and `.kicad_sym` symbols. |
+| `kicad` | Import `.kicad_mod` footprints (+ graphics) and `.kicad_sym` symbols. Key submodule: `iface_infer` (conservative interface inference). |
 | `svg_import` | SVG path import → regions. |
 | `font` / `ttf` | Built-in stroke font; TTF outline rendering + kerning (the one dependency lives here). |
 | `solve` | Least-change placement constraint solver; convex-courtyard packing; feasibility reporting. |
-| `route` | Trace/via/slab model; the `world_features` producer; DRC; pours; connectivity/ratsnest. |
-| `autoroute` | N-layer grid A\* autorouter (an editing tool proposing transactions; DRC-verified claims). |
+| `route` | Trace/via/slab model; the `world_features` producer + `doc_netlist` membership map; DRC; pours; connectivity/ratsnest. Key submodules: `world`, `drc`, `connect`, `model`. |
+| `autoroute` | N-layer grid A\* autorouter (an editing tool proposing transactions; DRC-verified claims). Key submodules: `grid`, `obstacles`, `ingest`, `search`. |
 | `export` | netlist / pick-and-place / SVG / Gerber / Excellon output. |
+| `schematic` / `schematic_svg` | Schematic view derivation and its SVG render. |
 | `project` | Deterministic text projection of the model (human/debug view). |
 | `id` | Stable entity / net / trace / via identifiers. |
 
 ## Build & run
 
 ```sh
-cargo test                       # 420 tests
+cargo test                       # 559 tests (510 lib + 49 integration)
 cargo clippy --all-targets
 cargo run --example m1           # typed interfaces, ERC, incremental recompute, reconciliation
 cargo run --example m2           # override strength, decay, constraint precedence
@@ -155,6 +160,7 @@ cargo run --example m3           # least-change placement (mini RP2350-carrier s
 cargo run --example export       # netlist + pick-and-place + SVG from a small board
 cargo run --example autoroute    # place → autoroute → DRC-clean, end to end
 cargo run --example gerber       # Gerber/Excellon fab output
+cargo run --example svg_outline  # board outline + graphics → SVG
 cargo run --example poc_multiprobe  # the capstone: 4-layer RP2350A board, full pipeline
 ```
 

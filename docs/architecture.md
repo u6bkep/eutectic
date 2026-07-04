@@ -418,7 +418,7 @@ Extent  = Prism { shape: Shape2D, z: ZRange }   // the 2.5D common case
   (Decision 16), is a filled area *with holes* — a set of oriented rings under the non-zero winding
   rule. It carries what a simple polygon cannot: the board substrate (outline ∖ cutouts), pour fills
   with knockouts, TTF glyphs with counters. Clearance generalizes (ring edge-distance + containment);
-  the exact-integer region kernel (`region.rs`) provides its booleans and offsets.
+  the exact-integer region kernel (`geom/kernel.rs`) provides its booleans and offsets.
 - **Two kinds of negative space, deliberately not interchangeable** (Decision 16b): a hole in an
   `Area` is *what the entity is* — intrinsic, in-plane, full-z for that feature (board cutouts, glyph
   counters, pour knockouts) — and reaches fab output as a **routed contour** (Edge.Cuts rings). A
@@ -577,7 +577,7 @@ A copper pour, a solder-mask layer, a paste stencil, and a keep-out-aware fill a
 *offset some shapes, then boolean-combine regions*. A pour is `zone − ⋃(foreign_copper ⊕ clearance)`
 (with same-net thermal spokes); a mask is `⋃(pad ⊕ mask_expansion)`; paste is the same with a
 reduction. So instead of a one-off "pour" feature we build the shared **offset + polygon-boolean
-kernel** once (`src/region.rs`) and let every consumer fall out of it.
+kernel** once (`src/geom/kernel.rs`) and let every consumer fall out of it.
 
 - **`Region` = a set of oriented rings** (CCW outer, CW holes) under the non-zero winding rule — so a
   pour with knockouts (area + holes), disjoint copper islands, and nested cut-outs are one type. It is

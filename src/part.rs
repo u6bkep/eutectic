@@ -203,7 +203,7 @@ pub struct InterfaceDef {
     pub mate: Vec<(String, String)>,
     /// Optional binding of each signal to the **pad number** it physically is, for an
     /// interface layered onto a part with real pads (an imported part — see
-    /// [`iface_infer`](crate::iface_infer)). **Empty for the toy library**, whose
+    /// [`iface_infer`](crate::kicad::iface_infer)). **Empty for the toy library**, whose
     /// interface signals have no underlying [`PinDef`].
     ///
     /// This is what unifies pin identity: a bound signal *is* its pad, so
