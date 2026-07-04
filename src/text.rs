@@ -232,6 +232,47 @@ fn render_directive(d: &GenDirective) -> String {
             }
             s
         }
+        GenDirective::Param { name, expr } => {
+            // `param <name> = <expr>` (Decision 21b). The expression text is emitted
+            // verbatim (it *is* the generative program — serializes as authored, never
+            // pre-evaluated); the `=` is spaced for readability and re-parsed tolerantly.
+            format!("param {name} = {expr}")
+        }
+        GenDirective::InstGenerative {
+            path,
+            part,
+            params,
+            param_exprs,
+            label,
+            range,
+            if_expr,
+        } => {
+            // The generative `inst`, serialized AS AUTHORED (Decision 21): a range suffix
+            // `[<lo>..<hi>]` on the path, an `if=<expr>` clause, verbatim `p:k=v` and
+            // expression `p:k=(<expr>)` params. The evaluated/expanded instances are
+            // elaboration-only and never serialized. Params render in `BTreeMap` (key)
+            // order for a canonical form; a verbatim and an expression key never collide
+            // (the parser routes each token to exactly one map).
+            let ranged = match range {
+                Some((lo, hi)) => format!("{path}[{lo}..{hi}]"),
+                None => path.clone(),
+            };
+            let mut s = format!("inst {ranged} {part}");
+            if let Some(l) = label {
+                s.push_str(&format!(" label={}", quote_value(l)));
+            }
+            if let Some(cond) = if_expr {
+                s.push_str(&format!(" if={}", quote_value(cond)));
+            }
+            for (k, v) in params {
+                s.push_str(&format!(" p:{k}={}", quote_value(v)));
+            }
+            // Expression params wear parentheses — the unambiguous "evaluate me" marker.
+            for (k, e) in param_exprs {
+                s.push_str(&format!(" p:{k}=({e})"));
+            }
+            s
+        }
         GenDirective::Place { path, pos } => format!("place {path} {}", fmt_point(*pos)),
         GenDirective::Fix { path, pos } => format!("fix {path} {}", fmt_point(*pos)),
         GenDirective::Board { outline } => {
@@ -1072,36 +1113,94 @@ fn parse_line(line: &str) -> Result<Item, String> {
     };
     Ok(match kw {
         "inst" => {
-            // `inst <path> <part> [label=<val>] [p:<key>=<val> ...]`. `path`/`part` are
-            // the two leading bare tokens; a `label=` token carries the display template
-            // and `p:<key>=<val>` tokens carry identity params (values may be quoted to
-            // include spaces). Bare `inst <path> <part>` still parses (empty/None).
-            const USAGE: &str = "inst <path> <part> [label=<val>] [p:<key>=<val> ...]";
-            let toks = split_ws_quoted(rest);
+            // `inst <path>[<lo>..<hi>] <part> [label=<val>] [if=<expr>] [p:<key>=<val>|(<expr>) ...]`.
+            // `path`/`part` are the two leading bare tokens; `label=` carries the display
+            // template; `if=<expr>` a population conditional; `p:<key>=<val>` an identity
+            // param (verbatim), and `p:<key>=(<expr>)` an *expression* param (the parens
+            // are the "evaluate me" marker — Decision 21b). A `[<lo>..<hi>]` suffix on the
+            // path is a range (hi exclusive). Whenever a range, an `if=`, or any `(expr)`
+            // param is present the directive is a generative [`GenDirective::InstGenerative`];
+            // a plain `inst <path> <part>` with only verbatim params stays exactly
+            // [`GenDirective::Instance`] as before, so existing docs are untouched. Tokens
+            // are split parens-aware so `if=(n > 0)` / `p:c=(i + 1)` may contain spaces.
+            const USAGE: &str = "inst <path>[<lo>..<hi>] <part> [label=<val>] [if=<expr>] [p:<key>=<val>|(<expr>) ...]";
+            let toks = split_ws_quoted_parens(rest);
             if toks.len() < 2 {
                 return Err(USAGE.into());
             }
-            let path = toks[0].clone();
+            // A `[<lo>..<hi>]` suffix on the path is a range (the `..` disambiguates it
+            // from an ordinary indexed path like `dec[0]`, which has no `..`).
+            let (base_path, range) = split_range_suffix(&toks[0]);
             let part = toks[1].clone();
             let mut params = BTreeMap::new();
+            let mut param_exprs = BTreeMap::new();
             let mut label = None;
+            let mut if_expr = None;
             for tok in &toks[2..] {
                 if let Some(v) = tok.strip_prefix("label=") {
                     label = Some(unquote(v).to_string());
+                } else if let Some(v) = tok.strip_prefix("if=") {
+                    if_expr = Some(strip_expr_parens(unquote(v)));
                 } else if let Some(kv) = tok.strip_prefix("p:") {
                     let (k, v) = kv
                         .split_once('=')
                         .ok_or_else(|| format!("inst param needs p:<key>=<value>: `{tok}`"))?;
-                    params.insert(k.to_string(), unquote(v).to_string());
+                    // A parenthesized value is an *expression* param; anything else is a
+                    // verbatim string (the existing behavior — existing docs untouched).
+                    if let Some(inner) = as_expr_value(v) {
+                        param_exprs.insert(k.to_string(), inner);
+                    } else {
+                        params.insert(k.to_string(), unquote(v).to_string());
+                    }
                 } else {
                     return Err(format!("inst: unexpected token `{tok}` ({USAGE})"));
                 }
             }
-            Item::Directive(GenDirective::Instance {
-                path,
-                part,
-                params,
-                label,
+            // Stay on the plain declarative `Instance` unless a generative feature is used
+            // — the round-trip and reconciliation of every existing document is identical.
+            if range.is_none() && if_expr.is_none() && param_exprs.is_empty() {
+                Item::Directive(GenDirective::Instance {
+                    path: base_path,
+                    part,
+                    params,
+                    label,
+                })
+            } else {
+                Item::Directive(GenDirective::InstGenerative {
+                    path: base_path,
+                    part,
+                    params,
+                    param_exprs,
+                    label,
+                    range,
+                    if_expr,
+                })
+            }
+        }
+        "param" => {
+            // `param <name> = <expr>` (Decision 21b). The `=` splits name from the
+            // expression; the expression is stored verbatim (parsed/evaluated only at
+            // elaboration, so it serializes as authored). The name is a single bare token.
+            const USAGE: &str = "param <name> = <expr>";
+            let (name, expr) = rest
+                .split_once('=')
+                .ok_or_else(|| format!("{USAGE} (missing `=`)"))?;
+            let name = name.trim();
+            let expr = expr.trim();
+            if name.is_empty() {
+                return Err(format!("{USAGE} (empty name)"));
+            }
+            if name.split_whitespace().count() != 1 || !is_ident(name) {
+                return Err(format!(
+                    "param name `{name}` must be a single identifier (letters, digits, `_`)"
+                ));
+            }
+            if expr.is_empty() {
+                return Err(format!("{USAGE} (empty expression)"));
+            }
+            Item::Directive(GenDirective::Param {
+                name: name.to_string(),
+                expr: expr.to_string(),
             })
         }
         "place" => {
@@ -1621,6 +1720,96 @@ fn split_ws_quoted(s: &str) -> Vec<String> {
         toks.push(cur);
     }
     toks
+}
+
+/// Like [`split_ws_quoted`], but *also* keeps a parenthesized run intact so an
+/// expression clause with internal whitespace stays one token (`if=(n > 0)`,
+/// `p:c=(i + 1)`). Depth-tracked (nested parens are balanced); a double-quoted run is
+/// still respected too, and a `(` inside quotes does not open a paren group. Additive:
+/// the plain [`split_ws_quoted`] path is unchanged, so directives that use it behave
+/// exactly as before.
+fn split_ws_quoted_parens(s: &str) -> Vec<String> {
+    let mut toks = Vec::new();
+    let mut cur = String::new();
+    let mut in_q = false;
+    let mut depth: i32 = 0;
+    for c in s.chars() {
+        match c {
+            '"' => {
+                in_q = !in_q;
+                cur.push(c);
+            }
+            '(' if !in_q => {
+                depth += 1;
+                cur.push(c);
+            }
+            ')' if !in_q => {
+                depth = (depth - 1).max(0);
+                cur.push(c);
+            }
+            c if c.is_whitespace() && !in_q && depth == 0 => {
+                if !cur.is_empty() {
+                    toks.push(std::mem::take(&mut cur));
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        toks.push(cur);
+    }
+    toks
+}
+
+/// Split a `[<lo>..<hi>]` **range** suffix off an instance path token. Returns the base
+/// path and, when present, the `(lo, hi)` expression texts. Only a suffix containing
+/// `..` is a range — an ordinary indexed path (`psu.dec[0]`) has no `..` and comes back
+/// unchanged with `None`. The bracket must be the final characters of the token.
+fn split_range_suffix(tok: &str) -> (String, Option<(String, String)>) {
+    if let Some(open) = tok.rfind('[')
+        && tok.ends_with(']')
+    {
+        let inner = &tok[open + 1..tok.len() - 1];
+        if let Some((lo, hi)) = inner.split_once("..") {
+            return (
+                tok[..open].to_string(),
+                Some((lo.trim().to_string(), hi.trim().to_string())),
+            );
+        }
+    }
+    (tok.to_string(), None)
+}
+
+/// A `p:key=value` value that is an *expression* (parenthesized) yields the inner
+/// expression text with the outer parens stripped; a non-parenthesized value is a
+/// verbatim string and yields `None`. The parens are the unambiguous "evaluate this"
+/// marker (Decision 21b), keeping every existing `p:value=10k` verbatim.
+fn as_expr_value(v: &str) -> Option<String> {
+    let v = unquote(v).trim();
+    v.strip_prefix('(')
+        .and_then(|s| s.strip_suffix(')'))
+        .map(|inner| inner.trim().to_string())
+}
+
+/// Strip one pair of surrounding parens off an `if=` expression, if present, so both
+/// `if=(n > 0)` and `if=n>0` are accepted; the inner text is what the evaluator parses.
+fn strip_expr_parens(v: &str) -> String {
+    let v = v.trim();
+    match v.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
+        Some(inner) => inner.trim().to_string(),
+        None => v.to_string(),
+    }
+}
+
+/// Is `s` a single expression-tier identifier (an ASCII-ish letters/digits/underscore
+/// run that does not start with a digit)? Used to validate a `param` name.
+fn is_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
 /// Strip one surrounding pair of double quotes from a value, if present.
@@ -2458,6 +2647,74 @@ slab F.Cu 1.565mm 1.6mm conductor copper";
         );
     }
 
+    /// A `param` directive (Decision 21b) parses to `GenDirective::Param` and serializes
+    /// as authored (the expression text is emitted verbatim, never pre-evaluated).
+    #[test]
+    fn param_directive_parses_and_round_trips() {
+        let text = "param n = 3\nparam gap = n + 1";
+        let Parsed { source: src, .. } = parse(text).expect("parse");
+        assert_eq!(
+            src,
+            vec![
+                GenDirective::Param {
+                    name: "n".into(),
+                    expr: "3".into(),
+                },
+                GenDirective::Param {
+                    name: "gap".into(),
+                    expr: "n + 1".into(),
+                },
+            ]
+        );
+        let doc = doc_of(src.clone(), BTreeMap::new());
+        assert_eq!(serialize(&doc).trim(), "param n = 3\nparam gap = n + 1");
+        assert_eq!(parse(&serialize(&doc)).unwrap().source, src);
+        // A malformed `param` (no `=`, empty name, non-identifier) is rejected.
+        assert!(parse("param n 3").is_err());
+        assert!(parse("param = 3").is_err());
+        assert!(parse("param 1n = 3").is_err());
+    }
+
+    /// A generative `inst` — a `[lo..hi]` range, an `if=` conditional, and expression
+    /// `p:(...)` params — parses to `GenDirective::InstGenerative` and round-trips as
+    /// authored (evaluated results are elaboration-only, never serialized).
+    #[test]
+    fn generative_inst_parses_and_round_trips() {
+        let text = "inst sense[0..n] R_0402 if=(i < 3) p:idx=(i + 1) p:tol=5%";
+        let Parsed { source: src, .. } = parse(text).expect("parse");
+        let mut params = BTreeMap::new();
+        params.insert("tol".into(), "5%".into());
+        let mut param_exprs = BTreeMap::new();
+        param_exprs.insert("idx".into(), "i + 1".into());
+        assert_eq!(
+            src,
+            vec![GenDirective::InstGenerative {
+                path: "sense".into(),
+                part: "R_0402".into(),
+                params,
+                param_exprs,
+                label: None,
+                range: Some(("0".into(), "n".into())),
+                if_expr: Some("i < 3".into()),
+            }]
+        );
+        let doc = doc_of(src.clone(), BTreeMap::new());
+        assert_eq!(parse(&serialize(&doc)).unwrap().source, src);
+
+        // An ordinary indexed path (`dec[0]`, no `..`) is NOT a range — it stays a plain
+        // Instance, so existing docs are untouched.
+        let Parsed { source: plain, .. } = parse("inst dec[0] Cap").expect("plain");
+        assert_eq!(
+            plain,
+            vec![GenDirective::Instance {
+                path: "dec[0]".into(),
+                part: "Cap".into(),
+                params: BTreeMap::new(),
+                label: None,
+            }]
+        );
+    }
+
     /// Documented limitation: a param value containing `" ` (a double quote followed by
     /// whitespace) serializes WITHOUT escaping the inner quote — `p:x="a" b"` — so the
     /// tokenizer closes the quoted run at the inner `"` and the trailing `b"` is an
@@ -2496,6 +2753,148 @@ slab F.Cu 1.565mm 1.6mm conductor copper";
         let c = &doc.components[&EntityId::new("c1")];
         assert_eq!(c.label.as_deref(), Some("{value}"));
         assert_eq!(c.params["value"], "100n");
+    }
+
+    /// Range instantiation (Decision 21b): `inst dec[0..n] Cap` with `param n = 3`
+    /// elaborates to concrete `dec[0]`, `dec[1]`, `dec[2]` components — hi exclusive.
+    #[test]
+    fn range_expands_to_indexed_instances() {
+        let src = "param n = 3\ninst dec[0..n] Cap p:value=(100n)";
+        let Parsed { source, .. } = parse(src).expect("parse");
+        let doc = placed(source);
+        assert!(doc.components.contains_key(&EntityId::new("dec[0]")));
+        assert!(doc.components.contains_key(&EntityId::new("dec[1]")));
+        assert!(doc.components.contains_key(&EntityId::new("dec[2]")));
+        assert!(
+            !doc.components.contains_key(&EntityId::new("dec[3]")),
+            "hi exclusive"
+        );
+        // The expression param evaluated onto each instance's verbatim params.
+        assert_eq!(
+            doc.components[&EntityId::new("dec[0]")].params["value"],
+            "100n"
+        );
+    }
+
+    /// The loop variable `i` is bound in each range instance's expressions.
+    #[test]
+    fn loop_variable_binds_in_range_expressions() {
+        let src = "inst r[0..3] Cap p:idx=(i + 1)";
+        let Parsed { source, .. } = parse(src).expect("parse");
+        let doc = placed(source);
+        assert_eq!(doc.components[&EntityId::new("r[0]")].params["idx"], "1");
+        assert_eq!(doc.components[&EntityId::new("r[1]")].params["idx"], "2");
+        assert_eq!(doc.components[&EntityId::new("r[2]")].params["idx"], "3");
+    }
+
+    /// Changing a range bound preserves surviving instances' identities and decays the
+    /// removed one through the existing reconciliation machinery (the reconciliation-
+    /// safety requirement). An override pinned to `dec[1]` survives `n: 3→4`, and one
+    /// pinned to `dec[3]` orphans (surfaced, never silently dropped) when `n: 4→3`.
+    #[test]
+    fn range_bound_change_reconciles_by_path() {
+        let lib = part_library();
+        let mut h = History::new(Default::default());
+        // Start at n=3 (dec[0..3]); pin dec[1].
+        let Parsed { source: s3, .. } = parse("param n = 3\ninst dec[0..n] Cap").expect("parse");
+        h.commit(Transaction::one(Command::SetSource(s3)), &lib, "n3")
+            .unwrap();
+        h.commit(
+            Transaction::one(Command::Pin(EntityId::new("dec[1]"), Point::mm(7, 3))),
+            &lib,
+            "pin",
+        )
+        .unwrap();
+        assert_eq!(
+            h.doc().components[&EntityId::new("dec[1]")].pos.value,
+            Point::mm(7, 3),
+            "pin holds dec[1] at n=3"
+        );
+        // Grow to n=4: dec[1]'s identity (and its pin) survives; dec[3] now exists.
+        let Parsed { source: s4, .. } = parse("param n = 4\ninst dec[0..n] Cap").expect("parse4");
+        h.commit(Transaction::one(Command::SetSource(s4)), &lib, "n4")
+            .unwrap();
+        assert!(h.doc().components.contains_key(&EntityId::new("dec[3]")));
+        assert_eq!(
+            h.doc().components[&EntityId::new("dec[1]")].pos.value,
+            Point::mm(7, 3),
+            "the pin on dec[1] survives the bound change (identity by path)"
+        );
+        assert!(h.doc().report.orphaned.is_empty());
+        // Shrink back to n=3: dec[3] is gone; a pin on it (add one first) would orphan.
+        h.commit(
+            Transaction::one(Command::Pin(EntityId::new("dec[3]"), Point::mm(9, 9))),
+            &lib,
+            "pin3",
+        )
+        .unwrap();
+        let Parsed { source: s3b, .. } = parse("param n = 3\ninst dec[0..n] Cap").expect("parse3b");
+        h.commit(Transaction::one(Command::SetSource(s3b)), &lib, "shrink")
+            .unwrap();
+        assert!(!h.doc().components.contains_key(&EntityId::new("dec[3]")));
+        assert!(
+            h.doc().report.orphaned.contains(&EntityId::new("dec[3]")),
+            "the removed instance's override is surfaced as an orphan, not dropped"
+        );
+    }
+
+    /// `if=` population conditional: a false condition depopulates the instance, and a
+    /// connection referencing the dropped part is skipped with a `W_DNP` warning (the
+    /// chosen dangling-connection semantics) rather than an `E_UNKNOWN_INSTANCE` error.
+    #[test]
+    fn if_conditional_depopulates_and_dangles_as_warning() {
+        // if=true keeps it.
+        let Parsed { source: on, .. } = parse("inst c1 Cap if=(true)").expect("on");
+        assert!(placed(on).components.contains_key(&EntityId::new("c1")));
+
+        // if=false drops it; a net referencing it warns (W_DNP), does not error.
+        let src = "param populate = false\n\
+                   inst c1 Cap\n\
+                   inst c2 Cap if=populate\n\
+                   net GND c1.p2 c2.p2";
+        let Parsed { source, .. } = parse(src).expect("parse");
+        let doc = placed(source);
+        assert!(doc.components.contains_key(&EntityId::new("c1")));
+        assert!(
+            !doc.components.contains_key(&EntityId::new("c2")),
+            "c2 is depopulated by if=false"
+        );
+        // The net referencing c2 is surfaced as a DNP dangle (a warning), and c1 still
+        // joins GND (the surviving pin is unaffected).
+        assert!(
+            doc.report.dnp_dangling.iter().any(|(_, p)| p == "c2"),
+            "dangling connection to c2 recorded: {:?}",
+            doc.report.dnp_dangling
+        );
+        let gnd = &doc.nets[&crate::id::NetId::new("GND")];
+        assert!(gnd.members.iter().any(|m| m.comp.as_str() == "c1"));
+        assert!(!gnd.members.iter().any(|m| m.comp.as_str() == "c2"));
+    }
+
+    /// Every `E_EXPR` fault class aborts the commit (collect-all structural fault).
+    #[test]
+    fn expression_faults_abort_the_commit() {
+        let lib = part_library();
+        let commit = |src: &str| -> Result<(), Vec<crate::diagnostic::Diagnostic>> {
+            let Parsed { source, .. } = parse(src).expect("parse");
+            let mut h = History::new(Default::default());
+            h.commit(Transaction::one(Command::SetSource(source)), &lib, "x")
+                .map(|_| ())
+        };
+        // unknown param
+        assert!(commit("inst r[0..missing] Cap").is_err());
+        // param cycle
+        assert!(commit("param a = b + 1\nparam b = a + 1\ninst r[0..a] Cap").is_err());
+        // type mismatch (bool as a range bound)
+        assert!(commit("param f = true\ninst r[0..f] Cap").is_err());
+        // inexact division in a param value
+        assert!(commit("inst r1 Cap p:v=(1 / 3)").is_err());
+        // negative bound
+        assert!(commit("inst r[0..-1] Cap").is_err());
+        // over the range cap
+        assert!(commit("inst r[0..100000] Cap").is_err());
+        // if= not a boolean
+        assert!(commit("inst r1 Cap if=(1 + 1)").is_err());
     }
 
     /// A `class` directive parses to the expected `Class { name, ClassEntry }` (prefix,

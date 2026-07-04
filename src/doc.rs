@@ -373,6 +373,15 @@ pub struct ReconReport {
     /// slabs anywhere — the resolution lives in
     /// [`Stackup::unmasked_outer_copper`](crate::geom::Stackup::unmasked_outer_copper)).
     pub unmasked_copper: Vec<String>,
+    /// Instance paths depopulated by a false `if=` population conditional (Decision 21b's
+    /// DNP variant), that a `net`/`nc`/`connect` directive still *references*. The
+    /// referenced pin is silently skipped (the part is intentionally not placed) but the
+    /// dangling reference is surfaced as a `W_DNP` **warning** so a stale connection to a
+    /// depopulated part is visible, never a hard `E_UNKNOWN_INSTANCE`. A **degrade**, not
+    /// a fault (like [`font_load_failure`](Self::font_load_failure)): the board elaborates
+    /// with the part absent, so this does **not** dirty [`is_clean`](Self::is_clean). Each
+    /// entry is `(referencing_context, dropped_path)`, deduped and sorted.
+    pub dnp_dangling: Vec<(String, String)>,
 }
 
 impl ReconReport {
@@ -468,6 +477,21 @@ impl crate::diagnostic::Diagnose for ReconReport {
                     Location::None,
                 )
                 .with_help("check the path (absolute is safest), or remove the `font` directive"),
+            );
+        }
+        for (ctx, path) in &self.dnp_dangling {
+            // Degrade, not fault (Decision 21b): a false `if=` depopulated `path`, and a
+            // connection still references it. The pin is skipped (the part is absent by
+            // design); the dangling reference surfaces as a warning so it stays visible.
+            out.push(
+                Diagnostic::warning(
+                    "W_DNP",
+                    format!("{ctx} references `{path}`, which is depopulated by an `if=` variant"),
+                    Location::None,
+                )
+                .with_help(
+                    "this pin is skipped; remove the reference, or the `if=` clause, if unintended",
+                ),
             );
         }
         for name in &self.unmasked_copper {

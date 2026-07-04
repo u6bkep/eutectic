@@ -56,6 +56,58 @@ pub enum GenDirective {
         params: BTreeMap<String, String>,
         label: Option<String>,
     },
+    /// A declared **parameter** (Decision 21b): `param <name> = <expr>`. A named value in
+    /// the hermetic expression tier — an integer, a decimal-exact SI quantity, or a
+    /// boolean — usable by later expressions (`p:` values, range bounds, `if=`). Params
+    /// are declarations, not variables: order-independent (they may reference each other),
+    /// resolved once per elaboration into an [`Env`](crate::expr::Env) with cycle
+    /// detection. The authored `expr` text is stored verbatim and round-trips as written
+    /// (it *is* the generative program, Decision 21). Not a placement/connectivity
+    /// directive — elaboration resolves it into the param environment before Pass 1;
+    /// the placement/connectivity passes ignore it.
+    Param {
+        name: String,
+        /// The authored expression text (e.g. `"3"`, `"n + 1"`, `"4.7k"`). Parsed and
+        /// evaluated by [`crate::expr`]; never pre-evaluated (serializes as authored).
+        expr: String,
+    },
+    /// A **generative instance** (Decision 21b) — the expression-bearing form of `inst`
+    /// that lowers, during elaboration, into one or more plain [`Instance`](Self::Instance)
+    /// directives. Kept a distinct variant so the common `inst` (plain verbatim params,
+    /// no range/conditional) stays exactly [`Instance`](Self::Instance) — existing
+    /// documents and their construction sites are wholly untouched (the diff is additive).
+    ///
+    /// It carries the three v1 consumers:
+    ///   - **Range instantiation**: `range = Some((lo, hi))` expands `path[i]` for `i` in
+    ///     `lo..hi` (**hi exclusive**, the Rust/`psu_module` idiom), binding the implicit
+    ///     loop variable `i` in this instance's own param/`if` expressions. Bounds are
+    ///     expression texts; the expanded count is capped (anti-footgun).
+    ///   - **Expression params**: `param_exprs` are `p:<key>=(<expr>)` values evaluated
+    ///     and formatted into the plain instance's verbatim `params` (display-normal
+    ///     spelling). `params` here are the *verbatim* `p:` values (non-expression),
+    ///     copied through unchanged.
+    ///   - **Population conditional**: `if_expr = Some(<expr>)` — a boolean that, when
+    ///     false, drops the instance (and, with a `W_DNP` warning, silently skips any
+    ///     connection referencing the dropped path — DNP variants).
+    ///
+    /// Lowered by [`expand_generative`] into concrete `Instance` directives *before* the
+    /// reconciliation passes, so overrides/refdes address the expanded `path[i]` by path
+    /// exactly as they address a hand-written `inst path[i]`.
+    InstGenerative {
+        /// The instance path *without* any range suffix (`sense`, not `sense[0..n]`); the
+        /// `[i]` index is appended per expansion when `range` is `Some`.
+        path: String,
+        part: String,
+        /// Verbatim (non-expression) `p:` values, copied through unchanged.
+        params: BTreeMap<String, String>,
+        /// Expression `p:` values (`p:count=(i+1)`), evaluated + formatted per instance.
+        param_exprs: BTreeMap<String, String>,
+        label: Option<String>,
+        /// `(lo, hi)` expression texts for `path[lo..hi]` range expansion (hi exclusive).
+        range: Option<(String, String)>,
+        /// A population conditional expression; false ⇒ the instance is not elaborated.
+        if_expr: Option<String>,
+    },
     /// Source-provided default placement (a *free* DOF unless overridden).
     Place {
         path: String,
@@ -224,6 +276,222 @@ pub fn directive_coords(d: &GenDirective) -> Vec<Nm> {
     }
 }
 
+/// The generous upper bound on a single range's expanded instance count (Decision 21b
+/// anti-footgun). A negative or absurd bound is an `E_EXPR` fault rather than an attempt
+/// to allocate billions of instances; 10k is far beyond any real board's part count on
+/// one directive while still catching a runaway expression.
+pub const MAX_RANGE_INSTANCES: i64 = 10_000;
+
+/// Lower every generative directive (`param`, ranged/conditional/expression `inst`) into
+/// the plain declarative `Source` the elaboration passes already understand (Decision
+/// 21b). Runs once, before Pass 1, so the reconciliation machinery sees only concrete
+/// `Instance` directives at concrete `path[i]` paths — an override or refdes pin attaches
+/// to an expanded instance exactly as it would to a hand-written `inst path[i]`.
+///
+/// Steps:
+///   1. resolve all `param` declarations into an [`Env`](crate::expr::Env) (cycle-safe);
+///   2. for each `InstGenerative`, evaluate its range bounds and, per index `i`
+///      (with `i` bound in scope), its `if=` conditional and `p:(expr)` values, emitting a
+///      concrete [`Instance`](GenDirective::Instance) — or nothing when `if=` is false;
+///   3. copy every other directive through unchanged.
+///
+/// Returns the expanded source **and** the set of instance paths a false `if=` dropped
+/// (so the connectivity passes can skip — with a `W_DNP` warning — pins referencing a
+/// depopulated part rather than reporting them as unknown). Any `E_EXPR` fault (parse,
+/// unknown param, type error, inexact division, cycle, out-of-range/huge bound) is
+/// collected as a house diagnostic; on any fault the whole expansion fails so no partial
+/// program elaborates.
+fn expand_generative(source: &Source) -> Result<(Source, BTreeSet<String>), Vec<Diagnostic>> {
+    use crate::expr;
+    let mut errors: Vec<Diagnostic> = Vec::new();
+
+    // Step 1: params → environment.
+    let decls: BTreeMap<String, String> = source
+        .iter()
+        .filter_map(|d| match d {
+            GenDirective::Param { name, expr } => Some((name.clone(), expr.clone())),
+            _ => None,
+        })
+        .collect();
+    // A duplicate `param` name is an authoring conflict (the last would silently win in
+    // the map); surface it rather than dropping one.
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for d in source {
+        if let GenDirective::Param { name, .. } = d
+            && !seen.insert(name.as_str())
+        {
+            errors.push(Diagnostic::error(
+                "E_EXPR",
+                format!("duplicate param `{name}`"),
+                Location::None,
+            ));
+        }
+    }
+    let env = match expr::resolve_params(&decls) {
+        Ok(env) => env,
+        Err(e) => {
+            errors.push(Diagnostic::error("E_EXPR", e, Location::None));
+            // Without an environment we cannot evaluate consumers; fail now with what we
+            // have (param faults + the duplicate report above).
+            return Err(errors);
+        }
+    };
+
+    let mut out: Source = Vec::new();
+    let mut dropped: BTreeSet<String> = BTreeSet::new();
+
+    let eval_at = |text: &str, i: Option<i64>| -> Result<expr::Value, String> {
+        match i {
+            // Bind the implicit loop variable `i` for this evaluation (shadowing is not a
+            // concern — params cannot be named `i` and also be a loop var in the same
+            // scope; a param named `i` is simply visible unless a range provides one).
+            Some(idx) => {
+                let mut scope = env.clone();
+                scope.insert("i".to_string(), expr::Value::Int(idx));
+                expr::eval_str(text, &scope)
+            }
+            None => expr::eval_str(text, &env),
+        }
+    };
+
+    for d in source {
+        match d {
+            GenDirective::Param { .. } => {} // resolved above; not a materialized directive
+            GenDirective::InstGenerative {
+                path,
+                part,
+                params,
+                param_exprs,
+                label,
+                range,
+                if_expr,
+            } => {
+                // Determine the index set: a range yields `lo..hi`, else a single unindexed
+                // instance (index `None`).
+                let indices: Vec<Option<i64>> = match range {
+                    Some((lo_s, hi_s)) => {
+                        let lo = eval_at(lo_s, None).and_then(|v| v.as_index());
+                        let hi = eval_at(hi_s, None).and_then(|v| v.as_index());
+                        match (lo, hi) {
+                            (Ok(lo), Ok(hi)) => {
+                                if lo < 0 || hi < 0 {
+                                    errors.push(Diagnostic::error(
+                                        "E_EXPR",
+                                        format!("range `{path}[{lo}..{hi}]` has a negative bound"),
+                                        Location::None,
+                                    ));
+                                    continue;
+                                }
+                                let count = (hi - lo).max(0);
+                                if count > MAX_RANGE_INSTANCES {
+                                    errors.push(Diagnostic::error(
+                                        "E_EXPR",
+                                        format!(
+                                            "range `{path}[{lo}..{hi}]` expands to {count} \
+                                             instances, over the {MAX_RANGE_INSTANCES} cap"
+                                        ),
+                                        Location::None,
+                                    ));
+                                    continue;
+                                }
+                                (lo..hi).map(Some).collect()
+                            }
+                            (lo, hi) => {
+                                for r in [lo, hi] {
+                                    if let Err(e) = r {
+                                        errors.push(Diagnostic::error(
+                                            "E_EXPR",
+                                            format!("range bound of `{path}`: {e}"),
+                                            Location::None,
+                                        ));
+                                    }
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                    None => vec![None],
+                };
+
+                for idx in indices {
+                    let ipath = match idx {
+                        Some(i) => format!("{path}[{i}]"),
+                        None => path.clone(),
+                    };
+                    // Conditional: a false `if=` depopulates this instance.
+                    if let Some(cond) = if_expr {
+                        match eval_at(cond, idx).and_then(|v| v.as_bool()) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                dropped.insert(ipath);
+                                continue;
+                            }
+                            Err(e) => {
+                                errors.push(Diagnostic::error(
+                                    "E_EXPR",
+                                    format!("`if=` on `{ipath}`: {e}"),
+                                    Location::None,
+                                ));
+                                continue;
+                            }
+                        }
+                    }
+                    // Evaluate expression params into display-normal strings, merged over
+                    // the verbatim ones (an expression key never collides with a verbatim
+                    // key — the parser routes each token to exactly one map).
+                    let mut merged = params.clone();
+                    let mut param_err = false;
+                    for (k, ex) in param_exprs {
+                        match eval_at(ex, idx) {
+                            Ok(v) => {
+                                merged.insert(k.clone(), format_value(v));
+                            }
+                            Err(e) => {
+                                errors.push(Diagnostic::error(
+                                    "E_EXPR",
+                                    format!("param `p:{k}` on `{ipath}`: {e}"),
+                                    Location::None,
+                                ));
+                                param_err = true;
+                            }
+                        }
+                    }
+                    if param_err {
+                        continue;
+                    }
+                    out.push(GenDirective::Instance {
+                        path: ipath,
+                        part: part.clone(),
+                        params: merged,
+                        label: label.clone(),
+                    });
+                }
+            }
+            other => out.push(other.clone()),
+        }
+    }
+
+    if errors.is_empty() {
+        Ok((out, dropped))
+    } else {
+        Err(errors)
+    }
+}
+
+/// Format an evaluated [`Value`](crate::expr::Value) into the display-normal string a
+/// component param stores (Decision 14 — params are authored strings at rest). An
+/// integer prints plainly; a quantity prints its minimal decimal via `format_si` with no
+/// unit (the unit spelling is a display concern owned by the class template downstream);
+/// a boolean prints `true`/`false`.
+fn format_value(v: crate::expr::Value) -> String {
+    use crate::expr::Value;
+    match v {
+        Value::Int(n) => n.to_string(),
+        Value::Quantity(q) => q.format_si(""),
+        Value::Bool(b) => b.to_string(),
+    }
+}
+
 /// Result of elaboration before it is folded into a Doc.
 pub struct Elaborated {
     pub components: BTreeMap<EntityId, Component>,
@@ -244,6 +512,14 @@ pub fn elaborate(
     refdes_pins: &BTreeMap<EntityId, String>,
     lib: &PartLib,
 ) -> Result<Elaborated, Vec<Diagnostic>> {
+    // Lower the generative tier (params, ranged/conditional/expression `inst`) into
+    // concrete declarative directives *first*, so every pass below — including
+    // reconciliation, which addresses instances by their `path[i]` — sees only plain
+    // `Instance` directives (Decision 21b). A generative fault (bad expression, cycle,
+    // out-of-range bound) aborts the whole transaction, like any structural fault.
+    let (expanded, dnp_dropped) = expand_generative(source)?;
+    let source = &expanded;
+
     let mut components: BTreeMap<EntityId, Component> = BTreeMap::new();
     let mut nets: BTreeMap<NetId, Net> = BTreeMap::new();
     let mut order = 0i64; // deterministic default placement counter
@@ -254,6 +530,25 @@ pub fn elaborate(
     // later references to it are silenced so the real fault isn't buried.
     let mut errors: Vec<Diagnostic> = Vec::new();
     let mut reported_missing: BTreeSet<EntityId> = BTreeSet::new();
+    // A path depopulated by a false `if=` (Decision 21b DNP) is *intentionally* absent,
+    // not a fault: seed it into the cascade-suppression set so any reference to it skips
+    // silently instead of raising `E_UNKNOWN_INSTANCE`. Connection references are
+    // additionally surfaced as `W_DNP` warnings at their sites below (a placement
+    // constraint on a depopulated part just skips). `dnp_dangling` collects those.
+    let mut dnp_dangling: Vec<(String, String)> = Vec::new();
+    for p in &dnp_dropped {
+        reported_missing.insert(EntityId::new(p.clone()));
+    }
+    // Whether a `(comp, _)` reference points at a depopulated instance — records the
+    // dangling connection for a `W_DNP` warning and returns true so the caller skips it.
+    let note_dnp = |comp: &str, ctx: &str, sink: &mut Vec<(String, String)>| -> bool {
+        if dnp_dropped.contains(comp) {
+            sink.push((ctx.to_string(), comp.to_string()));
+            true
+        } else {
+            false
+        }
+    };
 
     // Pass 1: instances.
     for d in source {
@@ -528,6 +823,13 @@ pub fn elaborate(
     for d in source {
         match d {
             GenDirective::ConnectInterface { a, b } => {
+                // A depopulated (`if=false`) endpoint makes the whole interface connect a
+                // no-op — skip it with a `W_DNP` rather than an unknown-instance error.
+                let ad = note_dnp(&a.0, "interface connect", &mut dnp_dangling);
+                let bd = note_dnp(&b.0, "interface connect", &mut dnp_dangling);
+                if ad || bd {
+                    continue;
+                }
                 let aid = EntityId::new(a.0.clone());
                 let bid = EntityId::new(b.0.clone());
                 let am = note_missing(
@@ -557,8 +859,11 @@ pub fn elaborate(
                     members: BTreeSet::new(),
                 });
                 for (comp, sel) in pins {
-                    let cid = EntityId::new(comp.clone());
                     let ctx = format!("net `{net}`");
+                    if note_dnp(comp, &ctx, &mut dnp_dangling) {
+                        continue;
+                    }
+                    let cid = EntityId::new(comp.clone());
                     if note_missing(&cid, &components, &mut reported_missing, &mut errors, &ctx) {
                         continue;
                     }
@@ -585,6 +890,9 @@ pub fn elaborate(
             }
             GenDirective::NoConnect { pins } => {
                 for (comp, sel) in pins {
+                    if note_dnp(comp, "no-connect", &mut dnp_dangling) {
+                        continue;
+                    }
                     let cid = EntityId::new(comp.clone());
                     if note_missing(
                         &cid,
@@ -748,6 +1056,12 @@ pub fn elaborate(
     // fault; the side resolution reuses the same top_mask/bottom_mask query pad openings
     // use, so the lint agrees with what the mask export actually covers.
     report.unmasked_copper = stackup(source).unmasked_outer_copper();
+    // DNP variant (Decision 21b): connections referencing an `if=false` depopulated
+    // instance were skipped above; surface each dangling reference as a `W_DNP` warning
+    // (deduped + sorted for a deterministic report).
+    dnp_dangling.sort();
+    dnp_dangling.dedup();
+    report.dnp_dangling = dnp_dangling;
 
     for (id, ov) in overrides {
         if !base.contains_key(id) || ov.pos.is_none() {
