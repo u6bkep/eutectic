@@ -1626,12 +1626,50 @@ fn stitching_via_connects_smd_pad_to_inner_plane() {
 }
 
 /// Padless-compatibility (Decision 19c): a bare terminal (a pin whose footprint
-/// carries NO pad copper — the toy library) keeps all-layer incidence, so it joins a
-/// same-net plane on any slab it sits over. The default `part_library`'s `LDO`/`Cap`
-/// pins are padless, so a GND plane on an inner slab still ties their GND pins.
+/// carries NO pad copper) keeps all-layer incidence, so it joins a same-net plane
+/// on any slab it sits over. The toy library's pins now carry real pad copper, so
+/// the test builds its own genuinely padless `LDO`/`Cap` stand-ins.
 #[test]
 fn bare_pin_keeps_all_layer_plane_incidence() {
-    let lib = part_library();
+    // Padless twins of the toy LDO/Cap: same pin names/offsets, `pad: None`.
+    let bare_pin = |name: &str, offset: Point| crate::part::PinDef {
+        name: name.into(),
+        number: name.into(),
+        role: crate::part::PinRole::Passive,
+        offset,
+        pad: None,
+    };
+    let bare_part = |name: &str, pins: Vec<crate::part::PinDef>| crate::part::PartDef {
+        name: name.into(),
+        pins,
+        interfaces: std::collections::BTreeMap::new(),
+        graphics: Vec::new(),
+        texts: Vec::new(),
+        courtyard: None,
+        class: None,
+    };
+    let mut lib = PartLib::new();
+    lib.insert(
+        "LDO".into(),
+        bare_part(
+            "LDO",
+            vec![
+                bare_pin("VIN", Point { x: -2 * MM, y: 0 }),
+                bare_pin("VOUT", Point { x: 2 * MM, y: 0 }),
+                bare_pin("GND", Point { x: 0, y: -2 * MM }),
+            ],
+        ),
+    );
+    lib.insert(
+        "Cap".into(),
+        bare_part(
+            "Cap",
+            vec![
+                bare_pin("p1", Point { x: -MM, y: 0 }),
+                bare_pin("p2", Point { x: MM, y: 0 }),
+            ],
+        ),
+    );
     let outline = Shape2D::polygon(vec![
         Point::mm(-6, -10),
         Point::mm(18, -10),

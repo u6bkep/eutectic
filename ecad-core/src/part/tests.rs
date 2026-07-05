@@ -621,9 +621,10 @@ fn courtyard_shape_covers_the_pads_plus_margin() {
 
 #[test]
 fn courtyard_shape_is_none_without_a_footprint() {
-    // Toy library parts carry no pads → no physical courtyard.
+    // Toy library parts now carry real pad copper, so a multi-pin toy part
+    // derives a pad-hull courtyard like an imported footprint.
     let lib = part_library();
-    assert!(courtyard_shape(&lib["LDO"]).is_none());
+    assert!(courtyard_shape(&lib["LDO"]).is_some());
     // A single round pad has only one skeleton vertex: no 2-D hull → None.
     let one = PartDef {
         name: "dot".into(),
@@ -811,8 +812,16 @@ fn imported_courtyard_overrides_derived_hull() {
 
 #[test]
 fn pad_features_no_pad_is_empty() {
+    // A genuinely padless pin (the toy `pin()` helper now attaches real pad
+    // copper, so build the bare PinDef directly).
     let stackup = Stackup::default_2layer();
-    let pin = pin("VIN", PinRole::PowerIn, Point { x: 0, y: 0 });
+    let pin = PinDef {
+        name: "VIN".into(),
+        number: "VIN".into(),
+        role: PinRole::PowerIn,
+        offset: Point { x: 0, y: 0 },
+        pad: None,
+    };
     let c = comp("P", Point { x: 0, y: 0 }, Orient::from_deg(0).unwrap());
     assert!(pin.pad_features(&c, &stackup).is_empty());
 }

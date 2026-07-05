@@ -118,12 +118,14 @@ fn board_fixture_has_unrouted_findings_with_points() {
 #[test]
 fn clean_doc_has_no_findings() {
     // A board with a single 1-pin-per-net setup: no ratsnest (nets < 2 pins), no
-    // routed copper, no clearance pairs → clean.
+    // routed copper, no clearance pairs → clean. The cap is placed mid-board so
+    // its (toy) pad copper clears the board edge.
     use crate::app::DomainState;
     let src = "\
 inst C1 Cap
 net SOLO C1.p1
 nc C1.p2
+place C1 (5mm, 5mm)
 board (0mm, 0mm) (10mm, 0mm) (10mm, 10mm) (0mm, 10mm)
 ";
     let d = DomainState::from_source(src.to_string(), Some("clean.ecad".to_string()));

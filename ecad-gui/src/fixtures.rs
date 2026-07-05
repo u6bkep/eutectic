@@ -80,6 +80,8 @@ inst C1 Cap
 inst C2 Cap
 net GND C1.p1 C2.p1
 net VBUS C1.p2 C2.p2
+place C1 (15mm, 3mm)
+place C2 (15mm, 12mm)
 board (0mm, 0mm) (20mm, 0mm) (20mm, 15mm) (0mm, 15mm)
 region conductor net=GND layer=F.Cu (1mm, 1mm) (19mm, 1mm) (19mm, 14mm) (1mm, 14mm)
 text \"BRD\" (4mm, 7mm) h=2mm layer=F.SilkS
@@ -165,6 +167,10 @@ inst B1 Cap
 inst B2 Cap
 net NA A1.p1 A2.p1
 net NB B1.p1 B2.p1
+place A1 (5mm, 5mm)
+place A2 (15mm, 5mm)
+place B1 (5mm, 10mm)
+place B2 (15mm, 10mm)
 board (0mm, 0mm) (20mm, 0mm) (20mm, 15mm) (0mm, 15mm)
 ";
 
@@ -359,40 +365,17 @@ pub fn dual_boards() -> EcadApp {
 // dirty → explicit Reload / Keep-mine, never silent last-writer).
 // ---------------------------------------------------------------------------
 
-/// The m6 editing library: the built-in toy library with REAL pad copper
-/// overlaid on the `Cap` pins (a 0.8 mm square at each pin offset, top side).
-/// The toy pins carry `pad: None` — no pad features, no `Pin` pick candidates —
-/// so components on the plain toy board are not grabbable; the editing scenes
-/// and drag tests need honest pad copper to pick, ghost, and ratsnest. Inline
-/// (no footprint files), so the scenes stay in the always-on lint bundle.
-pub fn padded_toy_lib() -> ecad_core::part::PartLib {
-    use ecad_core::geom::Shape2D;
-    use ecad_core::part::{PadCopper, PadGeo, PadLayers};
-    let mut lib = ecad_core::part::part_library();
-    if let Some(cap) = lib.get_mut("Cap") {
-        for pin in &mut cap.pins {
-            pin.pad = Some(PadGeo {
-                copper: vec![PadCopper {
-                    // Component-local: a square centred on the pin's own offset.
-                    shape: Shape2D::rect(pin.offset, 800_000, 800_000),
-                    layers: PadLayers::Top,
-                }],
-                drill: None,
-            });
-        }
-    }
-    lib
-}
-
 /// The m6 editing board: [`BOARD_ECAD`]'s two netted caps + outline + pour,
-/// elaborated against [`padded_toy_lib`] so the caps have real, pickable pad
-/// copper (no command-routed extras — the editing scenes exercise the commit
-/// path themselves).
+/// with no command-routed extras — the editing scenes exercise the commit path
+/// themselves. The built-in toy library now carries real pad copper (a 0.8 mm
+/// top-side square per pin), so the caps are pickable / draggable / routable
+/// against the plain `part_library()` — the slice-A `padded_toy_lib` overlay
+/// is retired.
 pub fn edit_board_domain() -> DomainState {
     DomainState::from_source_with(
         BOARD_ECAD.to_string(),
         Some("board.ecad".to_string()),
-        padded_toy_lib(),
+        ecad_core::part::part_library(),
         |_| Vec::new(),
     )
 }
@@ -409,8 +392,9 @@ pub fn drag_in_progress() -> EcadApp {
     let comp = EntityId::new("C1");
     let doc = app.domain.doc.as_ref().expect("edit board elaborates");
     let from = doc.components[&comp].pos.value;
+    // C1 sits at (15, 3); drag left+up so the ghost stays inside the board.
     let to = Point {
-        x: from.x + 5 * MM,
+        x: from.x - 5 * MM,
         y: from.y + 3 * MM,
     };
     let armed = app.set_drag(&comp, PaneId::A, to);

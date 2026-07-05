@@ -2,8 +2,9 @@
 //! cleanly separable from the type model in the parent module.
 
 use crate::doc::{MM, Point};
+use crate::geom::Shape2D;
 use crate::part::Dir::*;
-use crate::part::{InterfaceDef, PartDef, PartLib, PinDef, PinRole};
+use crate::part::{InterfaceDef, PadCopper, PadGeo, PadLayers, PartDef, PartLib, PinDef, PinRole};
 use std::collections::BTreeMap;
 
 fn uart() -> InterfaceDef {
@@ -23,15 +24,29 @@ fn uart() -> InterfaceDef {
     }
 }
 
+/// Toy pad copper: a 0.8 mm square on the top layer, centred on the pin offset.
+/// Real pad geometry (not just a point) so toy-lib components render, pick, and
+/// route like imported footprints — pads are candidates for the GUI's hit-test
+/// and honest obstacles/anchors for DRC and routing.
+const TOY_PAD_MM: Nm = 800_000; // 0.8 mm square
+
+use crate::doc::Nm;
+
 pub(crate) fn pin(name: &str, role: PinRole, offset: Point) -> PinDef {
     // No distinct pad numbering in the toy library: number defaults to the name.
-    // The toy parts carry no footprint, so they have no pad copper geometry.
     PinDef {
         name: name.into(),
         number: name.into(),
         role,
         offset,
-        pad: None,
+        pad: Some(PadGeo {
+            copper: vec![PadCopper {
+                // Component-local: a square centred on the pin's own offset.
+                shape: Shape2D::rect(offset, TOY_PAD_MM, TOY_PAD_MM),
+                layers: PadLayers::Top,
+            }],
+            drill: None,
+        }),
     }
 }
 

@@ -1130,9 +1130,10 @@ board (0mm, 0mm) (10mm, 0mm) (10mm, 10mm) (0mm, 10mm)
             "a doc with findings renders at least one source chip"
         );
 
-        // The clean doc from findings/tests.rs: single-pin nets, no copper.
+        // The clean doc from findings/tests.rs: single-pin nets, no routed copper,
+        // the cap placed mid-board so its (toy) pad copper clears the board edge.
         let clean = EcadApp::new(DomainState::from_source(
-            "inst C1 Cap\nnet SOLO C1.p1\nnc C1.p2\n\
+            "inst C1 Cap\nnet SOLO C1.p1\nnc C1.p2\nplace C1 (5mm, 5mm)\n\
              board (0mm, 0mm) (10mm, 0mm) (10mm, 10mm) (0mm, 10mm)\n"
                 .to_string(),
             Some("clean.ecad".to_string()),
@@ -1333,7 +1334,7 @@ net GND U1.GND
     // synthesized pointer events. All headless.
     // -----------------------------------------------------------------------
 
-    use crate::fixtures::{edit_board_domain, padded_toy_lib};
+    use crate::fixtures::edit_board_domain;
     use ecad_core::command::{Command, Transaction};
     use ecad_core::coord::{MM as NM_PER_MM, Point};
     use ecad_core::id::EntityId;
@@ -1463,7 +1464,10 @@ net GND U1.GND
         );
 
         // serialize → parse/elaborate → serialize is a fixpoint.
-        let d2 = DomainState::from_source_with(s.clone(), None, padded_toy_lib(), |_| Vec::new());
+        let d2 =
+            DomainState::from_source_with(s.clone(), None, ecad_core::part::part_library(), |_| {
+                Vec::new()
+            });
         let doc2 = d2.doc.as_ref().expect("canonical text elaborates");
         assert_eq!(ecad_core::text::serialize(doc2), s, "serialize fixpoint");
         assert_eq!(

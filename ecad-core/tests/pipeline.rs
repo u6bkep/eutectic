@@ -24,6 +24,63 @@ fn pos(d: &Doc, id: &str) -> Point {
     d.components[&EntityId::new(id)].pos.value
 }
 
+/// A padless twin of the toy `LDO` + `Cap` (same pin names/offsets, `pad: None`,
+/// so no pad-hull courtyard). The solver-semantics tests below assert exact pull
+/// distances that a courtyard spacing constraint legitimately relaxes — the toy
+/// library's pins now carry real pad copper, so those tests use these stand-ins
+/// to keep testing the *constraint* semantics in isolation.
+fn padless_lib() -> ecad_core::part::PartLib {
+    use ecad_core::part::{PartDef, PinDef, PinRole};
+    let pin = |name: &str, offset: Point| PinDef {
+        name: name.into(),
+        number: name.into(),
+        role: PinRole::Passive,
+        offset,
+        pad: None,
+    };
+    let part = |name: &str, pins: Vec<PinDef>| PartDef {
+        name: name.into(),
+        pins,
+        interfaces: BTreeMap::new(),
+        graphics: Vec::new(),
+        texts: Vec::new(),
+        courtyard: None,
+        class: None,
+    };
+    let mut lib = ecad_core::part::PartLib::new();
+    lib.insert(
+        "LDO".into(),
+        part(
+            "LDO",
+            vec![
+                pin("VIN", Point { x: -2 * MM, y: 0 }),
+                pin("VOUT", Point { x: 2 * MM, y: 0 }),
+                pin("GND", Point { x: 0, y: -2 * MM }),
+            ],
+        ),
+    );
+    lib.insert(
+        "Cap".into(),
+        part(
+            "Cap",
+            vec![
+                pin("p1", Point { x: -MM, y: 0 }),
+                pin("p2", Point { x: MM, y: 0 }),
+            ],
+        ),
+    );
+    lib
+}
+
+/// Like [`placed`], but elaborated against [`padless_lib`].
+fn placed_padless(src: Source) -> Doc {
+    let lib = padless_lib();
+    let mut h = History::new(Default::default());
+    h.commit(Transaction::one(Command::SetSource(src)), &lib, "s")
+        .unwrap();
+    h.doc().clone()
+}
+
 fn uart_link() -> Source {
     vec![
         GenDirective::Instance {
@@ -1195,12 +1252,14 @@ fn rotate_off_axis_is_accepted_as_a_quaternion() {
 /// Near-to-pin pulls a component onto a *pin's* world position, accounting for
 /// the host component's orientation. reg is fixed at the origin and rotated 90°,
 /// so its VOUT pin (local (2mm,0)) lands at world (0, 2mm); a cap constrained
-/// `nearpin reg.VOUT 0` is dragged there.
+/// `nearpin reg.VOUT 0` is dragged there. Padless stand-ins: a `within: 0` pull
+/// onto another part's pin would be relaxed by the padded toy parts' courtyard
+/// spacing, which is not what this test is about.
 #[test]
 fn near_to_pin_pulls_component_onto_rotated_pin() {
     use ecad_core::doc::Orient;
     use ecad_core::part::pin_world;
-    let d = placed(vec![
+    let d = placed_padless(vec![
         GenDirective::Instance {
             path: "reg".into(),
             part: "LDO".into(),
@@ -1228,7 +1287,7 @@ fn near_to_pin_pulls_component_onto_rotated_pin() {
             within: 0,
         },
     ]);
-    let lib = part_library();
+    let lib = padless_lib();
     let reg = &d.components[&EntityId::new("reg")];
     let pin_pos = pin_world(reg, &lib["LDO"], "VOUT").unwrap();
     assert_eq!(pin_pos, Point::mm(0, 2), "rotated pin world position");
@@ -1248,8 +1307,10 @@ fn hint_decays_when_solver_would_place_it_there_anyway() {
     // reg is fixed at the origin; dec is constrained to coincide with it.
     // A nudge of dec to the origin is therefore doing nothing -> it decays,
     // even though the value differs from the *row* default. This is the
-    // solver-based definition of "ineffective".
-    let lib = part_library();
+    // solver-based definition of "ineffective". Padless stand-ins: with the
+    // padded toy parts, courtyard spacing keeps dec off the origin, so the
+    // nudge would genuinely change the outcome and never decay.
+    let lib = padless_lib();
     let mut h = History::new(Default::default());
     let src = vec![
         GenDirective::Instance {

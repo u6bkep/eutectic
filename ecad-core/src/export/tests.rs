@@ -558,10 +558,14 @@ fn gerber_layer_has_format_apertures_draws_and_flashes() {
     assert!(top.contains("X10000000Y5000000D01*"));
     // The via flashes on Top (it spans Top..Bottom).
     assert!(top.contains("X10000000Y5000000D03*"));
-    // Exactly one draw (one 2-pt trace) and one flash (the via) on Top.
+    // The toy Cap pads (0.8 mm squares, top copper) flash with a rect aperture.
+    assert!(top.contains("%ADD12R,0.800000X0.800000*%"), "got:\n{top}");
+    // Exactly one draw (one 2-pt trace) on Top; five flashes — the via plus the
+    // two Caps' four top-side toy pads.
     assert_eq!(top.matches("D01*").count(), 1);
-    assert_eq!(top.matches("D03*").count(), 1);
-    // The Bottom layer carries the other trace and the same via flash.
+    assert_eq!(top.matches("D03*").count(), 5);
+    // The Bottom layer carries the other trace and the same via flash; the toy
+    // pads are Top-only, so no pad flashes land there.
     let bot = gerber_layer(&doc, &lib, &cu(&doc, "B.Cu"));
     assert_eq!(bot.matches("D01*").count(), 1);
     assert_eq!(bot.matches("D03*").count(), 1);

@@ -23,8 +23,6 @@ pub use geometry::{
     pin_world, swap_side, text_features, to_world,
 };
 pub use library::part_library;
-#[cfg(test)]
-pub(crate) use library::pin;
 
 /// Which copper layer(s) a pad's copper occupies. SMD pads sit on one outer layer;
 /// a plated through-hole's copper is `Through` (top + bottom, conceptually a barrel
