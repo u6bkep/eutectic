@@ -11,6 +11,8 @@
 //! - `autoroute` — basic deterministic grid/maze autorouter (transaction-proposer).
 //! - `elaborate` — generative source -> instances + ID-keyed override reconcile.
 //! - `part` — typed pins & interfaces (makes the serial swap unrepresentable).
+//! - `library` — manifest-driven library packages (`ecad.lib` directories) that
+//!   documents reference by name via `use` directives.
 //! - `project` — deterministic text projection (agent/git view).
 //! - `text` — canonical serializer + parser for tier-1 truth (the text front-end).
 //! - `export` — deterministic output artifacts (netlist / pick-and-place / SVG).
@@ -29,6 +31,7 @@ pub mod history;
 pub mod id;
 pub mod ir;
 pub mod kicad;
+pub mod library;
 pub mod part;
 pub mod project;
 pub mod quantity;
