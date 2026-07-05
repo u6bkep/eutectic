@@ -131,7 +131,11 @@ pub struct Candidate {
     /// phase reject. A pointer whose position, minus the tolerance, falls outside this box
     /// (saturating) cannot be within tolerance of the region, so it is skipped before the
     /// distance test. A degenerate (empty) region yields a zero-extent box at the origin;
-    /// such a candidate never hits, matching the old empty-region containment.
+    /// such a candidate never hits. Known divergence from the pre-derived-state picker:
+    /// a zero-radius `Stroke` used to become a `tol`-radius disc under the old per-event
+    /// `inflated(tol)` test and WAS pickable; here it tessellates empty and is not.
+    /// Unreachable for committed docs (trace width is ingest-validated positive,
+    /// `E_TRACE_WIDTH`), so no behavioral delta in practice.
     pub aabb: (Point, Point),
     /// The visual layer this candidate sits on — matched against the visibility
     /// predicate so hidden layers are not pickable.
