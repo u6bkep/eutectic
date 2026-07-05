@@ -12,11 +12,13 @@
 //! 2. a **screen-px pick tolerance** converted to a board distance through the
 //!    current zoom, so a 6-px grab radius stays 6 px on screen at every zoom (picking
 //!    does not get harder as you zoom out — the tolerance grows in board space);
-//! 3. a candidate walk over the **doc** (not `world_features`), because
-//!    `world_features` carries only a net annotation, never the owning entity id
-//!    (see the module note on provenance below). Each candidate is one
-//!    [`Candidate`] pairing a [`SemanticId`] with the world-space [`Shape2D`] to test
-//!    and the [`LayerId`] it lives on;
+//! 3. a candidate walk over the **same `world_features` stream the canvas renders**
+//!    (issue 0031): each derived [`NetFeature`] now carries a
+//!    [`FeatureOrigin`](ecad_core::geom::FeatureOrigin) naming the source entity it
+//!    was lowered from, so a rendered feature maps straight back to a selectable id
+//!    with no second walk over the doc. Each candidate is one [`Candidate`] pairing a
+//!    [`SemanticId`] with the world-space [`Shape2D`] to test and the [`LayerId`] it
+//!    lives on;
 //! 4. containment: a candidate hits when the query point is inside its shape inflated
 //!    by the tolerance, tested through the same [`shape_to_region`] kernel the SVG
 //!    backend and DRC use — so a filled pad/pour uses exact area containment and a
@@ -25,34 +27,34 @@
 //!    ([`PickPriority`]): pad/pin ▸ trace ▸ via ▸ pour ▸ board outline. Ties within a
 //!    priority break by top-most layer (highest z) first.
 //!
-//! # Provenance / granularity (the honest story)
+//! # Provenance: one stream, no double-walk (issue 0031)
 //!
-//! `ecad-core`'s [`world_features`](ecad_core::route::world_features) stream is the
-//! render producer, and each [`NetFeature`](ecad_core::geom::NetFeature) carries only
-//! `Option<NetId>` — **not** the trace / via / component / pin it came from
-//! (`NetFeature { net, feature }`, geometry-model Decision 12: the net is an
-//! annotation, identity lives elsewhere). So mapping a rendered feature back to a
-//! selectable entity id is *not* possible from that stream.
+//! `ecad-core`'s [`world_features`](ecad_core::route::world_features) stream is *the*
+//! render producer, and each [`NetFeature`](ecad_core::geom::NetFeature) now carries a
+//! [`FeatureOrigin`](ecad_core::geom::FeatureOrigin) naming the source entity it was
+//! derived from — the trace / via / component-pad / pour / board / silk it belongs to
+//! — populated at derivation where that entity is in hand. Mapping a rendered feature
+//! back to a selectable entity id is a pure `FeatureOrigin → SemanticId` fold.
 //!
-//! Rather than pick against `world_features` and lose identity, this module rebuilds
-//! the pickable geometry directly from the doc, where the ids live: `doc.traces`
-//! (→ [`TraceId`]), `doc.vias` (→ [`ViaId`]), `doc.components` + their `PartDef` pins
-//! (→ refdes [`EntityId`] and per-pin [`PinRef`]), and `elaborate::regions` for pour
-//! outlines (→ net + layer). This recovers **full granularity** — trace, via, pin,
-//! and pour identity are all resolvable GUI-side without touching `ecad-core`. The
-//! geometry is rebuilt with the same public constructors the engine uses
-//! ([`Shape2D::trace`], [`Shape2D::disc`], [`PinDef::pad_features`]), so a pick tests
-//! the identical copper extent the canvas draws. See the report's
-//! `selection_granularity` field.
+//! So the picker walks **the same stream the canvas renders** (there is no second walk
+//! over the doc). [`candidates`] filters that stream to the copper it can attribute
+//! (pad ▸ trace ▸ via ▸ pour) and maps each origin to a [`SemanticId`], reusing the
+//! feature's own [`Shape2D`] and z — the identical copper extent the canvas draws.
+//! Origins that name no selectable board entity (board substrate/mask, drill/mask
+//! `Void`s, silk/text markings, [`Unattributed`](ecad_core::geom::FeatureOrigin::Unattributed))
+//! contribute no candidate. This deletes the former doc-rebuild walk: render and pick
+//! can no longer silently diverge because they consume one producer.
 
 use super::LayerId;
 use damascene_core::viewport::ViewportView;
 use ecad_core::coord::{MM, Nm, Point};
-use ecad_core::doc::Doc;
+use ecad_core::doc::{Doc, PinRef};
 use ecad_core::geom::kernel::{DEFAULT_CIRCLE_SEGS, shape_to_region};
-use ecad_core::geom::{Extent, Role, Shape2D, Stackup};
+use ecad_core::geom::{Extent, FeatureOrigin, NetFeature, Role, Shape2D, Slab, Stackup};
 use ecad_core::id::{EntityId, NetId, TraceId, ViaId};
-use ecad_core::part::PartLib;
+use ecad_core::part::{PartLib, PinRole};
+use ecad_core::route::{DesignRules, world_features};
+use std::collections::BTreeMap;
 
 /// A stable, geometry-free semantic identity — the currency of the selection model
 /// (structural commitment 2). Every variant is an id (or a small id tuple), **never**
@@ -164,103 +166,131 @@ pub fn pointer_to_board_nm(
     })
 }
 
-/// Build every pickable [`Candidate`] for a doc: pour outlines, pad copper (per pin),
-/// traces, and vias (per spanned copper slab), plus the board outline as the
-/// last-resort candidate. Pure over the doc + library + stackup; the render cache is
-/// untouched. Emission is deterministic (doc iteration order is `BTreeMap`-stable).
+/// Build every pickable [`Candidate`] for a doc by folding the **same
+/// [`world_features`] stream the canvas renders** (issue 0031): each derived feature's
+/// [`FeatureOrigin`] maps to a [`SemanticId`], and the feature's own [`Shape2D`] + z is
+/// the pick geometry. Only copper the origin can attribute to a selectable board entity
+/// yields a candidate — pad ▸ trace ▸ via ▸ pour; substrate/mask/void/silk features
+/// (and any [`Unattributed`](FeatureOrigin::Unattributed)) contribute none. Pure over
+/// the doc + library + stackup; the render cache is untouched. Deterministic
+/// (`world_features` emits in a stable source order).
+///
+/// This replaced the former doc-rebuild walk (`doc.traces`/`vias`/`components` +
+/// `elaborate::regions`): render and pick now consume one producer and cannot silently
+/// diverge. `panic`-free — a committed doc never fails lowering (the commit-time slab
+/// gate); an unexpected lowering error degrades to *no* candidates (the whole board
+/// simply becomes unpickable) rather than crashing the UI.
 pub fn candidates(doc: &Doc, lib: &PartLib, su: &Stackup) -> Vec<Candidate> {
+    let Ok(features) = doc_world_features(doc, lib, su) else {
+        return Vec::new();
+    };
     let mut out: Vec<Candidate> = Vec::new();
-    let cu = su.copper_slabs();
 
-    // Pours: the authored conductor-region outline (not the knocked-out fill — a click
-    // anywhere inside the outline should select the pour; the knockouts are visual).
-    // Identity is net + layer. Priority Pour (large area, loses to everything on top).
-    for r in ecad_core::elaborate::regions(&doc.source) {
-        if r.role != Role::Conductor {
+    for nf in &features {
+        // Map the source-entity provenance to a selectable id + pick priority. Only the
+        // four attributable copper kinds are pickable; everything else (board body,
+        // mask, drill/mask voids, silk/text, Unattributed) names no board-entity id.
+        let (id, priority) = match &nf.origin {
+            FeatureOrigin::Pad { comp, pad } => (
+                SemanticId::Pin {
+                    comp: comp.clone(),
+                    // The pad NUMBER — the `PinRef`/net-membership join key — flows
+                    // straight through from `FeatureOrigin::Pad` (the engine tags it
+                    // with `pin.number`), never the functional name. This preserves the
+                    // m3 pin-identity contract by construction.
+                    pin: pad.clone(),
+                },
+                PickPriority::Pad,
+            ),
+            FeatureOrigin::Trace(tid) => (SemanticId::Trace(*tid), PickPriority::Trace),
+            FeatureOrigin::Via(vid) => (SemanticId::Via(*vid), PickPriority::Via),
+            FeatureOrigin::Region {
+                net: Some(net),
+                layer,
+            } => (
+                SemanticId::Pour {
+                    net: net.clone(),
+                    layer: layer.clone(),
+                },
+                PickPriority::Pour,
+            ),
+            // Netless region (keep-out), board body / mask, board / footprint markings,
+            // and Unattributed name no selectable board entity — not pickable.
+            FeatureOrigin::Region { net: None, .. }
+            | FeatureOrigin::ComponentMarking(_)
+            | FeatureOrigin::Board
+            | FeatureOrigin::BoardText
+            | FeatureOrigin::Unattributed => continue,
+        };
+
+        // Only copper is pickable: the pad/via *drill* `Void`s share their entity's
+        // origin (Pad / Via) but are not selectable copper — filter by role so a via's
+        // barrel copper is a candidate while its plated-drill Void is not.
+        if nf.feature.role != Role::Conductor {
             continue;
         }
-        let Some(net) = &r.net else { continue };
-        let Some(slab) = cu.iter().find(|s| s.name == r.layer) else {
+
+        let Extent::Prism { shape, z } = &nf.feature.extent;
+        // The visual layer this copper sits on — the slab whose z it matches (a via
+        // barrel fans to one Conductor feature per spanned copper slab, so a via yields
+        // one candidate per slab, keeping it pickable on any visible layer). A pour's
+        // z is its copper slab; a trace/pad's z is its slab.
+        let Some(slab) = slab_of_z(su, z) else {
             continue;
         };
         out.push(Candidate {
-            id: SemanticId::Pour {
-                net: NetId::new(net.clone()),
-                layer: r.layer.clone(),
-            },
-            shape: r.shape.clone(),
-            layer: LayerId::Slab(r.layer.clone()),
-            priority: PickPriority::Pour,
-            z_top: slab.z.hi,
+            id,
+            shape: shape.clone(),
+            layer: LayerId::Slab(slab.name.clone()),
+            priority,
+            z_top: z.hi,
         });
     }
 
-    // Pads / pins: each pin's copper features, rebuilt with the engine's own lowering
-    // (`pad_features`). One candidate per copper feature (a through pad fans to several
-    // slabs); identity is the pin ref. Priority Pad (most specific).
-    for c in doc.components.values() {
-        let Some(def) = lib.get(&c.part) else {
-            continue;
-        };
-        for pin in &def.pins {
-            for f in pin.pad_features(c, su) {
-                if f.role != Role::Conductor {
-                    continue; // the drill / mask-opening Void is not pickable copper
-                }
-                let Extent::Prism { shape, z } = &f.extent;
-                let Some(slab) = cu.iter().find(|s| s.z == *z) else {
-                    continue;
-                };
-                out.push(Candidate {
-                    id: SemanticId::Pin {
-                        comp: c.id.clone(),
-                        pin: pin.number.clone(),
-                    },
-                    shape: shape.clone(),
-                    layer: LayerId::Slab(slab.name.clone()),
-                    priority: PickPriority::Pad,
-                    z_top: z.hi,
-                });
-            }
-        }
-    }
-
-    // Traces: the honest capsule/polyline copper extent on the trace's named slab.
-    for (tid, t) in &doc.traces {
-        let Some(slab) = cu.iter().find(|s| s.name == t.layer) else {
-            continue;
-        };
-        out.push(Candidate {
-            id: SemanticId::Trace(*tid),
-            shape: Shape2D::trace(t.path.clone(), t.width),
-            layer: LayerId::Slab(t.layer.clone()),
-            priority: PickPriority::Trace,
-            z_top: slab.z.hi,
-        });
-    }
-
-    // Vias: the pad disc on every copper slab the via spans (so a hidden top layer
-    // still leaves the via pickable on a visible inner/bottom layer).
-    for (vid, v) in &doc.vias {
-        for slab in v.spanned_slabs(&cu) {
-            out.push(Candidate {
-                id: SemanticId::Via(*vid),
-                shape: Shape2D::disc(v.at, v.pad / 2),
-                layer: LayerId::Slab(slab.name.clone()),
-                priority: PickPriority::Via,
-                z_top: slab.z.hi,
-            });
-        }
-    }
-
-    // Board outline: the whole board region, the last-resort candidate so a click on
-    // bare substrate still lands *somewhere* meaningful. Selecting it currently maps to
-    // nothing selectable (no board-entity id), so it is emitted but the resolver drops
-    // an outline-only hit to "no selection" — clicking empty board clears, per the
-    // spec. Kept as a documented seam for a future board-properties selection.
-    // (Intentionally not emitted: it would make "click empty canvas clears" impossible.)
+    // Board outline: intentionally not emitted. A click on bare board must *clear* the
+    // selection (per the m3 spec); an always-present outline candidate would make
+    // "click empty canvas clears" impossible. A future board-properties selection would
+    // add it here (the `FeatureOrigin::Board` features already carry the identity).
 
     out
+}
+
+/// Build the `world_features` stream for a doc with default design rules — the one
+/// producer the canvas renders and the picker folds, so render and pick always agree
+/// (issue 0031). The GUI-side twin of `canvas::doc_world_features`.
+fn doc_world_features(doc: &Doc, lib: &PartLib, su: &Stackup) -> Result<Vec<NetFeature>, String> {
+    world_features(doc, lib, &doc_netlist(doc), &DesignRules::default(), su)
+}
+
+/// The membership netlist `world_features` needs, rebuilt from `doc.nets` (the
+/// crate-internal `route::doc_netlist` is not public). Roles are irrelevant to the
+/// geometry producer, so every member is `Passive` — matching the engine's own bridge
+/// and `canvas::doc_netlist`.
+fn doc_netlist(doc: &Doc) -> BTreeMap<NetId, Vec<(PinRef, PinRole)>> {
+    doc.nets
+        .iter()
+        .map(|(nid, net)| {
+            (
+                nid.clone(),
+                net.members
+                    .iter()
+                    .map(|pr| (pr.clone(), PinRole::Passive))
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// The stackup slab whose z-range contains the **midpoint** of a feature's z — the
+/// forward query the canvas uses to bin a feature onto its visual layer
+/// (`canvas::slab_of_z`), so the pick's `LayerId` matches the layer the feature renders
+/// on. Midpoint (not overlap) disambiguates the shared faces between contiguous slabs.
+fn slab_of_z<'a>(su: &'a Stackup, z: &ecad_core::geom::ZRange) -> Option<&'a Slab> {
+    let mid = z.lo + (z.hi - z.lo) / 2;
+    su.slabs
+        .iter()
+        .find(|s| s.z.lo <= mid && mid < s.z.hi)
+        .or_else(|| su.slabs.iter().find(|s| s.z.lo <= mid && mid <= s.z.hi))
 }
 
 /// Resolve a board-space query point (nm) to the winning [`Pick`], honoring the

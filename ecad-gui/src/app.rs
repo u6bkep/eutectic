@@ -208,13 +208,15 @@ pub struct EcadApp {
 
 /// The board projection held in app state: the [`Canvas`] (for coordinate
 /// inversion), the tessellated per-layer assets it built once, and the pre-built
-/// pick candidates (the doc-walk that recovers entity identity — see
-/// [`crate::canvas::pick`]). All built once per (doc revision) load.
+/// pick candidates (folded from the `world_features` stream via each feature's
+/// `FeatureOrigin` — see [`crate::canvas::pick`]). All built once per (doc
+/// revision) load.
 struct BoardView {
     canvas: Canvas,
     layers: Vec<BoardLayer>,
-    /// Pickable candidates over the doc (traces / vias / pins / pours), rebuilt only
-    /// when the doc loads — the hit-test input.
+    /// Pickable candidates (pins / traces / vias / pours), folded from the same
+    /// `world_features` stream the canvas renders and rebuilt only when the doc
+    /// loads — the hit-test input.
     candidates: Vec<Candidate>,
 }
 
