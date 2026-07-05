@@ -6,6 +6,7 @@
 //! the headless fixture-and-lint review loop.
 
 pub mod app;
+pub mod canvas;
 pub mod fixtures;
 
 pub use app::{DomainState, EcadApp, PaneState};
