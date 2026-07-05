@@ -118,7 +118,7 @@ A full, if prototype-grade, flow:
 
 **559 tests (510 lib + 49 integration), one dependency, `cargo clippy --all-targets` clean.**
 
-## Modules (`src/`)
+## Modules (`ecad-core/src/`)
 
 Most subsystems are a facade module (`foo.rs`) over a submodule directory (`foo/`);
 the "key submodules" note names the internal split where there is one.
@@ -166,7 +166,7 @@ cargo run -p ecad-core --example gerber       # Gerber/Excellon fab output
 cargo run -p ecad-core --example schematic    # authored schematic layout → rendered schematic SVG
 cargo run -p ecad-core --example svg_outline  # SVG import: outline + cutout → board → rendered SVG
 cargo run -p ecad-core --example poc_multiprobe  # the capstone: 4-layer RP2350A board, full pipeline
-cargo run -p ecad-gui [path.ecad]             # the GUI (opens a window; optional .ecad file to load)
+cargo run -p ecad-gui -- board.ecad          # the GUI (opens a window; the .ecad file arg is optional)
 ```
 
 ## Repository layout
@@ -176,7 +176,7 @@ The working tree lives in a sibling worktree of a bare repository:
 ```
 ecad/
 ├── .git/         bare repository
-├── main/         this worktree  (src/, docs/, examples/, README.md)
+├── main/         this worktree — cargo workspace: ecad-core/ (engine), ecad-gui/ (GUI), poc/, docs/
 ├── issues/       file-based issue tracker (outside the repo; migrates to GitHub Issues on upload)
 └── reference/    KiCad + Horizon EDA source mirrors (untracked, prior-art study)
 ```
