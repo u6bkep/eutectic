@@ -129,8 +129,12 @@ where
                         break; // app gone — stop polling.
                     }
                     wake();
+                    // Advance the baseline only on a successful read: if the read
+                    // raced an atomic rename-swap and failed, keeping the old
+                    // baseline makes the next poll retry this same edit even when
+                    // the settled mtime equals the one we just observed.
+                    last_mtime = now;
                 }
-                last_mtime = now;
             } else if now != last_mtime {
                 // File vanished (Some→None): update the baseline so its re-creation
                 // (None→Some) is detected as a change, but send nothing yet.
