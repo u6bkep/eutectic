@@ -21,10 +21,42 @@
 
 use damascene_core::prelude::Rect;
 use damascene_winit_wgpu::HostConfig;
-use ecad_gui::{DomainState, EcadApp, SourceMailbox};
+use ecad_gui::{DomainState, EcadApp, LibSource, Registry, SourceMailbox};
+
+/// The per-machine registry file location — computed **only here** (the
+/// registry module itself takes its path as a parameter; tests inject scratch
+/// paths and never touch the real config): `$XDG_CONFIG_HOME/ecad/libraries`,
+/// falling back to `$HOME/.config/ecad/libraries`. `None` when neither env var
+/// is set (registry edits then stay in-memory for the session).
+fn default_registry_path() -> Option<std::path::PathBuf> {
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME")
+        && !xdg.is_empty()
+    {
+        return Some(std::path::PathBuf::from(xdg).join("ecad/libraries"));
+    }
+    std::env::var_os("HOME")
+        .map(|home| std::path::PathBuf::from(home).join(".config/ecad/libraries"))
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = std::env::args().nth(1);
+
+    // The per-machine library registry (library packages, slice 2). A missing
+    // file is the empty first-run registry; a malformed one degrades to empty
+    // with a stderr warning (the app must still open — the Libraries menu is
+    // how you fix it — but note a later menu edit will then REWRITE the file).
+    let registry_path = default_registry_path();
+    let registry = match &registry_path {
+        Some(p) => Registry::load(p).unwrap_or_else(|e| {
+            eprintln!("warning: broken library registry ignored ({e})");
+            Registry::new()
+        }),
+        None => Registry::new(),
+    };
+    let lib_source = LibSource::Registry {
+        registry,
+        save_path: registry_path,
+    };
 
     let domain = match &path {
         Some(path) => {
@@ -33,9 +65,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let filename = std::path::Path::new(path)
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned());
-            DomainState::from_source(source, filename)
+            // Resolve the doc's `use` names through the registry (real
+            // libraries first, the built-in toy lib appended last).
+            let LibSource::Registry {
+                registry,
+                save_path,
+            } = lib_source
+            else {
+                unreachable!("lib_source is constructed as Registry above")
+            };
+            DomainState::from_source_registry(source, filename, registry, save_path)
         }
-        None => DomainState::empty(),
+        None => DomainState::empty().with_lib_source(lib_source),
     };
 
     // The live-source mailbox: the app keeps the receiver; the sender goes to the

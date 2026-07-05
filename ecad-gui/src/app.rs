@@ -402,6 +402,47 @@ fn finding_index_of_key(route: &str) -> Option<usize> {
 const SPLIT_HANDLE_KEY: &str = "pane:split";
 const SPLIT_ROW_KEY: &str = "pane:split-row";
 
+/// The toolbar button that opens/closes the Libraries menu (the single
+/// libraries UI — registry rows + add/remove + per-row load status).
+const LIBRARIES_TOGGLE_KEY: &str = "libraries:toggle";
+/// The Libraries menu's Close button.
+const LIBRARIES_CLOSE_KEY: &str = "libraries:close";
+/// The Libraries modal root key; damascene's `modal` emits `{key}:dismiss` for
+/// a click on the scrim outside the panel.
+const LIBRARIES_MODAL_KEY: &str = "libraries";
+/// The Libraries menu's add-entry button.
+const LIBRARIES_ADD_KEY: &str = "libraries:add";
+/// The two add-entry text inputs (damascene `text_input` keys).
+const LIB_NAME_INPUT_KEY: &str = "libraries:input:name";
+const LIB_PATH_INPUT_KEY: &str = "libraries:input:path";
+/// The route-key prefix of a registry row's Remove button (name appended).
+const LIBRARIES_REMOVE_PREFIX: &str = "libraries:remove:";
+
+/// The Remove-button key for the registry row named `name`.
+fn library_remove_key(name: &str) -> String {
+    format!("{LIBRARIES_REMOVE_PREFIX}{name}")
+}
+
+/// Libraries-menu interaction state: the two add-entry input strings, the
+/// shared damascene text [`Selection`] (caret + highlight — the app owns it,
+/// per the `text_input` contract), and the last add/remove/save error shown
+/// inline in the panel.
+#[derive(Default)]
+struct LibUi {
+    /// The add-entry "name" input value.
+    name: String,
+    /// The add-entry "path" input value.
+    path: String,
+    /// The global text selection (which input owns the caret, and where).
+    selection: Selection,
+    /// The last registry-edit error (invalid name / relative path / save
+    /// failure), rendered inline until the next successful edit.
+    error: Option<String>,
+}
+
+/// One cached Libraries-menu row: name, bound path, and its load status.
+type LibRow = (String, std::path::PathBuf, registry::RowStatus);
+
 /// The pick grab radius in screen (logical) px — converted to a board distance
 /// through the current zoom by [`pick::tolerance_nm`], so the on-screen radius is
 /// zoom-independent.
@@ -467,6 +508,15 @@ pub struct EcadApp {
     mailbox: SourceMailbox,
     /// Whether the findings panel section is expanded (collapsible like the explorer).
     findings_open: Cell<bool>,
+    /// Whether the Libraries menu (modal) is open.
+    libraries_open: Cell<bool>,
+    /// Libraries-menu interaction state (inputs + text selection + last error).
+    lib_ui: RefCell<LibUi>,
+    /// Cached per-row registry load statuses for the Libraries menu (`None` =
+    /// dirty; recomputed lazily on the next build). Invalidated on menu open
+    /// and on every registry edit — row status is a filesystem probe
+    /// ([`registry::row_status`]), so it must not run every frame.
+    lib_statuses: RefCell<Option<Vec<LibRow>>>,
 }
 
 /// The board projection held in app state: the [`Canvas`] (for coordinate
@@ -572,7 +622,32 @@ impl EcadApp {
             measure_pane: Cell::new(PaneId::A),
             mailbox: SourceMailbox::disconnected(),
             findings_open: Cell::new(true),
+            libraries_open: Cell::new(false),
+            lib_ui: RefCell::new(LibUi::default()),
+            lib_statuses: RefCell::new(None),
         }
+    }
+
+    /// Open or close the Libraries menu — for fixtures / tests. Opening
+    /// invalidates the row-status cache so the menu shows fresh statuses.
+    pub fn set_libraries_open(&self, open: bool) {
+        if open {
+            *self.lib_statuses.borrow_mut() = None;
+        }
+        self.libraries_open.set(open);
+    }
+
+    /// Pre-fill the Libraries add-entry inputs — for tests that drive the add
+    /// button without simulating per-character text input.
+    pub fn set_library_inputs(&self, name: &str, path: &str) {
+        let mut ui = self.lib_ui.borrow_mut();
+        ui.name = name.to_string();
+        ui.path = path.to_string();
+    }
+
+    /// The Libraries menu's last inline edit error — for tests.
+    pub fn library_edit_error(&self) -> Option<String> {
+        self.lib_ui.borrow().error.clone()
     }
 
     /// Attach a live-source [`SourceMailbox`] — the windowed `main.rs` wires this to
@@ -1291,6 +1366,7 @@ impl EcadApp {
             lead.push(reload_error_chip(err));
         }
         lead.push(button(layout_label).key(LAYOUT_TOGGLE_KEY));
+        lead.push(button("Libraries").key(LIBRARIES_TOGGLE_KEY));
         lead.push(spacer());
         lead.push(row(tool_buttons).gap(tokens::SPACE_1));
         lead.push(text(format!("{:.0}%", zoom * 100.0)).muted().mono());
@@ -1472,9 +1548,266 @@ impl EcadApp {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The Libraries menu (library packages, slice 2): the single libraries UI.
+// A modal over the whole window — registry rows (name → path + load status +
+// remove), an add-entry form, and a close affordance. Live edit semantics:
+// add/remove saves the registry file immediately AND re-resolves the current
+// doc through the same path a source reload takes.
+// ---------------------------------------------------------------------------
+
+impl EcadApp {
+    /// The cached Libraries-menu rows (name, path, load status), recomputed
+    /// lazily when the cache was invalidated (menu open, registry edit). Row
+    /// status probes the filesystem ([`registry::row_status`]) — every row is
+    /// probed, whether or not the current doc `use`s it, so the menu doubles
+    /// as the "why is my library broken" diagnostic.
+    fn lib_rows(&self) -> Vec<LibRow> {
+        let mut cache = self.lib_statuses.borrow_mut();
+        cache
+            .get_or_insert_with(|| match &self.domain.lib_source {
+                LibSource::Registry { registry, .. } => registry
+                    .iter()
+                    .map(|(n, p)| (n.to_string(), p.to_path_buf(), registry::row_status(p)))
+                    .collect(),
+                LibSource::Fixed(_) => Vec::new(),
+            })
+            .clone()
+    }
+
+    /// The Libraries modal: registry rows, the add-entry form (two text
+    /// inputs + Add), the inline error line, and Close. Rendered through
+    /// damascene's `modal` (scrim + centered panel), consistent with the
+    /// existing panel styling (cards + badges + muted captions).
+    fn libraries_modal(&self) -> El {
+        let ui = self.lib_ui.borrow();
+        let rows = self.lib_rows();
+
+        let mut body: Vec<El> =
+            vec![
+            text("Per-machine bindings for `use NAME` library packages: NAME → absolute directory.")
+                .muted()
+                .wrap_text()
+                .width(Size::Fill(1.0)),
+        ];
+
+        if let LibSource::Fixed(_) = self.domain.lib_source {
+            body.push(
+                text("No registry attached (fixed library) — edits here cannot apply.").muted(),
+            );
+        } else if rows.is_empty() {
+            body.push(text("No libraries registered.").muted());
+        }
+        if !rows.is_empty() {
+            let row_els: Vec<El> = rows.iter().map(library_row).collect();
+            body.push(column(row_els).gap(tokens::SPACE_1).width(Size::Fill(1.0)));
+        }
+
+        body.push(separator());
+        body.push(
+            row([
+                text_input_with(
+                    LIB_NAME_INPUT_KEY,
+                    &ui.name,
+                    &ui.selection,
+                    TextInputOpts::default().placeholder("name"),
+                )
+                .width(Size::Fixed(110.0)),
+                text_input_with(
+                    LIB_PATH_INPUT_KEY,
+                    &ui.path,
+                    &ui.selection,
+                    TextInputOpts::default().placeholder("/absolute/path/to/package"),
+                )
+                .width(Size::Fill(1.0)),
+                button("Add").key(LIBRARIES_ADD_KEY).primary(),
+            ])
+            .gap(tokens::SPACE_2)
+            .align(Align::Center)
+            .width(Size::Fill(1.0)),
+        );
+        if let Some(err) = &ui.error {
+            body.push(
+                alert([alert_description(err.clone())])
+                    .destructive()
+                    .width(Size::Fill(1.0)),
+            );
+        }
+        body.push(row([spacer(), button("Close").key(LIBRARIES_CLOSE_KEY)]).width(Size::Fill(1.0)));
+
+        modal(LIBRARIES_MODAL_KEY, "Libraries", body)
+    }
+
+    /// Handle an event while the Libraries menu is open. Returns `true` when
+    /// the event was consumed by the menu (everything else stays behind the
+    /// scrim; unconsumed events fall through to the normal handlers).
+    fn handle_libraries_event(&mut self, event: &UiEvent) -> bool {
+        // Close affordances: the Close button, a scrim click, Escape.
+        if event.is_click_or_activate(LIBRARIES_CLOSE_KEY)
+            || event.is_click_or_activate(&format!("{LIBRARIES_MODAL_KEY}:dismiss"))
+            || event.kind == UiEventKind::Escape
+        {
+            self.libraries_open.set(false);
+            return true;
+        }
+
+        // The two add-entry text inputs: fold routed edits into the app-owned
+        // strings + shared Selection (the damascene text_input contract —
+        // apply_event self-gates pointer events by route, key events by focus).
+        {
+            let mut ui = self.lib_ui.borrow_mut();
+            let LibUi {
+                name,
+                path,
+                selection,
+                ..
+            } = &mut *ui;
+            if text_input::apply_event(name, selection, event, LIB_NAME_INPUT_KEY)
+                || text_input::apply_event(path, selection, event, LIB_PATH_INPUT_KEY)
+            {
+                return true;
+            }
+            // A runtime selection update (focus moved, drag-select) not folded by
+            // either input: adopt it so `App::selection` reports the live state.
+            if let Some(sel) = &event.selection {
+                *selection = sel.clone();
+            }
+        }
+
+        if event.is_click_or_activate(LIBRARIES_ADD_KEY) {
+            self.add_library_entry();
+            return true;
+        }
+        if matches!(event.kind, UiEventKind::Click | UiEventKind::Activate)
+            && let Some(name) = event
+                .route()
+                .and_then(|r| r.strip_prefix(LIBRARIES_REMOVE_PREFIX))
+        {
+            let name = name.to_string();
+            self.remove_library_entry(&name);
+            return true;
+        }
+        false
+    }
+
+    /// The Add button: register the (trimmed) name → path from the inputs.
+    /// Validation (single-token name, absolute path) happens in
+    /// [`Registry::set`]; a failure renders inline and leaves the inputs
+    /// untouched for correction.
+    fn add_library_entry(&mut self) {
+        let (name, path) = {
+            let ui = self.lib_ui.borrow();
+            (ui.name.trim().to_string(), ui.path.trim().to_string())
+        };
+        match self.edit_registry(|reg| reg.set(&name, std::path::Path::new(&path))) {
+            Ok(()) => {
+                let mut ui = self.lib_ui.borrow_mut();
+                ui.name.clear();
+                ui.path.clear();
+                ui.error = None;
+            }
+            Err(e) => self.lib_ui.borrow_mut().error = Some(e),
+        }
+    }
+
+    /// A row's Remove button: drop the entry (removing a name that is already
+    /// gone is a no-op, not an error).
+    fn remove_library_entry(&mut self, name: &str) {
+        match self.edit_registry(|reg| {
+            reg.remove(name);
+            Ok(())
+        }) {
+            Ok(()) => self.lib_ui.borrow_mut().error = None,
+            Err(e) => self.lib_ui.borrow_mut().error = Some(e),
+        }
+    }
+
+    /// Apply `edit` to the registry, then the **live edit semantics**: save
+    /// the registry file immediately (when a save path is wired — `main.rs`
+    /// wires the per-machine default; fixtures may leave it `None`),
+    /// invalidate the row-status cache, and re-resolve + re-elaborate the
+    /// current doc through [`apply_reload`](Self::apply_reload) — the *same*
+    /// code path as a source reload, so the revision bumps and cameras /
+    /// selection / layer visibility are preserved exactly as a reload
+    /// preserves them. The empty (no-document) state skips the re-elaborate
+    /// (there is no source to resolve).
+    fn edit_registry(
+        &mut self,
+        edit: impl FnOnce(&mut Registry) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let LibSource::Registry {
+            registry,
+            save_path,
+        } = &mut self.domain.lib_source
+        else {
+            return Err("no registry attached (fixed library)".to_string());
+        };
+        edit(registry)?;
+        let saved = match save_path {
+            Some(p) => registry.save(p),
+            None => Ok(()),
+        };
+        *self.lib_statuses.borrow_mut() = None;
+        if self.domain.filename.is_some() {
+            // Re-elaborating the last-GOOD source says nothing about a *newer*
+            // broken source on disk: if a reload-error banner is up, it must
+            // survive this registry-triggered reload (only a good reload of
+            // fresh source may clear it).
+            let prior_error = self.domain.reload_error.clone();
+            let source = self.domain.source.clone();
+            self.apply_reload(source);
+            if self.domain.reload_error.is_none() {
+                self.domain.reload_error = prior_error;
+            }
+        }
+        saved
+    }
+}
+
+/// One Libraries-menu registry row: the name + status badge + Remove button
+/// over the bound path (and, for a manifest error, the loader's message).
+fn library_row((name, path, status): &LibRow) -> El {
+    use crate::registry::RowStatus;
+    let status_badge = match status {
+        RowStatus::Ok { parts } => badge(format!("OK · {parts} parts")).success(),
+        RowStatus::Missing => badge("path missing").destructive(),
+        RowStatus::Error(_) => badge("manifest error").destructive(),
+    };
+    let mut lines = vec![
+        row([
+            text(name.clone()).mono().width(Size::Fill(1.0)).ellipsis(),
+            status_badge,
+            button("Remove").key(library_remove_key(name)),
+        ])
+        .gap(tokens::SPACE_2)
+        .align(Align::Center)
+        .width(Size::Fill(1.0)),
+        text(path.display().to_string())
+            .muted()
+            .caption()
+            .mono()
+            .width(Size::Fill(1.0))
+            .ellipsis(),
+    ];
+    if let RowStatus::Error(msg) = status {
+        lines.push(
+            text(msg.clone())
+                .caption()
+                .wrap_text()
+                .width(Size::Fill(1.0)),
+        );
+    }
+    column(lines)
+        .gap(tokens::SPACE_1)
+        .fill(tokens::CARD)
+        .radius(tokens::RADIUS_SM)
+        .padding(Sides::xy(tokens::SPACE_2, tokens::SPACE_1))
+        .width(Size::Fill(1.0))
+}
+
 impl App for EcadApp {
     fn build(&self, cx: &BuildCx) -> El {
-        match &self.domain.doc {
+        let main = match &self.domain.doc {
             // A loaded doc renders the two-pane viewer (at least one pane always shows
             // something — board or schematic). Even a board-only or schematic-only doc
             // gets panes; the empty side shows a placeholder.
@@ -1482,15 +1815,23 @@ impl App for EcadApp {
             Err(message) => {
                 let chrome = toolbar([
                     toolbar_title("ecad"),
-                    spacer(),
                     badge("no document").muted(),
+                    spacer(),
+                    button("Libraries").key(LIBRARIES_TOGGLE_KEY),
                 ])
+                .gap(tokens::SPACE_2)
                 .padding(Sides::xy(tokens::SPACE_4, tokens::SPACE_2));
                 page([column([chrome, error_card(message)])
                     .gap(tokens::SPACE_4)
                     .height(Size::Fill(1.0))])
             }
-        }
+        };
+        // The Libraries menu floats over whichever body rendered (it must be
+        // reachable even with no document — that is when you register libs).
+        overlays(
+            main,
+            [self.libraries_open.get().then(|| self.libraries_modal())],
+        )
     }
 
     fn before_build(&mut self) {
@@ -1578,6 +1919,17 @@ impl App for EcadApp {
                 self.split_weights.set(w);
                 return;
             }
+        }
+
+        // Libraries menu (slice 2): the toolbar toggle opens/closes; while open,
+        // the modal's own controls (inputs / add / remove / close / scrim) are
+        // handled first — everything else sits behind the scrim.
+        if event.is_click_or_activate(LIBRARIES_TOGGLE_KEY) {
+            self.set_libraries_open(!self.libraries_open.get());
+            return;
+        }
+        if self.libraries_open.get() && self.handle_libraries_event(&event) {
+            return;
         }
 
         // Dual/stacked layout toggle.
@@ -1727,6 +2079,13 @@ impl App for EcadApp {
 
     fn drain_viewport_requests(&mut self) -> Vec<ViewportRequest> {
         std::mem::take(&mut self.pending.borrow_mut())
+    }
+
+    /// The app's current text selection — the Libraries menu's inputs are the
+    /// only text fields, so their shared [`Selection`] is the app's (the host
+    /// reads this once per frame to paint highlight bands / resolve clipboard).
+    fn selection(&self) -> Selection {
+        self.lib_ui.borrow().selection.clone()
     }
 }
 
@@ -2463,4 +2822,209 @@ board (0mm, 0mm) (10mm, 0mm) (10mm, 10mm) (0mm, 10mm)
 inst U1
 net GND U1.GND
 ";
+
+    // -----------------------------------------------------------------------
+    // Library packages, slice 2: registry-driven resolution + the Libraries
+    // menu's live edit semantics. All headless; registries live in scratch
+    // dirs (never the per-user config — the path is injected).
+    // -----------------------------------------------------------------------
+
+    use crate::registry::Registry;
+
+    /// The in-repo poc library package directory (an absolute path — the
+    /// crate manifest dir is absolute).
+    fn poc_parts_dir() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../poc/parts")
+    }
+
+    /// A one-instance source that only the poc package can resolve.
+    const USE_POC_SRC: &str = "use poc\ninst U1 RP2350A\n";
+
+    /// A scratch dir under the system temp dir, removed on drop.
+    struct Scratch(std::path::PathBuf);
+    impl Scratch {
+        fn new(tag: &str) -> Scratch {
+            let dir =
+                std::env::temp_dir().join(format!("ecad-app-test-{tag}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("create scratch dir");
+            Scratch(dir)
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The Libraries-menu add flow end to end: with `use poc` unregistered the
+    /// doc loads degraded (instance skipped, W_LIB_UNREGISTERED in the
+    /// findings); adding the poc entry through the menu saves the registry
+    /// file, re-resolves + re-elaborates through the reload path (revision
+    /// bump), and the part now resolves. Removing it degrades again.
+    #[test]
+    fn registry_add_and_remove_reresolve_the_current_doc() {
+        let scratch = Scratch::new("add-remove");
+        let save = scratch.0.join("libraries");
+        let mut app = EcadApp::new(DomainState::from_source_registry(
+            USE_POC_SRC.to_string(),
+            Some("t.ecad".to_string()),
+            Registry::new(),
+            Some(save.clone()),
+        ));
+        let doc = app.domain.doc.as_ref().expect("degraded load succeeds");
+        assert!(doc.components.is_empty(), "RP2350A unresolved at first");
+        assert!(
+            app.findings()
+                .items
+                .iter()
+                .any(|i| i.code == "W_LIB_UNREGISTERED"),
+            "the unregistered use renders in the findings"
+        );
+        assert_eq!(app.revision(), 0);
+
+        // Drive the menu: open, fill the add-entry inputs, click Add.
+        let cx = EventCx::new();
+        app.on_event(click(LIBRARIES_TOGGLE_KEY), &cx);
+        assert!(app.libraries_open.get(), "toolbar button opens the menu");
+        app.set_library_inputs("poc", poc_parts_dir().to_str().unwrap());
+        app.on_event(click(LIBRARIES_ADD_KEY), &cx);
+
+        assert_eq!(
+            app.revision(),
+            1,
+            "a registry edit re-elaborates through the reload path (bump once)"
+        );
+        assert_eq!(app.library_edit_error(), None);
+        let doc = app.domain.doc.as_ref().unwrap();
+        assert_eq!(doc.components.len(), 1, "RP2350A resolves after the add");
+        assert!(
+            !app.findings()
+                .items
+                .iter()
+                .any(|i| i.code == "W_LIB_UNREGISTERED" || i.code == "W_UNRESOLVED_PART"),
+            "the library findings clear once the name binds"
+        );
+        // Live edit semantics: the registry file was saved immediately.
+        let back = Registry::load(&save).expect("saved registry loads");
+        assert_eq!(back.get("poc"), Some(poc_parts_dir().as_path()));
+        // The add cleared the inputs.
+        assert_eq!(app.lib_ui.borrow().name, "");
+        assert_eq!(app.lib_ui.borrow().path, "");
+
+        // Remove flow: the row's Remove button unbinds + re-resolves again.
+        app.on_event(click(&library_remove_key("poc")), &cx);
+        assert_eq!(app.revision(), 2);
+        assert!(
+            app.domain.doc.as_ref().unwrap().components.is_empty(),
+            "unbinding the library degrades the doc again"
+        );
+        let back = Registry::load(&save).expect("saved registry loads");
+        assert!(back.is_empty(), "the removal was saved");
+    }
+
+    /// A relative path in the add form is rejected at the boundary: the error
+    /// renders inline, nothing is saved, and the doc is untouched (no revision
+    /// bump).
+    #[test]
+    fn registry_add_rejects_relative_path_inline() {
+        let scratch = Scratch::new("relative");
+        let save = scratch.0.join("libraries");
+        let mut app = EcadApp::new(DomainState::from_source_registry(
+            USE_POC_SRC.to_string(),
+            Some("t.ecad".to_string()),
+            Registry::new(),
+            Some(save.clone()),
+        ));
+        let cx = EventCx::new();
+        app.set_libraries_open(true);
+        app.set_library_inputs("poc", "relative/path");
+        app.on_event(click(LIBRARIES_ADD_KEY), &cx);
+        let err = app.library_edit_error().expect("inline error set");
+        assert!(err.contains("absolute"), "{err}");
+        assert_eq!(app.revision(), 0, "no re-elaborate on a rejected edit");
+        assert!(!save.exists(), "nothing saved on a rejected edit");
+        // The inputs stay for correction.
+        assert_eq!(app.lib_ui.borrow().path, "relative/path");
+    }
+
+    /// A source reload that ADDS a `use` line re-runs resolution against the
+    /// registry — the lib is re-derived per load, not fixed at open time.
+    #[test]
+    fn reload_reresolves_use_names() {
+        let mut registry = Registry::new();
+        registry.set("poc", &poc_parts_dir()).unwrap();
+        let mut app = EcadApp::new(DomainState::from_source_registry(
+            "inst U1 RP2350A\n".to_string(),
+            Some("t.ecad".to_string()),
+            registry,
+            None,
+        ));
+        assert!(
+            app.domain.doc.as_ref().unwrap().components.is_empty(),
+            "without a use line the registry is not consulted"
+        );
+        app.apply_reload(USE_POC_SRC.to_string());
+        assert_eq!(app.revision(), 1);
+        assert_eq!(
+            app.domain.doc.as_ref().unwrap().components.len(),
+            1,
+            "the reload's new `use poc` resolves through the registry"
+        );
+    }
+
+    /// A registry edit while a reload-error banner is up re-elaborates the
+    /// last-GOOD source — which says nothing about the newer broken source on
+    /// disk, so the banner must survive the registry-triggered reload.
+    #[test]
+    fn registry_edit_preserves_a_standing_reload_error() {
+        let mut registry = Registry::new();
+        registry.set("poc", &poc_parts_dir()).unwrap();
+        let mut app = EcadApp::new(DomainState::from_source_registry(
+            USE_POC_SRC.to_string(),
+            Some("t.ecad".to_string()),
+            registry,
+            None,
+        ));
+        // A broken disk source arrives: banner up, last-good doc stays.
+        app.apply_reload(BROKEN_SRC.to_string());
+        assert!(app.reload_error().is_some(), "banner up");
+
+        // A registry edit re-resolves the last-good source; the banner stays.
+        let cx = EventCx::new();
+        app.set_libraries_open(true);
+        app.on_event(click(&library_remove_key("poc")), &cx);
+        assert!(
+            app.reload_error().is_some(),
+            "the banner must survive a registry-triggered reload of the stale-good source"
+        );
+    }
+
+    /// Escape closes the Libraries menu (and is consumed — the selection
+    /// survives), and the scrim/close affordances work.
+    #[test]
+    fn libraries_menu_escape_and_close() {
+        let mut app = EcadApp::new(schematic_domain());
+        let cx = EventCx::new();
+        app.domain
+            .selection
+            .borrow_mut()
+            .select_only(SemanticId::Net(NetId::new("VDD")));
+
+        app.on_event(click(LIBRARIES_TOGGLE_KEY), &cx);
+        assert!(app.libraries_open.get());
+        // damascene has no generic synthetic constructor; shape an Escape by hand.
+        let mut esc = UiEvent::synthetic_click("");
+        esc.key = None;
+        esc.kind = UiEventKind::Escape;
+        app.on_event(esc, &cx);
+        assert!(!app.libraries_open.get(), "Escape closes the menu");
+        assert!(
+            !app.domain.selection.borrow().is_empty(),
+            "Escape was consumed by the menu — the selection survives"
+        );
+
+        app.on_event(click(LIBRARIES_TOGGLE_KEY), &cx);
+        app.on_event(click(LIBRARIES_CLOSE_KEY), &cx);
+        assert!(!app.libraries_open.get(), "Close button closes the menu");
+    }
 }

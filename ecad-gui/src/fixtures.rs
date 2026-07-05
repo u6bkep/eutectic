@@ -353,6 +353,68 @@ pub fn dual_boards() -> EcadApp {
 }
 
 // ---------------------------------------------------------------------------
+// Library-packages slice-2 scenes: a doc whose `use` name resolves to nothing
+// (registry-driven, permissive degrade → findings rows + a loaded-but-degraded
+// board), and the Libraries menu open over it.
+// ---------------------------------------------------------------------------
+
+/// A doc that `use`s an unregistered library and instantiates a part only that
+/// library could provide: `nolib` misses the registry (a `W_LIB_UNREGISTERED`
+/// note), `Ghost` misses the resolved lib (an engine `W_UNRESOLVED_PART`
+/// finding — U9 is skipped), and the two toy caps + outline still elaborate —
+/// the loaded-but-degraded board the findings panel annotates.
+pub const UNRESOLVED_LIBS_ECAD: &str = "\
+use nolib
+inst U9 Ghost
+inst C1 Cap
+inst C2 Cap
+net GND C1.p1 C2.p1
+net VBUS C1.p2 C2.p2
+board (0mm, 0mm) (20mm, 0mm) (20mm, 15mm) (0mm, 15mm)
+";
+
+/// The unresolved-libraries [`DomainState`]: [`UNRESOLVED_LIBS_ECAD`] resolved
+/// through an **empty test registry** (never the per-user config; no save
+/// path), so resolution degrades exactly as a fresh machine would: the doc
+/// loads, the findings carry the unregistered-library note and the skipped
+/// instance.
+pub fn unresolved_libs_domain() -> DomainState {
+    DomainState::from_source_registry(
+        UNRESOLVED_LIBS_ECAD.to_string(),
+        Some("unresolved.ecad".to_string()),
+        crate::registry::Registry::new(),
+        None,
+    )
+}
+
+/// The unresolved-libraries scene: findings rows (`W_LIB_UNREGISTERED` +
+/// `W_UNRESOLVED_PART`) over the degraded-but-rendered board.
+pub fn unresolved_libs() -> EcadApp {
+    EcadApp::new(unresolved_libs_domain())
+}
+
+/// The Libraries menu open over the unresolved-libraries doc, with a test
+/// registry containing one entry whose path does not exist — the menu's rows
+/// show the per-row load status (here: "path missing"), the add-entry inputs,
+/// and the close affordance. The path is deterministic and never touched
+/// (nothing is created there), so the scene needs no file IO to render.
+pub fn libraries_menu() -> EcadApp {
+    let mut registry = crate::registry::Registry::new();
+    registry
+        .set("stale", std::path::Path::new("/nonexistent/ecad-lib"))
+        .expect("absolute path registers");
+    let domain = DomainState::from_source_registry(
+        UNRESOLVED_LIBS_ECAD.to_string(),
+        Some("unresolved.ecad".to_string()),
+        registry,
+        None,
+    );
+    let app = EcadApp::new(domain);
+    app.set_libraries_open(true);
+    app
+}
+
+// ---------------------------------------------------------------------------
 // The real 4-layer multiprobe board, loaded from `poc/out/board.ecad` with the
 // same KiCad-imported library the `poc_multiprobe` example builds. Reads files at
 // call time (path relative to the crate manifest) — used by the end-to-end smoke
@@ -396,6 +458,8 @@ pub fn all() -> Vec<(&'static str, EcadApp)> {
         ("stacked_layout", stacked_layout()),
         ("maximized_pane", maximized_pane()),
         ("dual_boards", dual_boards()),
+        ("unresolved_libs", unresolved_libs()),
+        ("libraries_menu", libraries_menu()),
     ]
 }
 
@@ -453,12 +517,14 @@ mod tests {
         harness::assert_content_coverage("document_loaded", &r, &[PaneId::A.canvas_key()]);
     }
 
-    /// Library packages, slice 1: a source whose only fault is an *unknown part*
-    /// LOADS (permissive degrade) with a `W_UNRESOLVED_PART` finding on the report —
-    /// the instance is skipped and its netted pins are cascade-suppressed, never a
-    /// hard error. (Findings-panel display of the warning is next slice.)
+    /// Library packages, slice 1 + 2: a source whose only fault is an *unknown
+    /// part* LOADS (permissive degrade) with a `W_UNRESOLVED_PART` finding on the
+    /// report — the instance is skipped and its netted pins are cascade-suppressed,
+    /// never a hard error — and (slice 2) the skip renders as an **informational**
+    /// findings-panel row (warning; no refs, no halo — the entity doesn't exist).
     #[test]
     fn unresolved_part_loads_with_finding() {
+        use crate::findings::Findings;
         let d = DomainState::from_source(
             "inst U1 NotAPart\nnet GND U1.GND\n".to_string(),
             Some("unresolved.ecad".to_string()),
@@ -480,6 +546,22 @@ mod tests {
         let (id, part, _help) = &doc.report.unresolved_parts[0];
         assert_eq!(id.to_string(), "U1");
         assert_eq!(part, "NotAPart");
+
+        // Slice 2: the skip is a findings-panel row — a warning that counts into
+        // the chip, informational (nothing to select or zoom to).
+        let f = Findings::compute(doc, &d.lib, &[], &d.lib_notes);
+        let row = f
+            .items
+            .iter()
+            .find(|i| i.code == "W_UNRESOLVED_PART")
+            .expect("the skip renders as a findings row");
+        assert!(
+            row.message.contains("NotAPart") && row.message.contains("U1"),
+            "the row names the instance and the part: {}",
+            row.message
+        );
+        assert!(row.is_informational(), "no geometry → non-navigating row");
+        assert!(f.warnings >= 1, "counts into the chip as a warning");
     }
 
     #[test]
@@ -602,6 +684,51 @@ mod tests {
         // Two board panes over the same doc — both show board content, both fit.
         let r = render_clean("dual_boards", dual_boards());
         harness::assert_content_coverage("dual_boards", &r, &canvas_keys());
+    }
+
+    /// The unresolved-libraries scene (slice 2): the doc LOADS degraded (the ghost
+    /// instance skipped, the caps + outline render), and the findings carry BOTH
+    /// library rows — the GUI-side `W_LIB_UNREGISTERED` resolution note and the
+    /// engine `W_UNRESOLVED_PART` — as chip-counted warnings.
+    #[test]
+    fn unresolved_libs_is_lint_clean_and_carries_library_findings() {
+        let app = unresolved_libs();
+        let doc = app
+            .domain
+            .doc
+            .as_ref()
+            .expect("a missing library degrades, never fails the load");
+        assert_eq!(
+            doc.components.len(),
+            2,
+            "the ghost instance is skipped; the two caps remain"
+        );
+        let f = app.findings();
+        assert!(
+            f.items.iter().any(|i| i.code == "W_LIB_UNREGISTERED"),
+            "the unregistered `use nolib` renders as a findings row: {:?}",
+            f.items
+        );
+        assert!(
+            f.items
+                .iter()
+                .any(|i| i.code == "W_UNRESOLVED_PART" && i.message.contains("Ghost")),
+            "the skipped instance renders as a findings row naming the part"
+        );
+        assert!(f.warnings >= 2, "both count into the chip as warnings");
+
+        let r = render_clean("unresolved_libs", app);
+        harness::assert_content_coverage("unresolved_libs", &r, &[PaneId::A.canvas_key()]);
+    }
+
+    /// The Libraries-menu scene (slice 2): the modal renders lint-clean over the
+    /// board, with the stale registry row showing its "path missing" status. The
+    /// board pane behind the scrim still fits.
+    #[test]
+    fn libraries_menu_is_lint_clean() {
+        let app = libraries_menu();
+        let r = render_clean("libraries_menu", app);
+        harness::assert_content_coverage("libraries_menu", &r, &[PaneId::A.canvas_key()]);
     }
 
     /// Inspector value honesty: the selected part's inspector shows the position
