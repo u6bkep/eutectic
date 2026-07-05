@@ -144,6 +144,71 @@ pub fn board() -> EcadApp {
 }
 
 // ---------------------------------------------------------------------------
+// Milestone-5 findings fixture: a board with a DELIBERATE clearance violation —
+// two traces on different nets routed 0.05 mm apart on F.Cu, well inside the
+// 0.15 mm default clearance. DRC (`route/drc.rs`) flags `E_DRC_CLEARANCE`; the
+// findings panel populates, the halo lands at the derived board-mm point, and the
+// chip shows the error count.
+// ---------------------------------------------------------------------------
+
+/// The findings fixture source: four toy caps on two nets (`NA`, `NB`) plus a board
+/// outline. No pours (so the only findings come from the routed copper below, keeping
+/// the violation set predictable). The traces are command-authored in
+/// [`drc_violation_domain`].
+pub const DRC_ECAD: &str = "\
+inst A1 Cap
+inst A2 Cap
+inst B1 Cap
+inst B2 Cap
+net NA A1.p1 A2.p1
+net NB B1.p1 B2.p1
+board (0mm, 0mm) (20mm, 0mm) (20mm, 15mm) (0mm, 15mm)
+";
+
+/// The findings fixture's [`DomainState`]: [`DRC_ECAD`] plus two parallel traces on
+/// **different** nets 0.05 mm apart (centre-to-centre 0.3 mm, each 0.25 mm wide → 0.05
+/// mm edge gap), which is inside the 0.15 mm default clearance → a guaranteed
+/// `E_DRC_CLEARANCE` violation on `F.Cu`. Both nets are also 2-pin and not fully
+/// routed, so the set additionally carries `E_DRC_UNROUTED` for each — the fixture
+/// exercises multiple simultaneous findings.
+pub fn drc_violation_domain() -> DomainState {
+    use ecad_core::command::Command;
+    use ecad_core::coord::Point;
+    use ecad_core::doc::Provenance;
+    use ecad_core::id::{NetId, TraceId};
+    use ecad_core::route::Trace;
+
+    DomainState::from_source_with(
+        DRC_ECAD.to_string(),
+        Some("drc.ecad".to_string()),
+        ecad_core::part::part_library(),
+        |_doc| {
+            let trace = |id: u64, net: &str, y: i64| {
+                Command::AddTrace(
+                    TraceId(id),
+                    Trace {
+                        net: NetId::new(net),
+                        layer: "F.Cu".to_string(),
+                        path: vec![Point { x: 4_000_000, y }, Point { x: 16_000_000, y }],
+                        width: 250_000,
+                        prov: Provenance::Free,
+                    },
+                )
+            };
+            // Two 0.25 mm traces on different nets, centres 0.3 mm apart at y=7.0 and
+            // y=7.3 mm → 0.05 mm edge gap ≪ 0.15 mm clearance.
+            vec![trace(1, "NA", 7_000_000), trace(2, "NB", 7_300_000)]
+        },
+    )
+}
+
+/// The findings fixture as an app (m5): a board with a deliberate clearance short, so
+/// the findings panel + halo + chip render populated.
+pub fn drc_violation() -> EcadApp {
+    EcadApp::new(drc_violation_domain())
+}
+
+// ---------------------------------------------------------------------------
 // Milestone-3 scenes: a board with a trace selected (overlay + populated
 // inspector), and a measure-in-progress overlay. Both are the board fixture
 // with canned interaction state applied, so the SVG/tree/lint artifacts cover
@@ -432,6 +497,7 @@ pub fn all() -> Vec<(&'static str, EcadApp)> {
         ("parse_error", parse_error()),
         ("board", board()),
         ("board_with_selection", board_with_selection()),
+        ("drc_violation", drc_violation()),
         ("measure_in_progress", measure_in_progress()),
         ("dual_cross_highlight", dual_cross_highlight()),
         ("stacked_layout", stacked_layout()),
@@ -538,6 +604,28 @@ mod tests {
     fn measure_in_progress_is_lint_clean() {
         let r = render_clean("measure_in_progress", measure_in_progress());
         harness::assert_content_coverage("measure_in_progress", &r, &[PaneId::A.canvas_key()]);
+    }
+
+    /// The DRC findings fixture: it must actually flag the deliberate clearance short
+    /// (otherwise the scene silently exercises a clean board), render lint-clean, and
+    /// its board pane must fit — the findings panel + halo + chip are all in the tree.
+    #[test]
+    fn drc_violation_is_lint_clean_and_flags() {
+        use crate::canvas::pick::candidates;
+        use crate::findings::Findings;
+        let d = drc_violation_domain();
+        let doc = d.doc.as_ref().expect("drc fixture elaborates");
+        let su = ecad_core::elaborate::stackup(&doc.source);
+        let cands = candidates(doc, &d.lib, &su);
+        let f = Findings::compute(doc, &d.lib, &cands);
+        assert!(
+            f.items.iter().any(|i| i.code == "E_DRC_CLEARANCE"),
+            "the drc_violation fixture must flag a clearance short"
+        );
+        assert!(f.errors >= 1, "the chip must show at least one error");
+        // The scene has a board (pane A) but no schematic block, so only pane A fits.
+        let r = render_clean("drc_violation", drc_violation());
+        harness::assert_content_coverage("drc_violation", &r, &[PaneId::A.canvas_key()]);
     }
 
     #[test]

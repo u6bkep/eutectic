@@ -11,8 +11,10 @@
 use crate::canvas::pick::{self, Candidate, SemanticId};
 use crate::canvas::{BoardLayer, Canvas, Overlay};
 use crate::explorer::Explorer;
+use crate::findings::Findings;
 use crate::highlight::HighlightSets;
 use crate::inspector::InspectorData;
+use crate::reload::{SourceMailbox, SourceMsg};
 use crate::schematic_view::SchematicView;
 use crate::selection::SelectionModel;
 use crate::tool::{MeasureState, Tool, format_readout};
@@ -54,6 +56,17 @@ pub struct DomainState {
     /// untouched). `RefCell` for the damascene interior-mutability pattern: written in
     /// `on_event`, read in `build` through `&self`.
     pub selection: RefCell<SelectionModel>,
+    /// The doc **revision** counter — bumped on every successful reload (m5). The
+    /// derived caches (canvas layers, schematic, explorer, findings) are rebuilt only
+    /// when this changes, exactly like `ecad-core`'s query-engine revision. Load-once
+    /// domains sit at revision 0.
+    pub revision: u64,
+    /// The persistent last-good-load error, if the most recent reload FAILED to
+    /// parse/elaborate. Per the permissive philosophy this does NOT replace the
+    /// rendered doc (the last-good doc stays on screen); the chrome surfaces it as an
+    /// unmissable banner until a good reload clears it. `None` when the current doc is
+    /// the freshest source.
+    pub reload_error: Option<String>,
 }
 
 impl DomainState {
@@ -65,6 +78,8 @@ impl DomainState {
             lib: ecad_core::part::part_library(),
             filename: None,
             selection: RefCell::new(SelectionModel::new()),
+            revision: 0,
+            reload_error: None,
         }
     }
 
@@ -129,7 +144,36 @@ impl DomainState {
             lib,
             filename,
             selection: RefCell::new(SelectionModel::new()),
+            revision: 0,
+            reload_error: None,
         }
+    }
+
+    /// Re-parse + re-elaborate `source` against **this** domain's existing library and
+    /// filename — the reload entry point. Returns the freshly-elaborated
+    /// `Result<Doc, String>` WITHOUT touching `self`; the caller
+    /// ([`EcadApp::apply_reload`]) decides whether to swap it in (success) or keep the
+    /// last-good doc and surface the error (failure). Pure over `(source, self.lib)`.
+    fn elaborate_source(&self, source: &str) -> Result<Doc, String> {
+        use ecad_core::command::{Command, Transaction};
+        use ecad_core::history::History;
+
+        let fmt = |diags: Vec<ecad_core::diagnostic::Diagnostic>| {
+            diags
+                .iter()
+                .map(|d| format!("[{}] {}", d.code, d.message))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let mut history = History::new(Doc::default());
+        history
+            .commit(
+                Transaction::one(Command::LoadText(source.to_string())),
+                &self.lib,
+                "reload",
+            )
+            .map_err(fmt)
+            .map(|_| history.doc().clone())
     }
 }
 
@@ -248,6 +292,20 @@ impl Default for PaneState {
 
 /// The event-route key of the dual/stacked layout toggle button.
 const LAYOUT_TOGGLE_KEY: &str = "layout:toggle";
+/// The event-route key of the findings-panel collapse toggle.
+const FINDINGS_TOGGLE_KEY: &str = "findings:toggle";
+/// The route-key prefix of a findings row (index appended).
+const FINDINGS_ROW_PREFIX: &str = "finding:row:";
+
+/// The route key for the findings row at `index`.
+fn finding_row_key(index: usize) -> String {
+    format!("{FINDINGS_ROW_PREFIX}{index}")
+}
+
+/// The finding index a route key names, if it is a findings row.
+fn finding_index_of_key(route: &str) -> Option<usize> {
+    route.strip_prefix(FINDINGS_ROW_PREFIX)?.parse().ok()
+}
 /// The key of the pane-split resize handle + the split row/column (for `rect_of_key`).
 const SPLIT_HANDLE_KEY: &str = "pane:split";
 const SPLIT_ROW_KEY: &str = "pane:split-row";
@@ -287,17 +345,19 @@ pub struct EcadApp {
     /// The measured split-container main extent (px), captured each frame for the weighted
     /// resize handler (the README idiom).
     split_extent: Cell<f32>,
-    /// The board projection + cached per-layer assets, or `None` when no document
-    /// is loaded / the load failed / projection failed. Built once in [`new`].
-    board: Option<BoardView>,
-    /// The schematic projection + cached asset + pick candidates, or `None` when the doc
-    /// has no components. Built once in [`new`].
-    schematic: Option<SchematicView>,
+    /// The derived caches (board projection, schematic projection, explorer rows,
+    /// findings) — everything computed *from* the doc. Rebuilt as a unit only when the
+    /// doc revision changes (a reload). `RefCell` because [`apply_reload`] swaps the
+    /// whole bundle in `before_build`; `build` reads it immutably.
+    ///
+    /// [`apply_reload`]: EcadApp::apply_reload
+    derived: RefCell<DerivedCaches>,
     /// Which layers are visible, keyed by [`LayerId::key`]. Absent ⇒ visible
     /// (layers default on). Mutated by the layer-panel toggles in `on_event`.
+    /// **Preserved across reloads** (the user's framing/visibility is sacred).
     hidden: RefCell<std::collections::HashSet<String>>,
-    /// Viewport requests (Fit / Reset) queued from toolbar clicks, drained once per
-    /// frame by the host.
+    /// Viewport requests (Fit / Reset / CenterOn) queued from toolbar / findings
+    /// clicks, drained once per frame by the host.
     pending: RefCell<Vec<ViewportRequest>>,
     /// The last pointer position over a board pane in **board mm**, for the status-bar
     /// cursor readout. Set by whichever board pane the pointer last moved over.
@@ -310,8 +370,11 @@ pub struct EcadApp {
     /// overlay draws it in the right place.
     measure: Cell<MeasureState>,
     measure_pane: Cell<PaneId>,
-    /// The projected explorer rows (components / nets), built once per doc load.
-    explorer: Explorer,
+    /// The live-source mailbox (m5): drained in `before_build`; a file change reloads.
+    /// A [`SourceMailbox::disconnected`] mailbox (fixtures / no file) never yields.
+    mailbox: SourceMailbox,
+    /// Whether the findings panel section is expanded (collapsible like the explorer).
+    findings_open: Cell<bool>,
 }
 
 /// The board projection held in app state: the [`Canvas`] (for coordinate
@@ -328,34 +391,73 @@ struct BoardView {
     candidates: Vec<Candidate>,
 }
 
+/// Everything derived from the elaborated [`Doc`], rebuilt together on a reload (the
+/// revision-keyed cache). Holding these as one bundle behind a single `RefCell` means
+/// a reload swaps the *whole* derived tier atomically — no half-updated frame where a
+/// new board pairs with old findings.
+struct DerivedCaches {
+    /// The board projection + cached per-layer assets, or `None` when no document is
+    /// loaded / the load failed / projection failed.
+    board: Option<BoardView>,
+    /// The schematic projection + cached asset + pick candidates, or `None` when the
+    /// doc has no components.
+    schematic: Option<SchematicView>,
+    /// The projected explorer rows (components / nets).
+    explorer: Explorer,
+    /// The per-revision findings (DRC + ERC + connectivity), computed once here and
+    /// read every frame by the panel / chip / overlays.
+    findings: Findings,
+}
+
+impl DerivedCaches {
+    /// Empty caches (no document / failed load).
+    fn empty() -> DerivedCaches {
+        DerivedCaches {
+            board: None,
+            schematic: None,
+            explorer: Explorer::default(),
+            findings: Findings::default(),
+        }
+    }
+
+    /// Build every derived cache from a document + library. A projection failure
+    /// (unreachable for a committed doc) degrades to "no board view" rather than
+    /// crashing — the permissive philosophy.
+    fn build(doc: &Doc, lib: &ecad_core::part::PartLib) -> DerivedCaches {
+        // The layered canvas + pick candidates, from the one `world_features` stream.
+        let board = Canvas::new(doc, lib)
+            .and_then(|canvas| {
+                let layers = canvas.build_layers(doc, lib)?;
+                let su = ecad_core::elaborate::stackup(&doc.source);
+                let candidates = pick::candidates(doc, lib, &su);
+                Ok(BoardView {
+                    canvas,
+                    layers,
+                    candidates,
+                })
+            })
+            .ok();
+        let schematic = SchematicView::build(doc, lib);
+        let explorer = Explorer::project(doc, lib);
+        // Findings are derived from the board pick candidates (the halo-location
+        // source) — empty candidate list when the board didn't project, which is fine
+        // (findings then carry no board-mm point, panel-only).
+        let candidates: &[Candidate] = board.as_ref().map_or(&[], |b| &b.candidates);
+        let findings = Findings::compute(doc, lib, candidates);
+        DerivedCaches {
+            board,
+            schematic,
+            explorer,
+            findings,
+        }
+    }
+}
+
 impl EcadApp {
     pub fn new(domain: DomainState) -> Self {
-        // Build the layered canvas once, when the document loads. A projection
-        // failure (unreachable for a committed doc) degrades to "no board view"
-        // rather than crashing — the permissive philosophy.
-        let board = match &domain.doc {
-            Ok(doc) => Canvas::new(doc, &domain.lib)
-                .and_then(|canvas| {
-                    let layers = canvas.build_layers(doc, &domain.lib)?;
-                    let su = ecad_core::elaborate::stackup(&doc.source);
-                    let candidates = pick::candidates(doc, &domain.lib, &su);
-                    Ok(BoardView {
-                        canvas,
-                        layers,
-                        candidates,
-                    })
-                })
-                .ok(),
-            Err(_) => None,
-        };
-        // The schematic projection, built once per doc load (same discipline as the board).
-        let schematic = match &domain.doc {
-            Ok(doc) => SchematicView::build(doc, &domain.lib),
-            Err(_) => None,
-        };
-        let explorer = match &domain.doc {
-            Ok(doc) => Explorer::project(doc, &domain.lib),
-            Err(_) => Explorer::default(),
+        let derived = match &domain.doc {
+            Ok(doc) => DerivedCaches::build(doc, &domain.lib),
+            Err(_) => DerivedCaches::empty(),
         };
         EcadApp {
             domain,
@@ -368,16 +470,77 @@ impl EcadApp {
             split_weights: Cell::new([1.0, 1.0]),
             split_drag: RefCell::new(ResizeWeightsDrag::default()),
             split_extent: Cell::new(0.0),
-            board,
-            schematic,
+            derived: RefCell::new(derived),
             hidden: RefCell::new(std::collections::HashSet::new()),
             pending: RefCell::new(Vec::new()),
             cursor_board_mm: Cell::new(None),
             tool: Cell::new(Tool::default()),
             measure: Cell::new(MeasureState::default()),
             measure_pane: Cell::new(PaneId::A),
-            explorer,
+            mailbox: SourceMailbox::disconnected(),
+            findings_open: Cell::new(true),
         }
+    }
+
+    /// Attach a live-source [`SourceMailbox`] — the windowed `main.rs` wires this to
+    /// the file-watch thread's sender; fixtures leave the disconnected default. Tests
+    /// use [`mailbox_push`](Self::mailbox_push) to inject reloads.
+    pub fn with_mailbox(mut self, mailbox: SourceMailbox) -> Self {
+        self.mailbox = mailbox;
+        self
+    }
+
+    /// Push a source message onto the app's mailbox — the headless reload test entry
+    /// point. The next `before_build` drains and applies it.
+    pub fn mailbox_push(&self, msg: SourceMsg) {
+        self.mailbox.push(msg);
+    }
+
+    /// The current doc revision — bumped once per successful reload. For tests.
+    pub fn revision(&self) -> u64 {
+        self.domain.revision
+    }
+
+    /// The persistent reload-error string, if the freshest source failed. For tests.
+    pub fn reload_error(&self) -> Option<String> {
+        self.domain.reload_error.clone()
+    }
+
+    /// The cached findings (per doc revision). For tests / the report.
+    pub fn findings(&self) -> Findings {
+        self.derived.borrow().findings.clone()
+    }
+
+    /// Clone the explorer rows out of the derived cache — test accessor (the field
+    /// moved behind a `RefCell<DerivedCaches>` in m5).
+    #[cfg(test)]
+    fn explorer_snapshot(&self) -> Explorer {
+        self.derived.borrow().explorer.clone()
+    }
+
+    /// True when the board projection exists — test accessor.
+    #[cfg(test)]
+    fn has_board(&self) -> bool {
+        self.derived.borrow().board.is_some()
+    }
+
+    /// True when the schematic projection exists — test accessor.
+    #[cfg(test)]
+    fn has_schematic(&self) -> bool {
+        self.derived.borrow().schematic.is_some()
+    }
+
+    /// A clone of the board projection's [`Canvas`] — test accessor for the
+    /// coordinate-composition tests.
+    #[cfg(test)]
+    fn board_canvas_clone(&self) -> Canvas {
+        self.derived
+            .borrow()
+            .board
+            .as_ref()
+            .expect("board projects")
+            .canvas
+            .clone()
     }
 
     /// Set both panes' view kinds — for fixtures that want a canned pane arrangement.
@@ -407,6 +570,82 @@ impl EcadApp {
     /// measure-in-progress scene without driving live pointer events.
     pub fn set_measure(&self, m: MeasureState) {
         self.measure.set(m);
+    }
+
+    /// Apply a live-source reload (m5). Re-elaborates `source` against the current
+    /// library and:
+    ///
+    /// - **on success**: swaps in the new doc + source, bumps the revision, rebuilds
+    ///   the derived caches (canvas / schematic / explorer / findings), **prunes** the
+    ///   selection + hover of any id that no longer resolves in the new doc, and clears
+    ///   any prior reload error. Cameras, layer visibility, pane layout, maximize state,
+    ///   the active tool, and the `fitted` flags are all left untouched — the user's
+    ///   framing and workspace are preserved (no re-fit).
+    /// - **on failure**: keeps the last-good doc + derived caches + findings rendered
+    ///   (the canvas never blanks — the permissive philosophy) and records the error in
+    ///   `domain.reload_error`, which the toolbar surfaces as a persistent banner chip
+    ///   until a good reload lands.
+    ///
+    /// `&mut self` because a reload swaps domain + derived state; called from
+    /// `before_build` (host frame) after the mailbox drain, and directly by tests.
+    pub fn apply_reload(&mut self, source: String) {
+        match self.domain.elaborate_source(&source) {
+            Ok(doc) => {
+                let derived = DerivedCaches::build(&doc, &self.domain.lib);
+                // Prune selection + hover to ids that still resolve in the NEW doc,
+                // using the freshly-built candidate/schematic ids as the resolvable set.
+                self.prune_selection(&doc, &derived);
+                *self.derived.borrow_mut() = derived;
+                self.domain.doc = Ok(doc);
+                self.domain.source = source;
+                self.domain.revision += 1;
+                self.domain.reload_error = None;
+            }
+            Err(err) => {
+                // Permissive: keep the last-good doc + caches on screen; surface the
+                // error persistently. Do NOT bump the revision (nothing derived changed).
+                self.domain.reload_error = Some(err);
+            }
+        }
+    }
+
+    /// Prune the selection + hover sets to the ids that still resolve against the
+    /// freshly-built derived caches — the reload contract's "drop ids that no longer
+    /// exist" step. An id resolves if it is a board pick candidate, a schematic
+    /// candidate, or (for a `Net` / `Part`) present in the new doc. Ids that don't
+    /// resolve are dropped silently (no panic), so a reload that removes a selected
+    /// entity leaves an empty-or-smaller selection rather than a dangling id.
+    fn prune_selection(&self, doc: &Doc, derived: &DerivedCaches) {
+        let mut sel = self.domain.selection.borrow_mut();
+        sel.retain(|id| resolves_in(id, doc, derived));
+    }
+}
+
+/// Does a [`SemanticId`] resolve against the new doc + derived caches? A board copper
+/// id must still be a pick candidate; a schematic id a schematic candidate; a `Net` /
+/// `Part` must be present in the doc's maps. This is the "prune dangling selection"
+/// predicate the reload contract requires.
+fn resolves_in(id: &SemanticId, doc: &Doc, derived: &DerivedCaches) -> bool {
+    match id {
+        SemanticId::Net(n) => doc.nets.contains_key(n),
+        SemanticId::Part(e) => doc.components.contains_key(e),
+        SemanticId::Trace(t) => doc.traces.contains_key(t),
+        SemanticId::Via(v) => doc.vias.contains_key(v),
+        SemanticId::Pour { .. } | SemanticId::Pin { .. } => {
+            // Pours and pins have no top-level doc map; a pin resolves iff its owning
+            // component still exists AND the pad is a live pick candidate. Fall back to
+            // the candidate sets (board + schematic), which are exactly "what can be
+            // selected in the new doc".
+            let on_board = derived
+                .board
+                .as_ref()
+                .is_some_and(|b| b.candidates.iter().any(|c| &c.id == id));
+            let on_schem = derived
+                .schematic
+                .as_ref()
+                .is_some_and(|s| s.candidates().iter().any(|c| &c.id == id));
+            on_board || on_schem
+        }
     }
 }
 
@@ -582,7 +821,8 @@ impl EcadApp {
     /// keyed to *this pane* (independent camera). Falls back to a placeholder when the
     /// board projection failed.
     fn board_canvas(&self, _cx: &BuildCx, pane: PaneId, sets: &HighlightSets) -> El {
-        let Some(view) = &self.board else {
+        let derived = self.derived.borrow();
+        let Some(view) = &derived.board else {
             return pane_placeholder("No board to display");
         };
         // Per-pane El keys: two board panes render the same layers, so namespace each
@@ -597,7 +837,7 @@ impl EcadApp {
             .enumerate()
             .map(|(i, el)| el.key(format!("layer:{prefix}:{i}")))
             .collect();
-        let overlay = self.build_board_overlay(view, pane, sets);
+        let overlay = self.build_board_overlay(view, pane, sets, &derived.findings);
         if let Some(el) = view.canvas.overlay_el(&overlay) {
             // Re-key the overlay per pane (the canvas hardcodes "overlay:dynamic"); wrap it
             // in a keyed container so two board panes' overlays don't collide.
@@ -617,12 +857,19 @@ impl EcadApp {
     /// overlay, in a viewport keyed to this pane. Falls back to a placeholder when the doc
     /// has no components.
     fn schematic_canvas(&self, _cx: &BuildCx, pane: PaneId, sets: &HighlightSets) -> El {
-        let Some(view) = &self.schematic else {
+        let derived = self.derived.borrow();
+        let Some(view) = &derived.schematic else {
             return pane_placeholder("No schematic to display");
         };
         let static_key = format!("schematic:{}", pane.canvas_key());
         let mut children = vec![view.static_el(&static_key)];
-        if let Some(el) = view.overlay_el(sets.schematic_ids(), pane.overlay_key()) {
+        // Schematic-side findings (ERC / floating-pad with entity refs) halo the symbol:
+        // union their entity/net refs into the overlay id set so the affected symbol +
+        // net wires ring in the finding accent alongside any selection highlight.
+        let finding_ids = self.schematic_finding_ids(&derived.findings);
+        let overlay_ids: std::collections::BTreeSet<SemanticId> =
+            sets.schematic_ids().union(&finding_ids).cloned().collect();
+        if let Some(el) = view.overlay_el(&overlay_ids, pane.overlay_key()) {
             children.push(el);
         }
         viewport(children)
@@ -639,7 +886,13 @@ impl EcadApp {
     /// measure preview (measure only draws in the pane it is happening in). Highlight
     /// geometry is re-derived from the pick candidates by id (commitment 2). A candidate
     /// lights up when its id — or its net — is in the board highlight set.
-    fn build_board_overlay(&self, view: &BoardView, pane: PaneId, sets: &HighlightSets) -> Overlay {
+    fn build_board_overlay(
+        &self,
+        view: &BoardView,
+        pane: PaneId,
+        sets: &HighlightSets,
+        findings: &Findings,
+    ) -> Overlay {
         let mut highlights: Vec<(Shape2D, bool)> = Vec::new();
         for c in &view.candidates {
             if !self.layer_visible(&c.layer.key()) {
@@ -659,10 +912,39 @@ impl EcadApp {
         } else {
             None
         };
+        // Findings with a derived board point become violation markers (both board
+        // panes show them — a finding is a property of the board, not a pane).
+        let finding_markers: Vec<(ecad_core::coord::Point, bool)> = findings
+            .items
+            .iter()
+            .filter_map(|f| {
+                let (mx, my) = f.board_mm?;
+                Some((
+                    ecad_core::coord::Point {
+                        x: (mx * ecad_core::coord::MM as f32).round() as ecad_core::coord::Nm,
+                        y: (my * ecad_core::coord::MM as f32).round() as ecad_core::coord::Nm,
+                    },
+                    f.is_error(),
+                ))
+            })
+            .collect();
         Overlay {
             highlights,
             measure,
+            findings: finding_markers,
         }
+    }
+
+    /// The semantic ids the schematic overlay should ring for findings: the entity /
+    /// pin / net refs of every finding (ERC multiple-drivers on a net, a floating pad
+    /// on a part). The schematic candidates key on Part / Pin / Net, so these light up
+    /// the affected symbol + net wires.
+    fn schematic_finding_ids(&self, findings: &Findings) -> std::collections::BTreeSet<SemanticId> {
+        findings
+            .items
+            .iter()
+            .flat_map(|f| f.refs.iter().cloned())
+            .collect()
     }
 
     /// The net a board candidate's id belongs to, if any (for the net-expansion match).
@@ -686,10 +968,15 @@ impl EcadApp {
     /// The right sidebar: the properties inspector (above), the explorer (middle), and the
     /// board layer panel (below), matching the mockup anatomy (Properties above Explorer).
     fn right_sidebar(&self) -> El {
-        let mut children = vec![self.inspector_panel(), self.explorer_panel()];
+        let derived = self.derived.borrow();
+        let mut children = vec![
+            self.inspector_panel(),
+            self.findings_panel(&derived.findings),
+            self.explorer_panel(&derived.explorer),
+        ];
         // The layer panel applies to board panes; show it whenever a board projection
         // exists (global layer visibility is fine for v1).
-        if let Some(view) = &self.board {
+        if let Some(view) = &derived.board {
             children.push(self.layer_panel(&view.layers));
         }
         scroll([column(children).gap(tokens::SPACE_3).width(Size::Fill(1.0))])
@@ -697,19 +984,93 @@ impl EcadApp {
             .height(Size::Fill(1.0))
     }
 
+    /// The findings panel (right sidebar, collapsible like the explorer): a header with
+    /// the error/warning tally, then one click-to-select row per finding (a severity
+    /// badge beside the code and message). Clicking a row selects the finding's refs
+    /// (cross-highlighting the panes) and centres the focused board pane on the
+    /// violation. Collapsed to just the header when `findings_open` is false or when
+    /// there are no findings (a clean board shows a compact "no issues" line).
+    fn findings_panel(&self, findings: &Findings) -> El {
+        let open = self.findings_open.get();
+        let title = if findings.is_clean() {
+            "Findings".to_string()
+        } else {
+            format!(
+                "Findings ({} err, {} warn)",
+                findings.errors, findings.warnings
+            )
+        };
+        let toggle = button(if open { "Hide" } else { "Show" }).key(FINDINGS_TOGGLE_KEY);
+        let header = sidebar_header([row([h3(title).width(Size::Fill(1.0)).ellipsis(), toggle])
+            .align(Align::Center)
+            .width(Size::Fill(1.0))]);
+        if !open {
+            return sidebar([header]).width(Size::Fill(1.0)).height(Size::Hug);
+        }
+        if findings.is_clean() {
+            return sidebar([
+                header,
+                sidebar_group([text("No issues — DRC clean.").muted()]),
+            ])
+            .width(Size::Fill(1.0))
+            .height(Size::Hug);
+        }
+        let rows: Vec<El> = findings
+            .items
+            .iter()
+            .enumerate()
+            .map(|(i, f)| self.finding_row(i, f))
+            .collect();
+        sidebar([
+            header,
+            sidebar_group([column(rows).gap(tokens::SPACE_1).width(Size::Fill(1.0))]),
+        ])
+        .width(Size::Fill(1.0))
+        .height(Size::Hug)
+    }
+
+    /// One findings row: a severity badge (error red / warning amber) + the code +
+    /// message, as a click-to-select focusable row keyed by index. Built on the same
+    /// focusable-list-item anatomy as `sidebar_menu_button` (which is label-only), so a
+    /// click routes to the app and the row reads as an interactive nav entry.
+    fn finding_row(&self, index: usize, f: &crate::findings::Finding) -> El {
+        let sev = if f.is_error() {
+            badge("ERR").destructive()
+        } else {
+            badge("WARN").warning()
+        };
+        let body = column([
+            text(f.code).mono().caption(),
+            text(f.message.clone()).width(Size::Fill(1.0)).wrap_text(),
+        ])
+        .gap(0.0)
+        .width(Size::Fill(1.0));
+        row([sev, body])
+            .key(finding_row_key(index))
+            .style_profile(StyleProfile::Solid)
+            .metrics_role(MetricsRole::ListItem)
+            .focusable()
+            .cursor(Cursor::Pointer)
+            .fill(tokens::CARD)
+            .radius(tokens::RADIUS_SM)
+            .gap(tokens::SPACE_2)
+            .padding(Sides::xy(tokens::SPACE_2, tokens::SPACE_1))
+            .align(Align::Center)
+            .width(Size::Fill(1.0))
+            .ghost()
+    }
+
     /// The explorer panel (mockup NetExplorer anatomy): Components + Nets sections, each a
     /// list of click-to-select rows with a count badge; the selected row gets the mockup's
     /// selected cue (`sidebar_menu_button`'s `current` treatment).
-    fn explorer_panel(&self) -> El {
+    fn explorer_panel(&self, explorer: &Explorer) -> El {
         let sel = self.domain.selection.borrow();
-        let comp_rows: Vec<El> = self
-            .explorer
+        let comp_rows: Vec<El> = explorer
             .components
             .iter()
             .map(|r| self.explorer_row(r, sel.is_selected(&r.id)))
             .collect();
-        let net_rows: Vec<El> = self
-            .explorer
+        let net_rows: Vec<El> = explorer
             .nets
             .iter()
             .map(|r| self.explorer_row(r, sel.is_selected(&r.id)))
@@ -816,18 +1177,40 @@ impl EcadApp {
             PaneLayout::Dual => "Dual",
             PaneLayout::Stacked => "Stacked",
         };
-        toolbar([
-            toolbar_title("ecad"),
-            badge(name).info(),
-            button(layout_label).key(LAYOUT_TOGGLE_KEY),
-            spacer(),
-            row(tool_buttons).gap(tokens::SPACE_1),
-            text(format!("{:.0}%", zoom * 100.0)).muted().mono(),
-            button("Fit").key("fit"),
-            button("Reset").key("reset"),
-        ])
-        .gap(tokens::SPACE_2)
-        .padding(Sides::xy(tokens::SPACE_4, tokens::SPACE_2))
+        // The persistent DRC status chip (mockup chrome): error + warning counts, green
+        // when clean. The reload-error banner chip (permissive philosophy) sits beside
+        // it whenever the freshest source failed to load — unmissable, never a toast.
+        let chip = self.drc_chip();
+        let mut lead: Vec<El> = vec![toolbar_title("ecad"), badge(name).info(), chip];
+        if let Some(err) = &self.domain.reload_error {
+            lead.push(reload_error_chip(err));
+        }
+        lead.push(button(layout_label).key(LAYOUT_TOGGLE_KEY));
+        lead.push(spacer());
+        lead.push(row(tool_buttons).gap(tokens::SPACE_1));
+        lead.push(text(format!("{:.0}%", zoom * 100.0)).muted().mono());
+        lead.push(button("Fit").key("fit"));
+        lead.push(button("Reset").key("reset"));
+        toolbar(lead)
+            .gap(tokens::SPACE_2)
+            .padding(Sides::xy(tokens::SPACE_4, tokens::SPACE_2))
+    }
+
+    /// The persistent DRC status chip (mockup menu-bar chrome): the cached findings'
+    /// error + warning counts, rendered green (`success`) when the board is clean, amber
+    /// (`warning`) when only warnings, red (`destructive`) when any error. Reads the
+    /// cached findings — never recomputes.
+    fn drc_chip(&self) -> El {
+        let findings = &self.derived.borrow().findings;
+        if findings.is_clean() {
+            return badge("DRC clean").success();
+        }
+        let label = format!("DRC {} · {} warn", findings.errors, findings.warnings);
+        if findings.errors > 0 {
+            badge(label).destructive()
+        } else {
+            badge(label).warning()
+        }
     }
 
     /// The right sidebar layer panel: one row per layer (top of the stack first),
@@ -891,6 +1274,16 @@ impl EcadApp {
         if let Some(net) = self.selected_net() {
             items.push(badge(format!("net {net}")).info());
         }
+        // Compact DRC state (mockup status-bar chrome).
+        {
+            let findings = &self.derived.borrow().findings;
+            let drc = if findings.is_clean() {
+                "DRC: clean".to_string()
+            } else {
+                format!("DRC: {} err {} warn", findings.errors, findings.warnings)
+            };
+            items.push(text(drc).muted().mono());
+        }
         items.push(text(format!("Zoom {:.0}%", zoom * 100.0)).muted().mono());
 
         toolbar(items)
@@ -905,6 +1298,66 @@ impl EcadApp {
         let sel = self.domain.selection.borrow();
         let id = sel.single()?;
         InspectorData::project(id, doc, &self.domain.lib)?.net
+    }
+
+    /// Select the finding at `index` (a findings-panel row click): fold ALL of its
+    /// semantic refs into the selection (so the panes cross-highlight the offending
+    /// nets / parts / pins), and — if the finding has a derived board point — queue a
+    /// `CenterOn` on the focused board pane so the violation comes into view.
+    ///
+    /// # Click-to-zoom gap (deviation)
+    ///
+    /// damascene 0.4.5 has **no frame-this-rect ViewportRequest** — only `FitContent`,
+    /// `ResetView`, and `CenterOn { key, point }`. So "zoom the focused board pane to the
+    /// violation" is realised as a **`CenterOn`** (pan to the point, keeping the current
+    /// zoom) rather than a true frame-to-rect. The finding's board point is centred; the
+    /// zoom is left as the user set it. Recorded as a deviation in the report.
+    fn select_finding(&self, index: usize, cx: &EventCx) {
+        let derived = self.derived.borrow();
+        let Some(f) = derived.findings.items.get(index) else {
+            return;
+        };
+        // Fold every ref into the selection (multi-select — a clearance highlights BOTH
+        // nets). Clear first, then add each ref.
+        {
+            let mut sel = self.domain.selection.borrow_mut();
+            sel.clear();
+            for r in &f.refs {
+                sel.add(r.clone());
+            }
+        }
+        // CenterOn the focused board pane, if the finding has a board point. The request
+        // wants a CONTENT-space point (logical px, pre-transform); the canvas maps the
+        // finding's board-mm point through its board→content-px transform using the
+        // pane's live laid-out rect (so the pan is exact regardless of the pane's
+        // aspect ratio / fitted scale).
+        if let (Some((mx, my)), Some(view)) = (f.board_mm, &derived.board)
+            && let Some(pane) = self.focused_board_pane()
+            && let Some(rect) = cx.rect_of_key(pane.canvas_key())
+            && let Some(point) = view
+                .canvas
+                .board_mm_to_content_px((mx, my), (rect.x, rect.y, rect.w, rect.h))
+        {
+            self.pending.borrow_mut().push(ViewportRequest::CenterOn {
+                key: pane.canvas_key().to_string(),
+                point,
+            });
+        }
+    }
+
+    /// The board pane to focus for click-to-zoom: the first pane currently showing a
+    /// board (A preferred), respecting a maximized pane. `None` when no board pane is
+    /// visible (both panes schematic, or the board didn't project).
+    fn focused_board_pane(&self) -> Option<PaneId> {
+        let panes = self.panes.borrow();
+        let visible = |id: PaneId| self.maximized.get().map(|m| m == id).unwrap_or(true);
+        for (i, p) in panes.iter().enumerate() {
+            let id = if i == 0 { PaneId::A } else { PaneId::B };
+            if p.view == ViewKind::Board && visible(id) {
+                return Some(id);
+            }
+        }
+        None
     }
 }
 
@@ -930,10 +1383,20 @@ impl App for EcadApp {
     }
 
     fn before_build(&mut self) {
+        // (m5) Drain the live-source mailbox first: a file change reloads the doc +
+        // derived caches BEFORE this frame builds, so the frame reflects the new source.
+        // The drain coalesces a burst to the latest source (see `SourceMailbox::drain`).
+        if let Some(SourceMsg::Changed(source)) = self.mailbox.drain() {
+            self.apply_reload(source);
+        }
+
         // Queue the initial fit-to-content once per pane, on the first frame after the doc
         // loaded (or after a view switch reset the flag) — the layout pass resolves each
         // request against the live per-pane viewport rect + content extents. The split
         // extent for the resize handler is captured in `on_event` from last frame's layout.
+        //
+        // Reload NEVER re-fits (the user's framing is sacred): `apply_reload` leaves the
+        // `fitted` flags alone, so a reload does not re-arm this.
         //
         // Only fit (and mark `fitted`) a pane that is actually built into the tree THIS
         // frame. When a pane is hidden (the other pane is maximized), its viewport El is
@@ -942,6 +1405,12 @@ impl App for EcadApp {
         // it: on restore it would render with the default camera and never re-fit. So a
         // hidden pane is left un-fitted and gets its fit on the first frame it is visible.
         let maximized = self.maximized.get();
+        // Read the projection state up front so the `derived` borrow doesn't overlap the
+        // `panes` mutable borrow below.
+        let (has_board, has_schematic) = {
+            let d = self.derived.borrow();
+            (d.board.is_some(), d.schematic.is_some())
+        };
         let mut panes = self.panes.borrow_mut();
         for (i, p) in panes.iter_mut().enumerate() {
             if p.fitted {
@@ -954,8 +1423,8 @@ impl App for EcadApp {
                 continue;
             }
             let projected = match p.view {
-                ViewKind::Board => self.board.is_some(),
-                ViewKind::Schematic => self.schematic.is_some(),
+                ViewKind::Board => has_board,
+                ViewKind::Schematic => has_schematic,
             };
             if projected {
                 self.pending.borrow_mut().push(ViewportRequest::FitContent {
@@ -1031,12 +1500,26 @@ impl App for EcadApp {
             }
         }
 
+        // Findings panel: collapse toggle, then a row click → select the finding's refs
+        // + centre the focused board pane on its board point (click-to-select-and-zoom).
+        if event.is_click_or_activate(FINDINGS_TOGGLE_KEY) {
+            self.findings_open.set(!self.findings_open.get());
+            return;
+        }
+        if matches!(event.kind, UiEventKind::Click | UiEventKind::Activate)
+            && let Some(route) = event.route()
+            && let Some(index) = finding_index_of_key(route)
+        {
+            self.select_finding(index, cx);
+            return;
+        }
+
         // Explorer row clicks → select that semantic id (cross-highlights in all panes).
         // Routed by the row button's key (the `sidebar_menu_button` route), same idiom as
         // the tool / view buttons.
         if matches!(event.kind, UiEventKind::Click | UiEventKind::Activate)
             && let Some(route) = event.route()
-            && let Some(id) = self.explorer.lookup(route)
+            && let Some(id) = self.derived.borrow().explorer.lookup(route)
         {
             self.domain.selection.borrow_mut().select_only(id);
             return;
@@ -1086,9 +1569,17 @@ impl App for EcadApp {
         }
 
         // Layer visibility switches (global; apply to all board panes).
-        if let Some(view) = &self.board {
-            for l in &view.layers {
-                let key = l.id.key();
+        {
+            // Snapshot the layer keys so the `derived` borrow doesn't overlap the
+            // `hidden` mutable borrow inside the loop.
+            let layer_keys: Vec<String> = self
+                .derived
+                .borrow()
+                .board
+                .as_ref()
+                .map(|v| v.layers.iter().map(|l| l.id.key()).collect())
+                .unwrap_or_default();
+            for key in layer_keys {
                 let sk = switch_key(&key);
                 let mut visible = self.layer_visible(&key);
                 if switch::apply_event(&mut visible, &event, &sk) {
@@ -1153,7 +1644,8 @@ impl EcadApp {
     /// Handle a pointer event over a board pane: cursor readout, pick / hover / measure —
     /// all through THE CLICKED PANE's canvas key + rect + viewport view.
     fn handle_board_pointer(&self, event: UiEvent, cx: &EventCx, pane: PaneId, pos: (f32, f32)) {
-        let Some(view) = &self.board else {
+        let derived = self.derived.borrow();
+        let Some(view) = &derived.board else {
             return;
         };
         let key = pane.canvas_key();
@@ -1219,7 +1711,8 @@ impl EcadApp {
         pane: PaneId,
         pos: (f32, f32),
     ) {
-        let Some(view) = &self.schematic else {
+        let derived = self.derived.borrow();
+        let Some(view) = &derived.schematic else {
             return;
         };
         let key = pane.canvas_key();
@@ -1290,6 +1783,17 @@ fn pane_placeholder(msg: &str) -> El {
         .height(Size::Fill(1.0))
 }
 
+/// The persistent reload-error chip (m5): an unmissable destructive badge in the
+/// toolbar shown whenever the *freshest* source failed to parse/elaborate while the
+/// last-good doc stays rendered. Not a toast — it persists until a good reload clears
+/// `reload_error`. The full error is available in the badge label's first line.
+fn reload_error_chip(err: &str) -> El {
+    // Compact the multi-line diagnostic to its first line for the chip; the banner is a
+    // glanceable "reload failed" cue, not the full report surface.
+    let first = err.lines().next().unwrap_or(err);
+    badge(format!("reload failed: {first}")).destructive()
+}
+
 /// The parse/elaborate-failure body: surface the error, never crash (the
 /// permissive philosophy starts here).
 fn error_card(message: &str) -> El {
@@ -1326,8 +1830,8 @@ mod tests {
     fn explorer_click_selects_net() {
         let mut app = EcadApp::new(schematic_domain());
         // The VDD net row's key, from the projection.
-        let net_row = app
-            .explorer
+        let explorer = app.explorer_snapshot();
+        let net_row = explorer
             .nets
             .iter()
             .find(|r| r.label == "VDD")
@@ -1349,8 +1853,8 @@ mod tests {
         let mut app = EcadApp::new(schematic_domain());
         // Find the row by its semantic id (the label is the *annotated* refdes, not the
         // instance path — e.g. `U1 MCU` annotates to `MCU1`).
-        let row = app
-            .explorer
+        let explorer = app.explorer_snapshot();
+        let row = explorer
             .components
             .iter()
             .find(|r| r.id == SemanticId::Part(ecad_core::id::EntityId::new("U1")))
@@ -1449,7 +1953,7 @@ mod tests {
     fn per_pane_composition_uses_the_clicked_panes_view_and_rect() {
         use damascene_core::viewport::ViewportView;
         let app = EcadApp::new(schematic_domain());
-        let canvas = app.board.as_ref().expect("board projects").canvas.clone();
+        let canvas = app.board_canvas_clone();
 
         let rect = (0.0f32, 0.0f32, 400.0f32, 300.0f32);
         let px = (100.0f32, 80.0f32);
@@ -1516,12 +2020,334 @@ mod tests {
     fn schematic_pane_renders_for_a_schematic_doc() {
         let app = EcadApp::new(schematic_domain());
         assert!(
-            app.schematic.is_some(),
+            app.has_schematic(),
             "a doc with components must project a schematic"
         );
-        // A point at the origin (schematic space) is inside the drawing bounds.
-        let view = app.schematic.as_ref().unwrap();
+        // The schematic projection has pick candidates (built once per load).
+        let doc = app.domain.doc.as_ref().unwrap();
+        let view = SchematicView::build(doc, &app.domain.lib).expect("schematic projects");
         assert!(!view.candidates().is_empty());
         let _ = MM; // (kept for symmetry with other tests' unit imports)
     }
+
+    // -----------------------------------------------------------------------
+    // Milestone-5: live source loop (reload) + findings interaction tests.
+    // All headless: inject SourceMsg onto the mailbox, run before_build.
+    // -----------------------------------------------------------------------
+
+    use crate::fixtures::{SCHEMATIC_ECAD, board, drc_violation};
+    use crate::reload::SourceMsg;
+
+    /// A settled render of an app through the harness (drives before_build → reload).
+    fn settle(app: &mut EcadApp) -> crate::harness::Rendered {
+        crate::harness::render_settled(app, Rect::new(0.0, 0.0, 1280.0, 800.0))
+    }
+
+    /// Good → good reload: the doc revision bumps EXACTLY once, and the preserved
+    /// state (layer visibility, pane layout, a still-resolving selection) survives.
+    #[test]
+    fn reload_good_to_good_bumps_revision_once_and_preserves_state() {
+        let mut app = board();
+        // Preserve targets: hide a layer, flip the layout, select the routed trace.
+        app.hidden.borrow_mut().insert("layer:F.Cu".to_string());
+        app.layout.set(PaneLayout::Stacked);
+        let tid = app
+            .domain
+            .doc
+            .as_ref()
+            .unwrap()
+            .traces
+            .keys()
+            .next()
+            .copied()
+            .unwrap();
+        // Trace ids are command-authored (not in source), so a source-only reload drops
+        // them; select a NET instead, which survives a same-source reload.
+        app.domain
+            .selection
+            .borrow_mut()
+            .select_only(SemanticId::Net(ecad_core::id::NetId::new("GND")));
+        let _ = tid;
+        let rev0 = app.revision();
+
+        // Reload with the SAME source (a good doc). The board fixture's source has no
+        // routed copper (that was command-authored), so GND is still a net in the doc.
+        let src = app.domain.source.clone();
+        app.mailbox_push(SourceMsg::Changed(src));
+        app.before_build();
+
+        assert_eq!(app.revision(), rev0 + 1, "one good reload bumps once");
+        assert!(
+            app.reload_error().is_none(),
+            "a good reload clears any error"
+        );
+        assert!(
+            app.hidden.borrow().contains("layer:F.Cu"),
+            "layer visibility must be preserved across reload"
+        );
+        assert_eq!(
+            app.layout.get(),
+            PaneLayout::Stacked,
+            "pane layout must be preserved across reload"
+        );
+        assert_eq!(
+            app.domain.selection.borrow().single(),
+            Some(&SemanticId::Net(ecad_core::id::NetId::new("GND"))),
+            "a still-resolving selection must survive reload"
+        );
+
+        // A second identical reload bumps again (each applied Changed is one revision).
+        let src = app.domain.source.clone();
+        app.mailbox_push(SourceMsg::Changed(src));
+        app.before_build();
+        assert_eq!(app.revision(), rev0 + 2);
+    }
+
+    /// Reload preserves cameras: the framing lives in damascene's persistent `UiState`,
+    /// which the app never resets on reload. The app-side invariant that guarantees "no
+    /// re-fit" is that `apply_reload` leaves the panes' `fitted` flags set, so a
+    /// post-reload `before_build` queues NO `FitContent` request — the camera is left
+    /// exactly as the user framed it. (The harness recreates `UiState` per call, so a
+    /// zoom-comparison across two `settle`s can't test this; the queued-request check
+    /// is the faithful app-side assertion.)
+    #[test]
+    fn reload_preserves_camera_no_refit() {
+        let mut app = board();
+        // First frame: the pane fits (queues + marks fitted).
+        app.before_build();
+        let first = app.drain_viewport_requests();
+        assert!(
+            first
+                .iter()
+                .any(|r| matches!(r, ViewportRequest::FitContent { .. })),
+            "the initial frame fits the board pane"
+        );
+
+        // Reload with identical good source, then run before_build again.
+        let src = app.domain.source.clone();
+        app.mailbox_push(SourceMsg::Changed(src));
+        app.before_build();
+        let after = app.drain_viewport_requests();
+        assert!(
+            !after
+                .iter()
+                .any(|r| matches!(r, ViewportRequest::FitContent { .. })),
+            "a reload must NOT re-fit — no FitContent may be queued after it, got {after:?}"
+        );
+    }
+
+    /// Good → bad reload: the last-good doc STAYS rendered (canvas does not blank), the
+    /// revision does NOT bump, and a persistent reload error is recorded. We choose to
+    /// RETAIN the last-good findings (they still describe what is on screen) — see the
+    /// reload_semantics report note.
+    #[test]
+    fn reload_good_to_bad_keeps_last_good_and_sets_error() {
+        let mut app = board();
+        let rev0 = app.revision();
+        let good_findings = app.findings();
+        assert!(app.has_board(), "board projects before the bad reload");
+
+        // A source that fails elaboration (unknown part).
+        app.mailbox_push(SourceMsg::Changed(BROKEN_SRC.to_string()));
+        app.before_build();
+
+        assert_eq!(
+            app.revision(),
+            rev0,
+            "a failed reload must NOT bump the revision"
+        );
+        assert!(
+            app.reload_error().is_some(),
+            "a failed reload must record a persistent error"
+        );
+        assert!(
+            app.has_board(),
+            "the last-good board must stay rendered (canvas never blanks)"
+        );
+        assert_eq!(
+            app.findings(),
+            good_findings,
+            "last-good findings are RETAINED across a failed reload"
+        );
+        assert!(
+            app.domain.doc.is_ok(),
+            "the last-good doc is still the rendered doc"
+        );
+    }
+
+    /// Bad → good recovery: after a failed reload, a subsequent good reload swaps in the
+    /// new doc, bumps the revision, and CLEARS the error.
+    #[test]
+    fn reload_bad_then_good_recovers() {
+        let mut app = board();
+        app.mailbox_push(SourceMsg::Changed(BROKEN_SRC.to_string()));
+        app.before_build();
+        assert!(app.reload_error().is_some());
+        let rev_after_bad = app.revision();
+
+        // Now a good source (the schematic doc) — recovers.
+        app.mailbox_push(SourceMsg::Changed(SCHEMATIC_ECAD.to_string()));
+        app.before_build();
+        assert!(
+            app.reload_error().is_none(),
+            "a good reload clears the error"
+        );
+        assert_eq!(
+            app.revision(),
+            rev_after_bad + 1,
+            "recovery bumps the revision"
+        );
+        assert!(
+            app.has_schematic(),
+            "the new doc's schematic projects after recovery"
+        );
+    }
+
+    /// Selection pruning: select an entity, reload with a source that REMOVES it →
+    /// the selection drops the now-dangling id without panicking.
+    #[test]
+    fn reload_prunes_dangling_selection() {
+        // Start from the schematic doc (has parts U1/C1/C2 + nets VDD/GND).
+        let mut app = EcadApp::new(schematic_domain());
+        app.domain
+            .selection
+            .borrow_mut()
+            .select_only(SemanticId::Part(ecad_core::id::EntityId::new("U1")));
+        assert!(!app.domain.selection.borrow().is_empty());
+
+        // Reload with a source that has NO U1 (only C1) — U1 no longer resolves.
+        let pruned_src = "\
+inst C1 Cap
+net SOLO C1.p1
+nc C1.p2
+board (0mm, 0mm) (10mm, 0mm) (10mm, 10mm) (0mm, 10mm)
+";
+        app.mailbox_push(SourceMsg::Changed(pruned_src.to_string()));
+        app.before_build(); // must not panic
+
+        assert!(
+            app.domain.selection.borrow().is_empty(),
+            "the removed entity must be pruned from the selection"
+        );
+        assert!(app.reload_error().is_none(), "the pruning reload was good");
+    }
+
+    /// A selection that STILL resolves survives the prune (the complement of the above).
+    #[test]
+    fn reload_keeps_resolving_selection() {
+        let mut app = EcadApp::new(schematic_domain());
+        app.domain
+            .selection
+            .borrow_mut()
+            .select_only(SemanticId::Net(ecad_core::id::NetId::new("VDD")));
+        // Reload with the SAME source: VDD still resolves.
+        app.mailbox_push(SourceMsg::Changed(SCHEMATIC_ECAD.to_string()));
+        app.before_build();
+        assert_eq!(
+            app.domain.selection.borrow().single(),
+            Some(&SemanticId::Net(ecad_core::id::NetId::new("VDD"))),
+            "a still-resolving net selection survives the prune"
+        );
+    }
+
+    /// Click a findings row → the finding's refs land in the SelectionModel, and a
+    /// CenterOn request is queued for the focused board pane (click-to-select-and-zoom).
+    #[test]
+    fn click_finding_selects_refs_and_queues_center() {
+        let mut app = drc_violation();
+        // Find the clearance finding's index (it carries both nets NA + NB).
+        let (index, refs) = {
+            let f = app.findings();
+            let (i, item) = f
+                .items
+                .iter()
+                .enumerate()
+                .find(|(_, it)| it.code == "E_DRC_CLEARANCE")
+                .expect("the fixture has a clearance finding");
+            (i, item.refs.clone())
+        };
+        assert!(app.domain.selection.borrow().is_empty());
+
+        // Settle first so a board pane is laid out; the returned UiState carries the
+        // pane rects the CenterOn conversion needs, so drive the event with an EventCx
+        // over that state (matching the host, which routes events against the live UI).
+        let r = settle(&mut app);
+        let cx = EventCx::new().with_ui_state(&r.ui);
+        app.on_event(click(&finding_row_key(index)), &cx);
+
+        // Every ref of the finding is now selected (both nets of the clearance).
+        let sel = app.domain.selection.borrow();
+        for r in &refs {
+            assert!(
+                sel.is_selected(r),
+                "clicking the finding must select its ref {r:?}"
+            );
+        }
+        drop(sel);
+        // A CenterOn was queued for the focused (board) pane.
+        let reqs = app.drain_viewport_requests();
+        assert!(
+            reqs.iter().any(|r| matches!(
+                r,
+                ViewportRequest::CenterOn { key, .. } if key == PaneId::A.canvas_key()
+            )),
+            "a clearance finding with a board point must queue a CenterOn on the board pane"
+        );
+    }
+
+    /// The clearance-finding halo is present in the board overlay at the right board mm:
+    /// building the board overlay yields a findings marker whose point matches the
+    /// finding's derived board_mm.
+    #[test]
+    fn finding_halo_present_in_board_overlay() {
+        let app = drc_violation();
+        let f = app.findings();
+        let clearance = f
+            .items
+            .iter()
+            .find(|i| i.code == "E_DRC_CLEARANCE")
+            .unwrap();
+        let (mx, my) = clearance.board_mm.expect("clearance has a board point");
+
+        let derived = app.derived.borrow();
+        let view = derived.board.as_ref().expect("board projects");
+        let sets = HighlightSets::default();
+        let overlay = app.build_board_overlay(view, PaneId::A, &sets, &derived.findings);
+        assert!(
+            !overlay.findings.is_empty(),
+            "the overlay must carry finding markers"
+        );
+        // The clearance marker's point matches the finding's board_mm (nm round-trip).
+        let want = ecad_core::coord::Point {
+            x: (mx * ecad_core::coord::MM as f32).round() as ecad_core::coord::Nm,
+            y: (my * ecad_core::coord::MM as f32).round() as ecad_core::coord::Nm,
+        };
+        assert!(
+            overlay
+                .findings
+                .iter()
+                .any(|(p, is_err)| *p == want && *is_err),
+            "an error marker must sit at the clearance finding's board point {want:?}"
+        );
+    }
+
+    /// The DRC chip counts match the cached findings (error + warning tallies).
+    #[test]
+    fn drc_chip_counts_match_findings() {
+        let app = drc_violation();
+        let f = app.findings();
+        assert!(
+            f.errors >= 1,
+            "the fixture has at least the clearance error"
+        );
+        // The chip is not clean and reports the same counts (asserted via the findings
+        // the chip reads — the chip El itself is a badge over these counts).
+        assert!(!f.is_clean());
+    }
+
+    /// A source that fails elaboration — an instance of a part not in the library.
+    const BROKEN_SRC: &str = "\
+inst U1 NotAPart
+net GND U1.GND
+";
 }

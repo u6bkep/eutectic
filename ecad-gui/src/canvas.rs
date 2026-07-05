@@ -160,6 +160,32 @@ impl Canvas {
         (view_mm.0, flip_sum_mm - view_mm.1)
     }
 
+    /// Map a board-mm point to the viewport **content-space** point (logical px,
+    /// pre-transform) — the exact inverse of [`content_px_to_board_mm`](Self::content_px_to_board_mm),
+    /// which a `ViewportRequest::CenterOn` consumes. Applies the y-flip (board→viewBox
+    /// mm), then the viewBox→rect scale + offset (`sx = rect.w/vw`, `sy = rect.h/vh`),
+    /// so the result is in the same frame the picker's `unproject` produces. `None` for
+    /// a degenerate rect. Used by findings click-to-centre.
+    pub fn board_mm_to_content_px(
+        &self,
+        board_mm: (f32, f32),
+        el_rect: (f32, f32, f32, f32),
+    ) -> Option<(f32, f32)> {
+        let (rx, ry, rw, rh) = el_rect;
+        let [vx, vy, vw, vh] = self.view_box();
+        if rw <= 0.0 || rh <= 0.0 || vw <= 0.0 || vh <= 0.0 {
+            return None;
+        }
+        // board → viewBox mm (flip is its own inverse: view_y = flip_sum - board_y).
+        let (_, y0, _, y1) = self.bounds;
+        let flip_sum_mm = nm_to_mm(y0 + y1);
+        let view_mm = (board_mm.0, flip_sum_mm - board_mm.1);
+        // viewBox mm → content px (undo the min offset + the per-axis rect scale).
+        let sx = rw / vw;
+        let sy = rh / vh;
+        Some((rx + (view_mm.0 - vx) * sx, ry + (view_mm.1 - vy) * sy))
+    }
+
     /// Map a viewport **content-space** point (the value `ViewportView::unproject`
     /// returns — the child `El`'s layout px, origin-relative, zoom/pan removed) to
     /// board coordinates in mm, for the status-bar cursor readout.
@@ -367,6 +393,17 @@ impl Canvas {
             paths.push(measure_line_path(a, b, flip_sum));
         }
 
+        // Findings markers: a distinct violation ring at each finding's board point,
+        // error-red or warning-amber — visually distinct from the cyan selection halo.
+        for (p, is_error) in &overlay.findings {
+            let color = if *is_error {
+                finding_error_color()
+            } else {
+                finding_warning_color()
+            };
+            paths.push(finding_marker_path(*p, flip_sum, color));
+        }
+
         if paths.is_empty() {
             return None;
         }
@@ -390,6 +427,10 @@ pub struct Overlay {
     pub highlights: Vec<(Shape2D, bool)>,
     /// The measure segment `(anchor, cursor)` in world nm, if a measure is in progress.
     pub measure: Option<(Point, Point)>,
+    /// DRC / findings markers: a board point (world nm, y-up) + whether it is an error
+    /// (vs a warning), drawn as a distinct violation ring — visually separate from the
+    /// selection halo (a filled-colour crosshair ring, not a shape-tracing stroke).
+    pub findings: Vec<(Point, bool)>,
 }
 
 /// Accent stroke for a selected feature: a bright halo tracing the shape's outline.
@@ -413,6 +454,44 @@ fn measure_line_path(a: Point, b: Point, flip_sum: Nm) -> VectorPath {
         .stroke_solid(measure_color(), OVERLAY_STROKE_MM)
         .stroke_line_cap(damascene_core::vector::VectorLineCap::Round)
         .build()
+}
+
+/// A findings marker: a small ring centred on the finding's board point, drawn as a
+/// stroked circle so it reads as a "look here" target distinct from the selection halo
+/// (which traces the feature's outline). Radius is a fixed board-mm so it scales with
+/// zoom like every overlay stroke.
+fn finding_marker_path(p: Point, flip_sum: Nm, color: Color) -> VectorPath {
+    let (cx, cy) = board_to_view(p, flip_sum);
+    let r = FINDING_MARKER_R_MM;
+    // Approximate the ring with a closed polygon (the overlay has no arc builder; a
+    // 24-gon reads as a circle at any practical zoom). Stroked, not filled, so the
+    // copper beneath still reads.
+    let mut b = PathBuilder::new();
+    let segs = 24;
+    for i in 0..segs {
+        let a = std::f32::consts::TAU * (i as f32) / (segs as f32);
+        let (x, y) = (cx + r * a.cos(), cy + r * a.sin());
+        b = if i == 0 {
+            b.move_to(x, y)
+        } else {
+            b.line_to(x, y)
+        };
+    }
+    b.close().stroke_solid(color, OVERLAY_STROKE_MM).build()
+}
+
+/// Findings marker ring radius in board mm.
+const FINDING_MARKER_R_MM: f32 = 1.2;
+
+/// The error-finding marker colour — a saturated red ring, distinct from every layer
+/// palette colour and from the cyan selection halo.
+fn finding_error_color() -> Color {
+    Color::srgb_token("ecad.finding.error", 0xff, 0x45, 0x45, 0xff)
+}
+
+/// The warning-finding marker colour — a warm amber ring (matches the DRC-warn chip).
+fn finding_warning_color() -> Color {
+    Color::srgb_token("ecad.finding.warning", 0xf5, 0xc0, 0x24, 0xff)
 }
 
 /// Overlay stroke width in mm (screen-independent; the viewport scales it with zoom).

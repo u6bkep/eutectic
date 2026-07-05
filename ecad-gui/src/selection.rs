@@ -52,6 +52,21 @@ impl SelectionModel {
         self.selected.clear();
     }
 
+    /// Add an id to the selection WITHOUT clearing (multi-select). Used by the findings
+    /// panel to select both nets of a clearance violation at once. Idempotent.
+    pub fn add(&mut self, id: SemanticId) {
+        self.selected.insert(id);
+    }
+
+    /// Prune both the selection and hover sets to the ids `keep` accepts — the reload
+    /// contract's "drop ids that no longer resolve" step (m5). An id that fails `keep`
+    /// is removed silently; a selection that fully drops out becomes empty (the
+    /// inspector then shows its empty state). Never panics.
+    pub fn retain(&mut self, keep: impl Fn(&SemanticId) -> bool) {
+        self.selected.retain(&keep);
+        self.hovered.retain(&keep);
+    }
+
     /// True when nothing is selected.
     pub fn is_empty(&self) -> bool {
         self.selected.is_empty()
