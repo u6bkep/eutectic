@@ -9,17 +9,18 @@ use crate::app::domain::{BoardView, DocStats};
 use crate::app::libraries::LIBRARIES_TOGGLE_KEY;
 use crate::app::pane::{
     CANVAS_BG, FINDINGS_TOGGLE_KEY, LAYOUT_TOGGLE_KEY, SPLIT_HANDLE_KEY, SPLIT_ROW_KEY,
-    finding_row_key, pane_index, pane_placeholder, switch_key,
+    finding_row_key, findings_chip_key, pane_index, pane_placeholder, switch_key,
 };
 use crate::app::{EcadApp, PaneId, PaneLayout, ViewKind};
 use crate::canvas::pick::SemanticId;
 use crate::canvas::{BoardLayer, Overlay};
 use crate::explorer::Explorer;
-use crate::findings::Findings;
+use crate::findings::{FindingSource, Findings};
 use crate::highlight::HighlightSets;
 use crate::inspector::InspectorData;
 use crate::tool::{Tool, format_readout};
 use damascene_core::prelude::*;
+use ecad_core::diagnostic::Severity;
 use ecad_core::geom::Shape2D;
 use ecad_core::id::NetId;
 
@@ -519,11 +520,14 @@ impl EcadApp {
             PaneLayout::Dual => "Dual",
             PaneLayout::Stacked => "Stacked",
         };
-        // The persistent DRC status chip (mockup chrome): error + warning counts, green
-        // when clean. The reload-error banner chip (permissive philosophy) sits beside
-        // it whenever the freshest source failed to load — unmissable, never a toast.
-        let chip = self.drc_chip();
-        let mut lead: Vec<El> = vec![toolbar_title("ecad"), badge(name).info(), chip];
+        // The per-source findings chips (mockup chrome): one chip per source (DRC / ERC /
+        // NET / LIB) shown only when nonzero, tinted by that source's worst severity; a
+        // single neutral ✓ chip when every source is clean. Any chip click toggles the
+        // findings panel. The reload-error banner chip (permissive philosophy) sits
+        // beside them whenever the freshest source failed to load — unmissable, never a
+        // toast.
+        let mut lead: Vec<El> = vec![toolbar_title("ecad"), badge(name).info()];
+        lead.extend(self.findings_chips());
         if let Some(err) = &self.domain.reload_error {
             lead.push(reload_error_chip(err));
         }
@@ -539,21 +543,40 @@ impl EcadApp {
             .padding(Sides::xy(tokens::SPACE_4, tokens::SPACE_2))
     }
 
-    /// The persistent DRC status chip (mockup menu-bar chrome): the cached findings'
-    /// error + warning counts, rendered green (`success`) when the board is clean, amber
-    /// (`warning`) when only warnings, red (`destructive`) when any error. Reads the
+    /// The per-source findings chips (mockup menu-bar chrome): one chip per
+    /// [`FindingSource`] that has findings this revision, in DRC/ERC/NET/LIB order,
+    /// each reading `"NAME n"` (n = total findings for that source) and tinted by the
+    /// source's worst severity — red (`destructive`) if any error, amber (`warning`)
+    /// otherwise, both through the theme's semantic colors. When every source is clean
+    /// a single neutral `"✓"` chip is shown instead. Every chip (including the ✓ one)
+    /// is a click-to-toggle-the-findings-panel affordance keyed distinctly. Reads the
     /// cached findings — never recomputes.
-    fn drc_chip(&self) -> El {
+    fn findings_chips(&self) -> Vec<El> {
         let findings = &self.derived.borrow().findings;
-        if findings.is_clean() {
-            return badge("DRC clean").success();
+        // A clickable chip: keyed + focusable + pointer cursor, so a click routes to the
+        // app (handled as a findings-panel toggle) exactly like the panel's Hide/Show.
+        let chip = |label: String, tag: &str| {
+            badge(label)
+                .key(findings_chip_key(tag))
+                .focusable()
+                .cursor(Cursor::Pointer)
+        };
+        let mut chips: Vec<El> = Vec::new();
+        for source in FindingSource::all() {
+            let Some((count, worst)) = findings.source_summary(source) else {
+                continue;
+            };
+            let c = chip(format!("{} {count}", source.label()), source.label());
+            chips.push(match worst {
+                Severity::Error => c.destructive(),
+                _ => c.warning(),
+            });
         }
-        let label = format!("DRC {} · {} warn", findings.errors, findings.warnings);
-        if findings.errors > 0 {
-            badge(label).destructive()
-        } else {
-            badge(label).warning()
+        if chips.is_empty() {
+            // All sources clean → a single neutral ✓ chip, still click-to-toggle.
+            chips.push(chip("✓".to_string(), "ok").muted());
         }
+        chips
     }
 
     /// The right sidebar layer panel: one row per layer (top of the stack first),

@@ -53,6 +53,46 @@ use ecad_core::id::NetId;
 use ecad_core::part::PartLib;
 use ecad_core::query::{Engine, Key};
 
+/// Which analysis surface a [`Finding`] came from — the grouping the toolbar's
+/// per-source chips key on. Assigned at construction from the query / report the
+/// row was projected from (not re-derived from the code), so a code rename can't
+/// silently drop a row from its chip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FindingSource {
+    /// Design-rule check (clearance / min-width / unrouted / keepout / edge) — the
+    /// `Key::Drc` violations.
+    Drc,
+    /// Electrical-rule check — the `Key::Erc` diagnostics (e.g. multiple drivers).
+    Erc,
+    /// Connectivity: the `Key::Floating` diagnostics — floating (unconnected) pads.
+    Net,
+    /// Library resolution: unresolved parts (`W_UNRESOLVED_PART`) + the GUI-side
+    /// `W_LIB_*` resolution notes (unregistered `use` / load error / collision).
+    Lib,
+}
+
+impl FindingSource {
+    /// The chip label for this source (uppercase, matching the mockup chrome).
+    pub fn label(self) -> &'static str {
+        match self {
+            FindingSource::Drc => "DRC",
+            FindingSource::Erc => "ERC",
+            FindingSource::Net => "NET",
+            FindingSource::Lib => "LIB",
+        }
+    }
+
+    /// The four sources in chip display order (DRC, ERC, NET, LIB).
+    pub fn all() -> [FindingSource; 4] {
+        [
+            FindingSource::Drc,
+            FindingSource::Erc,
+            FindingSource::Net,
+            FindingSource::Lib,
+        ]
+    }
+}
+
 /// One finding row, projected from a DRC violation or a diagnostic. Holds the
 /// severity + message for the panel, the semantic refs to fold into the selection on
 /// click (so the panes cross-highlight), and an optional board-mm location for the
@@ -60,6 +100,8 @@ use ecad_core::query::{Engine, Key};
 /// docs).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Finding {
+    /// Which analysis surface produced this row — the per-source chip grouping.
+    pub source: FindingSource,
     /// Error or warning — drives the badge colour and the chip counts.
     pub severity: Severity,
     /// The stable diagnostic code (e.g. `"E_DRC_CLEARANCE"`) — the panel row's mono
@@ -173,6 +215,7 @@ impl Findings {
                 .unwrap_or_default();
             let board_mm = halo_point(&refs, doc, candidates);
             items.push(Finding {
+                source: FindingSource::Drc,
                 severity: Severity::Error,
                 code,
                 message,
@@ -181,12 +224,23 @@ impl Findings {
             });
         }
 
-        // ERC + Floating: map each diagnostic's `Location` to semantic refs.
+        // ERC + Floating: map each diagnostic's `Location` to semantic refs. ERC rows
+        // are the `Erc` source; floating (unconnected) pads are the `Net` source.
         for d in engine.query(doc, lib, Key::Erc).as_erc() {
-            items.push(finding_from_diagnostic(d, doc, candidates));
+            items.push(finding_from_diagnostic(
+                FindingSource::Erc,
+                d,
+                doc,
+                candidates,
+            ));
         }
         for d in engine.query(doc, lib, Key::Floating).as_floating() {
-            items.push(finding_from_diagnostic(d, doc, candidates));
+            items.push(finding_from_diagnostic(
+                FindingSource::Net,
+                d,
+                doc,
+                candidates,
+            ));
         }
 
         // Library packages: unresolved-part warnings from the recon report — one row
@@ -195,6 +249,7 @@ impl Findings {
         // is informational.
         for (id, part, _help) in &doc.report.unresolved_parts {
             items.push(Finding {
+                source: FindingSource::Lib,
                 severity: Severity::Warning,
                 code: "W_UNRESOLVED_PART",
                 message: format!(
@@ -209,6 +264,7 @@ impl Findings {
         // collision) — informational warning rows with `W_LIB_*` codes.
         for n in lib_notes {
             items.push(Finding {
+                source: FindingSource::Lib,
                 severity: Severity::Warning,
                 code: n.code,
                 message: n.message.clone(),
@@ -238,6 +294,27 @@ impl Findings {
     pub fn is_clean(&self) -> bool {
         self.items.is_empty()
     }
+
+    /// The `(count, worst_severity)` for one source, or `None` when that source has no
+    /// findings this revision (the toolbar shows a source chip only when nonzero).
+    /// `worst_severity` is [`Severity::Error`] if any finding in the source is an error,
+    /// else [`Severity::Warning`] — it tints the chip through the theme's semantic colors.
+    pub fn source_summary(&self, source: FindingSource) -> Option<(usize, Severity)> {
+        let count = self.items.iter().filter(|f| f.source == source).count();
+        if count == 0 {
+            return None;
+        }
+        let worst = if self
+            .items
+            .iter()
+            .any(|f| f.source == source && f.is_error())
+        {
+            Severity::Error
+        } else {
+            Severity::Warning
+        };
+        Some((count, worst))
+    }
 }
 
 /// The stable code + full semantic ref set for a typed DRC [`Violation`]. This is the
@@ -263,10 +340,16 @@ fn violation_refs(v: &ecad_core::route::Violation) -> (&'static str, Vec<Semanti
 /// [`Location`] to semantic refs. A `Pin` location also contributes the owning
 /// `Part` ref so selecting a floating-pad finding highlights the whole part on the
 /// schematic (the pin stub alone is easy to miss).
-fn finding_from_diagnostic(d: &Diagnostic, doc: &Doc, candidates: &[Candidate]) -> Finding {
+fn finding_from_diagnostic(
+    source: FindingSource,
+    d: &Diagnostic,
+    doc: &Doc,
+    candidates: &[Candidate],
+) -> Finding {
     let refs = location_refs(&d.location);
     let board_mm = halo_point(&refs, doc, candidates);
     Finding {
+        source,
         severity: d.severity,
         code: d.code,
         message: d.message.clone(),

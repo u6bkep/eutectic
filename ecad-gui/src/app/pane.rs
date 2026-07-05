@@ -130,6 +130,21 @@ pub(crate) fn pane_index(p: PaneId) -> usize {
 pub(crate) const LAYOUT_TOGGLE_KEY: &str = "layout:toggle";
 /// The event-route key of the findings-panel collapse toggle.
 pub(crate) const FINDINGS_TOGGLE_KEY: &str = "findings:toggle";
+/// The route-key prefix of a toolbar findings chip (a source label, or `ok`, appended).
+/// Each chip needs its own key (keys are unique in the tree); clicking any of them
+/// toggles/focuses the findings panel exactly like [`FINDINGS_TOGGLE_KEY`].
+pub(crate) const FINDINGS_CHIP_PREFIX: &str = "findings:chip:";
+
+/// The route key for the toolbar findings chip named `tag` (a source label or `ok`).
+pub(crate) fn findings_chip_key(tag: &str) -> String {
+    format!("{FINDINGS_CHIP_PREFIX}{tag}")
+}
+
+/// Whether `route` is a toolbar findings chip (any of the per-source / ✓ chips).
+pub(crate) fn is_findings_chip_key(route: &str) -> bool {
+    route.starts_with(FINDINGS_CHIP_PREFIX)
+}
+
 /// The route-key prefix of a findings row (index appended).
 const FINDINGS_ROW_PREFIX: &str = "finding:row:";
 

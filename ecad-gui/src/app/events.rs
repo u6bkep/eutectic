@@ -8,7 +8,7 @@
 use crate::app::libraries::LIBRARIES_TOGGLE_KEY;
 use crate::app::pane::{
     FINDINGS_TOGGLE_KEY, LAYOUT_TOGGLE_KEY, SPLIT_HANDLE_KEY, SPLIT_ROW_KEY, finding_index_of_key,
-    is_canvas_target, pane_index, switch_key,
+    is_canvas_target, is_findings_chip_key, pane_index, switch_key,
 };
 use crate::app::panels::error_card;
 use crate::app::{EcadApp, PaneId, PaneLayout, ViewKind};
@@ -183,7 +183,12 @@ impl App for EcadApp {
 
         // Findings panel: collapse toggle, then a row click → select the finding's refs
         // + centre the focused board pane on its board point (click-to-select-and-zoom).
-        if event.is_click_or_activate(FINDINGS_TOGGLE_KEY) {
+        // A toolbar findings chip (any per-source chip, or the ✓ chip) toggles the panel
+        // exactly like the collapse toggle.
+        if event.is_click_or_activate(FINDINGS_TOGGLE_KEY)
+            || (matches!(event.kind, UiEventKind::Click | UiEventKind::Activate)
+                && event.route().is_some_and(is_findings_chip_key))
+        {
             self.findings_open.set(!self.findings_open.get());
             return;
         }

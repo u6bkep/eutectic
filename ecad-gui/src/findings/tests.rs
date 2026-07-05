@@ -135,4 +135,34 @@ board (0mm, 0mm) (10mm, 0mm) (10mm, 10mm) (0mm, 10mm)
     );
     assert_eq!(f.errors, 0);
     assert_eq!(f.warnings, 0);
+    // A clean doc has no per-source summary for any source (drives the ✓ chip).
+    for source in FindingSource::all() {
+        assert_eq!(f.source_summary(source), None);
+    }
+}
+
+/// Per-source classification: the clearance fixture's DRC error classifies under
+/// `FindingSource::Drc`, and `source_summary(Drc)` reports it with error severity —
+/// the toolbar's per-source-chip grouping (item 4). ERC/NET/LIB have nothing here.
+#[test]
+fn drc_violation_classifies_under_drc_source() {
+    let f = findings_of(&drc_violation_domain());
+    assert!(
+        f.items
+            .iter()
+            .any(|i| i.source == FindingSource::Drc && i.code == "E_DRC_CLEARANCE"),
+        "the clearance error must carry the Drc source"
+    );
+    let (count, worst) = f
+        .source_summary(FindingSource::Drc)
+        .expect("Drc source is nonzero for the violation fixture");
+    assert!(count >= 1);
+    assert_eq!(worst, ecad_core::diagnostic::Severity::Error);
+    // Every finding's source is one of the four; DRC codes never leak into another.
+    assert!(
+        f.items
+            .iter()
+            .all(|i| i.source != FindingSource::Drc || i.code.starts_with("E_DRC_")),
+        "only E_DRC_* codes may carry the Drc source"
+    );
 }
