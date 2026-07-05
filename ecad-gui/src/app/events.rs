@@ -8,19 +8,19 @@
 use crate::app::libraries::LIBRARIES_TOGGLE_KEY;
 use crate::app::pane::{
     CONFLICT_KEEP_KEY, CONFLICT_RELOAD_KEY, FINDINGS_TOGGLE_KEY, LAYOUT_TOGGLE_KEY, REDO_KEY,
-    SAVE_KEY, SPLIT_HANDLE_KEY, SPLIT_ROW_KEY, UNDO_KEY, finding_index_of_key, is_canvas_target,
-    is_findings_chip_key, pane_index, switch_key,
+    SAVE_KEY, SPLIT_HANDLE_KEY, SPLIT_ROW_KEY, UNDO_KEY, active_layer_of_key, finding_index_of_key,
+    is_canvas_target, is_findings_chip_key, pane_index, switch_key,
 };
 use crate::app::panels::error_card;
 use crate::app::{EcadApp, PaneId, PaneLayout, ViewKind};
 use crate::canvas::pick::{self, SemanticId};
 use crate::reload::SourceMsg;
 use crate::schematic_view::SchematicView;
-use crate::tool::{DragState, MeasureState, Tool};
+use crate::tool::{self, DragState, MeasureState, RouteState, Tool, TraceDragState};
 use damascene_core::prelude::*;
 use ecad_core::command::{Command, Transaction};
 use ecad_core::coord::{Nm, Point};
-use ecad_core::id::EntityId;
+use ecad_core::id::{EntityId, NetId};
 
 /// The pick grab radius in screen (logical) px — converted to a board distance
 /// through the current zoom by [`pick::tolerance_nm`], so the on-screen radius is
@@ -248,22 +248,53 @@ impl App for EcadApp {
             return;
         }
 
-        // Tool palette toggles (structural commitment 4).
+        // Tool palette toggles (structural commitment 4). Switching tools cancels
+        // every in-flight preview (measure / pending route / vertex drag) — a
+        // preview never outlives its tool.
         for t in Tool::all() {
             if event.is_click_or_activate(t.key()) {
                 if self.tool.get() != t {
                     self.measure.set(MeasureState::default());
+                    *self.route.borrow_mut() = None;
+                    *self.trace_drag.borrow_mut() = None;
                 }
                 self.tool.set(t);
                 return;
             }
         }
 
-        // Escape: cancel an in-flight drag first (preview discarded, nothing
-        // committed — m6), then a measure in progress, else clear the selection.
+        // The layer panel's set-active affordance (m6 slice B): make that copper
+        // slab the active routing layer. While a route is pending this drops a
+        // via at the last waypoint and continues on the new layer (the app-side
+        // `set_active_layer` owns that logic).
+        if matches!(event.kind, UiEventKind::Click | UiEventKind::Activate)
+            && let Some(route) = event.route()
+            && let Some(name) = active_layer_of_key(route)
+        {
+            let name = name.to_string();
+            self.set_active_layer(&name);
+            return;
+        }
+
+        // Escape: cancel an in-flight preview first — component drag, then a
+        // trace-vertex drag, then a pending route (preview discarded, nothing
+        // committed — m6); with the Route tool idle, Esc exits the tool back to
+        // Select; then a measure in progress; else clear the selection.
         if event.kind == UiEventKind::Escape {
             if self.drag.borrow().is_some() {
                 *self.drag.borrow_mut() = None;
+                return;
+            }
+            if self.trace_drag.borrow().is_some() {
+                *self.trace_drag.borrow_mut() = None;
+                return;
+            }
+            if self.route.borrow().is_some() {
+                *self.route.borrow_mut() = None;
+                return;
+            }
+            if self.tool.get() == Tool::Route {
+                self.tool.set(Tool::Select);
                 return;
             }
             let mut m = self.measure.get();
@@ -325,9 +356,14 @@ impl App for EcadApp {
         // A pointer-up with a drag in flight ALWAYS finishes the drag (commit if
         // moved), even when the release lands outside the pane rect — otherwise a
         // release over the chrome would strand the ghost. The drag's own last
-        // in-pane cursor is the drop point in that case.
+        // in-pane cursor is the drop point in that case. Same rule for a
+        // trace-vertex drag (m6 slice B).
         if event.kind == UiEventKind::PointerUp && self.drag.borrow().is_some() {
             self.finish_drag();
+            return;
+        }
+        if event.kind == UiEventKind::PointerUp && self.trace_drag.borrow().is_some() {
+            self.finish_trace_drag();
             return;
         }
 
@@ -445,6 +481,12 @@ impl EcadApp {
             (Tool::Select, UiEventKind::PointerDown) => {
                 // A fresh press can never inherit a stale eaten-click flag.
                 self.suppress_click.set(false);
+                // A press on the SELECTED trace's vertex / segment arms the
+                // vertex-refinement drag (m6 slice B) — it wins over a component
+                // drag (handles render on top of everything).
+                if self.begin_trace_drag(p, tol) {
+                    return;
+                }
                 self.begin_drag(pane, p, tol);
             }
             (Tool::Select, UiEventKind::Click) => {
@@ -466,8 +508,13 @@ impl EcadApp {
                 }
             }
             (Tool::Select, UiEventKind::Drag) => {
-                // An in-flight component drag consumes pointer movement (the ghost
-                // tracks it); otherwise drag-over is a hover cue, as before.
+                // An in-flight trace-vertex or component drag consumes pointer
+                // movement (the preview tracks it); otherwise drag-over is a
+                // hover cue, as before.
+                if let Some(d) = self.trace_drag.borrow_mut().as_mut() {
+                    d.update(p);
+                    return;
+                }
                 let mut drag = self.drag.borrow_mut();
                 if let Some(d) = drag.as_mut() {
                     d.update(p);
@@ -516,7 +563,198 @@ impl EcadApp {
                 m.hover(p);
                 self.measure.set(m);
             }
+            (Tool::Route, UiEventKind::Click) => {
+                self.route_click(p, tol);
+            }
+            (
+                Tool::Route,
+                UiEventKind::PointerEnter
+                | UiEventKind::PointerDown
+                | UiEventKind::Drag
+                | UiEventKind::PointerUp,
+            ) => {
+                // Rubber-segment update on every pointer event 0.4.5 delivers
+                // (no free-hover pointer-move — the documented toolkit limit).
+                if let Some(r) = self.route.borrow_mut().as_mut() {
+                    r.hover(p);
+                }
+            }
             _ => {}
+        }
+    }
+
+    /// A Route-tool click at board point `p` (m6 slice B, ladder level 1).
+    ///
+    /// No pending route: a PIN with a net starts one (anchor = the pad's centre
+    /// — the engine stores trace paths as free points, so the snap is realised
+    /// as the candidate AABB centre); known-net copper (trace / via / pour)
+    /// starts one anchored at the snapped click point (trace → nearest point on
+    /// its centreline, via → its centre, pour → the raw point). Empty space /
+    /// netless copper does nothing (a trace needs a net — a data requirement,
+    /// not a legality refusal).
+    ///
+    /// Pending: a PIN click — any pin, even one on a DIFFERENT net (permissive;
+    /// overlap surfaces as DRC findings, never a block) — snaps to that pad's
+    /// centre and COMMITS. Anything else appends a waypoint at the raw board
+    /// position (no grid snap in v1).
+    fn route_click(&mut self, p: Point, tol: Nm) {
+        if self.route.borrow().is_none() {
+            let Some((net, anchor)) = self.route_start_at(p, tol) else {
+                return;
+            };
+            let Some(layer) = self.active_layer_name() else {
+                return;
+            };
+            *self.route.borrow_mut() = Some(RouteState::start(net, layer, anchor));
+            return;
+        }
+        match self.pin_snap_at(p, tol) {
+            Some(end) => {
+                let committable = {
+                    let mut r = self.route.borrow_mut();
+                    let r = r.as_mut().expect("pending checked above");
+                    r.push_waypoint(end);
+                    r.has_committable()
+                };
+                // A commit-click on the start pin with no waypoints has nothing
+                // to commit — the route stays pending (commit_route also guards).
+                if committable {
+                    self.commit_route();
+                }
+            }
+            None => {
+                let mut r = self.route.borrow_mut();
+                r.as_mut().expect("pending checked above").push_waypoint(p);
+            }
+        }
+    }
+
+    /// The pad-centre snap for a pin pick at `p`, if the winning pick is a pin:
+    /// the candidate's AABB centre (the same centre the drag ghost / ratsnest
+    /// use). Pure per-event lookup over the cached candidates.
+    fn pin_snap_at(&self, p: Point, tol: Nm) -> Option<Point> {
+        let derived = self.derived.borrow();
+        let view = derived.board.as_ref()?;
+        let hit = pick::resolve(&view.candidates, p, tol, |id| self.layer_id_visible(id))?;
+        if !matches!(hit.id, SemanticId::Pin { .. }) {
+            return None;
+        }
+        let c = view.candidates.iter().find(|c| c.id == hit.id)?;
+        Some(Point {
+            x: (c.aabb.0.x + c.aabb.1.x) / 2,
+            y: (c.aabb.0.y + c.aabb.1.y) / 2,
+        })
+    }
+
+    /// Resolve a route START click: the net the new trace belongs to and the
+    /// snapped anchor point. `None` when the click hits nothing routable (empty
+    /// space, or a netless pin — a trace needs a net).
+    fn route_start_at(&self, p: Point, tol: Nm) -> Option<(NetId, Point)> {
+        let derived = self.derived.borrow();
+        let view = derived.board.as_ref()?;
+        let hit = pick::resolve(&view.candidates, p, tol, |id| self.layer_id_visible(id))?;
+        let doc = self.domain.doc.as_ref().ok()?;
+        match &hit.id {
+            SemanticId::Pin { .. } => {
+                let net = self.candidate_net(&hit.id)?;
+                let c = view.candidates.iter().find(|c| c.id == hit.id)?;
+                Some((
+                    net,
+                    Point {
+                        x: (c.aabb.0.x + c.aabb.1.x) / 2,
+                        y: (c.aabb.0.y + c.aabb.1.y) / 2,
+                    },
+                ))
+            }
+            SemanticId::Trace(tid) => {
+                let t = doc.traces.get(tid)?;
+                Some((t.net.clone(), tool::closest_on_path(&t.path, p)?))
+            }
+            SemanticId::Via(vid) => {
+                let v = doc.vias.get(vid)?;
+                Some((v.net.clone(), v.at))
+            }
+            SemanticId::Pour { net, .. } => Some((net.clone(), p)),
+            _ => None,
+        }
+    }
+
+    /// Pointer-down with the Select tool over the single-selected trace: arm the
+    /// vertex-refinement drag (m6 slice B). A press within the pick tolerance of
+    /// a VERTEX drags that vertex; a press on a SEGMENT (within tolerance of the
+    /// copper, i.e. tol + half width) INSERTS a new vertex at the projected
+    /// point and drags it. Cheap per-event vector math against the selected
+    /// trace's few points — no kernel call (event-path discipline). Returns
+    /// whether a drag was armed.
+    fn begin_trace_drag(&self, p: Point, tol: Nm) -> bool {
+        let Ok(doc) = &self.domain.doc else {
+            return false;
+        };
+        let tid = match self.domain.selection.borrow().single() {
+            Some(SemanticId::Trace(t)) => *t,
+            _ => return false,
+        };
+        let Some(trace) = doc.traces.get(&tid) else {
+            return false;
+        };
+        let (index, path) = if let Some(i) = tool::hit_vertex(&trace.path, p, tol) {
+            (i, trace.path.clone())
+        } else if let Some((i, q)) = tool::hit_segment(&trace.path, p, tol + trace.width / 2) {
+            let mut path = trace.path.clone();
+            path.insert(i, q);
+            (i, path)
+        } else {
+            return false;
+        };
+        *self.trace_drag.borrow_mut() = Some(TraceDragState {
+            trace: tid,
+            path,
+            index,
+            width: trace.width,
+            start: p,
+            moved: false,
+            slop: tol,
+        });
+        true
+    }
+
+    /// Pointer-up with a trace-vertex drag in flight: a **moved** drag commits
+    /// the updated path as `RemoveTrace + AddTrace` under the SAME `TraceId` in
+    /// one transaction — the engine has no update-trace-path command, so the
+    /// replace is the disclosed workaround; the stable id keeps the selection
+    /// alive through the commit. `Pinned` provenance (the refined path is
+    /// user-authored). An un-moved press-release just disarms — a plain click
+    /// (and an inserted-but-never-dragged vertex is discarded uncommitted).
+    fn finish_trace_drag(&mut self) {
+        let Some(d) = self.trace_drag.borrow_mut().take() else {
+            return;
+        };
+        if !d.moved {
+            return;
+        }
+        // Eat the trailing Click of this press (PointerUp fires first).
+        self.suppress_click.set(true);
+        let new_trace = {
+            let Ok(doc) = &self.domain.doc else {
+                return;
+            };
+            let Some(orig) = doc.traces.get(&d.trace) else {
+                return;
+            };
+            ecad_core::route::Trace {
+                net: orig.net.clone(),
+                layer: orig.layer.clone(),
+                path: d.path.clone(),
+                width: orig.width,
+                prov: ecad_core::doc::Provenance::Pinned,
+            }
+        };
+        let txn = Transaction(vec![
+            Command::RemoveTrace(d.trace),
+            Command::AddTrace(d.trace, new_trace),
+        ]);
+        if let Err(e) = self.commit_edit(txn, "edit trace path") {
+            self.domain.edit.error = Some(e);
         }
     }
 

@@ -305,6 +305,43 @@ impl EcadApp {
                 _ => (Vec::new(), Vec::new()),
             }
         };
+        // Pending route preview (m6 slice B): board-space geometry, so — like the
+        // findings markers — every board pane shows it. Runs render at the width
+        // the commit will use; the layer-switch vias as pad-sized rings.
+        let (route_runs, route_rubber, route_vias) = {
+            let route = self.route.borrow();
+            match route.as_ref() {
+                Some(r) => {
+                    let (width, _, via_pad) = crate::app::route_defaults();
+                    (
+                        r.runs
+                            .iter()
+                            .map(|run| (run.points.clone(), width))
+                            .collect(),
+                        r.rubber(),
+                        r.vias.iter().map(|p| (*p, via_pad)).collect(),
+                    )
+                }
+                None => (Vec::new(), None, Vec::new()),
+            }
+        };
+        // Trace-vertex refinement (m6 slice B, Select tool): the selected trace
+        // renders vertex handles; an in-flight vertex drag renders its working
+        // path as an edit preview (handles track the working path).
+        let (edit_path, handles) = {
+            let drag = self.trace_drag.borrow();
+            if let Some(d) = drag.as_ref() {
+                (Some((d.path.clone(), d.width)), d.path.clone())
+            } else if self.tool.get() == Tool::Select
+                && let Ok(doc) = &self.domain.doc
+                && let Some(SemanticId::Trace(tid)) = self.domain.selection.borrow().single()
+                && let Some(t) = doc.traces.get(tid)
+            {
+                (None, t.path.clone())
+            } else {
+                (None, Vec::new())
+            }
+        };
         // Findings with a derived board point become violation markers (both board
         // panes show them — a finding is a property of the board, not a pane).
         let finding_markers: Vec<(ecad_core::coord::Point, bool)> = findings
@@ -327,6 +364,11 @@ impl EcadApp {
             findings: finding_markers,
             ghost,
             ratsnest,
+            route_runs,
+            route_rubber,
+            route_vias,
+            edit_path,
+            handles,
         }
     }
 
@@ -342,8 +384,9 @@ impl EcadApp {
             .collect()
     }
 
-    /// The net a board candidate's id belongs to, if any (for the net-expansion match).
-    fn candidate_net(&self, id: &SemanticId) -> Option<NetId> {
+    /// The net a board candidate's id belongs to, if any (for the net-expansion
+    /// match, and the Route tool's start-pick net resolution).
+    pub(crate) fn candidate_net(&self, id: &SemanticId) -> Option<NetId> {
         let doc = self.domain.doc.as_ref().ok()?;
         match id {
             SemanticId::Trace(t) => doc.traces.get(t).map(|t| t.net.clone()),
@@ -665,11 +708,18 @@ impl EcadApp {
     }
 
     /// The right sidebar layer panel: one row per layer (top of the stack first),
-    /// each a colour swatch, name, and a visibility switch. Order mirrors draw
-    /// order reversed, so the top copper reads at the top of the list.
+    /// each a colour swatch, name, and a visibility switch; copper rows also get
+    /// the set-active routing marker (m6 slice B). Order mirrors draw order
+    /// reversed, so the top copper reads at the top of the list.
     fn layer_panel(&self, layers: &[BoardLayer]) -> El {
+        let copper = self.copper_layer_names();
+        let active = self.active_layer_name();
         // Draw order is bottom-first; the panel lists top-first.
-        let rows: Vec<El> = layers.iter().rev().map(|l| self.layer_row(l)).collect();
+        let rows: Vec<El> = layers
+            .iter()
+            .rev()
+            .map(|l| self.layer_row(l, &copper, active.as_deref()))
+            .collect();
         sidebar([
             sidebar_header([h3("Layers")]),
             sidebar_group([
@@ -681,8 +731,13 @@ impl EcadApp {
         .height(Size::Hug)
     }
 
-    /// One layer-panel row: colour swatch + name + a visibility [`switch`].
-    fn layer_row(&self, l: &BoardLayer) -> El {
+    /// One layer-panel row: colour swatch + name + a visibility [`switch`]. A
+    /// COPPER row additionally leads with the set-active routing marker (m6
+    /// slice B): a small `●`/`○` button — filled when this is the active layer —
+    /// visually distinct from (and on the opposite side to) the visibility
+    /// toggle. Clicking it makes this slab the active routing layer; while a
+    /// route is pending that switch drops a via.
+    fn layer_row(&self, l: &BoardLayer, copper: &[String], active: Option<&str>) -> El {
         let key = l.id.key();
         let swatch = El::new(Kind::Custom("layer-swatch"))
             .fill(l.color)
@@ -690,14 +745,22 @@ impl EcadApp {
             .radius(3.0)
             .width(Size::Fixed(14.0))
             .height(Size::Fixed(14.0));
-        row([
-            swatch,
-            text(l.name.clone()).width(Size::Fill(1.0)),
-            switch(switch_key(&key), self.layer_visible(&key)),
-        ])
-        .align(Align::Center)
-        .gap(tokens::SPACE_2)
-        .padding(Sides::y(tokens::SPACE_1))
+        let mut cells: Vec<El> = Vec::new();
+        if let crate::canvas::LayerId::Slab(name) = &l.id
+            && copper.iter().any(|n| n == name)
+        {
+            let is_active = active == Some(name.as_str());
+            let marker = button(if is_active { "●" } else { "○" })
+                .key(crate::app::pane::active_layer_key(name));
+            cells.push(if is_active { marker.primary() } else { marker });
+        }
+        cells.push(swatch);
+        cells.push(text(l.name.clone()).width(Size::Fill(1.0)));
+        cells.push(switch(switch_key(&key), self.layer_visible(&key)));
+        row(cells)
+            .align(Align::Center)
+            .gap(tokens::SPACE_2)
+            .padding(Sides::y(tokens::SPACE_1))
     }
 
     /// The bottom status bar (mockup taste): the live cursor position in board
@@ -720,6 +783,11 @@ impl EcadApp {
 
         items.push(spacer());
 
+        // The active-layer chip (mockup status-bar anatomy; m6 slice B): the
+        // copper slab new routes land on. Shown whenever a board is loaded.
+        if let Some(layer) = self.active_layer_name() {
+            items.push(badge(format!("layer {layer}")).info());
+        }
         // The selected net name (mockup taste: the status bar carries the selected
         // net). Derived from the single selection via the inspector projection.
         if let Some(net) = self.selected_net() {

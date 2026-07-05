@@ -442,6 +442,100 @@ pub fn conflict_banner() -> EcadApp {
 }
 
 // ---------------------------------------------------------------------------
+// Milestone-6 slice-B scenes: manual trace drawing (routing ladder level 1).
+// A route in progress (pending waypoints + rubber segment), a committed
+// multi-waypoint trace, a layer-switched route with its via drop, and a
+// trace-vertex refinement drag in progress.
+// ---------------------------------------------------------------------------
+
+/// A board point at integer-mm `(x, y)` — shorthand for the m6b scenes.
+fn mm_pt(x: i64, y: i64) -> ecad_core::coord::Point {
+    use ecad_core::coord::MM;
+    ecad_core::coord::Point {
+        x: x * MM,
+        y: y * MM,
+    }
+}
+
+/// A route in progress (m6 slice B): the Route tool active over the editing
+/// board with a pending route started at C1's `p1` pad (net GND, active layer
+/// F.Cu), two waypoints clicked, and the rubber segment tracking the last known
+/// pointer position. Nothing committed; the doc is untouched and clean.
+pub fn route_in_progress() -> EcadApp {
+    use crate::tool::Tool;
+    use ecad_core::id::EntityId;
+    let app = EcadApp::new(edit_board_domain());
+    app.set_tool(Tool::Route);
+    let armed = app.set_route(
+        &EntityId::new("C1"),
+        "p1",
+        &[mm_pt(10, 5), mm_pt(10, 9)],
+        Some(mm_pt(12, 10)),
+    );
+    debug_assert!(armed, "C1.p1 has a pad candidate on net GND");
+    app
+}
+
+/// A committed multi-waypoint trace (m6 slice B): the pending route above
+/// extended to C2's `p1` pad centre and committed through `commit_route` — one
+/// GND trace with two interior waypoints, committed via the command layer (the
+/// doc is dirty, one undo step, the new trace selected).
+pub fn routed_trace() -> EcadApp {
+    use ecad_core::id::EntityId;
+    let mut app = EcadApp::new(edit_board_domain());
+    // (14, 12) is C2.p1's pad centre (C2 sits at (15, 12); p1 offsets -1 mm).
+    let armed = app.set_route(
+        &EntityId::new("C1"),
+        "p1",
+        &[mm_pt(10, 5), mm_pt(10, 9), mm_pt(14, 12)],
+        None,
+    );
+    debug_assert!(armed, "C1.p1 has a pad candidate on net GND");
+    app.commit_route();
+    app
+}
+
+/// A layer-switched route in progress (m6 slice B, ladder level 1's "via drop
+/// on layer switch"): a pending GND route with one F.Cu waypoint, the active
+/// layer switched to B.Cu (dropping a through-via at the last waypoint), and a
+/// further waypoint on the new layer. Still pending — the via + both runs will
+/// commit together as one undo unit.
+pub fn route_layer_switch() -> EcadApp {
+    use crate::tool::Tool;
+    use ecad_core::id::EntityId;
+    let app = EcadApp::new(edit_board_domain());
+    app.set_tool(Tool::Route);
+    let armed = app.set_route(&EntityId::new("C1"), "p1", &[mm_pt(10, 5)], None);
+    debug_assert!(armed, "C1.p1 has a pad candidate on net GND");
+    app.set_active_layer("B.Cu");
+    if let Some(r) = app.route.borrow_mut().as_mut() {
+        r.push_waypoint(mm_pt(10, 9));
+        r.hover(mm_pt(12, 10));
+    }
+    app
+}
+
+/// A trace-vertex refinement drag in progress (m6 slice B): the committed
+/// multi-waypoint trace with its first interior vertex being dragged (Select
+/// tool) — the overlay renders the vertex handles and the working-path preview;
+/// nothing further is committed until release.
+pub fn trace_vertex_drag() -> EcadApp {
+    let app = routed_trace();
+    let tid = *app
+        .domain
+        .doc
+        .as_ref()
+        .expect("routed board elaborates")
+        .traces
+        .keys()
+        .next()
+        .expect("the routed_trace scene committed a trace");
+    let armed = app.set_trace_drag(tid, 1, mm_pt(8, 6));
+    debug_assert!(armed, "the committed trace has an interior vertex");
+    app
+}
+
+// ---------------------------------------------------------------------------
 // Library-packages slice-2 scenes: a doc whose `use` name resolves to nothing
 // (registry-driven, permissive degrade → findings rows + a loaded-but-degraded
 // board), and the Libraries menu open over it.
@@ -552,6 +646,10 @@ pub fn all() -> Vec<(&'static str, EcadApp)> {
         ("drag_in_progress", drag_in_progress()),
         ("dirty_doc", dirty_doc()),
         ("conflict_banner", conflict_banner()),
+        ("route_in_progress", route_in_progress()),
+        ("routed_trace", routed_trace()),
+        ("route_layer_switch", route_layer_switch()),
+        ("trace_vertex_drag", trace_vertex_drag()),
     ]
 }
 
@@ -915,6 +1013,103 @@ mod tests {
         assert!(app.dirty(), "the doc stays dirty");
         assert_eq!(app.revision(), rev0, "the external change was NOT applied");
         harness::assert_content_coverage("conflict_banner", &r, &[PaneId::A.canvas_key()]);
+    }
+
+    /// The route-in-progress scene (m6 slice B): a pending route with waypoints
+    /// and a live rubber segment, nothing committed (doc clean), lint-clean with
+    /// a fitted board pane.
+    #[test]
+    fn route_in_progress_is_lint_clean_and_pending() {
+        let app = route_in_progress();
+        assert!(app.route_active(), "the scene must have a pending route");
+        assert!(!app.dirty(), "a pending route commits nothing");
+        let r = app.pending_route().unwrap();
+        assert_eq!(r.net.to_string(), "GND", "started from C1.p1 → net GND");
+        assert_eq!(r.runs.len(), 1, "single-layer so far");
+        assert_eq!(r.runs[0].points.len(), 3, "anchor + two waypoints");
+        assert!(r.rubber().is_some(), "the rubber segment tracks the cursor");
+        let rendered = render_clean("route_in_progress", app);
+        harness::assert_content_coverage("route_in_progress", &rendered, &[PaneId::A.canvas_key()]);
+    }
+
+    /// The committed multi-waypoint trace scene (m6 slice B): one GND trace with
+    /// the pin-snapped endpoints and both waypoints, committed through the
+    /// command layer (dirty, one undo, trace selected), lint-clean.
+    #[test]
+    fn routed_trace_is_lint_clean_and_committed() {
+        let app = routed_trace();
+        assert!(!app.route_active(), "the route committed");
+        assert!(app.dirty(), "the commit dirtied the doc");
+        assert_eq!(app.undo_depths(), (1, 0), "one commit → one undo unit");
+        let doc = app.domain.doc.as_ref().unwrap();
+        assert_eq!(doc.traces.len(), 1, "one committed trace");
+        let t = doc.traces.values().next().unwrap();
+        assert_eq!(t.net.to_string(), "GND");
+        assert_eq!(t.layer, "F.Cu");
+        assert_eq!(
+            t.path,
+            vec![mm_pt(14, 3), mm_pt(10, 5), mm_pt(10, 9), mm_pt(14, 12)],
+            "pad-centre anchor + waypoints + pad-centre end"
+        );
+        let (width, ..) = crate::app::route_defaults();
+        assert_eq!(t.width, width, "the DRC/router default width (0.15 mm)");
+        assert_eq!(t.prov, ecad_core::doc::Provenance::Pinned, "hand-routed");
+        // The commit left the new trace selected, ready for refinement.
+        let tid = *doc.traces.keys().next().unwrap();
+        assert_eq!(
+            app.domain.selection.borrow().single(),
+            Some(&crate::canvas::pick::SemanticId::Trace(tid))
+        );
+        let rendered = render_clean("routed_trace", app);
+        harness::assert_content_coverage("routed_trace", &rendered, &[PaneId::A.canvas_key()]);
+    }
+
+    /// The layer-switch scene (m6 slice B): the pending route carries the via
+    /// drop at the switch point and continues on B.Cu; still uncommitted.
+    #[test]
+    fn route_layer_switch_is_lint_clean_and_has_via() {
+        let app = route_layer_switch();
+        assert!(app.route_active());
+        assert!(!app.dirty(), "still pending — nothing committed");
+        assert_eq!(app.active_layer_name().as_deref(), Some("B.Cu"));
+        let r = app.pending_route().unwrap();
+        assert_eq!(
+            r.vias,
+            vec![mm_pt(10, 5)],
+            "via dropped at the last waypoint"
+        );
+        assert_eq!(r.runs.len(), 2, "one run per layer");
+        assert_eq!(r.runs[0].layer, "F.Cu");
+        assert_eq!(r.runs[1].layer, "B.Cu");
+        assert_eq!(
+            r.runs[1].points.first(),
+            Some(&mm_pt(10, 5)),
+            "the new run continues from the via point"
+        );
+        let rendered = render_clean("route_layer_switch", app);
+        harness::assert_content_coverage(
+            "route_layer_switch",
+            &rendered,
+            &[PaneId::A.canvas_key()],
+        );
+    }
+
+    /// The vertex-refinement scene (m6 slice B): a trace-vertex drag in flight
+    /// over the committed trace — handles + working-path preview render, the
+    /// doc still holds the pre-drag path.
+    #[test]
+    fn trace_vertex_drag_is_lint_clean_and_previews() {
+        let app = trace_vertex_drag();
+        assert!(app.trace_drag_active(), "the scene must have a drag armed");
+        let doc = app.domain.doc.as_ref().unwrap();
+        let t = doc.traces.values().next().unwrap();
+        assert_eq!(
+            t.path[1],
+            mm_pt(10, 5),
+            "the doc path is untouched until release"
+        );
+        let rendered = render_clean("trace_vertex_drag", app);
+        harness::assert_content_coverage("trace_vertex_drag", &rendered, &[PaneId::A.canvas_key()]);
     }
 
     /// Inspector value honesty: the selected part's inspector shows the position

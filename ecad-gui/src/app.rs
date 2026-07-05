@@ -49,9 +49,10 @@ pub(crate) use pane::{
 
 use crate::findings::Findings;
 use crate::reload::{SourceMailbox, SourceMsg};
-use crate::tool::{DragState, MeasureState, Tool};
+use crate::tool::{DragState, MeasureState, RouteState, Tool, TraceDragState};
 use damascene_core::prelude::*;
 use ecad_core::command::Transaction;
+use ecad_core::coord::Nm;
 use ecad_core::doc::Doc;
 use std::cell::{Cell, RefCell};
 
@@ -152,6 +153,34 @@ pub struct EcadApp {
     /// next `PointerDown` (so an eaten Click can never go stale) and consumed by
     /// the Click handler.
     pub(crate) suppress_click: Cell<bool>,
+    /// The Route tool's pending route (m6 slice B) — the uncommitted preview
+    /// state between the start click and the commit-on-pin click / Esc. Renders
+    /// only to the overlay; commit lowers to AddTrace/AddVia through
+    /// [`commit_route`](Self::commit_route).
+    pub(crate) route: RefCell<Option<RouteState>>,
+    /// The Select tool's in-flight trace-vertex refinement drag (m6 slice B):
+    /// between pointer-down on a selected trace's vertex/segment and pointer-up
+    /// (commit as Remove+Add under the same id) / Esc (cancel).
+    pub(crate) trace_drag: RefCell<Option<TraceDragState>>,
+    /// The active routing layer, as a copper slab name. `None` = the default
+    /// (top copper). Set from the layer panel's set-active affordance; switching
+    /// it while a route is pending drops a via (ladder level 1).
+    pub(crate) active_layer: RefCell<Option<String>>,
+}
+
+/// The trace / via defaults the Route tool commits with, sourced from the same
+/// [`DesignRules::default()`](ecad_core::route::DesignRules) the DRC query and the
+/// autorouter consume: trace width = `min_trace_width` (0.15 mm), via drill =
+/// `min_trace_width`, via pad = `2 * min_trace_width` — the exact `width` /
+/// `via_drill` / `via_pad` derivation `ecad_core::autoroute` applies. Returned as
+/// `(width, via_drill, via_pad)`.
+pub(crate) fn route_defaults() -> (Nm, Nm, Nm) {
+    let rules = ecad_core::route::DesignRules::default();
+    (
+        rules.min_trace_width,
+        rules.min_trace_width,
+        2 * rules.min_trace_width,
+    )
 }
 
 impl EcadApp {
@@ -185,6 +214,9 @@ impl EcadApp {
             lib_statuses: RefCell::new(None),
             drag: RefCell::new(None),
             suppress_click: Cell::new(false),
+            route: RefCell::new(None),
+            trace_drag: RefCell::new(None),
+            active_layer: RefCell::new(None),
         }
     }
 
@@ -390,8 +422,11 @@ impl EcadApp {
                 self.domain.source = source;
                 self.domain.revision += 1;
                 self.domain.reload_error = None;
-                // Any in-flight drag preview is anchored to the old candidates; drop it.
+                // Any in-flight previews are anchored to the old candidates /
+                // trace ids (LoadText re-mints them); drop them all.
                 *self.drag.borrow_mut() = None;
+                *self.route.borrow_mut() = None;
+                *self.trace_drag.borrow_mut() = None;
                 true
             }
             Err(err) => {
@@ -581,6 +616,221 @@ impl EcadApp {
     /// Is a component drag in flight? For tests.
     pub fn drag_active(&self) -> bool {
         self.drag.borrow().is_some()
+    }
+
+    /// Is a route pending (Route tool, started but not committed)? For tests.
+    pub fn route_active(&self) -> bool {
+        self.route.borrow().is_some()
+    }
+
+    /// A clone of the pending route state, if any — for tests / fixtures that
+    /// assert on runs / vias / rubber.
+    pub fn pending_route(&self) -> Option<RouteState> {
+        self.route.borrow().clone()
+    }
+
+    /// Is a trace-vertex drag in flight? For tests.
+    pub fn trace_drag_active(&self) -> bool {
+        self.trace_drag.borrow().is_some()
+    }
+
+    /// The copper slab names of the current doc's stackup, top-down — the
+    /// candidates for the active routing layer.
+    pub fn copper_layer_names(&self) -> Vec<String> {
+        let Ok(doc) = &self.domain.doc else {
+            return Vec::new();
+        };
+        let su = ecad_core::elaborate::stackup(&doc.source);
+        su.copper_slabs().iter().map(|s| s.name.clone()).collect()
+    }
+
+    /// The active routing layer's copper slab name: the user's pick while it
+    /// still resolves to a copper slab, else the default — the TOP copper slab
+    /// (`copper_slabs()` is ordered top-down). `None` only without a doc / with
+    /// a copper-less stackup.
+    pub fn active_layer_name(&self) -> Option<String> {
+        let copper = self.copper_layer_names();
+        if let Some(name) = self.active_layer.borrow().as_ref()
+            && copper.iter().any(|n| n == name)
+        {
+            return Some(name.clone());
+        }
+        copper.first().cloned()
+    }
+
+    /// Set the active routing layer (the layer panel's set-active affordance).
+    /// Only copper slab names are accepted. If a route is PENDING and the layer
+    /// actually changes, this drops a through-via at the route's last point and
+    /// continues the pending route on the new layer (ladder level 1's "via drop
+    /// on layer switch") — the via + all trace runs commit together as one undo
+    /// unit when the route commits.
+    pub fn set_active_layer(&self, name: &str) {
+        if !self.copper_layer_names().iter().any(|n| n == name) {
+            return;
+        }
+        // `switch_layer` compares against the ROUTE's own live-run layer, so a
+        // redundant set (same layer) never drops a spurious via.
+        if let Some(r) = self.route.borrow_mut().as_mut() {
+            r.switch_layer(name);
+        }
+        *self.active_layer.borrow_mut() = Some(name.to_string());
+    }
+
+    /// Commit the pending route (the commit-on-pin click): each run with ≥ 2
+    /// points lowers to an `AddTrace` (fresh ids: max+1 over the doc's traces —
+    /// the same derivation `ecad_core::autoroute` uses; the engine has no id
+    /// allocation helper), each layer-switch via to an `AddVia` (through, span
+    /// `None`), all in ONE `commit_edit` transaction — one undo unit. Width /
+    /// drill / pad come from [`route_defaults`]. `Pinned` provenance (a hand
+    /// edit). The first committed trace is selected, ready for refinement. A
+    /// route with nothing committable is left pending (the click is ignored).
+    pub(crate) fn commit_route(&mut self) {
+        use ecad_core::command::Command;
+        use ecad_core::id::{TraceId, ViaId};
+
+        let committable = self
+            .route
+            .borrow()
+            .as_ref()
+            .is_some_and(|r| r.has_committable());
+        if !committable {
+            return;
+        }
+        let route = self.route.borrow_mut().take().expect("checked above");
+        let (width, drill, pad) = route_defaults();
+        let (cmds, first_tid) = {
+            let Ok(doc) = &self.domain.doc else {
+                return;
+            };
+            let mut next_tid = doc.traces.keys().map(|t| t.0 + 1).max().unwrap_or(1);
+            let mut next_vid = doc.vias.keys().map(|v| v.0 + 1).max().unwrap_or(1);
+            let mut cmds = Vec::new();
+            let mut first_tid = None;
+            for run in &route.runs {
+                if run.points.len() < 2 {
+                    continue;
+                }
+                let tid = TraceId(next_tid);
+                next_tid += 1;
+                first_tid.get_or_insert(tid);
+                cmds.push(Command::AddTrace(
+                    tid,
+                    ecad_core::route::Trace {
+                        net: route.net.clone(),
+                        layer: run.layer.clone(),
+                        path: run.points.clone(),
+                        width,
+                        prov: ecad_core::doc::Provenance::Pinned,
+                    },
+                ));
+            }
+            for at in &route.vias {
+                cmds.push(Command::AddVia(
+                    ViaId(next_vid),
+                    ecad_core::route::Via {
+                        net: route.net.clone(),
+                        at: *at,
+                        span: None,
+                        drill,
+                        pad,
+                        prov: ecad_core::doc::Provenance::Pinned,
+                    },
+                ));
+                next_vid += 1;
+            }
+            (cmds, first_tid)
+        };
+        match self.commit_edit(Transaction(cmds), "draw trace") {
+            Ok(()) => {
+                if let Some(tid) = first_tid {
+                    self.domain
+                        .selection
+                        .borrow_mut()
+                        .select_only(crate::canvas::pick::SemanticId::Trace(tid));
+                }
+            }
+            Err(e) => self.domain.edit.error = Some(e),
+        }
+    }
+
+    /// Arm a canned pending route — for fixtures / tests that render a
+    /// route-in-progress scene without driving live pointer events. Starts at
+    /// the pad centre of `comp`.`pin` (the same snap the interactive start
+    /// click applies) on that pin's net and the current active layer, then
+    /// appends `waypoints` and sets the rubber cursor. Returns `false` when the
+    /// pin has no candidate or no net.
+    pub fn set_route(
+        &self,
+        comp: &ecad_core::id::EntityId,
+        pin: &str,
+        waypoints: &[ecad_core::coord::Point],
+        cursor: Option<ecad_core::coord::Point>,
+    ) -> bool {
+        use crate::canvas::pick::SemanticId;
+        let id = SemanticId::Pin {
+            comp: comp.clone(),
+            pin: pin.to_string(),
+        };
+        let anchor = {
+            let derived = self.derived.borrow();
+            let Some(view) = &derived.board else {
+                return false;
+            };
+            let Some(c) = view.candidates.iter().find(|c| c.id == id) else {
+                return false;
+            };
+            ecad_core::coord::Point {
+                x: (c.aabb.0.x + c.aabb.1.x) / 2,
+                y: (c.aabb.0.y + c.aabb.1.y) / 2,
+            }
+        };
+        let Some(net) = self.candidate_net(&id) else {
+            return false;
+        };
+        let Some(layer) = self.active_layer_name() else {
+            return false;
+        };
+        let mut r = RouteState::start(net, layer, anchor);
+        for w in waypoints {
+            r.push_waypoint(*w);
+        }
+        if let Some(c) = cursor {
+            r.hover(c);
+        }
+        *self.route.borrow_mut() = Some(r);
+        true
+    }
+
+    /// Arm a canned trace-vertex drag on `trace`'s vertex `index`, moved to
+    /// `to` — for fixtures / tests that render a refinement-in-progress scene.
+    /// Returns `false` when the trace / index doesn't resolve.
+    pub fn set_trace_drag(
+        &self,
+        trace: ecad_core::id::TraceId,
+        index: usize,
+        to: ecad_core::coord::Point,
+    ) -> bool {
+        let Ok(doc) = &self.domain.doc else {
+            return false;
+        };
+        let Some(t) = doc.traces.get(&trace) else {
+            return false;
+        };
+        if index >= t.path.len() {
+            return false;
+        }
+        let mut d = TraceDragState {
+            trace,
+            path: t.path.clone(),
+            index,
+            width: t.width,
+            start: t.path[index],
+            moved: false,
+            slop: 0,
+        };
+        d.update(to);
+        *self.trace_drag.borrow_mut() = Some(d);
+        true
     }
 
     /// Prune the selection + hover sets to the ids that still resolve against the
@@ -1859,6 +2109,403 @@ net GND U1.GND
         let cx = EventCx::new().with_ui_state(&r.ui);
         app.on_event(pointer(UiEventKind::PointerDown, px), &cx);
         assert!(!app.drag_active(), "only components are draggable");
+    }
+
+    // -----------------------------------------------------------------------
+    // Milestone-6 slice B: manual trace drawing (routing ladder level 1) +
+    // trace-vertex refinement, end to end through synthesized pointer events.
+    // -----------------------------------------------------------------------
+
+    /// The pad centre of a SPECIFIC pin of `comp` (the Route tool's snap point).
+    fn pin_center_of(app: &EcadApp, comp: &EntityId, pin: &str) -> Point {
+        let derived = app.derived.borrow();
+        let view = derived.board.as_ref().expect("board projects");
+        let want = SemanticId::Pin {
+            comp: comp.clone(),
+            pin: pin.to_string(),
+        };
+        let c = view
+            .candidates
+            .iter()
+            .find(|c| c.id == want)
+            .expect("pin has a pad candidate");
+        Point {
+            x: (c.aabb.0.x + c.aabb.1.x) / 2,
+            y: (c.aabb.0.y + c.aabb.1.y) / 2,
+        }
+    }
+
+    /// The full manual-routing contract through synthesized pointer events:
+    /// Route-tool click on a pin STARTS (net = the pin's net, anchor = the pad
+    /// centre snap), a click on non-pin board adds a WAYPOINT at the raw board
+    /// position, and a click on another pin COMMITS — one AddTrace through
+    /// commit_edit (dirty, one undo unit, the new trace selected), at the
+    /// engine-default width, `Pinned`.
+    #[test]
+    fn route_draw_start_waypoint_commit() {
+        let mut app = edit_app();
+        let r = settle(&mut app);
+        let cx = EventCx::new().with_ui_state(&r.ui);
+        app.on_event(click(Tool::Route.key()), &cx);
+        assert_eq!(app.tool.get(), Tool::Route);
+
+        let c1 = pin_center_of(&app, &EntityId::new("C1"), "p1");
+        let c2 = pin_center_of(&app, &EntityId::new("C2"), "p1");
+        let wp_px = px_of_board(
+            &app,
+            &r,
+            Point {
+                x: 7 * NM_PER_MM,
+                y: 7 * NM_PER_MM,
+            },
+        );
+        // The exact board point the handler derives from the waypoint pixel
+        // (f32 round-trip included).
+        let wp_board = board_of_px(&app, &r, wp_px);
+
+        // Start on C1.p1.
+        app.on_event(pointer(UiEventKind::Click, px_of_board(&app, &r, c1)), &cx);
+        assert!(app.route_active(), "a pin click starts the route");
+        assert!(!app.dirty(), "starting commits nothing");
+        {
+            let pending = app.pending_route().unwrap();
+            assert_eq!(pending.net.to_string(), "GND");
+            assert_eq!(pending.last_point(), c1, "anchored at the pad centre");
+        }
+
+        // A waypoint on non-pin board (the GND pour is fine — permissive).
+        app.on_event(pointer(UiEventKind::Click, wp_px), &cx);
+        assert_eq!(app.pending_route().unwrap().last_point(), wp_board);
+        assert!(!app.dirty(), "waypoints commit nothing");
+
+        // Commit on C2.p1.
+        let rev0 = app.revision();
+        app.on_event(pointer(UiEventKind::Click, px_of_board(&app, &r, c2)), &cx);
+        assert!(!app.route_active(), "the pin click committed the route");
+        assert!(app.dirty());
+        assert_eq!(app.revision(), rev0 + 1);
+        assert_eq!(app.undo_depths(), (1, 0), "one commit → one undo unit");
+
+        let doc = app.domain.doc.as_ref().unwrap();
+        assert_eq!(doc.traces.len(), 1);
+        let (tid, t) = doc.traces.iter().next().unwrap();
+        assert_eq!(t.net.to_string(), "GND");
+        assert_eq!(t.layer, "F.Cu", "default active layer = top copper");
+        assert_eq!(t.path, vec![c1, wp_board, c2], "pin-snap + raw waypoint");
+        let (width, ..) = crate::app::route_defaults();
+        assert_eq!(t.width, width, "engine default width (0.15 mm)");
+        assert_eq!(t.prov, ecad_core::doc::Provenance::Pinned);
+        assert_eq!(
+            app.domain.selection.borrow().single(),
+            Some(&SemanticId::Trace(*tid)),
+            "the committed trace is selected, ready for refinement"
+        );
+        // The routes serialize into the source's `# routes` section.
+        assert!(app.domain.source.contains("# routes"));
+
+        // Undo removes the whole route.
+        app.undo();
+        assert!(app.domain.doc.as_ref().unwrap().traces.is_empty());
+    }
+
+    /// Permissiveness: committing on a pin of a DIFFERENT net commits fine —
+    /// the trace keeps its source net; any overlap is a findings matter, never
+    /// a block.
+    #[test]
+    fn route_commit_on_foreign_pin_is_permissive() {
+        let mut app = edit_app();
+        let r = settle(&mut app);
+        let cx = EventCx::new().with_ui_state(&r.ui);
+        app.on_event(click(Tool::Route.key()), &cx);
+
+        let c1_gnd = pin_center_of(&app, &EntityId::new("C1"), "p1"); // net GND
+        let c2_vbus = pin_center_of(&app, &EntityId::new("C2"), "p2"); // net VBUS
+        app.on_event(
+            pointer(UiEventKind::Click, px_of_board(&app, &r, c1_gnd)),
+            &cx,
+        );
+        app.on_event(
+            pointer(UiEventKind::Click, px_of_board(&app, &r, c2_vbus)),
+            &cx,
+        );
+        assert!(!app.route_active(), "the foreign pin still commits");
+        let doc = app.domain.doc.as_ref().unwrap();
+        assert_eq!(doc.traces.len(), 1, "naive source→dest line committed");
+        let t = doc.traces.values().next().unwrap();
+        assert_eq!(t.net.to_string(), "GND", "the trace keeps its SOURCE net");
+        assert_eq!(t.path, vec![c1_gnd, c2_vbus]);
+    }
+
+    /// Esc layering (m6 slice B): the first Esc cancels the pending route
+    /// (nothing committed), the next exits the Route tool back to Select.
+    #[test]
+    fn route_esc_cancels_pending_then_exits_tool() {
+        let mut app = edit_app();
+        let r = settle(&mut app);
+        let cx = EventCx::new().with_ui_state(&r.ui);
+        app.on_event(click(Tool::Route.key()), &cx);
+        let c1 = pin_center_of(&app, &EntityId::new("C1"), "p1");
+        app.on_event(pointer(UiEventKind::Click, px_of_board(&app, &r, c1)), &cx);
+        assert!(app.route_active());
+
+        app.on_event(escape(), &cx);
+        assert!(!app.route_active(), "Esc cancels the pending route first");
+        assert_eq!(app.tool.get(), Tool::Route, "…but stays in the tool");
+        assert!(!app.dirty(), "nothing committed");
+
+        app.on_event(escape(), &cx);
+        assert_eq!(
+            app.tool.get(),
+            Tool::Select,
+            "the second Esc exits the tool"
+        );
+    }
+
+    /// A Route-tool start click on empty space (or netless copper) does nothing
+    /// — a trace needs a net (a data requirement, not a legality refusal).
+    #[test]
+    fn route_start_on_empty_space_does_nothing() {
+        let mut app = edit_app();
+        let r = settle(&mut app);
+        let cx = EventCx::new().with_ui_state(&r.ui);
+        app.on_event(click(Tool::Route.key()), &cx);
+        // (0.5, 0.5) mm: on the board but outside the pour outline (1,1) and
+        // away from every pad.
+        let px = px_of_board(
+            &app,
+            &r,
+            Point {
+                x: NM_PER_MM / 2,
+                y: NM_PER_MM / 2,
+            },
+        );
+        app.on_event(pointer(UiEventKind::Click, px), &cx);
+        assert!(!app.route_active(), "empty space starts nothing");
+        assert!(!app.dirty());
+    }
+
+    /// Ladder level 1's "via drop on layer switch", end to end: switching the
+    /// active layer mid-route drops a through-via at the last waypoint and the
+    /// commit lands BOTH per-layer traces + the via in ONE transaction — a
+    /// single undo removes the whole route atomically.
+    #[test]
+    fn layer_switch_drops_via_and_undo_removes_whole_route() {
+        let mut app = edit_app();
+        let r = settle(&mut app);
+        let cx = EventCx::new().with_ui_state(&r.ui);
+        app.on_event(click(Tool::Route.key()), &cx);
+        assert_eq!(
+            app.active_layer_name().as_deref(),
+            Some("F.Cu"),
+            "default active layer is top copper"
+        );
+
+        let c1 = pin_center_of(&app, &EntityId::new("C1"), "p1");
+        let c2 = pin_center_of(&app, &EntityId::new("C2"), "p1");
+        app.on_event(pointer(UiEventKind::Click, px_of_board(&app, &r, c1)), &cx);
+        let wp_px = px_of_board(
+            &app,
+            &r,
+            Point {
+                x: 7 * NM_PER_MM,
+                y: 7 * NM_PER_MM,
+            },
+        );
+        let wp_board = board_of_px(&app, &r, wp_px);
+        app.on_event(pointer(UiEventKind::Click, wp_px), &cx);
+
+        // The layer panel's set-active affordance for B.Cu (a chrome click).
+        app.on_event(click(&crate::app::pane::active_layer_key("B.Cu")), &cx);
+        assert_eq!(app.active_layer_name().as_deref(), Some("B.Cu"));
+        {
+            let pending = app.pending_route().unwrap();
+            assert_eq!(pending.vias, vec![wp_board], "via at the last waypoint");
+            assert_eq!(pending.current_layer(), "B.Cu");
+        }
+
+        // Commit on C2.p1: two traces + one via, one transaction.
+        app.on_event(pointer(UiEventKind::Click, px_of_board(&app, &r, c2)), &cx);
+        assert!(!app.route_active());
+        assert_eq!(app.undo_depths(), (1, 0), "ONE undo unit");
+        {
+            let doc = app.domain.doc.as_ref().unwrap();
+            assert_eq!(doc.traces.len(), 2, "one trace per layer run");
+            let layers: Vec<&str> = doc.traces.values().map(|t| t.layer.as_str()).collect();
+            assert_eq!(layers, vec!["F.Cu", "B.Cu"]);
+            let paths: Vec<&[Point]> = doc.traces.values().map(|t| t.path.as_slice()).collect();
+            assert_eq!(paths[0], &[c1, wp_board][..]);
+            assert_eq!(paths[1], &[wp_board, c2][..]);
+            assert_eq!(doc.vias.len(), 1);
+            let v = doc.vias.values().next().unwrap();
+            assert_eq!(v.at, wp_board);
+            assert_eq!(v.span, None, "layer-switch vias are through vias");
+            let (_, drill, pad) = crate::app::route_defaults();
+            assert_eq!((v.drill, v.pad), (drill, pad));
+            assert_eq!(v.net.to_string(), "GND");
+            // The whole route serializes into the `# routes` section.
+            assert!(app.domain.source.contains("# routes"));
+        }
+
+        // One undo removes trace runs AND via together (atomic undo unit).
+        app.undo();
+        let doc = app.domain.doc.as_ref().unwrap();
+        assert!(doc.traces.is_empty(), "undo removed both trace runs");
+        assert!(doc.vias.is_empty(), "…and the via, atomically");
+    }
+
+    /// Post-commit refinement, end to end: with the Select tool, pressing on a
+    /// selected trace's SEGMENT inserts a vertex there and drags it; release
+    /// commits the updated path under the SAME TraceId (Remove+Add in one
+    /// transaction); undo restores the pre-drag path.
+    #[test]
+    fn vertex_drag_inserts_moves_and_commits_same_id() {
+        let mut app = edit_app();
+        let r = settle(&mut app);
+        let cx = EventCx::new().with_ui_state(&r.ui);
+
+        // Draw a naive straight GND trace C1.p1 → C2.p1 with the Route tool.
+        app.on_event(click(Tool::Route.key()), &cx);
+        let c1 = pin_center_of(&app, &EntityId::new("C1"), "p1");
+        let c2 = pin_center_of(&app, &EntityId::new("C2"), "p1");
+        app.on_event(pointer(UiEventKind::Click, px_of_board(&app, &r, c1)), &cx);
+        app.on_event(pointer(UiEventKind::Click, px_of_board(&app, &r, c2)), &cx);
+        let tid = *app
+            .domain
+            .doc
+            .as_ref()
+            .unwrap()
+            .traces
+            .keys()
+            .next()
+            .unwrap();
+        let orig_path = vec![c1, c2];
+
+        // Back to Select (the commit left the trace selected).
+        app.on_event(click(Tool::Select.key()), &cx);
+        assert_eq!(
+            app.domain.selection.borrow().single(),
+            Some(&SemanticId::Trace(tid))
+        );
+
+        // Press on the segment midpoint → arms a drag with an INSERTED vertex.
+        let mid = Point {
+            x: (c1.x + c2.x) / 2,
+            y: (c1.y + c2.y) / 2,
+        };
+        let mid_px = px_of_board(&app, &r, mid);
+        app.on_event(pointer(UiEventKind::PointerDown, mid_px), &cx);
+        assert!(app.trace_drag_active(), "a segment press arms the drag");
+        assert!(!app.drag_active(), "…and wins over a component drag");
+
+        // Drag the new vertex aside and release.
+        let to_px = px_of_board(
+            &app,
+            &r,
+            Point {
+                x: 9 * NM_PER_MM,
+                y: 7 * NM_PER_MM,
+            },
+        );
+        let to_board = board_of_px(&app, &r, to_px);
+        app.on_event(pointer(UiEventKind::Drag, to_px), &cx);
+        assert_eq!(
+            app.undo_depths(),
+            (1, 0),
+            "nothing further committed during the drag (only the draw commit)"
+        );
+        app.on_event(pointer(UiEventKind::PointerUp, to_px), &cx);
+        assert!(!app.trace_drag_active());
+        assert_eq!(
+            app.undo_depths(),
+            (2, 0),
+            "release committed the path edit as its own undo unit"
+        );
+        assert!(app.dirty());
+
+        let doc = app.domain.doc.as_ref().unwrap();
+        assert_eq!(doc.traces.len(), 1, "still one trace");
+        let t = doc.traces.get(&tid).expect("SAME TraceId after the edit");
+        assert_eq!(
+            t.path,
+            vec![c1, to_board, c2],
+            "the inserted vertex landed at the drop point"
+        );
+        assert_eq!(t.net.to_string(), "GND", "net preserved");
+        // The trailing Click of the release is eaten — the trace stays selected.
+        app.on_event(pointer(UiEventKind::Click, to_px), &cx);
+        assert_eq!(
+            app.domain.selection.borrow().single(),
+            Some(&SemanticId::Trace(tid))
+        );
+
+        // Undo restores the pre-drag path (ids are re-minted by the snapshot
+        // reload, so compare the path, not the id).
+        app.undo();
+        let doc = app.domain.doc.as_ref().unwrap();
+        assert_eq!(doc.traces.len(), 1);
+        assert_eq!(doc.traces.values().next().unwrap().path, orig_path);
+    }
+
+    /// Pressing a selected trace's VERTEX (not segment) drags that vertex
+    /// without inserting; Esc cancels the drag with nothing committed.
+    #[test]
+    fn vertex_drag_esc_cancels_without_commit() {
+        let mut app = edit_app();
+        let r = settle(&mut app);
+        let cx = EventCx::new().with_ui_state(&r.ui);
+        app.on_event(click(Tool::Route.key()), &cx);
+        let c1 = pin_center_of(&app, &EntityId::new("C1"), "p1");
+        let c2 = pin_center_of(&app, &EntityId::new("C2"), "p1");
+        app.on_event(pointer(UiEventKind::Click, px_of_board(&app, &r, c1)), &cx);
+        app.on_event(pointer(UiEventKind::Click, px_of_board(&app, &r, c2)), &cx);
+        let path0 = app
+            .domain
+            .doc
+            .as_ref()
+            .unwrap()
+            .traces
+            .values()
+            .next()
+            .unwrap()
+            .path
+            .clone();
+        let dirty_after_draw = app.dirty();
+        app.on_event(click(Tool::Select.key()), &cx);
+
+        // Press ON the endpoint vertex, drag, Esc.
+        app.on_event(
+            pointer(UiEventKind::PointerDown, px_of_board(&app, &r, c2)),
+            &cx,
+        );
+        assert!(app.trace_drag_active(), "a vertex press arms the drag");
+        let away = px_of_board(
+            &app,
+            &r,
+            Point {
+                x: 5 * NM_PER_MM,
+                y: 5 * NM_PER_MM,
+            },
+        );
+        app.on_event(pointer(UiEventKind::Drag, away), &cx);
+        app.on_event(escape(), &cx);
+        assert!(!app.trace_drag_active(), "Esc cancels the vertex drag");
+        assert_eq!(
+            app.domain
+                .doc
+                .as_ref()
+                .unwrap()
+                .traces
+                .values()
+                .next()
+                .unwrap()
+                .path,
+            path0,
+            "the doc path is untouched"
+        );
+        assert_eq!(app.dirty(), dirty_after_draw, "no further commit happened");
+        // A later pointer-up is inert (no stale drag).
+        app.on_event(pointer(UiEventKind::PointerUp, away), &cx);
+        assert_eq!(app.undo_depths(), (1, 0), "still only the draw commit");
     }
 
     /// The editing hotkeys drive the same actions as the toolbar buttons: Ctrl+Z

@@ -445,6 +445,46 @@ impl Canvas {
             );
         }
 
+        // Pending route preview (m6 slice B): each layer run as a polyline at
+        // the width the commit will use; the rubber segment thinner / dimmer.
+        for (pts, width) in &overlay.route_runs {
+            if pts.len() >= 2 {
+                let w = nm_to_mm(*width).max(MIN_STROKE_MM);
+                paths.push(polyline_path(pts, flip_sum, route_color(), w));
+            }
+        }
+        if let Some((a, b)) = overlay.route_rubber {
+            paths.push(polyline_path(
+                &[a, b],
+                flip_sum,
+                route_rubber_color(),
+                OVERLAY_STROKE_MM,
+            ));
+        }
+        // Layer-switch via previews: a ring at each drop, sized to the via pad.
+        for (p, pad) in &overlay.route_vias {
+            paths.push(ring_path(
+                *p,
+                flip_sum,
+                (nm_to_mm(*pad) / 2.0).max(MIN_STROKE_MM),
+                route_color(),
+            ));
+        }
+
+        // Trace-path edit preview (vertex drag): the working path in the ghost
+        // accent — same "preview, not copper" convention as the drag ghost.
+        if let Some((pts, width)) = &overlay.edit_path
+            && pts.len() >= 2
+        {
+            let w = nm_to_mm(*width).max(MIN_STROKE_MM);
+            paths.push(polyline_path(pts, flip_sum, ghost_color(), w));
+        }
+
+        // Vertex handles of the selected trace: a small filled square per vertex.
+        for h in &overlay.handles {
+            paths.push(handle_path(*h, flip_sum));
+        }
+
         if paths.is_empty() {
             return None;
         }
@@ -478,6 +518,24 @@ pub struct Overlay {
     /// The live ratsnest during a drag (m6): straight segments from each ghost pad to
     /// the nearest other member pad of its net (world nm, y-up).
     pub ratsnest: Vec<(Point, Point)>,
+    /// The pending route's committed-to polylines (m6 slice B): one entry per
+    /// layer run — `(points, trace width nm)` — drawn at the width the commit
+    /// will use, in the route-preview accent.
+    pub route_runs: Vec<(Vec<Point>, Nm)>,
+    /// The pending route's rubber segment: last waypoint → last known pointer
+    /// position (sparse on 0.4.5 free-hover). Drawn thinner / dimmer than the
+    /// committed-to runs.
+    pub route_rubber: Option<(Point, Point)>,
+    /// Via previews for the pending route's layer switches: `(centre, pad
+    /// diameter nm)`, drawn as rings in the route accent.
+    pub route_vias: Vec<(Point, Nm)>,
+    /// The uncommitted trace-path edit preview (m6 slice B vertex drag):
+    /// `(working path, width nm)`, drawn in the ghost accent ("preview, not
+    /// copper" — same convention as the component drag ghost).
+    pub edit_path: Option<(Vec<Point>, Nm)>,
+    /// Vertex handles of the selected trace (Select tool): one marker per path
+    /// vertex, so the refinement affordance is visible.
+    pub handles: Vec<Point>,
 }
 
 /// Accent stroke for a selected feature: a bright halo tracing the shape's outline.
@@ -508,16 +566,21 @@ fn measure_line_path(a: Point, b: Point, flip_sum: Nm) -> VectorPath {
 /// (which traces the feature's outline). Radius is a fixed board-mm so it scales with
 /// zoom like every overlay stroke.
 fn finding_marker_path(p: Point, flip_sum: Nm, color: Color) -> VectorPath {
+    ring_path(p, flip_sum, FINDING_MARKER_R_MM, color)
+}
+
+/// A stroked ring of radius `r_mm` centred on board point `p` — the marker
+/// primitive shared by the findings halo and the route-preview via drop.
+/// Approximated with a closed 24-gon (the overlay has no arc builder; it reads
+/// as a circle at any practical zoom); stroked, not filled, so the copper
+/// beneath still reads.
+fn ring_path(p: Point, flip_sum: Nm, r_mm: f32, color: Color) -> VectorPath {
     let (cx, cy) = board_to_view(p, flip_sum);
-    let r = FINDING_MARKER_R_MM;
-    // Approximate the ring with a closed polygon (the overlay has no arc builder; a
-    // 24-gon reads as a circle at any practical zoom). Stroked, not filled, so the
-    // copper beneath still reads.
     let mut b = PathBuilder::new();
     let segs = 24;
     for i in 0..segs {
         let a = std::f32::consts::TAU * (i as f32) / (segs as f32);
-        let (x, y) = (cx + r * a.cos(), cy + r * a.sin());
+        let (x, y) = (cx + r_mm * a.cos(), cy + r_mm * a.sin());
         b = if i == 0 {
             b.move_to(x, y)
         } else {
@@ -526,6 +589,46 @@ fn finding_marker_path(p: Point, flip_sum: Nm, color: Color) -> VectorPath {
     }
     b.close().stroke_solid(color, OVERLAY_STROKE_MM).build()
 }
+
+/// A stroked polyline through board points (round caps/joins) — the route-preview
+/// primitive. `width_mm` is the on-board stroke width (scales with zoom).
+fn polyline_path(pts: &[Point], flip_sum: Nm, color: Color, width_mm: f32) -> VectorPath {
+    let mut b = PathBuilder::new();
+    for (i, p) in pts.iter().enumerate() {
+        let (x, y) = board_to_view(*p, flip_sum);
+        b = if i == 0 {
+            b.move_to(x, y)
+        } else {
+            b.line_to(x, y)
+        };
+    }
+    b.stroke_solid(color, width_mm)
+        .stroke_line_cap(damascene_core::vector::VectorLineCap::Round)
+        .stroke_line_join(damascene_core::vector::VectorLineJoin::Round)
+        .build()
+}
+
+/// A vertex handle: a small filled square centred on the vertex, in the handle
+/// accent — visually distinct from both the copper and the selection halo.
+fn handle_path(p: Point, flip_sum: Nm) -> VectorPath {
+    let (cx, cy) = board_to_view(p, flip_sum);
+    let h = HANDLE_HALF_MM;
+    PathBuilder::new()
+        .move_to(cx - h, cy - h)
+        .line_to(cx + h, cy - h)
+        .line_to(cx + h, cy + h)
+        .line_to(cx - h, cy + h)
+        .close()
+        .fill(Some(VectorFill {
+            color: VectorColor::Solid(handle_color()),
+            opacity: 1.0,
+            rule: VectorFillRule::EvenOdd,
+        }))
+        .build()
+}
+
+/// Vertex-handle half-side in board mm.
+const HANDLE_HALF_MM: f32 = 0.3;
 
 /// Findings marker ring radius in board mm.
 const FINDING_MARKER_R_MM: f32 = 1.2;
@@ -569,6 +672,22 @@ fn ghost_color() -> Color {
 /// translucent so it never obscures copper.
 fn ratsnest_color() -> Color {
     Color::srgb_token("ecad.overlay.ratsnest", 0xe8, 0xe4, 0xa0, 0xbb)
+}
+
+/// The route-preview accent — a bright green, distinct from selection cyan,
+/// measure amber, ghost violet, and every layer colour: reads as "pending copper".
+fn route_color() -> Color {
+    Color::srgb_token("ecad.overlay.route", 0x53, 0xdd, 0x6c, 0xee)
+}
+
+/// The route rubber segment — the route accent dimmed (uncommitted-to end).
+fn route_rubber_color() -> Color {
+    Color::srgb_token("ecad.overlay.route.rubber", 0x53, 0xdd, 0x6c, 0x77)
+}
+
+/// The vertex-handle fill — near-white, so handles pop over any copper colour.
+fn handle_color() -> Color {
+    Color::srgb_token("ecad.overlay.handle", 0xf2, 0xf5, 0xff, 0xee)
 }
 
 /// Ratsnest stroke width in mm — thinner than the overlay halos (an airwire is a

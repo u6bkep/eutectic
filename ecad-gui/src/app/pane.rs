@@ -180,6 +180,22 @@ pub(crate) fn switch_key(layer_key: &str) -> String {
     format!("switch:{layer_key}")
 }
 
+/// The route-key prefix of a layer row's set-active affordance (m6 slice B). The
+/// full key is `active:` + the slab's [`LayerId::key`](crate::canvas::LayerId::key)
+/// (`"active:layer:F.Cu"`), so it can never collide with the `switch:`-prefixed
+/// visibility toggle or a canvas target.
+const ACTIVE_LAYER_PREFIX: &str = "active:layer:";
+
+/// The set-active route key for the copper slab named `name`.
+pub(crate) fn active_layer_key(name: &str) -> String {
+    format!("{ACTIVE_LAYER_PREFIX}{name}")
+}
+
+/// The copper slab name a route key names, if it is a set-active affordance.
+pub(crate) fn active_layer_of_key(route: &str) -> Option<&str> {
+    route.strip_prefix(ACTIVE_LAYER_PREFIX)
+}
+
 /// Is this event target inside a pane canvas? A pointer event routes to a pane viewport
 /// (`canvas:a` / `canvas:b`), a stacked board layer / overlay El (keyed `layer:*` /
 /// `overlay:*`), or a schematic static El (keyed `schematic:*`). All are canvas hits;
