@@ -144,6 +144,53 @@ pub fn board() -> EcadApp {
 }
 
 // ---------------------------------------------------------------------------
+// Milestone-3 scenes: a board with a trace selected (overlay + populated
+// inspector), and a measure-in-progress overlay. Both are the board fixture
+// with canned interaction state applied, so the SVG/tree/lint artifacts cover
+// the selection overlay + inspector projection + measure preview headlessly.
+// ---------------------------------------------------------------------------
+
+/// The board fixture with its `VBUS` trace (`TraceId(1)`) pre-selected: the overlay
+/// draws the selection halo and the inspector shows the trace's net / layer / width /
+/// length. The selected id is looked up from the doc so the scene stays honest if the
+/// fixture route changes.
+pub fn board_with_selection() -> EcadApp {
+    use crate::canvas::pick::SemanticId;
+    let app = EcadApp::new(board_domain());
+    if let Ok(doc) = &app.domain.doc {
+        // Select the first routed trace by its real id (not a hardcoded number).
+        if let Some(tid) = doc.traces.keys().next().copied() {
+            app.domain
+                .selection
+                .borrow_mut()
+                .select_only(SemanticId::Trace(tid));
+        }
+    }
+    app
+}
+
+/// The board fixture in Measure mode with a measurement in progress: an anchor at
+/// (3, 3) mm and the moving end at (15, 10) mm, so the overlay draws the measure line
+/// and the status bar shows the dx / dy / distance readout.
+pub fn measure_in_progress() -> EcadApp {
+    use crate::tool::{MeasureState, Tool};
+    use ecad_core::coord::{MM, Point};
+    let app = EcadApp::new(board_domain());
+    app.set_tool(Tool::Measure);
+    let mut m = MeasureState::default();
+    m.click(Point {
+        x: 3 * MM,
+        y: 3 * MM,
+    });
+    m.click(Point {
+        x: 15 * MM,
+        y: 10 * MM,
+    });
+    app.set_measure(m);
+    app
+}
+
+// ---------------------------------------------------------------------------
 // The real 4-layer multiprobe board, loaded from `poc/out/board.ecad` with the
 // same KiCad-imported library the `poc_multiprobe` example builds. Reads files at
 // call time (path relative to the crate manifest) — used by the end-to-end smoke
@@ -290,6 +337,8 @@ pub fn all() -> Vec<(&'static str, EcadApp)> {
         ("document_loaded", document_loaded()),
         ("parse_error", parse_error()),
         ("board", board()),
+        ("board_with_selection", board_with_selection()),
+        ("measure_in_progress", measure_in_progress()),
     ]
 }
 
@@ -355,5 +404,60 @@ mod tests {
             app.domain.doc.as_ref().err()
         );
         assert_lint_clean("board", &app);
+    }
+
+    #[test]
+    fn board_with_selection_is_lint_clean() {
+        let app = board_with_selection();
+        // The scene must actually have a selection — otherwise it is silently the
+        // empty-inspector board.
+        assert!(
+            !app.domain.selection.borrow().is_empty(),
+            "board_with_selection has no selection"
+        );
+        assert_lint_clean("board_with_selection", &app);
+    }
+
+    #[test]
+    fn measure_in_progress_is_lint_clean() {
+        assert_lint_clean("measure_in_progress", &measure_in_progress());
+    }
+
+    /// Inspector value honesty: the selected part's inspector shows the position
+    /// authored in the fixture source — no hardcoded values. Selects a component by
+    /// its real entity id and asserts the projected `Position` row matches the doc's
+    /// stored position.
+    #[test]
+    fn inspector_shows_authored_part_position() {
+        use crate::canvas::pick::SemanticId;
+        use crate::inspector::InspectorData;
+        use ecad_core::doc::MM;
+
+        let d = board_domain();
+        let doc = d.doc.as_ref().expect("board fixture elaborates");
+        let (eid, comp) = doc
+            .components
+            .iter()
+            .next()
+            .expect("board fixture has a component");
+        let data = InspectorData::project(&SemanticId::Part(eid.clone()), doc, &d.lib)
+            .expect("part projects");
+
+        // The identity card shows the refdes; a Position row shows the authored mm.
+        assert_eq!(data.kind, "Part");
+        let pos_row = data
+            .rows
+            .iter()
+            .find(|r| r.key == "Position")
+            .expect("inspector has a Position row");
+        let expect = format!(
+            "{:.3}, {:.3} mm",
+            comp.pos.value.x as f64 / MM as f64,
+            comp.pos.value.y as f64 / MM as f64
+        );
+        assert_eq!(
+            pos_row.value, expect,
+            "inspector Position must be the doc's authored position, not a hardcoded value"
+        );
     }
 }

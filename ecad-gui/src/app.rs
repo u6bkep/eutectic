@@ -8,9 +8,14 @@
 //! here. Where a future struct belongs, a stub with a doc-comment points at the
 //! architecture through-line it will implement.
 
-use crate::canvas::{BoardLayer, Canvas};
+use crate::canvas::pick::{self, Candidate};
+use crate::canvas::{BoardLayer, Canvas, Overlay};
+use crate::inspector::InspectorData;
+use crate::selection::SelectionModel;
+use crate::tool::{MeasureState, Tool, format_readout};
 use damascene_core::prelude::*;
 use ecad_core::doc::Doc;
+use ecad_core::geom::Shape2D;
 use std::cell::{Cell, RefCell};
 
 /// Domain state: the source-of-truth half of `gui-architecture.md` through-line
@@ -39,6 +44,12 @@ pub struct DomainState {
     /// The filename the document was loaded from, for the toolbar badge.
     /// `None` in the no-document state.
     pub filename: Option<String>,
+    /// The semantic selection + hover model (structural commitment 2). Lives in
+    /// domain state — shared, view-independent — so every pane projects the same
+    /// selection into its own overlay (milestone 4's schematic pane reuses it
+    /// untouched). `RefCell` for the damascene interior-mutability pattern: written in
+    /// `on_event`, read in `build` through `&self`.
+    pub selection: RefCell<SelectionModel>,
 }
 
 impl DomainState {
@@ -49,6 +60,7 @@ impl DomainState {
             doc: Err("no document".to_string()),
             lib: ecad_core::part::part_library(),
             filename: None,
+            selection: RefCell::new(SelectionModel::new()),
         }
     }
 
@@ -112,6 +124,7 @@ impl DomainState {
             doc,
             lib,
             filename,
+            selection: RefCell::new(SelectionModel::new()),
         }
     }
 }
@@ -147,6 +160,11 @@ impl Default for PaneState {
 /// damascene's `UiState` (structural through-line 3: per-pane camera by key).
 const CANVAS_KEY: &str = "board-canvas";
 
+/// The pick grab radius in screen (logical) px — converted to a board distance
+/// through the current zoom by [`pick::tolerance_nm`], so the on-screen radius is
+/// zoom-independent.
+const PICK_TOL_PX: f32 = 6.0;
+
 /// The milestone-2 application: a [`DomainState`], one [`PaneState`], and the
 /// board-view state (the cached layered canvas + per-layer visibility + live
 /// interaction state).
@@ -180,13 +198,24 @@ pub struct EcadApp {
     /// Whether the initial fit-to-content has been queued yet (once, on first
     /// build after a document loads).
     fitted: Cell<bool>,
+    /// The active tool (structural commitment 4). Global mode; `Cell` because it is
+    /// flipped in `on_event` and read in `build`.
+    tool: Cell<Tool>,
+    /// The measure tool's uncommitted preview state (the preview channel — renders
+    /// only to the overlay, never the doc).
+    measure: Cell<MeasureState>,
 }
 
 /// The board projection held in app state: the [`Canvas`] (for coordinate
-/// inversion) plus the tessellated per-layer assets it built once.
+/// inversion), the tessellated per-layer assets it built once, and the pre-built
+/// pick candidates (the doc-walk that recovers entity identity — see
+/// [`crate::canvas::pick`]). All built once per (doc revision) load.
 struct BoardView {
     canvas: Canvas,
     layers: Vec<BoardLayer>,
+    /// Pickable candidates over the doc (traces / vias / pins / pours), rebuilt only
+    /// when the doc loads — the hit-test input.
+    candidates: Vec<Candidate>,
 }
 
 impl EcadApp {
@@ -198,7 +227,13 @@ impl EcadApp {
             Ok(doc) => Canvas::new(doc, &domain.lib)
                 .and_then(|canvas| {
                     let layers = canvas.build_layers(doc, &domain.lib)?;
-                    Ok(BoardView { canvas, layers })
+                    let su = ecad_core::elaborate::stackup(&doc.source);
+                    let candidates = pick::candidates(doc, &domain.lib, &su);
+                    Ok(BoardView {
+                        canvas,
+                        layers,
+                        candidates,
+                    })
                 })
                 .ok(),
             Err(_) => None,
@@ -211,7 +246,21 @@ impl EcadApp {
             pending: RefCell::new(Vec::new()),
             cursor_board_mm: Cell::new(None),
             fitted: Cell::new(false),
+            tool: Cell::new(Tool::default()),
+            measure: Cell::new(MeasureState::default()),
         }
+    }
+
+    /// Set the active tool — for fixtures / tests that want a canned tool mode. The
+    /// interactive path flips this in `on_event`.
+    pub fn set_tool(&self, tool: Tool) {
+        self.tool.set(tool);
+    }
+
+    /// Set the measure preview state — for fixtures / tests that render a
+    /// measure-in-progress scene without driving live pointer events.
+    pub fn set_measure(&self, m: MeasureState) {
+        self.measure.set(m);
     }
 }
 
@@ -254,17 +303,20 @@ impl EcadApp {
         !self.hidden.borrow().contains(key)
     }
 
-    /// The board viewer body: the layered canvas viewport (center) + the layer
-    /// panel (right). Only reached when a [`BoardView`] projected successfully.
+    /// The board viewer body: the layered canvas viewport (center) + the inspector +
+    /// layer panels (right). Only reached when a [`BoardView`] projected successfully.
     fn board_body(&self, cx: &BuildCx, view: &BoardView) -> El {
         // Static layer Els, stacked in draw order, filtered by visibility. Cloning
         // cached assets only — no re-tessellation (the layered-canvas commitment).
         let mut canvas_children = view
             .canvas
             .layer_els(&view.layers, |id| self.layer_visible(&id.key()));
-        // The per-frame dynamic overlay seam (empty in m2).
-        if let Some(overlay) = view.canvas.overlay_el() {
-            canvas_children.push(overlay);
+        // The per-frame dynamic overlay: selection / hover highlights + the measure
+        // preview. Rebuilt each frame from the live selection + tool state; it never
+        // touches the cached static layers above.
+        let overlay = self.build_overlay(view);
+        if let Some(el) = view.canvas.overlay_el(&overlay) {
+            canvas_children.push(el);
         }
 
         let board_pane = viewport(canvas_children)
@@ -280,7 +332,7 @@ impl EcadApp {
 
         column([
             self.viewer_toolbar(zoom),
-            row([board_pane, self.layer_panel(&view.layers)])
+            row([board_pane, self.right_sidebar(view)])
                 .gap(tokens::SPACE_3)
                 .width(Size::Fill(1.0))
                 .height(Size::Fill(1.0)),
@@ -291,6 +343,109 @@ impl EcadApp {
         .height(Size::Fill(1.0))
     }
 
+    /// Build the per-frame dynamic overlay from the live selection + measure state:
+    /// the world-space shapes to highlight (selection bright, hover dim) and the
+    /// measure segment. Re-derives highlight geometry from the pick candidates by id —
+    /// geometry is never stored in the selection model (commitment 2).
+    fn build_overlay(&self, view: &BoardView) -> Overlay {
+        let sel = self.domain.selection.borrow();
+        let mut highlights: Vec<(Shape2D, bool)> = Vec::new();
+        for c in &view.candidates {
+            // Skip highlights on hidden layers (a selected feature on a hidden layer
+            // stays selected but is not drawn — it can't be seen anyway).
+            if !self.layer_visible(&c.layer.key()) {
+                continue;
+            }
+            if sel.is_selected(&c.id) {
+                highlights.push((c.shape.clone(), false));
+            } else if sel.is_hovered(&c.id) {
+                highlights.push((c.shape.clone(), true));
+            }
+        }
+        let measure = if self.tool.get() == Tool::Measure {
+            self.measure.get().segment()
+        } else {
+            None
+        };
+        Overlay {
+            highlights,
+            measure,
+        }
+    }
+
+    /// The right sidebar: the properties inspector (above) over the layer panel
+    /// (below), matching the mockup anatomy. The inspector shows the selected entity;
+    /// with nothing selected it is the m2 stats card (the empty state).
+    fn right_sidebar(&self, view: &BoardView) -> El {
+        // A fixed-width scrollable column: the inspector (Hug) above the layer panel.
+        // Scrollable so a long inspector (many pin rows) + the full layer list never
+        // overflow the pane height — the two panels share the column and clip cleanly.
+        scroll([
+            column([self.inspector_panel(view), self.layer_panel(&view.layers)])
+                .gap(tokens::SPACE_3)
+                .width(Size::Fill(1.0)),
+        ])
+        .width(Size::Fixed(248.0))
+        .height(Size::Fill(1.0))
+    }
+
+    /// The inspector panel: an identity card + key/value rows for the single selected
+    /// entity, or the m2 stats card when nothing is selected. Every value is projected
+    /// live from the doc via [`InspectorData::project`] — nothing hardcoded.
+    fn inspector_panel(&self, view: &BoardView) -> El {
+        let doc = match &self.domain.doc {
+            Ok(doc) => doc,
+            Err(_) => return self.empty_inspector(view),
+        };
+        let sel = self.domain.selection.borrow();
+        let Some(id) = sel.single() else {
+            return self.empty_inspector(view);
+        };
+        let Some(data) = InspectorData::project(id, doc, &self.domain.lib) else {
+            return self.empty_inspector(view);
+        };
+
+        let mut children: Vec<El> = vec![
+            // Identity card: kind label + large primary id.
+            column([text(data.kind).muted().mono(), h3(data.primary)]).gap(tokens::SPACE_1),
+        ];
+        for r in &data.rows {
+            children.push(field_row(r.key.clone(), text(r.value.clone()).mono()));
+        }
+        sidebar([sidebar_header([h3("Properties")]), sidebar_group(children)])
+            .width(Size::Fill(1.0))
+            .height(Size::Hug)
+    }
+
+    /// The inspector's empty state: the m2 doc stats (kept — it is the no-selection
+    /// content, per the spec), rendered as sidebar rows so it fits the narrow column.
+    fn empty_inspector(&self, _view: &BoardView) -> El {
+        match &self.domain.doc {
+            Ok(doc) => {
+                let s = DocStats::of(doc);
+                let board = match s.board_mm {
+                    Some((w, h)) => format!("{w:.1} x {h:.1} mm"),
+                    None => "none".to_string(),
+                };
+                sidebar([
+                    sidebar_header([h3("Properties")]),
+                    sidebar_group([
+                        text("No selection").muted(),
+                        field_row("Parts", text(s.parts.to_string()).mono()),
+                        field_row("Nets", text(s.nets.to_string()).mono()),
+                        field_row("Copper layers", text(s.layers.to_string()).mono()),
+                        field_row("Board", text(board).mono()),
+                    ]),
+                ])
+                .width(Size::Fill(1.0))
+                .height(Size::Hug)
+            }
+            Err(_) => sidebar([sidebar_header([h3("Properties")])])
+                .width(Size::Fill(1.0))
+                .height(Size::Hug),
+        }
+    }
+
     /// The toolbar: app title, filename badge, Fit / Reset framing buttons, and a
     /// live zoom-percent readout.
     fn viewer_toolbar(&self, zoom: f32) -> El {
@@ -299,10 +454,21 @@ impl EcadApp {
             .filename
             .clone()
             .unwrap_or_else(|| "untitled".into());
+        let active = self.tool.get();
+        // The global tool palette (structural commitment 4): two toggle buttons, the
+        // active one filled (`.primary()`), matching the mockup's active-tool cue.
+        let tool_buttons: Vec<El> = Tool::all()
+            .into_iter()
+            .map(|t| {
+                let b = button(t.label()).key(t.key());
+                if t == active { b.primary() } else { b }
+            })
+            .collect();
         toolbar([
             toolbar_title("ecad"),
             badge(name).info(),
             spacer(),
+            row(tool_buttons).gap(tokens::SPACE_1),
             text(format!("{:.0}%", zoom * 100.0)).muted().mono(),
             button("Fit").key("fit"),
             button("Reset").key("reset"),
@@ -324,8 +490,8 @@ impl EcadApp {
                 column(rows).gap(tokens::SPACE_1),
             ]),
         ])
-        .width(Size::Fixed(232.0))
-        .height(Size::Fill(1.0))
+        .width(Size::Fill(1.0))
+        .height(Size::Hug)
     }
 
     /// One layer-panel row: colour swatch + name + a visibility [`switch`].
@@ -355,13 +521,37 @@ impl EcadApp {
             Some((x, y)) => format!("X {x:.2}  Y {y:.2} mm"),
             None => "X --  Y -- mm".to_string(),
         };
-        toolbar([
-            text(cursor).muted().mono(),
-            spacer(),
-            text(format!("Zoom {:.0}%", zoom * 100.0)).muted().mono(),
-        ])
-        .gap(tokens::SPACE_3)
-        .padding(Sides::xy(tokens::SPACE_4, tokens::SPACE_1))
+        let mut items: Vec<El> = vec![text(cursor).muted().mono()];
+
+        // The measure readout (mockup taste: dx/dy/dist in the status bar) — shown only
+        // in Measure mode with a segment in progress.
+        if self.tool.get() == Tool::Measure
+            && let Some((dx, dy, dist)) = self.measure.get().readout()
+        {
+            items.push(text(format_readout(dx, dy, dist)).mono());
+        }
+
+        items.push(spacer());
+
+        // The selected net name (mockup taste: the status bar carries the selected
+        // net). Derived from the single selection via the inspector projection.
+        if let Some(net) = self.selected_net() {
+            items.push(badge(format!("net {net}")).info());
+        }
+        items.push(text(format!("Zoom {:.0}%", zoom * 100.0)).muted().mono());
+
+        toolbar(items)
+            .gap(tokens::SPACE_3)
+            .padding(Sides::xy(tokens::SPACE_4, tokens::SPACE_1))
+    }
+
+    /// The net name of the current single selection, if it belongs to one (a trace /
+    /// via / pin / pour / net selection). `None` for a part or empty selection.
+    fn selected_net(&self) -> Option<String> {
+        let doc = self.domain.doc.as_ref().ok()?;
+        let sel = self.domain.selection.borrow();
+        let id = sel.single()?;
+        InspectorData::project(id, doc, &self.domain.lib)?.net
     }
 }
 
@@ -418,6 +608,31 @@ impl App for EcadApp {
     }
 
     fn on_event(&mut self, event: UiEvent, cx: &EventCx) {
+        // Tool palette toggles (structural commitment 4). Switching tools cancels any
+        // in-progress measure preview (clean cancel on mode change).
+        for t in Tool::all() {
+            if event.is_click_or_activate(t.key()) {
+                if self.tool.get() != t {
+                    self.measure.set(MeasureState::default());
+                }
+                self.tool.set(t);
+                return;
+            }
+        }
+
+        // Escape: cancel a measure in progress if any; else clear the selection.
+        // Routed as `UiEventKind::Escape` (window-level when nothing is focused).
+        if event.kind == UiEventKind::Escape {
+            let mut m = self.measure.get();
+            if self.tool.get() == Tool::Measure && m.segment().is_some() {
+                m.cancel();
+                self.measure.set(m);
+            } else {
+                self.domain.selection.borrow_mut().clear();
+            }
+            return;
+        }
+
         // Toolbar framing buttons.
         if event.is_click_or_activate("fit") {
             self.pending.borrow_mut().push(ViewportRequest::FitContent {
@@ -454,27 +669,74 @@ impl App for EcadApp {
             }
         }
 
-        // Cursor readout in board coordinates. Any event routed to the canvas that
-        // carries a pointer (PointerEnter on hover, Drag while panning, Down/Up)
-        // updates the readout; free hover between those does not emit a routed
-        // event (see the deviation note), so this is the closest achievable live
-        // tracking on the current damascene event surface.
-        if event.target_key() == Some(CANVAS_KEY)
-            && let (Some(pos), Some(view)) = (event.pointer_pos(), &self.board)
-            && let (Some(rect), Some(vv)) =
-                (cx.rect_of_key(CANVAS_KEY), cx.viewport_view(CANVAS_KEY))
-        {
-            let origin = (rect.x, rect.y);
-            let content_px = vv.unproject(pos, origin);
-            // unproject yields the board El's content-space px (origin-relative,
-            // zoom/pan removed) — NOT viewBox mm. Convert through the viewBox min +
-            // rect/viewBox scale before the flip inverse.
-            let board_mm = view
-                .canvas
-                .content_px_to_board_mm(content_px, (rect.x, rect.y, rect.w, rect.h));
-            if let Some(board_mm) = board_mm {
-                self.cursor_board_mm.set(Some(board_mm));
+        // Canvas pointer interaction. The canvas interior is one keyed viewport; a
+        // pointer event over it routes to `CANVAS_KEY` (empty board) or to a stacked
+        // layer / overlay El. Any of those is a canvas target. We need the viewport
+        // rect + view to map the pointer to board coordinates.
+        if !is_canvas_target(event.target_key()) {
+            return;
+        }
+        let (Some(pos), Some(view)) = (event.pointer_pos(), &self.board) else {
+            return;
+        };
+        let (Some(rect), Some(vv)) = (cx.rect_of_key(CANVAS_KEY), cx.viewport_view(CANVAS_KEY))
+        else {
+            return;
+        };
+        let el_rect = (rect.x, rect.y, rect.w, rect.h);
+
+        // Cursor readout in board mm (any pointer-carrying canvas event updates it;
+        // free hover emits no event — the known 0.4.5 limit).
+        let content_px = vv.unproject(pos, (rect.x, rect.y));
+        if let Some(mm) = view.canvas.content_px_to_board_mm(content_px, el_rect) {
+            self.cursor_board_mm.set(Some(mm));
+        }
+
+        // The board point in nm for hit-testing (composes unproject + viewBox/scale +
+        // y-flip + mm→nm).
+        let Some(p) = pick::pointer_to_board_nm(&view.canvas, pos, el_rect, vv) else {
+            return;
+        };
+        let tol = pick::tolerance_nm(PICK_TOL_PX, vv.zoom);
+
+        match (self.tool.get(), event.kind) {
+            // Select tool, click: pick and single-select (or clear on empty).
+            (Tool::Select, UiEventKind::Click) => {
+                let hit =
+                    pick::resolve(&view.candidates, p, tol, |id| self.layer_visible(&id.key()));
+                let mut sel = self.domain.selection.borrow_mut();
+                match hit {
+                    Some(pick) => sel.select_only(pick.id),
+                    None => sel.clear(),
+                }
             }
+            // Select tool, hover-class event (enter/drag): update the hover highlight.
+            // Free hover emits nothing, so this only fires on enter/drag/down.
+            (Tool::Select, UiEventKind::PointerEnter | UiEventKind::Drag) => {
+                let hit =
+                    pick::resolve(&view.candidates, p, tol, |id| self.layer_visible(&id.key()));
+                let mut sel = self.domain.selection.borrow_mut();
+                match hit {
+                    Some(pick) => sel.hover_only(pick.id),
+                    None => sel.clear_hover(),
+                }
+            }
+            (Tool::Select, UiEventKind::PointerLeave) => {
+                self.domain.selection.borrow_mut().clear_hover();
+            }
+            // Measure tool, click: anchor then set the second point.
+            (Tool::Measure, UiEventKind::Click) => {
+                let mut m = self.measure.get();
+                m.click(p);
+                self.measure.set(m);
+            }
+            // Measure tool, live move (enter/drag): drag the moving end.
+            (Tool::Measure, UiEventKind::PointerEnter | UiEventKind::Drag) => {
+                let mut m = self.measure.get();
+                m.hover(p);
+                self.measure.set(m);
+            }
+            _ => {}
         }
     }
 
@@ -489,6 +751,17 @@ const CANVAS_BG: Color = Color::srgb_token("ecad.canvas.bg", 0x12, 0x14, 0x18, 0
 /// The event-route key of a layer's visibility switch.
 fn switch_key(layer_key: &str) -> String {
     format!("switch:{layer_key}")
+}
+
+/// Is this event target inside the board canvas? The interior is one keyed viewport,
+/// but a pointer event may route to the viewport (`CANVAS_KEY`, over bare board) or to
+/// one of the stacked layer / overlay `El`s (keyed `layer:*` / `overlay:*`). All of
+/// those are canvas hits; chrome (toolbar, sidebar) is not.
+fn is_canvas_target(target: Option<&str>) -> bool {
+    match target {
+        Some(k) => k == CANVAS_KEY || k.starts_with("layer:") || k.starts_with("overlay:"),
+        None => false,
+    }
 }
 
 /// The document-loaded body: a card of cheap doc stats.

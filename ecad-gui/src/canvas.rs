@@ -334,14 +334,103 @@ impl Canvas {
             .collect()
     }
 
-    /// The per-frame **dynamic overlay** seam (structural commitment 1): the layer
-    /// selection / DRC halos / tool previews render into, rebuilt every frame.
-    /// Empty in milestone 2 — returns `None` so the caller adds nothing. Present as
-    /// a named seam so m3+ has an obvious home that does not touch the cached
-    /// static layers above.
-    pub fn overlay_el(&self) -> Option<El> {
-        None
+    /// The per-frame **dynamic overlay** (structural commitment 1): the layer
+    /// selection / hover highlights and tool previews render into, rebuilt every
+    /// frame from the live [`Overlay`] and stacked on top of the cached static
+    /// layers **without** touching them (no re-tessellation). `None` when the overlay
+    /// is empty (nothing selected, no measure in progress) so the caller adds nothing.
+    ///
+    /// The overlay shares the layers' viewBox, so its geometry registers pixel-exact
+    /// against the board; it is `Painted` on top in a single asset. This is the m3
+    /// realisation of the m2 seam.
+    pub fn overlay_el(&self, overlay: &Overlay) -> Option<El> {
+        let (_, y0, _, y1) = self.bounds;
+        let flip_sum = y0 + y1;
+        let mut paths: Vec<VectorPath> = Vec::new();
+
+        // Selection / hover highlights: an accent stroke tracing each highlighted
+        // world-space copper/area shape. Selected is the bright accent; hover is a
+        // dimmer pre-select tint (hover events only arrive on enter/drag/down — see
+        // the free-hover deviation).
+        for (shape, hovered) in &overlay.highlights {
+            let color = if *hovered {
+                overlay_hover_color()
+            } else {
+                overlay_select_color()
+            };
+            paths.push(shape_halo_path(shape, flip_sum, color));
+        }
+
+        // Measure preview: the anchored segment (+ live end where a pointer position
+        // was available) as an accent dashed-free polyline with endpoint ticks.
+        if let Some((a, b)) = overlay.measure {
+            paths.push(measure_line_path(a, b, flip_sum));
+        }
+
+        if paths.is_empty() {
+            return None;
+        }
+        let asset = VectorAsset::from_paths(self.view_box(), paths);
+        Some(
+            vector(asset)
+                .vector_render_mode(VectorRenderMode::Painted)
+                .key("overlay:dynamic"),
+        )
     }
+}
+
+/// The per-frame dynamic-overlay contents: highlighted world-space shapes (selection
+/// and hover) plus an optional measure segment. Built fresh each frame by the app from
+/// the semantic selection and tool state. Holds only geometry to *render*, never
+/// selection identity (that lives in the [`SelectionModel`](crate::selection::SelectionModel)).
+#[derive(Clone, Debug, Default)]
+pub struct Overlay {
+    /// World-frame (nm, y-up) shapes to highlight, each flagged `true` when it is a
+    /// *hover* (dimmer) rather than a committed *selection* (bright).
+    pub highlights: Vec<(Shape2D, bool)>,
+    /// The measure segment `(anchor, cursor)` in world nm, if a measure is in progress.
+    pub measure: Option<(Point, Point)>,
+}
+
+/// Accent stroke for a selected feature: a bright halo tracing the shape's outline.
+fn shape_halo_path(shape: &Shape2D, flip_sum: Nm, color: Color) -> VectorPath {
+    // Trace the shape's honest copper region boundary (same kernel as the fills), so a
+    // pad/pour is haloed on its true outline and a trace on its capsule.
+    let region = match shape {
+        Shape2D::Area { region } => region.clone(),
+        _ => shape_to_region(shape, DEFAULT_CIRCLE_SEGS),
+    };
+    region_stroke_path(&region, flip_sum, color, OVERLAY_STROKE_MM)
+}
+
+/// The measure polyline: a two-point segment in the accent colour, round-capped.
+fn measure_line_path(a: Point, b: Point, flip_sum: Nm) -> VectorPath {
+    let (ax, ay) = board_to_view(a, flip_sum);
+    let (bx, by) = board_to_view(b, flip_sum);
+    PathBuilder::new()
+        .move_to(ax, ay)
+        .line_to(bx, by)
+        .stroke_solid(measure_color(), OVERLAY_STROKE_MM)
+        .stroke_line_cap(damascene_core::vector::VectorLineCap::Round)
+        .build()
+}
+
+/// Overlay stroke width in mm (screen-independent; the viewport scales it with zoom).
+const OVERLAY_STROKE_MM: f32 = 0.15;
+
+/// The selection halo accent — a bright cyan, distinct from every layer palette colour.
+fn overlay_select_color() -> Color {
+    Color::srgb_token("ecad.overlay.select", 0x22, 0xd3, 0xee, 0xff)
+}
+
+/// The hover halo — a dimmer cyan (hover is a weaker pre-select cue than selection).
+fn overlay_hover_color() -> Color {
+    Color::srgb_token("ecad.overlay.hover", 0x22, 0xd3, 0xee, 0x88)
+}
+
+/// The measure-line accent — a warm amber, distinct from the selection cyan.
+fn measure_color() -> Color {
+    Color::srgb_token("ecad.overlay.measure", 0xf5, 0xa5, 0x24, 0xff)
 }
 
 // ----------------------------------------------------------------------------
@@ -349,7 +438,7 @@ impl Canvas {
 // ----------------------------------------------------------------------------
 
 /// A fixed-point nanometre coordinate as millimetres (f32 viewBox units).
-fn nm_to_mm(nm: Nm) -> f32 {
+pub(crate) fn nm_to_mm(nm: Nm) -> f32 {
     nm as f32 / MM as f32
 }
 
@@ -622,6 +711,8 @@ fn layer_display_name(id: &LayerId) -> String {
         LayerId::Slab(name) => name.clone(),
     }
 }
+
+pub mod pick;
 
 #[cfg(test)]
 mod tests;

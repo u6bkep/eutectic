@@ -8,5 +8,8 @@
 pub mod app;
 pub mod canvas;
 pub mod fixtures;
+pub mod inspector;
+pub mod selection;
+pub mod tool;
 
 pub use app::{DomainState, EcadApp, PaneState};

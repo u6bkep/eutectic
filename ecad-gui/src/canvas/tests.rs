@@ -178,14 +178,46 @@ fn visibility_toggles_include_exclude_els() {
     assert_eq!(without_fcu.len(), all.len() - 1);
 }
 
-/// The dynamic-overlay seam is empty in milestone 2 (the layered-canvas commitment
-/// reserves it for m3+ selection / DRC / tools).
+/// An empty overlay contributes no `El` (nothing selected, no measure in progress) —
+/// so the static-layer cache is the only thing drawn. A populated overlay yields an
+/// El keyed `overlay:dynamic`, stacked on top without touching the cached layers.
 #[test]
-fn overlay_is_empty_in_m2() {
+fn empty_overlay_is_none_populated_is_some() {
+    use super::Overlay;
+    use ecad_core::coord::Point;
+    use ecad_core::geom::Shape2D;
+
     let d = board_domain();
     let doc = d.doc.as_ref().expect("fixture elaborates");
     let canvas = Canvas::new(doc, &d.lib).unwrap();
-    assert!(canvas.overlay_el().is_none());
+
+    // Empty overlay → nothing drawn.
+    assert!(canvas.overlay_el(&Overlay::default()).is_none());
+
+    // A highlighted shape → one overlay El keyed `overlay:dynamic`.
+    let overlay = Overlay {
+        highlights: vec![(
+            Shape2D::trace(
+                vec![
+                    Point {
+                        x: 3_000_000,
+                        y: 7_000_000,
+                    },
+                    Point {
+                        x: 17_000_000,
+                        y: 7_000_000,
+                    },
+                ],
+                500_000,
+            ),
+            false,
+        )],
+        measure: None,
+    };
+    let el = canvas
+        .overlay_el(&overlay)
+        .expect("populated overlay draws");
+    assert_eq!(el.key.as_deref(), Some("overlay:dynamic"));
 }
 
 /// The real 4-layer multiprobe board (poc/out/board.ecad) parses, elaborates, and
