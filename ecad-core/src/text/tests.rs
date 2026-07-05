@@ -2965,6 +2965,64 @@ fn unresolved_part_loads_with_finding_and_suppresses_cascade() {
     assert!(!gnd.members.iter().any(|m| m.comp.as_str() == "u9"));
 }
 
+/// The permissive promise holds even when the schematic layout touches the unresolved
+/// instance: a `sym` on it and a `wire` endpoint on it must DEGRADE (like a DNP drop),
+/// not hard-abort the commit via `E_SCHEMATIC` — otherwise a doc placing a part the
+/// caller failed to resolve would refuse to load, defeating the whole degrade.
+#[test]
+fn schematic_on_unresolved_part_degrades_not_aborts() {
+    // The real load path: `LoadText` is the only command that carries the parsed
+    // `schematic { … }` block into the doc (SetSource takes directives only).
+    let src = "inst u9 NotAPart\n\
+               inst c1 Cap\n\
+               net GND c1.p2 u9.GND\n\
+               schematic {\n\
+                 row {\n\
+                   sym u9\n\
+                   sym c1\n\
+                   wire u9.GND c1.p2\n\
+                 }\n\
+               }";
+    let lib = part_library();
+    let mut h = History::new(Default::default());
+    // Commits — an Err (E_SCHEMATIC) here fails the test.
+    h.commit(
+        Transaction::one(Command::LoadText(src.to_string())),
+        &lib,
+        "load",
+    )
+    .expect("a schematic touching an unresolved part must still load");
+    let doc = h.doc().clone();
+    // The unresolved instance is skipped and reported, exactly as without a schematic.
+    assert!(!doc.components.contains_key(&EntityId::new("u9")));
+    assert_eq!(doc.report.unresolved_parts.len(), 1);
+    // The `sym u9` degrades to the unplaced bin (W_SCHEMATIC_UNPLACED channel)…
+    assert_eq!(doc.report.unplaced_components, vec![EntityId::new("u9")]);
+    // …and the `wire u9.GND …` degrades to a non-blocking W_SCHEMATIC_WIRE finding.
+    assert_eq!(doc.report.schematic_wire_warnings.len(), 1);
+    let w = &doc.report.schematic_wire_warnings[0];
+    assert_eq!(w.code, "W_SCHEMATIC_WIRE");
+    assert!(w.message.contains("unresolved"), "got: {}", w.message);
+    // Degrades stay non-blocking: the doc is still clean.
+    assert!(doc.report.is_clean());
+    // A genuinely unknown sym path in the same doc would still hard-fail (the typo
+    // gate is untouched): pin that with a sibling commit.
+    let mut h2 = History::new(Default::default());
+    let bad = "inst c1 Cap\nschematic {\n  row {\n    sym TYPO\n  }\n}";
+    let err = h2
+        .commit(
+            Transaction::one(Command::LoadText(bad.to_string())),
+            &lib,
+            "bad",
+        )
+        .unwrap_err();
+    assert!(
+        err.iter()
+            .any(|d| d.code == "E_SCHEMATIC" && d.message.contains("TYPO")),
+        "got: {err:?}"
+    );
+}
+
 /// A genuinely malformed source still hard-fails: permissive unresolved parts must
 /// not soften structural faults (an unknown *instance* reference, a syntax error).
 #[test]

@@ -31,16 +31,26 @@ use std::collections::{BTreeMap, BTreeSet};
 /// exactly like a never-placed part, not an `E_SCHEMATIC`. Only a path the source does not
 /// know at all is the typo case that aborts.
 ///
+/// The **unresolved-part case** (library packages, slice 1) is the same shape: a path in
+/// `unresolved` is an instance the source *did* declare whose part the library failed to
+/// provide — elaboration skipped it permissively (`W_UNRESOLVED_PART` rides the
+/// [`ReconReport`](crate::doc::ReconReport)), so a `sym` on it must degrade to the
+/// unplaced bin too, never hard-abort. Aborting here would defeat the whole permissive
+/// promise: the doc would refuse to load the moment its schematic places a part the
+/// caller could not resolve.
+///
 /// `component_ids` is the elaborated (populated) instance universe (keys of
 /// `Doc::components`); `dnp_dropped` is the depopulated-path set from
-/// [`crate::elaborate::Elaborated`]; `def_fragments` is the per-instance stamped layout
+/// [`crate::elaborate::Elaborated`]; `unresolved` is the unresolved-part instance-path
+/// set (the ids of `ReconReport::unresolved_parts`); `def_fragments` is the per-instance stamped layout
 /// table (Decision 20 embedded in a def, keyed by def-instance path) — a `sym` whose path
 /// is a key is **legal** (it expands into the fragment at reflow), NOT an unknown-typo error
 /// and NOT a placed component. Its values (the fragments, holding the internal paths each
 /// stamps) drive the override-warning channel.
 ///
 /// Returns three channels: the hard errors (empty ⇒ clean), the sorted list of unplaced ids
-/// (never-placed populated parts + DNP-dropped placed paths), and a set of NON-BLOCKING
+/// (never-placed populated parts + declared-but-absent placed paths, i.e. DNP-dropped or
+/// unresolved-part), and a set of NON-BLOCKING
 /// `W_SCHEMATIC` override warnings — one per internal path that both the stamped fragment
 /// AND a doc-level `sym` place, where the doc-level placement wins (the reflow drops the
 /// fragment's copy, so this is never a duplicate error, just a visible "your doc-level sym
@@ -49,6 +59,7 @@ pub fn validate(
     layout: &SchematicLayout,
     component_ids: &BTreeSet<EntityId>,
     dnp_dropped: &BTreeSet<String>,
+    unresolved: &BTreeSet<String>,
     def_fragments: &BTreeMap<String, SchematicLayout>,
 ) -> (Vec<Diagnostic>, Vec<EntityId>, Vec<Diagnostic>) {
     let mut errors = Vec::new();
@@ -82,9 +93,13 @@ pub fn validate(
     //   - populated (in `component_ids`): a real placement; duplicate placement is an error.
     //   - DNP-dropped (in `dnp_dropped`): the source declared it but `if=false` turned it
     //     off — NOT an error; collect it as unplaced so it warns and the view degrades.
+    //   - unresolved part (in `unresolved`): the source declared it but the library did
+    //     not provide its part, so elaboration skipped it permissively — NOT an error
+    //     (the `W_UNRESOLVED_PART` degrade must not be re-hardened here); it joins the
+    //     unplaced bin exactly like a DNP drop.
     //   - unknown to the source entirely: a typo — hard `E_SCHEMATIC` abort.
     let mut placed: BTreeSet<&str> = BTreeSet::new();
-    let mut dnp_placed: BTreeSet<EntityId> = BTreeSet::new();
+    let mut absent_placed: BTreeSet<EntityId> = BTreeSet::new();
     for path in layout.symbol_paths() {
         if def_fragments.contains_key(path) {
             // A def-instance sym: legal, expands at reflow. Not a component placement.
@@ -97,9 +112,10 @@ pub fn validate(
                     Location::Entity(EntityId::new(path)),
                 ));
             }
-        } else if dnp_dropped.contains(path) {
-            // Depopulated variant: degrade to unplaced, do not abort (§20c × 21b).
-            dnp_placed.insert(EntityId::new(path));
+        } else if dnp_dropped.contains(path) || unresolved.contains(path) {
+            // Declared but absent (depopulated variant, or an unresolved part the
+            // elaboration skipped): degrade to unplaced, do not abort (§20c × 21b).
+            absent_placed.insert(EntityId::new(path));
         } else {
             errors.push(Diagnostic::error(
                 "E_SCHEMATIC",
@@ -196,7 +212,7 @@ pub fn validate(
         .filter(|id| !placed_ids.contains(id))
         .cloned()
         .collect();
-    unplaced.extend(dnp_placed);
+    unplaced.extend(absent_placed);
 
     (errors, unplaced.into_iter().collect(), warnings)
 }
@@ -211,20 +227,25 @@ pub fn validate(
 ///     unknown to the source (a typo, exactly like an unknown `sym` path), or whose pin
 ///     selector names no pin on that component's part (a typo'd pin). Collect-all.
 ///   - **`W_SCHEMATIC_WIRE` warnings** (returned second): a wire endpoint on a
-///     DNP-dropped component (the wire degrades like a `sym` — non-blocking, §20c × 21b),
+///     DNP-dropped component (the wire degrades like a `sym` — non-blocking, §20c × 21b)
+///     or on an unresolved-part instance (same declared-but-absent degrade — the
+///     permissive `W_UNRESOLVED_PART` skip must not be re-hardened by a wire on it),
 ///     and a wire whose two endpoints resolve onto *different* nets (a legal but honest
 ///     "your drawing disagrees with the netlist" signal — the net tag at each pin still
-///     tells the truth). Both leave the doc clean.
+///     tells the truth). All leave the doc clean.
 ///
 /// `components` is the populated path→part universe; `lib` sizes/enumerates pins;
-/// `dnp_dropped` is the depopulated-path set; `pin_net` maps a resolved
-/// [`PinRef`](crate::doc::PinRef) to its net name (absent ⇒ the pin joins no net). The
-/// wire order is the pre-order [`SchematicLayout::wires`] walk, so output is deterministic.
+/// `dnp_dropped` is the depopulated-path set; `unresolved` is the unresolved-part
+/// instance-path set (the ids of `ReconReport::unresolved_parts`); `pin_net` maps a
+/// resolved [`PinRef`](crate::doc::PinRef) to its net name (absent ⇒ the pin joins no
+/// net). The wire order is the pre-order [`SchematicLayout::wires`] walk, so output is
+/// deterministic.
 pub fn validate_wires(
     layout: &SchematicLayout,
     components: &BTreeMap<EntityId, String>,
     lib: &PartLib,
     dnp_dropped: &BTreeSet<String>,
+    unresolved: &BTreeSet<String>,
     pin_net: &impl Fn(&crate::doc::PinRef) -> Option<String>,
 ) -> (Vec<Diagnostic>, Vec<Diagnostic>) {
     let mut errors = Vec::new();
@@ -239,7 +260,8 @@ pub fn validate_wires(
      -> Option<Vec<crate::doc::PinRef>> {
         let cid = EntityId::new(end.comp.clone());
         let Some(part) = components.get(&cid) else {
-            // Not a populated component: a DNP-dropped path degrades (like a sym); an
+            // Not a populated component: a DNP-dropped path degrades (like a sym), as
+            // does an unresolved-part instance the elaboration skipped permissively; an
             // otherwise-unknown path is a hard typo.
             if dnp_dropped.contains(end.comp.as_str()) {
                 warnings.push(
@@ -247,6 +269,17 @@ pub fn validate_wires(
                         "W_SCHEMATIC_WIRE",
                         format!(
                             "wire endpoint `{}.{}` is on `{}`, which an `if=` variant depopulated; the wire is not drawn",
+                            end.comp, end.pin, end.comp
+                        ),
+                        Location::Entity(cid),
+                    ),
+                );
+            } else if unresolved.contains(end.comp.as_str()) {
+                warnings.push(
+                    Diagnostic::warning(
+                        "W_SCHEMATIC_WIRE",
+                        format!(
+                            "wire endpoint `{}.{}` is on `{}`, whose part is unresolved (not in the library); the wire is not drawn",
                             end.comp, end.pin, end.comp
                         ),
                         Location::Entity(cid),

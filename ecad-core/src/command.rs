@@ -296,19 +296,36 @@ pub fn apply(
     // is a post-elaborate gate over tier-1 authored state that `elaborate` does not own:
     // it needs the freshly-elaborated component universe to resolve `sym` paths. A `sym`
     // path unknown to the *source* is a hard `E_SCHEMATIC` abort (a typo); a path the
-    // source *did* declare but a false `if=` depopulated (Decision 21b DNP) is **not** an
-    // error — it degrades to the unplaced bin like any other unplaced part, so toggling a
-    // population variant never blocks a commit (§20c totality). Duplicate paths / duplicate
+    // source *did* declare but a false `if=` depopulated (Decision 21b DNP) — or whose
+    // part the library failed to resolve (the permissive `W_UNRESOLVED_PART` skip) — is
+    // **not** an error: it degrades to the unplaced bin like any other unplaced part, so
+    // toggling a population variant never blocks a commit (§20c totality). Duplicate
+    // paths / duplicate
     // sibling names stay hard errors. The `W_SCHEMATIC_UNPLACED` finding (unplaced *and*
     // DNP-dropped placed symbols) is non-blocking and rides the `ReconReport` (the
     // `W_FONT_LOAD` idiom).
     if let Some(layout) = &next.schematic {
         let ids: std::collections::BTreeSet<EntityId> = next.components.keys().cloned().collect();
+        // Unresolved-part instance paths (library packages, slice 1): declared by the
+        // source but skipped by elaboration because the library lacks the part. A `sym`
+        // or wire endpoint on one must DEGRADE (like a DNP drop), not hard-abort — the
+        // permissive `W_UNRESOLVED_PART` promise is that the doc still loads.
+        let unresolved: std::collections::BTreeSet<String> = next
+            .report
+            .unresolved_parts
+            .iter()
+            .map(|(id, _, _)| id.as_str().to_string())
+            .collect();
         // Pass the per-instance stamped fragment table (Decision 20 embedded in a def) so a
         // def-instance `sym` is legal (it expands) rather than an unknown-typo error, and so
         // any doc-level sym that overrides a fragment placement surfaces as a warning.
-        let (errors, unplaced, override_warnings) =
-            crate::schematic::validate(layout, &ids, &elab.dnp_dropped, &next.def_fragments);
+        let (errors, unplaced, override_warnings) = crate::schematic::validate(
+            layout,
+            &ids,
+            &elab.dnp_dropped,
+            &unresolved,
+            &next.def_fragments,
+        );
         if !errors.is_empty() {
             return Err(errors);
         }
@@ -333,8 +350,14 @@ pub fn apply(
             .flat_map(|net| net.members.iter().map(|m| (m.clone(), net.name.clone())))
             .collect();
         let pin_net = |p: &crate::doc::PinRef| pin_to_net.get(p).cloned();
-        let (wire_errors, wire_warnings) =
-            crate::schematic::validate_wires(layout, &parts, lib, &elab.dnp_dropped, &pin_net);
+        let (wire_errors, wire_warnings) = crate::schematic::validate_wires(
+            layout,
+            &parts,
+            lib,
+            &elab.dnp_dropped,
+            &unresolved,
+            &pin_net,
+        );
         if !wire_errors.is_empty() {
             return Err(wire_errors);
         }

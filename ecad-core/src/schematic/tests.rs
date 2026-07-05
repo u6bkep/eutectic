@@ -50,6 +50,12 @@ fn dnp(paths: &[&str]) -> BTreeSet<String> {
     paths.iter().map(|p| p.to_string()).collect()
 }
 
+/// An unresolved-part instance-path set from string slices (library packages: instances
+/// whose part the library failed to provide, skipped permissively by elaboration).
+fn unres(paths: &[&str]) -> BTreeSet<String> {
+    paths.iter().map(|p| p.to_string()).collect()
+}
+
 // --- sizing -------------------------------------------------------------
 
 #[test]
@@ -282,7 +288,13 @@ fn unknown_sym_path_is_an_error() {
     let layout = SchematicLayout {
         roots: vec![row(vec![sym("C1"), sym("NOPE")])],
     };
-    let (errors, _, _) = validate(&layout, &ids(&[("C1", "Cap")]), &dnp(&[]), &BTreeMap::new());
+    let (errors, _, _) = validate(
+        &layout,
+        &ids(&[("C1", "Cap")]),
+        &dnp(&[]),
+        &unres(&[]),
+        &BTreeMap::new(),
+    );
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].code, "E_SCHEMATIC");
 }
@@ -292,7 +304,13 @@ fn duplicate_sym_is_an_error() {
     let layout = SchematicLayout {
         roots: vec![row(vec![sym("C1"), sym("C1")])],
     };
-    let (errors, _, _) = validate(&layout, &ids(&[("C1", "Cap")]), &dnp(&[]), &BTreeMap::new());
+    let (errors, _, _) = validate(
+        &layout,
+        &ids(&[("C1", "Cap")]),
+        &dnp(&[]),
+        &unres(&[]),
+        &BTreeMap::new(),
+    );
     assert_eq!(errors.len(), 1);
     assert!(errors[0].message.contains("more than one"));
 }
@@ -311,7 +329,7 @@ fn duplicate_sibling_name_is_an_error() {
     let layout = SchematicLayout {
         roots: vec![named("power"), named("power")],
     };
-    let (errors, _, _) = validate(&layout, &ids(&[]), &dnp(&[]), &BTreeMap::new());
+    let (errors, _, _) = validate(&layout, &ids(&[]), &dnp(&[]), &unres(&[]), &BTreeMap::new());
     assert_eq!(errors.len(), 1);
     assert!(errors[0].message.contains("duplicate sibling"));
 }
@@ -331,7 +349,7 @@ fn same_name_in_different_scopes_is_ok() {
     let layout = SchematicLayout {
         roots: vec![row(vec![inner("col")]), row(vec![inner("col")])],
     };
-    let (errors, _, _) = validate(&layout, &ids(&[]), &dnp(&[]), &BTreeMap::new());
+    let (errors, _, _) = validate(&layout, &ids(&[]), &dnp(&[]), &unres(&[]), &BTreeMap::new());
     assert!(errors.is_empty());
 }
 
@@ -344,6 +362,7 @@ fn unplaced_reported_as_warning_set() {
         &layout,
         &ids(&[("C1", "Cap"), ("C2", "Cap")]),
         &dnp(&[]),
+        &unres(&[]),
         &BTreeMap::new(),
     );
     assert!(errors.is_empty());
@@ -363,11 +382,51 @@ fn dnp_dropped_sym_degrades_to_unplaced_not_error() {
         &layout,
         &ids(&[("C1", "Cap")]),
         &dnp(&["C2"]),
+        &unres(&[]),
         &BTreeMap::new(),
     );
     assert!(errors.is_empty(), "DNP-dropped placed sym must not error");
     // C2 surfaces as unplaced (so it warns), and is absent from the placed set.
     assert_eq!(unplaced, vec![EntityId::new("C2")]);
+}
+
+#[test]
+fn unresolved_part_sym_degrades_to_unplaced_not_error() {
+    // Library packages, slice 1: a `sym` on an instance the source declared but whose
+    // part the library failed to provide (elaboration skipped it with W_UNRESOLVED_PART)
+    // must NOT hard-abort — that would defeat the permissive-degrade promise ("the doc
+    // still loads"). It degrades to the unplaced bin exactly like a DNP drop.
+    let layout = SchematicLayout {
+        roots: vec![row(vec![sym("C1"), sym("U9")])],
+    };
+    // C1 is populated; U9's part was unresolved, so it is absent from the universe.
+    let (errors, unplaced, _) = validate(
+        &layout,
+        &ids(&[("C1", "Cap")]),
+        &dnp(&[]),
+        &unres(&["U9"]),
+        &BTreeMap::new(),
+    );
+    assert!(errors.is_empty(), "unresolved-part sym must not error");
+    assert_eq!(unplaced, vec![EntityId::new("U9")]);
+}
+
+#[test]
+fn unknown_sym_path_still_aborts_even_with_unresolved_set() {
+    // A typo'd path stays a hard error even when some other path is legitimately
+    // unresolved — the permissive set must not blanket-soften unknown paths.
+    let layout = SchematicLayout {
+        roots: vec![row(vec![sym("TYPO"), sym("U9")])],
+    };
+    let (errors, _, _) = validate(
+        &layout,
+        &ids(&[("C1", "Cap")]),
+        &dnp(&[]),
+        &unres(&["U9"]),
+        &BTreeMap::new(),
+    );
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].message.contains("TYPO"));
 }
 
 // --- wire validation ----------------------------------------------------
@@ -403,7 +462,7 @@ fn wire_to_real_pins_on_same_net_is_silent() {
         roots: vec![wire(("C1", "p1"), ("C2", "p1"))],
     };
     let net = nets(&[("C1", "p1", "N1"), ("C2", "p1", "N1")]);
-    let (errors, warnings) = validate_wires(&layout, &u, &lib, &dnp(&[]), &net);
+    let (errors, warnings) = validate_wires(&layout, &u, &lib, &dnp(&[]), &unres(&[]), &net);
     assert!(errors.is_empty());
     assert!(warnings.is_empty(), "same-net wire is honest: {warnings:?}");
 }
@@ -417,7 +476,7 @@ fn wire_across_two_nets_warns_not_errors() {
     };
     // The two pins are on *different* nets: legal but honest disagreement (§20d).
     let net = nets(&[("C1", "p1", "N1"), ("C2", "p1", "N2")]);
-    let (errors, warnings) = validate_wires(&layout, &u, &lib, &dnp(&[]), &net);
+    let (errors, warnings) = validate_wires(&layout, &u, &lib, &dnp(&[]), &unres(&[]), &net);
     assert!(errors.is_empty(), "cross-net is a warning, not an error");
     assert_eq!(warnings.len(), 1);
     assert_eq!(warnings[0].code, "W_SCHEMATIC_WIRE");
@@ -435,7 +494,7 @@ fn wire_unknown_comp_or_pin_is_an_error() {
             wire(("C1", "bogus"), ("C1", "p2")),
         ],
     };
-    let (errors, _) = validate_wires(&layout, &u, &lib, &dnp(&[]), &nets(&[]));
+    let (errors, _) = validate_wires(&layout, &u, &lib, &dnp(&[]), &unres(&[]), &nets(&[]));
     assert_eq!(errors.len(), 2);
     assert!(errors.iter().all(|e| e.code == "E_SCHEMATIC"));
 }
@@ -452,7 +511,7 @@ fn wire_to_interface_signal_fails_loud_not_silent() {
     let layout = SchematicLayout {
         roots: vec![wire(("U1.uart", "tx"), ("U1", "VDD"))],
     };
-    let (errors, _) = validate_wires(&layout, &u, &lib, &dnp(&[]), &nets(&[]));
+    let (errors, _) = validate_wires(&layout, &u, &lib, &dnp(&[]), &unres(&[]), &nets(&[]));
     assert_eq!(errors.len(), 1, "the interface-signal endpoint must error");
     assert_eq!(errors[0].code, "E_SCHEMATIC");
     assert!(errors[0].message.contains("U1.uart"));
@@ -467,7 +526,8 @@ fn wire_on_dnp_dropped_comp_degrades_to_warning() {
     let layout = SchematicLayout {
         roots: vec![wire(("C1", "p1"), ("C2", "p1"))],
     };
-    let (errors, warnings) = validate_wires(&layout, &u, &lib, &dnp(&["C2"]), &nets(&[]));
+    let (errors, warnings) =
+        validate_wires(&layout, &u, &lib, &dnp(&["C2"]), &unres(&[]), &nets(&[]));
     assert!(
         errors.is_empty(),
         "DNP-dropped wire endpoint must not error"
@@ -475,6 +535,27 @@ fn wire_on_dnp_dropped_comp_degrades_to_warning() {
     assert_eq!(warnings.len(), 1);
     assert_eq!(warnings[0].code, "W_SCHEMATIC_WIRE");
     assert!(warnings[0].message.contains("depopulated"));
+}
+
+#[test]
+fn wire_on_unresolved_part_comp_degrades_to_warning() {
+    let lib = part_library();
+    // U9's part was unresolved (library packages): elaboration skipped the instance, so
+    // it is absent from the populated universe. A wire onto it must degrade to a
+    // non-blocking W_SCHEMATIC_WIRE like a DNP drop, never hard-abort the commit.
+    let u = universe(&[("C1", "Cap")]);
+    let layout = SchematicLayout {
+        roots: vec![wire(("C1", "p1"), ("U9", "GND"))],
+    };
+    let (errors, warnings) =
+        validate_wires(&layout, &u, &lib, &dnp(&[]), &unres(&["U9"]), &nets(&[]));
+    assert!(
+        errors.is_empty(),
+        "unresolved-part wire endpoint must not error: {errors:?}"
+    );
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0].code, "W_SCHEMATIC_WIRE");
+    assert!(warnings[0].message.contains("unresolved"));
 }
 
 // --- def-embedded layout stamping (Decision 20 embedded in a def) ------
@@ -619,7 +700,7 @@ fn doc_level_sym_overrides_fragment_placement() {
 
     // And `validate` surfaces the override as a single non-blocking W_SCHEMATIC warning.
     let ids: BTreeSet<EntityId> = u.keys().cloned().collect();
-    let (errors, _unplaced, warnings) = validate(&layout, &ids, &dnp(&[]), &fragments);
+    let (errors, _unplaced, warnings) = validate(&layout, &ids, &dnp(&[]), &unres(&[]), &fragments);
     assert!(errors.is_empty(), "override is not an error: {errors:?}");
     assert_eq!(warnings.len(), 1, "one override warning: {warnings:?}");
     assert_eq!(warnings[0].code, "W_SCHEMATIC");
@@ -640,7 +721,7 @@ fn rot_dx_dy_on_def_instance_sym_warns_ignored() {
     let plain = SchematicLayout {
         roots: vec![row(vec![sym("sense[0]")])],
     };
-    let (_e, _u, w) = validate(&plain, &ids, &dnp(&[]), &fragments);
+    let (_e, _u, w) = validate(&plain, &ids, &dnp(&[]), &unres(&[]), &fragments);
     assert!(w.is_empty(), "plain def-instance sym is silent: {w:?}");
     // A pinned offset on the def-instance sym: one ignored-attr warning.
     let shifted = SchematicLayout {
@@ -651,7 +732,8 @@ fn rot_dx_dy_on_def_instance_sym_warns_ignored() {
             dy: 0,
         })])],
     };
-    let (errors, _unplaced, warnings) = validate(&shifted, &ids, &dnp(&[]), &fragments);
+    let (errors, _unplaced, warnings) =
+        validate(&shifted, &ids, &dnp(&[]), &unres(&[]), &fragments);
     assert!(
         errors.is_empty(),
         "ignored attr is not an error: {errors:?}"
@@ -684,7 +766,8 @@ fn fragment_nesting_past_the_cap_is_an_error_not_a_silent_drop() {
     };
     // No populated components needed — the check is purely on fragment nesting depth.
     let ids: BTreeSet<EntityId> = BTreeSet::new();
-    let (errors, _unplaced, _warnings) = validate(&layout, &ids, &dnp(&[]), &fragments);
+    let (errors, _unplaced, _warnings) =
+        validate(&layout, &ids, &dnp(&[]), &unres(&[]), &fragments);
     assert!(
         errors
             .iter()
@@ -720,7 +803,8 @@ fn def_instance_sym_does_not_error_but_unknown_still_does() {
         roots: vec![row(vec![sym("sense[0]"), sym("NOPE")])],
     };
     let ids = ids(&[("sense[0].R1", "R")]);
-    let (errors, _unplaced, _warnings) = validate(&layout, &ids, &dnp(&[]), &fragments);
+    let (errors, _unplaced, _warnings) =
+        validate(&layout, &ids, &dnp(&[]), &unres(&[]), &fragments);
     // Only `NOPE` errors — the def-instance sym `sense[0]` is legal.
     assert_eq!(errors.len(), 1, "only the typo errors: {errors:?}");
     assert!(errors[0].message.contains("NOPE"));
@@ -737,6 +821,7 @@ fn unknown_path_still_aborts_even_with_dnp_set() {
         &layout,
         &ids(&[("C1", "Cap")]),
         &dnp(&["C2"]),
+        &unres(&[]),
         &BTreeMap::new(),
     );
     assert_eq!(errors.len(), 1);
