@@ -125,6 +125,15 @@ source; re-elaborate derives everything else; undo/redo is source snapshots
 debounced DRC) arrives via the mailbox pattern (`before_build` drain +
 external wakeup).
 
+**Save model (decided 2026-07-05, m6):** edits live in memory as dirty state;
+the GUI never overwrites the user's file autonomously in an interactive
+session. Explicit save writes `serialize(doc)` to the file (and suppresses
+the watcher echo of our own write). If the watcher delivers an external
+change while the doc is dirty, that is a **conflict banner** — an explicit
+reload-or-keep choice, never silent last-writer. A clean doc follows external
+edits automatically, as today. The always-current sidecar variant (agent
+visibility of live editing state) is deferred as gw-24.
+
 ## Library resolution (the single Libraries menu)
 
 Engine-side design: `architecture.md` §9 (library packages, `use` directive,
