@@ -305,10 +305,11 @@ pub const COURTYARD_MARGIN: Nm = 250_000;
 /// the origin and grown by [`COURTYARD_MARGIN`]. This is the keep-out the placement
 /// solver uses for overlap-avoidance (issue 0005).
 ///
-/// Derived from real copper extent only, so a footprint-less part (the toy
-/// `part_library`, `pad: None`) returns `(0, 0)` — it has no defined physical
-/// courtyard, so it is exempt from overlap-avoidance (it is an abstract fixture, not
-/// a placeable body). Origin-centred (rather than a true offset bbox) keeps it a
+/// Derived from real copper extent only, so a genuinely footprint-less part
+/// (every pin `pad: None`) returns `(0, 0)` — it has no defined physical courtyard,
+/// so it is exempt from overlap-avoidance. (The built-in toy `part_library` no
+/// longer qualifies: its pins carry real pad copper since m6b, so toy parts have
+/// pad-hull courtyards like any imported footprint.) Origin-centred (rather than a true offset bbox) keeps it a
 /// single half-extent pair that rotates by swapping `hw`/`hh` on a cardinal turn;
 /// real footprints are centred on their origin, so this is tight in practice and
 /// conservative otherwise.
@@ -351,7 +352,8 @@ pub fn courtyard_half_extents(def: &PartDef) -> (Nm, Nm) {
 /// Decision 10's tighter-packing value requires the solver's push itself to consume
 /// this polygon — a deferred solver enhancement (issue 0019), not a verify bolt-on.
 ///
-/// Footprint-less parts (the toy `part_library`, every `pad: None`) have no copper, so
+/// Genuinely footprint-less parts (every pin `pad: None`; NOT the built-in toy
+/// `part_library`, whose pins carry real pad copper since m6b) have no copper, so
 /// they return `None` and are exempt from overlap verification — exactly as they are
 /// exempt from the proxy push. A degenerate footprint whose copper vertices are
 /// collinear (no 2-D hull, e.g. a single round pad) also returns `None`.

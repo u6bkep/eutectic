@@ -275,7 +275,8 @@ fn copper_layers(doc: &crate::doc::Doc) -> Vec<Slab> {
 /// `target_z`, as `(world centre, aperture)`, in `(EntityId, pin-declaration,
 /// copper-region)` order. Each pad's real geometry is transformed to world space and
 /// reduced to a flashable aperture; a region flashes only on the slabs it occupies.
-/// Toy-library pins (`pad: None`) contribute nothing.
+/// Pins with no pad geometry (`pad: None`) contribute nothing (the built-in toy
+/// library no longer has any — its pins carry real pad copper since m6b).
 fn component_pad_flashes(
     doc: &crate::doc::Doc,
     lib: &PartLib,
