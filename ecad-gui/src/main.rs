@@ -44,11 +44,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The per-machine library registry (library packages, slice 2). A missing
     // file is the empty first-run registry; a malformed one degrades to empty
     // with a stderr warning (the app must still open — the Libraries menu is
-    // how you fix it — but note a later menu edit will then REWRITE the file).
+    // how you fix it). The broken file is set aside as `libraries.bak` first,
+    // so a later menu edit rewrites the live path without destroying the
+    // hand-edited original.
     let registry_path = default_registry_path();
     let registry = match &registry_path {
         Some(p) => Registry::load(p).unwrap_or_else(|e| {
-            eprintln!("warning: broken library registry ignored ({e})");
+            let bak = p.with_extension("bak");
+            match std::fs::rename(p, &bak) {
+                Ok(()) => eprintln!(
+                    "warning: broken library registry ignored ({e}); \
+                     original preserved at {}",
+                    bak.display()
+                ),
+                Err(re) => eprintln!(
+                    "warning: broken library registry ignored ({e}); \
+                     could not set it aside ({re}) — a menu edit will overwrite it"
+                ),
+            }
             Registry::new()
         }),
         None => Registry::new(),
