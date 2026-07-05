@@ -1,0 +1,9 @@
+[package]
+name = "ecad-gui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ecad-core = { path = "../ecad-core" }
+damascene-core = "0.4.5"
+damascene-winit-wgpu = "0.4.5"

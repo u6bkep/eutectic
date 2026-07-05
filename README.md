@@ -151,18 +151,22 @@ the "key submodules" note names the internal split where there is one.
 
 ## Build & run
 
+The repo is a cargo workspace: `ecad-core` (the engine) + `ecad-gui` (the
+damascene GUI). Examples live in `ecad-core`; run them with `-p ecad-core`.
+
 ```sh
-cargo test                       # 559 tests (510 lib + 49 integration)
-cargo clippy --all-targets
-cargo run --example m1           # typed interfaces, ERC, incremental recompute, reconciliation
-cargo run --example m2           # override strength, decay, constraint precedence
-cargo run --example m3           # least-change placement (mini RP2350-carrier scene)
-cargo run --example export       # netlist + pick-and-place + SVG from a small board
-cargo run --example autoroute    # place → autoroute → DRC-clean, end to end
-cargo run --example gerber       # Gerber/Excellon fab output
-cargo run --example schematic    # authored schematic layout → rendered schematic SVG
-cargo run --example svg_outline  # SVG import: outline + cutout → board → rendered SVG
-cargo run --example poc_multiprobe  # the capstone: 4-layer RP2350A board, full pipeline
+cargo test --workspace           # 559 ecad-core tests (510 lib + 49 integration) + the ecad-gui fixtures
+cargo clippy --workspace --all-targets
+cargo run -p ecad-core --example m1           # typed interfaces, ERC, incremental recompute, reconciliation
+cargo run -p ecad-core --example m2           # override strength, decay, constraint precedence
+cargo run -p ecad-core --example m3           # least-change placement (mini RP2350-carrier scene)
+cargo run -p ecad-core --example export       # netlist + pick-and-place + SVG from a small board
+cargo run -p ecad-core --example autoroute    # place → autoroute → DRC-clean, end to end
+cargo run -p ecad-core --example gerber       # Gerber/Excellon fab output
+cargo run -p ecad-core --example schematic    # authored schematic layout → rendered schematic SVG
+cargo run -p ecad-core --example svg_outline  # SVG import: outline + cutout → board → rendered SVG
+cargo run -p ecad-core --example poc_multiprobe  # the capstone: 4-layer RP2350A board, full pipeline
+cargo run -p ecad-gui [path.ecad]             # the GUI (opens a window; optional .ecad file to load)
 ```
 
 ## Repository layout

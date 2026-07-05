@@ -1,11 +1,29 @@
-[package]
-name = "ecad-core"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = ["ecad-core", "ecad-gui"]
+resolver = "3"
 
-[dependencies]
-# TTF/OpenType outline reader (Decision 17). The crate's only dependency: zero-dep
-# itself, well-fuzzed. Only the `std` feature (for float trig in the core outline path);
-# the layout/variable-font/apple/glyph-name features stay off — we use just the core
-# glyf/loca/cmap/hmtx/OS-2 tables.
-ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
+# Optimize damascene's text rasterization/shaping stack in dev builds.
+# Leaf dependencies that compile once; your own crates stay at
+# opt-level 0 so incremental iteration speed is unaffected.
+[profile.dev.package.fdsm]
+opt-level = 3
+[profile.dev.package.fdsm-ttf-parser]
+opt-level = 3
+[profile.dev.package.nalgebra]
+opt-level = 3
+[profile.dev.package.simba]
+opt-level = 3
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.ttf-parser]
+opt-level = 3
+[profile.dev.package.cosmic-text]
+opt-level = 3
+[profile.dev.package.swash]
+opt-level = 3
+[profile.dev.package.skrifa]
+opt-level = 3
+[profile.dev.package.zeno]
+opt-level = 3
+[profile.dev.package.fontdb]
+opt-level = 3
