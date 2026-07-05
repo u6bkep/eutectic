@@ -18,6 +18,16 @@
 //! bounding box (with the same 2 mm margin `svg.rs` uses), so the layers register
 //! against each other and the whole board frames with a single `FitContent`.
 //!
+//! The framing tracks `svg.rs`'s but is **not byte-identical** to it: `svg.rs`
+//! sizes its viewBox from a hand-gathered point set (pad centres via `pin_world`,
+//! footprint `def.graphics` world extents, board-text `Role::Marking` source
+//! features), whereas the canvas derives bounds from the `world_features` stream it
+//! already walks — the *inflated copper regions* (a trace is its capsule, a pad its
+//! full copper) and the lowered silk. Same roles in view (copper + silk, never fab
+//! `Datum`/substrate/mask/void), same 2 mm margin, so the board frames the same way;
+//! the exact viewBox differs by up to a copper half-width / silk-extent (a few mm on
+//! the poc board). See [`content_bounds`].
+//!
 //! The model's y axis points **up** (ECAD convention); SVG / screen y points
 //! **down**. Like `svg.rs` we flip y within the content bounds
 //! (`flip(y) = y0 + y1 - y`) so the canvas reads upright and visually matches
@@ -140,13 +150,45 @@ impl Canvas {
     }
 
     /// Map a viewBox (mm) point back to board coordinates in mm, undoing the y-flip
-    /// — the inverse of [`board_to_view`]. The viewport's `unproject` takes a
-    /// screen point to this content (mm) space; this then reads it as board mm for
-    /// the status-bar cursor readout ("X 12.34 Y 5.67 mm").
+    /// — the inverse of [`board_to_view`]. This is *only* the flip inverse; it
+    /// assumes its input is already in viewBox-mm (not screen or content px). The
+    /// status bar goes through [`content_px_to_board_mm`](Canvas::content_px_to_board_mm),
+    /// which converts the viewport's content-px to viewBox-mm first.
     pub fn view_to_board_mm(&self, view_mm: (f32, f32)) -> (f32, f32) {
         let (_, y0, _, y1) = self.bounds;
         let flip_sum_mm = nm_to_mm(y0 + y1);
         (view_mm.0, flip_sum_mm - view_mm.1)
+    }
+
+    /// Map a viewport **content-space** point (the value `ViewportView::unproject`
+    /// returns — the child `El`'s layout px, origin-relative, zoom/pan removed) to
+    /// board coordinates in mm, for the status-bar cursor readout.
+    ///
+    /// `content_px` is in the same logical-px frame as `el_rect` (the board `El`'s
+    /// laid-out rect from `cx.rect_of_key`). The `VectorAsset` maps its viewBox
+    /// `[vx, vy, vw, vh]` onto that rect with independent `sx = rect.w/vw`,
+    /// `sy = rect.h/vh` (see damascene `append_vector_asset_mesh`), so the inverse is
+    /// `vb = [vx + (px - rect.x)/sx, vy + (py - rect.y)/sy]`. That undoes both the
+    /// viewBox min offset and the (possibly non-square, `Size::Fill`) rect scaling —
+    /// the two corrections the old direct `view_to_board_mm(unproject())` path
+    /// dropped. The resulting viewBox-mm point then goes through the flip inverse.
+    ///
+    /// Returns `None` for a degenerate rect (zero/negative extent), matching the
+    /// asset renderer which draws nothing there.
+    pub fn content_px_to_board_mm(
+        &self,
+        content_px: (f32, f32),
+        el_rect: (f32, f32, f32, f32),
+    ) -> Option<(f32, f32)> {
+        let (rx, ry, rw, rh) = el_rect;
+        let [vx, vy, vw, vh] = self.view_box();
+        if rw <= 0.0 || rh <= 0.0 || vw <= 0.0 || vh <= 0.0 {
+            return None;
+        }
+        let sx = rw / vw;
+        let sy = rh / vh;
+        let view_mm = (vx + (content_px.0 - rx) / sx, vy + (content_px.1 - ry) / sy);
+        Some(self.view_to_board_mm(view_mm))
     }
 
     /// Build every visual layer of the board, tessellating each into its own
@@ -193,8 +235,18 @@ impl Canvas {
                 // Copper: the honest filled extent. A Stroke (trace / disc pad /
                 // capsule) becomes its inflated region; a Polygon / Area fills
                 // directly. Even-odd fill so pour knockouts read as voids — the same
-                // rule `svg.rs` uses on the same rings.
-                Role::Conductor => vec![fill_shape(shape, flip_sum, color)],
+                // rule `svg.rs` uses on the same rings. A pour (`Shape2D::Area`) fills
+                // **translucent** (0.25, like `svg.rs`'s `fill-opacity="0.25"` on its
+                // pour paths) so the board outline drawn beneath still reads through;
+                // discrete copper (pads / traces / vias) stays opaque.
+                Role::Conductor => {
+                    let opacity = if matches!(shape, Shape2D::Area { .. }) {
+                        0.25
+                    } else {
+                        1.0
+                    };
+                    vec![fill_shape_opacity(shape, flip_sum, color, opacity)]
+                }
                 // Silk / fab markings: mirror `svg.rs`'s `svg_surface` shape arm —
                 // a Stroke draws as a centreline polyline (pen = radius*2), a
                 // Polygon / Area as a filled area.
@@ -340,9 +392,19 @@ fn doc_netlist(doc: &Doc) -> BTreeMap<NetId, Vec<(PinRef, PinRole)>> {
 }
 
 /// Content bounds in nm `(x0, y0, x1, y1)` **with the 2 mm margin** — the exact box
-/// `svg.rs` computes, so the canvas viewBox matches `board.svg`. Covers every
-/// feature point plus the board corners; falls back to a 10 mm box for an empty
-/// document so the viewBox is never degenerate.
+/// `svg.rs` computes, so the canvas viewBox matches `board.svg`. Covers the board
+/// corners plus only the feature roles `svg.rs` puts in view; falls back to a 10 mm
+/// box for an empty document so the viewBox is never degenerate.
+///
+/// **Role filter (must track `svg.rs`'s bounds loop, `export/svg.rs`):** `svg.rs`
+/// gathers component origins + pin pads + footprint `def.graphics` + board corners +
+/// traces + vias + `Role::Marking` silk — i.e. copper and silk only. It never puts
+/// `Role::Datum` fab geometry/text, `Substrate`, `Mask`, `Void`, or `Keepout` extents
+/// in the frame. Those same points arrive here through `world_features` as
+/// `Conductor` (pads/traces/vias/pours) and `Marking` (footprint silk + board text),
+/// so we include exactly those two roles. Including `Datum` here framed the poc board
+/// tiny and off-centre — its F.Fab text runs to x≈[-17.4..73.4] mm, ~35 mm wider than
+/// the board — so the filter is load-bearing, not cosmetic.
 fn content_bounds(doc: &Doc, features: &[NetFeature]) -> (Nm, Nm, Nm, Nm) {
     let mut pts: Vec<Point> = Vec::new();
     if let Some(region) = ecad_core::elaborate::board_region(&doc.source)
@@ -352,6 +414,10 @@ fn content_bounds(doc: &Doc, features: &[NetFeature]) -> (Nm, Nm, Nm, Nm) {
         pts.push(max);
     }
     for nf in features {
+        // Match svg.rs's in-view set: copper (pads/traces/vias/pours) and silk only.
+        if !matches!(nf.feature.role, Role::Conductor | Role::Marking) {
+            continue;
+        }
         let Extent::Prism { shape, .. } = &nf.feature.extent;
         pts.extend(shape.points());
     }

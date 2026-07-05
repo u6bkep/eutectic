@@ -433,14 +433,18 @@ impl App for EcadApp {
             return;
         }
 
-        // Layer visibility switches: route is `switch:layer:<name>`.
+        // Layer visibility switches: route is `switch:layer:<name>`. Controlled
+        // widget — fold the event over the derived `visible` bool with the switch's
+        // own `apply_event` (README idiom), then reconcile the `hidden` set (our
+        // canonical state) to the flipped value.
         if let Some(view) = &self.board {
             for l in &view.layers {
-                let sk = switch_key(&l.id.key());
-                if event.is_click_or_activate(&sk) {
+                let key = l.id.key();
+                let sk = switch_key(&key);
+                let mut visible = self.layer_visible(&key);
+                if switch::apply_event(&mut visible, &event, &sk) {
                     let mut hidden = self.hidden.borrow_mut();
-                    let key = l.id.key();
-                    if hidden.contains(&key) {
+                    if visible {
                         hidden.remove(&key);
                     } else {
                         hidden.insert(key);
@@ -461,9 +465,16 @@ impl App for EcadApp {
                 (cx.rect_of_key(CANVAS_KEY), cx.viewport_view(CANVAS_KEY))
         {
             let origin = (rect.x, rect.y);
-            let content_mm = vv.unproject(pos, origin);
-            self.cursor_board_mm
-                .set(Some(view.canvas.view_to_board_mm(content_mm)));
+            let content_px = vv.unproject(pos, origin);
+            // unproject yields the board El's content-space px (origin-relative,
+            // zoom/pan removed) — NOT viewBox mm. Convert through the viewBox min +
+            // rect/viewBox scale before the flip inverse.
+            let board_mm = view
+                .canvas
+                .content_px_to_board_mm(content_px, (rect.x, rect.y, rect.w, rect.h));
+            if let Some(board_mm) = board_mm {
+                self.cursor_board_mm.set(Some(board_mm));
+            }
         }
     }
 

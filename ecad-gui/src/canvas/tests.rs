@@ -224,3 +224,121 @@ fn poc_multiprobe_board_projects() {
         "In1.Cu pour projected empty"
     );
 }
+
+/// The bounds walk excludes `Role::Datum` fab geometry (and every non-copper /
+/// non-silk role), matching `svg.rs`'s in-view set. Regression guard for the
+/// framing finding: on the poc board the F.Fab datum text ran ~35 mm wider than the
+/// board, which used to blow out the viewBox. With the role filter the canvas
+/// viewBox is within a small copper-half-width / silk-extent slack of `svg.rs`'s —
+/// same roles in view, same margin, not a huge fab gutter. (It is *not* byte-
+/// identical: the canvas frames from inflated `world_features` copper, `svg.rs` from
+/// pad centres — see `content_bounds`.)
+#[test]
+fn bounds_exclude_fab_datum_and_track_svg() {
+    for name in ["board", "poc"] {
+        let d = if name == "board" {
+            crate::fixtures::board_domain()
+        } else {
+            crate::fixtures::poc_board_domain()
+        };
+        let doc = d.doc.as_ref().unwrap();
+        let canvas = Canvas::new(doc, &d.lib).unwrap();
+        let [vx, vy, vw, vh] = canvas.view_box();
+
+        // Parse svg.rs's viewBox="x y w h".
+        let svg = ecad_core::export::svg(doc, &d.lib).unwrap();
+        let vbline = svg.lines().find(|l| l.contains("viewBox")).unwrap();
+        let inner = vbline.split("viewBox=\"").nth(1).unwrap();
+        let inner = inner.split('"').next().unwrap();
+        let n: Vec<f32> = inner
+            .split_whitespace()
+            .map(|s| s.parse().unwrap())
+            .collect();
+        let (sx, sy, sw, sh) = (n[0], n[1], n[2], n[3]);
+
+        // Same framing to within a few mm (copper half-widths / silk extents), NOT the
+        // old ~35 mm datum blowout. Each edge agrees within 6 mm.
+        assert!((vx - sx).abs() < 6.0, "{name}: viewBox x {vx} vs svg {sx}");
+        assert!((vy - sy).abs() < 6.0, "{name}: viewBox y {vy} vs svg {sy}");
+        assert!((vw - sw).abs() < 6.0, "{name}: viewBox w {vw} vs svg {sw}");
+        assert!((vh - sh).abs() < 6.0, "{name}: viewBox h {vh} vs svg {sh}");
+    }
+
+    // Directly assert Datum points are excluded: injecting fab-datum extent must not
+    // be able to widen the bounds. We prove this structurally — the bounds walk only
+    // admits Conductor | Marking — by checking a doc whose datum runs far outside the
+    // board still frames to the board (poc, whose F.Fab text is ~35 mm wide).
+    let d = crate::fixtures::poc_board_domain();
+    let doc = d.doc.as_ref().unwrap();
+    let canvas = Canvas::new(doc, &d.lib).unwrap();
+    let [_, _, vw, _] = canvas.view_box();
+    // The poc board copper is ~55 mm wide; +4 mm margin ⇒ ~59 mm. If datum leaked in
+    // the width would be ~90 mm. Guard the regression.
+    assert!(
+        vw < 70.0,
+        "poc viewBox width {vw} — fab datum leaked into bounds?"
+    );
+}
+
+/// The **full** screen → board composition the status bar uses:
+/// `ViewportView::unproject` then [`Canvas::content_px_to_board_mm`]. Unlike
+/// `coordinate_mapping_spot_checks` (which feeds viewBox-mm straight in, bypassing
+/// unproject), this exercises the real path end to end and would catch the dropped
+/// viewBox-min offset and the non-square rect/viewBox scaling. We forward-project a
+/// known board point to a screen coordinate through the exact same maps the renderer
+/// uses, then invert and require it round-trips.
+#[test]
+fn screen_to_board_roundtrip_full_composition() {
+    use damascene_core::viewport::ViewportView;
+
+    let d = crate::fixtures::board_domain();
+    let doc = d.doc.as_ref().unwrap();
+    let canvas = Canvas::new(doc, &d.lib).unwrap();
+    let [vx, vy, vw, vh] = canvas.view_box();
+
+    // A deliberately NON-square El rect and NON-trivial pan/zoom, so the aspect-ratio
+    // scale and viewBox min both matter (the two corrections the old path dropped).
+    let rect = (30.0_f32, 12.0_f32, 800.0_f32, 300.0_f32); // (x, y, w, h)
+    let vv = ViewportView {
+        pan: (17.0, -9.0),
+        zoom: 1.7,
+    };
+    let origin = (rect.0, rect.1);
+
+    // Forward maps, mirroring the renderer:
+    //  board mm --flip--> viewBox mm --(vx,vy)+scale--> content px --project--> screen.
+    let board = (7.5_f32, 4.25_f32); // mm
+    // flip: view_y_mm = flip_sum - board_y. Recover flip_sum from the canvas's own
+    // inverse: view_to_board_mm((_, 0.0)).1 == flip_sum.
+    let flip_sum = canvas.view_to_board_mm((0.0, 0.0)).1;
+    let view_mm = (board.0, flip_sum - board.1);
+    let sx = rect.2 / vw;
+    let sy = rect.3 / vh;
+    let content_px = (
+        rect.0 + (view_mm.0 - vx) * sx,
+        rect.1 + (view_mm.1 - vy) * sy,
+    );
+    let screen = vv.project(content_px, origin);
+
+    // Inverse (the app's path):
+    let back_px = vv.unproject(screen, origin);
+    let back = canvas
+        .content_px_to_board_mm(back_px, (rect.0, rect.1, rect.2, rect.3))
+        .expect("non-degenerate rect");
+    assert!(
+        (back.0 - board.0).abs() < 1e-2 && (back.1 - board.1).abs() < 1e-2,
+        "round-trip board ({},{}) -> screen {:?} -> board ({},{})",
+        board.0,
+        board.1,
+        screen,
+        back.0,
+        back.1
+    );
+
+    // A degenerate rect returns None (the renderer draws nothing there).
+    assert!(
+        canvas
+            .content_px_to_board_mm((5.0, 5.0), (0.0, 0.0, 0.0, 100.0))
+            .is_none()
+    );
+}
