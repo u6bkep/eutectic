@@ -353,6 +353,111 @@ pub fn dual_boards() -> EcadApp {
 }
 
 // ---------------------------------------------------------------------------
+// Milestone-6 slice-A scenes: the editing foundation. A drag in progress
+// (ghost + live ratsnest in the overlay), a dirty doc (filename bullet + a
+// primary Save button), and the disk-conflict banner (external change while
+// dirty → explicit Reload / Keep-mine, never silent last-writer).
+// ---------------------------------------------------------------------------
+
+/// The m6 editing library: the built-in toy library with REAL pad copper
+/// overlaid on the `Cap` pins (a 0.8 mm square at each pin offset, top side).
+/// The toy pins carry `pad: None` — no pad features, no `Pin` pick candidates —
+/// so components on the plain toy board are not grabbable; the editing scenes
+/// and drag tests need honest pad copper to pick, ghost, and ratsnest. Inline
+/// (no footprint files), so the scenes stay in the always-on lint bundle.
+pub fn padded_toy_lib() -> ecad_core::part::PartLib {
+    use ecad_core::geom::Shape2D;
+    use ecad_core::part::{PadCopper, PadGeo, PadLayers};
+    let mut lib = ecad_core::part::part_library();
+    if let Some(cap) = lib.get_mut("Cap") {
+        for pin in &mut cap.pins {
+            pin.pad = Some(PadGeo {
+                copper: vec![PadCopper {
+                    // Component-local: a square centred on the pin's own offset.
+                    shape: Shape2D::rect(pin.offset, 800_000, 800_000),
+                    layers: PadLayers::Top,
+                }],
+                drill: None,
+            });
+        }
+    }
+    lib
+}
+
+/// The m6 editing board: [`BOARD_ECAD`]'s two netted caps + outline + pour,
+/// elaborated against [`padded_toy_lib`] so the caps have real, pickable pad
+/// copper (no command-routed extras — the editing scenes exercise the commit
+/// path themselves).
+pub fn edit_board_domain() -> DomainState {
+    DomainState::from_source_with(
+        BOARD_ECAD.to_string(),
+        Some("board.ecad".to_string()),
+        padded_toy_lib(),
+        |_| Vec::new(),
+    )
+}
+
+/// A component drag in progress over the editing board: `C1` grabbed at its own
+/// position and dragged +5 mm / +3 mm. The overlay renders the pad-shape GHOST at
+/// the uncommitted position and the live RATSNEST (a line from each ghost pad to
+/// the nearest other member pad of its net — C2's pads here). Nothing is
+/// committed; the doc is untouched and clean.
+pub fn drag_in_progress() -> EcadApp {
+    use ecad_core::coord::{MM, Point};
+    use ecad_core::id::EntityId;
+    let app = EcadApp::new(edit_board_domain());
+    let comp = EntityId::new("C1");
+    let doc = app.domain.doc.as_ref().expect("edit board elaborates");
+    let from = doc.components[&comp].pos.value;
+    let to = Point {
+        x: from.x + 5 * MM,
+        y: from.y + 3 * MM,
+    };
+    let armed = app.set_drag(&comp, PaneId::A, to);
+    debug_assert!(armed, "C1 has pad candidates");
+    app
+}
+
+/// A dirty document (m6 save model): the editing board with one committed GUI
+/// edit (C1 pinned 2 mm right of its solved position) and a source path wired,
+/// so the chrome shows the dirty bullet on the filename badge and a primary Save
+/// button. The path is inert fixture data — nothing is ever written by the scene.
+pub fn dirty_doc() -> EcadApp {
+    use ecad_core::command::{Command, Transaction};
+    use ecad_core::coord::{MM, Point};
+    use ecad_core::id::EntityId;
+    let mut domain = edit_board_domain();
+    domain.source_path = Some(std::path::PathBuf::from("/nonexistent/ecad/board.ecad"));
+    let mut app = EcadApp::new(domain);
+    let comp = EntityId::new("C1");
+    let pos = app.domain.doc.as_ref().unwrap().components[&comp].pos.value;
+    let target = Point {
+        x: pos.x + 2 * MM,
+        y: pos.y,
+    };
+    app.commit_edit(
+        Transaction::one(Command::Pin(comp, target)),
+        "move component",
+    )
+    .expect("fixture move commits");
+    app
+}
+
+/// The conflict banner (m6 save model): the dirty doc above with an external
+/// disk change waiting on the mailbox — the harness's first `before_build`
+/// routes it into the pending conflict (the doc is dirty, so it is NOT applied)
+/// and the persistent banner renders with the two explicit actions.
+pub fn conflict_banner() -> EcadApp {
+    use crate::reload::SourceMsg;
+    let app = dirty_doc();
+    // An externally-edited variant of the board source (a comment prepended is
+    // enough — any text that differs from our own last save).
+    let external = format!("# edited in $EDITOR\n{BOARD_ECAD}");
+    app.mailbox_push(SourceMsg::Changed(external));
+    app
+}
+
+// ---------------------------------------------------------------------------
 // Library-packages slice-2 scenes: a doc whose `use` name resolves to nothing
 // (registry-driven, permissive degrade → findings rows + a loaded-but-degraded
 // board), and the Libraries menu open over it.
@@ -460,6 +565,9 @@ pub fn all() -> Vec<(&'static str, EcadApp)> {
         ("dual_boards", dual_boards()),
         ("unresolved_libs", unresolved_libs()),
         ("libraries_menu", libraries_menu()),
+        ("drag_in_progress", drag_in_progress()),
+        ("dirty_doc", dirty_doc()),
+        ("conflict_banner", conflict_banner()),
     ]
 }
 
@@ -729,6 +837,57 @@ mod tests {
         let app = libraries_menu();
         let r = render_clean("libraries_menu", app);
         harness::assert_content_coverage("libraries_menu", &r, &[PaneId::A.canvas_key()]);
+    }
+
+    /// The drag-in-progress scene (m6): the drag is actually armed and moved (so
+    /// the overlay carries the ghost + a non-empty ratsnest), the doc is
+    /// untouched (nothing committed, not dirty), and the scene renders lint-clean
+    /// with a fitted board pane.
+    #[test]
+    fn drag_in_progress_is_lint_clean_and_previews() {
+        let app = drag_in_progress();
+        assert!(app.drag_active(), "the scene must have a drag armed");
+        assert!(!app.dirty(), "a drag preview commits nothing");
+        assert_eq!(app.revision(), 0, "no commit → no revision bump");
+        let r = render_clean("drag_in_progress", app);
+        harness::assert_content_coverage("drag_in_progress", &r, &[PaneId::A.canvas_key()]);
+    }
+
+    /// The dirty-doc scene (m6): the committed move left the doc dirty with one
+    /// undo step, and the scene renders lint-clean (the chrome carries the dirty
+    /// bullet + Save button — presence is asserted structurally via `dirty()` +
+    /// `source_path`, the render via the lint gate).
+    #[test]
+    fn dirty_doc_is_lint_clean_and_dirty() {
+        let app = dirty_doc();
+        assert!(app.dirty(), "the scene must be dirty");
+        assert_eq!(app.undo_depths(), (1, 0), "one committed edit → one undo");
+        assert!(
+            app.domain.source_path.is_some(),
+            "the save affordance needs a source path"
+        );
+        let r = render_clean("dirty_doc", app);
+        harness::assert_content_coverage("dirty_doc", &r, &[PaneId::A.canvas_key()]);
+    }
+
+    /// The conflict-banner scene (m6): after the harness's first frame the
+    /// external change is parked as the pending conflict (NOT applied — the doc
+    /// stays dirty at its pre-conflict revision), and the banner scene renders
+    /// lint-clean.
+    #[test]
+    fn conflict_banner_is_lint_clean_and_pending() {
+        let mut app = conflict_banner();
+        let rev0 = app.revision();
+        let r = harness::render_settled(&mut app, viewport());
+        assert!(
+            r.bundle.lint.findings.is_empty(),
+            "fixture `conflict_banner` has lint findings:\n{}",
+            r.bundle.lint.text()
+        );
+        assert!(app.conflict().is_some(), "the external change is parked");
+        assert!(app.dirty(), "the doc stays dirty");
+        assert_eq!(app.revision(), rev0, "the external change was NOT applied");
+        harness::assert_content_coverage("conflict_banner", &r, &[PaneId::A.canvas_key()]);
     }
 
     /// Inspector value honesty: the selected part's inspector shows the position
