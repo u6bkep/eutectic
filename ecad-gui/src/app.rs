@@ -533,6 +533,10 @@ impl EcadApp {
                 edit.saved_canon = Some(text.clone());
                 edit.last_saved_write = Some(text);
                 edit.error = None;
+                // A save while the conflict banner is up IS the keep-mine
+                // resolution made permanent (the disk was just explicitly
+                // overwritten), so the banner dismisses with it.
+                edit.conflict = None;
             }
             Err(e) => self.domain.edit.error = Some(e),
         }
@@ -1647,6 +1651,32 @@ net GND U1.GND
         clean.before_build();
         assert_eq!(clean.revision(), rev0 + 1, "a clean doc follows disk");
         assert!(!clean.dirty());
+    }
+
+    /// Saving while the conflict banner is up is the keep-mine resolution made
+    /// permanent: the disk is explicitly overwritten and the banner dismisses.
+    #[test]
+    fn save_while_conflicted_overwrites_and_dismisses() {
+        let scratch = Scratch::new("save-conflict");
+        let file = scratch.0.join("board.ecad");
+        let mut app = edit_app();
+        app.domain.source_path = Some(file.clone());
+        commit_move(&mut app, 3, 0);
+        app.mailbox_push(SourceMsg::Changed(SCHEMATIC_ECAD.to_string()));
+        app.before_build();
+        assert!(app.conflict().is_some());
+
+        app.save();
+        assert!(!app.dirty());
+        assert!(
+            app.conflict().is_none(),
+            "an explicit save resolves the conflict (last-writer, chosen)"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            app.domain.source,
+            "the save overwrote the disk with my edits"
+        );
     }
 
     /// No-path docs have no save: `save()` is a no-op (stays dirty, no error).
