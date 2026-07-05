@@ -525,4 +525,20 @@ part LED footprint=led.kicad_mod {
         assert_eq!(use_names(&src), vec!["poc", "jellybean"]);
         assert!(use_names(&[]).is_empty());
     }
+
+    // ---- PartLib equality (PartDef: PartialEq) -----------------------------
+
+    /// Loading the same package twice yields byte-for-byte equal libraries — the
+    /// `PartDef: PartialEq` derive (a gui incidental finding: resolution tests want
+    /// to assert two `PartLib`s are equal). `PartLib` is `BTreeMap<String, PartDef>`,
+    /// so this exercises the whole `PartDef` field chain (pins, interfaces, graphics,
+    /// texts, courtyard) through the derived `PartialEq`.
+    #[test]
+    fn load_library_twice_yields_equal_libs() {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../poc/parts");
+        let a = load_library(&dir).expect("poc parts load");
+        let b = load_library(&dir).expect("poc parts load again");
+        assert_eq!(a, b, "the same package must load to equal PartLibs");
+        assert!(!a.is_empty(), "the poc package defines parts");
+    }
 }

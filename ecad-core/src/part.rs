@@ -170,7 +170,7 @@ impl PinRole {
 /// `name` via the [`pin`] constructor.
 ///
 /// [`PinRef`]: crate::doc::PinRef
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PinDef {
     pub name: String,
     /// Pad/manufacturing number used as the symbol↔footprint join key. Defaults to
@@ -189,7 +189,7 @@ pub struct PinDef {
 
 /// A typed interface (e.g. UART). Defined once; encodes the correct mating so
 /// that connecting two instances can never be wired backwards.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InterfaceDef {
     pub type_name: String,
     /// signal name -> direction
@@ -218,7 +218,7 @@ pub struct InterfaceDef {
 }
 
 /// A part definition: discrete pins + named interface ports.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PartDef {
     pub name: String,
     pub pins: Vec<PinDef>,
