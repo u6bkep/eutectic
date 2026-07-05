@@ -551,7 +551,7 @@ impl EcadApp {
     /// a single neutral `"✓"` chip is shown instead. Every chip (including the ✓ one)
     /// is a click-to-toggle-the-findings-panel affordance keyed distinctly. Reads the
     /// cached findings — never recomputes.
-    fn findings_chips(&self) -> Vec<El> {
+    pub(crate) fn findings_chips(&self) -> Vec<El> {
         let findings = &self.derived.borrow().findings;
         // A clickable chip: keyed + focusable + pointer cursor, so a click routes to the
         // app (handled as a findings-panel toggle) exactly like the panel's Hide/Show.

@@ -854,18 +854,33 @@ board (0mm, 0mm) (10mm, 0mm) (10mm, 10mm) (0mm, 10mm)
         );
     }
 
-    /// The DRC chip counts match the cached findings (error + warning tallies).
+    /// The per-source findings chips track the cached findings: a doc with
+    /// findings renders source chips (no ✓); a clean doc renders exactly the
+    /// single neutral ✓ chip (the all-clean branch of `findings_chips`).
     #[test]
-    fn drc_chip_counts_match_findings() {
+    fn findings_chips_match_findings() {
         let app = drc_violation();
         let f = app.findings();
         assert!(
             f.errors >= 1,
             "the fixture has at least the clearance error"
         );
-        // The chip is not clean and reports the same counts (asserted via the findings
-        // the chip reads — the chip El itself is a badge over these counts).
         assert!(!f.is_clean());
+        assert!(
+            !app.findings_chips().is_empty(),
+            "a doc with findings renders at least one source chip"
+        );
+
+        // The clean doc from findings/tests.rs: single-pin nets, no copper.
+        let clean = EcadApp::new(DomainState::from_source(
+            "inst C1 Cap\nnet SOLO C1.p1\nnc C1.p2\n\
+             board (0mm, 0mm) (10mm, 0mm) (10mm, 10mm) (0mm, 10mm)\n"
+                .to_string(),
+            Some("clean.ecad".to_string()),
+        ));
+        assert!(clean.findings().is_clean());
+        let chips = clean.findings_chips();
+        assert_eq!(chips.len(), 1, "all-clean is a single ✓ chip");
     }
 
     /// A source that fails the load — a malformed `inst` (missing its part token).
