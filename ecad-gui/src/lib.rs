@@ -7,9 +7,12 @@
 
 pub mod app;
 pub mod canvas;
+pub mod explorer;
 pub mod fixtures;
+pub mod highlight;
 pub mod inspector;
+pub mod schematic_view;
 pub mod selection;
 pub mod tool;
 
-pub use app::{DomainState, EcadApp, PaneState};
+pub use app::{DomainState, EcadApp, PaneId, PaneLayout, PaneState, ViewKind};

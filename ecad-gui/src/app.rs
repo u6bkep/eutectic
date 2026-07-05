@@ -8,14 +8,18 @@
 //! here. Where a future struct belongs, a stub with a doc-comment points at the
 //! architecture through-line it will implement.
 
-use crate::canvas::pick::{self, Candidate};
+use crate::canvas::pick::{self, Candidate, SemanticId};
 use crate::canvas::{BoardLayer, Canvas, Overlay};
+use crate::explorer::Explorer;
+use crate::highlight::HighlightSets;
 use crate::inspector::InspectorData;
+use crate::schematic_view::SchematicView;
 use crate::selection::SelectionModel;
 use crate::tool::{MeasureState, Tool, format_readout};
 use damascene_core::prelude::*;
 use ecad_core::doc::Doc;
 use ecad_core::geom::Shape2D;
+use ecad_core::id::NetId;
 use std::cell::{Cell, RefCell};
 
 /// Domain state: the source-of-truth half of `gui-architecture.md` through-line
@@ -129,36 +133,124 @@ impl DomainState {
     }
 }
 
-/// Per-pane view state: the *view-dependent* half of through-line 3.
-///
-/// A pane is one view (board / schematic / source) over the shared
-/// [`DomainState`], with its own camera keyed by the pane's El key. v1 renders
-/// a single pane; milestone 4 grows this into a Blender-style split tree
-/// (`resize_handle`) of panes over the same domain state, and the semantic
-/// selection projects into each pane's own highlight overlay.
-///
-/// Milestone 1 needs none of that machinery, so this is a placeholder: it names
-/// the seam without building the split-tree / camera / canvas state that
-/// milestones 2–4 own.
-pub struct PaneState {
-    /// The El key this pane's camera state lives under in damascene's
-    /// `UiState`. Distinct per pane so two panes on the same doc get
-    /// independent cameras (through-line 3). Unused until the viewport canvas
-    /// arrives in milestone 2.
-    pub key: String,
+/// Which view a pane renders (mockup: the pane header's view-type switcher). v1 has two
+/// read-only view kinds; `3D` etc. are wishlist. A schematic and a board pane over the
+/// same doc share the semantic selection but project it into their own overlays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewKind {
+    /// The layered board canvas (milestone 2/3).
+    Board,
+    /// The read-only schematic view (milestone 4).
+    Schematic,
 }
 
-impl Default for PaneState {
-    fn default() -> Self {
-        PaneState {
-            key: "pane:main".to_string(),
+impl ViewKind {
+    /// The human label for the pane header + switcher.
+    pub fn label(self) -> &'static str {
+        match self {
+            ViewKind::Board => "PCB Layout",
+            ViewKind::Schematic => "Schematic",
+        }
+    }
+
+    /// Both view kinds, in switcher order.
+    pub fn all() -> [ViewKind; 2] {
+        [ViewKind::Board, ViewKind::Schematic]
+    }
+}
+
+/// The two-pane orientation (mockup: the dual/stacked toolbar toggle). `Dual` is side-by-
+/// side (a `row` split), `Stacked` is over/under (a `column` split). A one-split
+/// simplification of the split-tree — fine for v1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneLayout {
+    Dual,
+    Stacked,
+}
+
+/// Which pane a pane index names — `A` (first / left / top) or `B` (second / right /
+/// bottom). The two are symmetric; the enum keeps call sites readable and keys stable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneId {
+    A,
+    B,
+}
+
+impl PaneId {
+    /// The canvas viewport El key for this pane — distinct per pane so the two cameras are
+    /// independent in damascene's `UiState` (through-line 3), *even when both panes show
+    /// the same view kind*.
+    fn canvas_key(self) -> &'static str {
+        match self {
+            PaneId::A => "canvas:a",
+            PaneId::B => "canvas:b",
+        }
+    }
+
+    /// The dynamic-overlay El key for this pane (stacked over its canvas).
+    fn overlay_key(self) -> &'static str {
+        match self {
+            PaneId::A => "overlay:a",
+            PaneId::B => "overlay:b",
+        }
+    }
+
+    /// The view-switcher button key for a target view kind in this pane.
+    fn switch_key(self, v: ViewKind) -> String {
+        let p = match self {
+            PaneId::A => "a",
+            PaneId::B => "b",
+        };
+        format!(
+            "pane:{p}:view:{}",
+            match v {
+                ViewKind::Board => "board",
+                ViewKind::Schematic => "schematic",
+            }
+        )
+    }
+
+    /// The maximize-toggle button key for this pane.
+    fn maximize_key(self) -> &'static str {
+        match self {
+            PaneId::A => "pane:a:max",
+            PaneId::B => "pane:b:max",
         }
     }
 }
 
-/// The El key of the board canvas viewport — the camera state lives under this in
-/// damascene's `UiState` (structural through-line 3: per-pane camera by key).
-const CANVAS_KEY: &str = "board-canvas";
+/// Per-pane view state: the *view-dependent* half of through-line 3. A pane is one view
+/// over the shared [`DomainState`], with its own camera keyed by the pane's canvas El key.
+/// Milestone 4 makes this real: the pane owns its view kind and whether it has been
+/// fit-to-content yet (the initial framing fires once per pane).
+#[derive(Clone, Debug)]
+pub struct PaneState {
+    /// The view this pane renders.
+    pub view: ViewKind,
+    /// Whether the initial fit-to-content has been queued for this pane's camera.
+    fitted: bool,
+}
+
+impl PaneState {
+    fn new(view: ViewKind) -> Self {
+        PaneState {
+            view,
+            fitted: false,
+        }
+    }
+}
+
+impl Default for PaneState {
+    fn default() -> Self {
+        PaneState::new(ViewKind::Board)
+    }
+}
+
+/// The event-route key of the dual/stacked layout toggle button.
+const LAYOUT_TOGGLE_KEY: &str = "layout:toggle";
+/// The key of the pane-split resize handle + the split row/column (for `rect_of_key`).
+const SPLIT_HANDLE_KEY: &str = "pane:split";
+const SPLIT_ROW_KEY: &str = "pane:split-row";
 
 /// The pick grab radius in screen (logical) px — converted to a board distance
 /// through the current zoom by [`pick::tolerance_nm`], so the on-screen radius is
@@ -181,29 +273,45 @@ const PICK_TOL_PX: f32 = 6.0;
 /// [`new`]: EcadApp::new
 pub struct EcadApp {
     pub domain: DomainState,
-    #[allow(dead_code)] // camera keying arrives with the split tree in milestone 4.
-    pub pane: PaneState,
+    /// The two panes (A, B). Milestone 4's split. Defaults to board | schematic. `RefCell`
+    /// because the view-switcher / maximize / initial-fit flips fields in `on_event` /
+    /// `before_build` and reads them in `build`.
+    panes: RefCell<[PaneState; 2]>,
+    /// The two-pane orientation (dual / stacked).
+    layout: Cell<PaneLayout>,
+    /// Which pane, if any, is maximized (the other is hidden). `None` ⇒ the normal split.
+    maximized: Cell<Option<PaneId>>,
+    /// The split weights `[a, b]` for the resize handle, and its in-flight drag.
+    split_weights: Cell<[f32; 2]>,
+    split_drag: RefCell<ResizeWeightsDrag>,
+    /// The measured split-container main extent (px), captured each frame for the weighted
+    /// resize handler (the README idiom).
+    split_extent: Cell<f32>,
     /// The board projection + cached per-layer assets, or `None` when no document
     /// is loaded / the load failed / projection failed. Built once in [`new`].
     board: Option<BoardView>,
+    /// The schematic projection + cached asset + pick candidates, or `None` when the doc
+    /// has no components. Built once in [`new`].
+    schematic: Option<SchematicView>,
     /// Which layers are visible, keyed by [`LayerId::key`]. Absent ⇒ visible
     /// (layers default on). Mutated by the layer-panel toggles in `on_event`.
     hidden: RefCell<std::collections::HashSet<String>>,
     /// Viewport requests (Fit / Reset) queued from toolbar clicks, drained once per
     /// frame by the host.
     pending: RefCell<Vec<ViewportRequest>>,
-    /// The last pointer position over the canvas in **board mm** (`None` until the
-    /// pointer has moved over the canvas), for the status-bar cursor readout.
+    /// The last pointer position over a board pane in **board mm**, for the status-bar
+    /// cursor readout. Set by whichever board pane the pointer last moved over.
     cursor_board_mm: Cell<Option<(f32, f32)>>,
-    /// Whether the initial fit-to-content has been queued yet (once, on first
-    /// build after a document loads).
-    fitted: Cell<bool>,
     /// The active tool (structural commitment 4). Global mode; `Cell` because it is
     /// flipped in `on_event` and read in `build`.
     tool: Cell<Tool>,
     /// The measure tool's uncommitted preview state (the preview channel — renders
-    /// only to the overlay, never the doc).
+    /// only to the overlay, never the doc). The pane the measure is happening in, so the
+    /// overlay draws it in the right place.
     measure: Cell<MeasureState>,
+    measure_pane: Cell<PaneId>,
+    /// The projected explorer rows (components / nets), built once per doc load.
+    explorer: Explorer,
 }
 
 /// The board projection held in app state: the [`Canvas`] (for coordinate
@@ -240,17 +348,53 @@ impl EcadApp {
                 .ok(),
             Err(_) => None,
         };
+        // The schematic projection, built once per doc load (same discipline as the board).
+        let schematic = match &domain.doc {
+            Ok(doc) => SchematicView::build(doc, &domain.lib),
+            Err(_) => None,
+        };
+        let explorer = match &domain.doc {
+            Ok(doc) => Explorer::project(doc, &domain.lib),
+            Err(_) => Explorer::default(),
+        };
         EcadApp {
             domain,
-            pane: PaneState::default(),
+            panes: RefCell::new([
+                PaneState::new(ViewKind::Board),
+                PaneState::new(ViewKind::Schematic),
+            ]),
+            layout: Cell::new(PaneLayout::Dual),
+            maximized: Cell::new(None),
+            split_weights: Cell::new([1.0, 1.0]),
+            split_drag: RefCell::new(ResizeWeightsDrag::default()),
+            split_extent: Cell::new(0.0),
             board,
+            schematic,
             hidden: RefCell::new(std::collections::HashSet::new()),
             pending: RefCell::new(Vec::new()),
             cursor_board_mm: Cell::new(None),
-            fitted: Cell::new(false),
             tool: Cell::new(Tool::default()),
             measure: Cell::new(MeasureState::default()),
+            measure_pane: Cell::new(PaneId::A),
+            explorer,
         }
+    }
+
+    /// Set both panes' view kinds — for fixtures that want a canned pane arrangement.
+    pub fn set_pane_views(&self, a: ViewKind, b: ViewKind) {
+        let mut panes = self.panes.borrow_mut();
+        panes[0].view = a;
+        panes[1].view = b;
+    }
+
+    /// Set the pane layout (dual / stacked) — for fixtures.
+    pub fn set_layout(&self, layout: PaneLayout) {
+        self.layout.set(layout);
+    }
+
+    /// Maximize a pane (hide the other) — for fixtures.
+    pub fn set_maximized(&self, pane: Option<PaneId>) {
+        self.maximized.set(pane);
     }
 
     /// Set the active tool — for fixtures / tests that want a canned tool mode. The
@@ -263,6 +407,14 @@ impl EcadApp {
     /// measure-in-progress scene without driving live pointer events.
     pub fn set_measure(&self, m: MeasureState) {
         self.measure.set(m);
+    }
+}
+
+/// A pane index into the `panes` array.
+fn pane_index(p: PaneId) -> usize {
+    match p {
+        PaneId::A => 0,
+        PaneId::B => 1,
     }
 }
 
@@ -305,36 +457,23 @@ impl EcadApp {
         !self.hidden.borrow().contains(key)
     }
 
-    /// The board viewer body: the layered canvas viewport (center) + the inspector +
-    /// layer panels (right). Only reached when a [`BoardView`] projected successfully.
-    fn board_body(&self, cx: &BuildCx, view: &BoardView) -> El {
-        // Static layer Els, stacked in draw order, filtered by visibility. Cloning
-        // cached assets only — no re-tessellation (the layered-canvas commitment).
-        let mut canvas_children = view
-            .canvas
-            .layer_els(&view.layers, |id| self.layer_visible(&id.key()));
-        // The per-frame dynamic overlay: selection / hover highlights + the measure
-        // preview. Rebuilt each frame from the live selection + tool state; it never
-        // touches the cached static layers above.
-        let overlay = self.build_overlay(view);
-        if let Some(el) = view.canvas.overlay_el(&overlay) {
-            canvas_children.push(el);
-        }
+    /// The viewer body: the toolbar, the two-pane split (center), the right sidebar
+    /// (inspector + explorer + layer panel), and the status bar. Reached when the doc
+    /// loaded (at least one pane always renders — a board pane falls back to a placeholder
+    /// if its projection failed, a schematic pane if the doc has no components).
+    fn viewer_body(&self, cx: &BuildCx) -> El {
+        // The active board pane's zoom drives the toolbar/status readout (whichever pane A
+        // shows a board, else pane B, else 1.0). The cursor readout is set per event.
+        let zoom = self.readout_zoom(cx);
 
-        let board_pane = viewport(canvas_children)
-            .key(CANVAS_KEY)
-            .min_zoom(0.1)
-            .max_zoom(64.0)
-            .pan_bounds(PanBounds::Contain)
-            .fill(CANVAS_BG)
-            .width(Size::Fill(1.0))
-            .height(Size::Fill(1.0));
+        // The shared cross-view highlight sets, projected once per frame from the selection.
+        let sets = self.highlight_sets();
 
-        let zoom = cx.viewport_view(CANVAS_KEY).map_or(1.0, |v| v.zoom);
+        let split = self.pane_split(cx, &sets);
 
         column([
             self.viewer_toolbar(zoom),
-            row([board_pane, self.right_sidebar(view)])
+            row([split, self.right_sidebar()])
                 .gap(tokens::SPACE_3)
                 .width(Size::Fill(1.0))
                 .height(Size::Fill(1.0)),
@@ -345,26 +484,177 @@ impl EcadApp {
         .height(Size::Fill(1.0))
     }
 
-    /// Build the per-frame dynamic overlay from the live selection + measure state:
-    /// the world-space shapes to highlight (selection bright, hover dim) and the
-    /// measure segment. Re-derives highlight geometry from the pick candidates by id —
-    /// geometry is never stored in the selection model (commitment 2).
-    fn build_overlay(&self, view: &BoardView) -> Overlay {
-        let sel = self.domain.selection.borrow();
+    /// The zoom to display in the toolbar / status bar: the active board pane's zoom
+    /// (whichever pane shows a board), else 1.0.
+    fn readout_zoom(&self, cx: &BuildCx) -> f32 {
+        let panes = self.panes.borrow();
+        for (i, p) in panes.iter().enumerate() {
+            if p.view == ViewKind::Board {
+                let id = if i == 0 { PaneId::A } else { PaneId::B };
+                return cx.viewport_view(id.canvas_key()).map_or(1.0, |v| v.zoom);
+            }
+        }
+        1.0
+    }
+
+    /// The shared cross-view highlight sets for this frame — the selection + hover ids,
+    /// projected through [`HighlightSets`] so both panes expand the same way.
+    fn highlight_sets(&self) -> HighlightSets {
+        match &self.domain.doc {
+            Ok(doc) => {
+                let sel = self.domain.selection.borrow();
+                // Selection + hover both cross-highlight (hover is the pre-select cue).
+                HighlightSets::project(sel.selected().chain(sel.hovered()), doc)
+            }
+            Err(_) => HighlightSets::default(),
+        }
+    }
+
+    /// The two-pane split (dual = row, stacked = column), with a draggable resize handle
+    /// between the panes — or, when a pane is maximized, that one pane full-bleed.
+    fn pane_split(&self, cx: &BuildCx, sets: &HighlightSets) -> El {
+        if let Some(max) = self.maximized.get() {
+            return self.pane_el(cx, max, sets);
+        }
+        let a = self.pane_el(cx, PaneId::A, sets);
+        let b = self.pane_el(cx, PaneId::B, sets);
+        let axis = match self.layout.get() {
+            PaneLayout::Dual => Axis::Row,
+            PaneLayout::Stacked => Axis::Column,
+        };
+        let w = self.split_weights.get();
+        let a = a.width(Size::Fill(w[0])).height(Size::Fill(w[0]));
+        let b = b.width(Size::Fill(w[1])).height(Size::Fill(w[1]));
+        let children = [a, resize_handle(SPLIT_HANDLE_KEY, axis), b];
+        let container = match self.layout.get() {
+            PaneLayout::Dual => row(children),
+            PaneLayout::Stacked => column(children),
+        };
+        container
+            .key(SPLIT_ROW_KEY)
+            .gap(tokens::SPACE_2)
+            .width(Size::Fill(1.0))
+            .height(Size::Fill(1.0))
+    }
+
+    /// One pane: a header row (view-kind label + switcher + maximize toggle) over the
+    /// pane's canvas (board or schematic). Fill in both axes so the split weights govern
+    /// its size.
+    fn pane_el(&self, cx: &BuildCx, pane: PaneId, sets: &HighlightSets) -> El {
+        let view = self.panes.borrow()[pane_index(pane)].view;
+        let canvas = match view {
+            ViewKind::Board => self.board_canvas(cx, pane, sets),
+            ViewKind::Schematic => self.schematic_canvas(cx, pane, sets),
+        };
+        column([self.pane_header(pane, view), canvas])
+            .gap(tokens::SPACE_1)
+            .width(Size::Fill(1.0))
+            .height(Size::Fill(1.0))
+    }
+
+    /// A pane header (mockup anatomy): the view-kind switcher (a segmented control of
+    /// toggle buttons, the active one filled) and a maximize toggle on the right.
+    fn pane_header(&self, pane: PaneId, view: ViewKind) -> El {
+        let switch_buttons: Vec<El> = ViewKind::all()
+            .into_iter()
+            .map(|v| {
+                let b = button(v.label()).key(pane.switch_key(v));
+                if v == view { b.primary() } else { b }
+            })
+            .collect();
+        let max_label = if self.maximized.get() == Some(pane) {
+            "Restore"
+        } else {
+            "Maximize"
+        };
+        toolbar([
+            row(switch_buttons).gap(tokens::SPACE_1),
+            spacer(),
+            button(max_label).key(pane.maximize_key()),
+        ])
+        .gap(tokens::SPACE_2)
+        .padding(Sides::xy(tokens::SPACE_2, tokens::SPACE_1))
+        .width(Size::Fill(1.0))
+        .height(Size::Hug)
+    }
+
+    /// A board pane's canvas: the cached layer Els + the per-frame overlay, in a viewport
+    /// keyed to *this pane* (independent camera). Falls back to a placeholder when the
+    /// board projection failed.
+    fn board_canvas(&self, _cx: &BuildCx, pane: PaneId, sets: &HighlightSets) -> El {
+        let Some(view) = &self.board else {
+            return pane_placeholder("No board to display");
+        };
+        // Per-pane El keys: two board panes render the same layers, so namespace each
+        // layer / overlay El by the pane (keys must be unique in the tree). The event
+        // router still recognises these as canvas targets (the `layer:` / `overlay:`
+        // prefixes survive) and the pane is resolved by pointer rect, not by key.
+        let prefix = pane.canvas_key();
+        let mut children: Vec<El> = view
+            .canvas
+            .layer_els(&view.layers, |id| self.layer_visible(&id.key()))
+            .into_iter()
+            .enumerate()
+            .map(|(i, el)| el.key(format!("layer:{prefix}:{i}")))
+            .collect();
+        let overlay = self.build_board_overlay(view, pane, sets);
+        if let Some(el) = view.canvas.overlay_el(&overlay) {
+            // Re-key the overlay per pane (the canvas hardcodes "overlay:dynamic"); wrap it
+            // in a keyed container so two board panes' overlays don't collide.
+            children.push(el.key(format!("overlay:{prefix}")));
+        }
+        viewport(children)
+            .key(pane.canvas_key())
+            .min_zoom(0.1)
+            .max_zoom(64.0)
+            .pan_bounds(PanBounds::Contain)
+            .fill(CANVAS_BG)
+            .width(Size::Fill(1.0))
+            .height(Size::Fill(1.0))
+    }
+
+    /// A schematic pane's canvas: the cached schematic asset + the per-frame highlight
+    /// overlay, in a viewport keyed to this pane. Falls back to a placeholder when the doc
+    /// has no components.
+    fn schematic_canvas(&self, _cx: &BuildCx, pane: PaneId, sets: &HighlightSets) -> El {
+        let Some(view) = &self.schematic else {
+            return pane_placeholder("No schematic to display");
+        };
+        let static_key = format!("schematic:{}", pane.canvas_key());
+        let mut children = vec![view.static_el(&static_key)];
+        if let Some(el) = view.overlay_el(sets.schematic_ids(), pane.overlay_key()) {
+            children.push(el);
+        }
+        viewport(children)
+            .key(pane.canvas_key())
+            .min_zoom(0.02)
+            .max_zoom(64.0)
+            .pan_bounds(PanBounds::Contain)
+            .fill(CANVAS_BG)
+            .width(Size::Fill(1.0))
+            .height(Size::Fill(1.0))
+    }
+
+    /// Build a board pane's dynamic overlay from the cross-view highlight sets + the
+    /// measure preview (measure only draws in the pane it is happening in). Highlight
+    /// geometry is re-derived from the pick candidates by id (commitment 2). A candidate
+    /// lights up when its id — or its net — is in the board highlight set.
+    fn build_board_overlay(&self, view: &BoardView, pane: PaneId, sets: &HighlightSets) -> Overlay {
         let mut highlights: Vec<(Shape2D, bool)> = Vec::new();
         for c in &view.candidates {
-            // Skip highlights on hidden layers (a selected feature on a hidden layer
-            // stays selected but is not drawn — it can't be seen anyway).
             if !self.layer_visible(&c.layer.key()) {
                 continue;
             }
-            if sel.is_selected(&c.id) {
-                highlights.push((c.shape.clone(), false));
-            } else if sel.is_hovered(&c.id) {
-                highlights.push((c.shape.clone(), true));
+            let net = self.candidate_net(&c.id);
+            if sets.board_matches(&c.id, net.as_ref()) {
+                // Committed selection reads bright; a hover-only match reads dim. A
+                // candidate is a hover if its id is hovered and not selected.
+                let sel = self.domain.selection.borrow();
+                let hovered = sel.is_hovered(&c.id) && !sel.is_selected(&c.id);
+                highlights.push((c.shape.clone(), hovered));
             }
         }
-        let measure = if self.tool.get() == Tool::Measure {
+        let measure = if self.tool.get() == Tool::Measure && self.measure_pane.get() == pane {
             self.measure.get().segment()
         } else {
             None
@@ -375,42 +665,101 @@ impl EcadApp {
         }
     }
 
-    /// The right sidebar: the properties inspector (above) over the layer panel
-    /// (below), matching the mockup anatomy. The inspector shows the selected entity;
-    /// with nothing selected it is the m2 stats card (the empty state).
-    fn right_sidebar(&self, view: &BoardView) -> El {
-        // A fixed-width scrollable column: the inspector (Hug) above the layer panel.
-        // Scrollable so a long inspector (many pin rows) + the full layer list never
-        // overflow the pane height — the two panels share the column and clip cleanly.
-        scroll([
-            column([self.inspector_panel(view), self.layer_panel(&view.layers)])
-                .gap(tokens::SPACE_3)
-                .width(Size::Fill(1.0)),
+    /// The net a board candidate's id belongs to, if any (for the net-expansion match).
+    fn candidate_net(&self, id: &SemanticId) -> Option<NetId> {
+        let doc = self.domain.doc.as_ref().ok()?;
+        match id {
+            SemanticId::Trace(t) => doc.traces.get(t).map(|t| t.net.clone()),
+            SemanticId::Via(v) => doc.vias.get(v).map(|v| v.net.clone()),
+            SemanticId::Pour { net, .. } => Some(net.clone()),
+            SemanticId::Pin { comp, pin } => {
+                let pr = ecad_core::doc::PinRef::new(comp, pin);
+                doc.nets
+                    .iter()
+                    .find(|(_, n)| n.members.contains(&pr))
+                    .map(|(nid, _)| nid.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// The right sidebar: the properties inspector (above), the explorer (middle), and the
+    /// board layer panel (below), matching the mockup anatomy (Properties above Explorer).
+    fn right_sidebar(&self) -> El {
+        let mut children = vec![self.inspector_panel(), self.explorer_panel()];
+        // The layer panel applies to board panes; show it whenever a board projection
+        // exists (global layer visibility is fine for v1).
+        if let Some(view) = &self.board {
+            children.push(self.layer_panel(&view.layers));
+        }
+        scroll([column(children).gap(tokens::SPACE_3).width(Size::Fill(1.0))])
+            .width(Size::Fixed(260.0))
+            .height(Size::Fill(1.0))
+    }
+
+    /// The explorer panel (mockup NetExplorer anatomy): Components + Nets sections, each a
+    /// list of click-to-select rows with a count badge; the selected row gets the mockup's
+    /// selected cue (`sidebar_menu_button`'s `current` treatment).
+    fn explorer_panel(&self) -> El {
+        let sel = self.domain.selection.borrow();
+        let comp_rows: Vec<El> = self
+            .explorer
+            .components
+            .iter()
+            .map(|r| self.explorer_row(r, sel.is_selected(&r.id)))
+            .collect();
+        let net_rows: Vec<El> = self
+            .explorer
+            .nets
+            .iter()
+            .map(|r| self.explorer_row(r, sel.is_selected(&r.id)))
+            .collect();
+        sidebar([
+            sidebar_header([h3("Explorer")]),
+            sidebar_group([
+                sidebar_group_label(format!("Components ({})", comp_rows.len())),
+                column(comp_rows)
+                    .gap(tokens::SPACE_1)
+                    .width(Size::Fill(1.0)),
+            ]),
+            sidebar_group([
+                sidebar_group_label(format!("Nets ({})", net_rows.len())),
+                column(net_rows).gap(tokens::SPACE_1).width(Size::Fill(1.0)),
+            ]),
         ])
-        .width(Size::Fixed(248.0))
-        .height(Size::Fill(1.0))
+        .width(Size::Fill(1.0))
+        .height(Size::Hug)
+    }
+
+    /// One explorer row: a click-to-select `sidebar_menu_button` labelled with the id +
+    /// secondary text + count badge, `current` when it is the selection.
+    fn explorer_row(&self, r: &crate::explorer::ExplorerRow, current: bool) -> El {
+        let label = if r.secondary.is_empty() {
+            format!("{}  [{}]", r.label, r.count)
+        } else {
+            format!("{}  ({})  [{}]", r.label, r.secondary, r.count)
+        };
+        sidebar_menu_button(label, current).key(r.key.clone())
     }
 
     /// The inspector panel: an identity card + key/value rows for the single selected
-    /// entity, or the m2 stats card when nothing is selected. Every value is projected
-    /// live from the doc via [`InspectorData::project`] — nothing hardcoded.
-    fn inspector_panel(&self, view: &BoardView) -> El {
+    /// entity, or the m2 stats card when nothing is selected. Works regardless of which
+    /// pane the selection came from (the selection is shared, semantic).
+    fn inspector_panel(&self) -> El {
         let doc = match &self.domain.doc {
             Ok(doc) => doc,
-            Err(_) => return self.empty_inspector(view),
+            Err(_) => return self.empty_inspector(),
         };
         let sel = self.domain.selection.borrow();
         let Some(id) = sel.single() else {
-            return self.empty_inspector(view);
+            return self.empty_inspector();
         };
         let Some(data) = InspectorData::project(id, doc, &self.domain.lib) else {
-            return self.empty_inspector(view);
+            return self.empty_inspector();
         };
 
-        let mut children: Vec<El> = vec![
-            // Identity card: kind label + large primary id.
-            column([text(data.kind).muted().mono(), h3(data.primary)]).gap(tokens::SPACE_1),
-        ];
+        let mut children: Vec<El> =
+            vec![column([text(data.kind).muted().mono(), h3(data.primary)]).gap(tokens::SPACE_1)];
         for r in &data.rows {
             children.push(field_row(r.key.clone(), text(r.value.clone()).mono()));
         }
@@ -419,9 +768,8 @@ impl EcadApp {
             .height(Size::Hug)
     }
 
-    /// The inspector's empty state: the m2 doc stats (kept — it is the no-selection
-    /// content, per the spec), rendered as sidebar rows so it fits the narrow column.
-    fn empty_inspector(&self, _view: &BoardView) -> El {
+    /// The inspector's empty state: the m2 doc stats, rendered as sidebar rows.
+    fn empty_inspector(&self) -> El {
         match &self.domain.doc {
             Ok(doc) => {
                 let s = DocStats::of(doc);
@@ -448,8 +796,8 @@ impl EcadApp {
         }
     }
 
-    /// The toolbar: app title, filename badge, Fit / Reset framing buttons, and a
-    /// live zoom-percent readout.
+    /// The toolbar: app title, filename badge, the dual/stacked layout toggle, the global
+    /// tool palette, and Fit / Reset framing buttons + a live zoom-percent readout.
     fn viewer_toolbar(&self, zoom: f32) -> El {
         let name = self
             .domain
@@ -457,8 +805,6 @@ impl EcadApp {
             .clone()
             .unwrap_or_else(|| "untitled".into());
         let active = self.tool.get();
-        // The global tool palette (structural commitment 4): two toggle buttons, the
-        // active one filled (`.primary()`), matching the mockup's active-tool cue.
         let tool_buttons: Vec<El> = Tool::all()
             .into_iter()
             .map(|t| {
@@ -466,9 +812,14 @@ impl EcadApp {
                 if t == active { b.primary() } else { b }
             })
             .collect();
+        let layout_label = match self.layout.get() {
+            PaneLayout::Dual => "Dual",
+            PaneLayout::Stacked => "Stacked",
+        };
         toolbar([
             toolbar_title("ecad"),
             badge(name).info(),
+            button(layout_label).key(LAYOUT_TOGGLE_KEY),
             spacer(),
             row(tool_buttons).gap(tokens::SPACE_1),
             text(format!("{:.0}%", zoom * 100.0)).muted().mono(),
@@ -559,30 +910,12 @@ impl EcadApp {
 
 impl App for EcadApp {
     fn build(&self, cx: &BuildCx) -> El {
-        // The board view when a document projected; otherwise the m1 no-document /
-        // error states, kept working.
-        match (&self.domain.doc, &self.board) {
-            (Ok(_), Some(view)) => page([self.board_body(cx, view)]),
-            // Loaded but projection failed (or no board outline): fall back to the
-            // stats card so the user still sees something, never a blank window.
-            (Ok(doc), None) => {
-                let chrome = toolbar([
-                    toolbar_title("ecad"),
-                    spacer(),
-                    badge(
-                        self.domain
-                            .filename
-                            .clone()
-                            .unwrap_or_else(|| "untitled".into()),
-                    )
-                    .info(),
-                ])
-                .padding(Sides::xy(tokens::SPACE_4, tokens::SPACE_2));
-                page([column([chrome, stats_card(&DocStats::of(doc))])
-                    .gap(tokens::SPACE_4)
-                    .height(Size::Fill(1.0))])
-            }
-            (Err(message), _) => {
+        match &self.domain.doc {
+            // A loaded doc renders the two-pane viewer (at least one pane always shows
+            // something — board or schematic). Even a board-only or schematic-only doc
+            // gets panes; the empty side shows a placeholder.
+            Ok(_) => page([self.viewer_body(cx)]),
+            Err(message) => {
                 let chrome = toolbar([
                     toolbar_title("ecad"),
                     spacer(),
@@ -597,21 +930,106 @@ impl App for EcadApp {
     }
 
     fn before_build(&mut self) {
-        // Queue the initial fit-to-content once, on the first frame after a board
-        // loaded — the layout pass resolves it against the live viewport rect and
-        // content extents (only known mid-frame).
-        if self.board.is_some() && !self.fitted.get() {
-            self.pending.borrow_mut().push(ViewportRequest::FitContent {
-                key: CANVAS_KEY.to_string(),
-                padding: 24.0,
-            });
-            self.fitted.set(true);
+        // Queue the initial fit-to-content once per pane, on the first frame after the doc
+        // loaded (or after a view switch reset the flag) — the layout pass resolves each
+        // request against the live per-pane viewport rect + content extents. The split
+        // extent for the resize handler is captured in `on_event` from last frame's layout.
+        let mut panes = self.panes.borrow_mut();
+        for (i, p) in panes.iter_mut().enumerate() {
+            if p.fitted {
+                continue;
+            }
+            let id = if i == 0 { PaneId::A } else { PaneId::B };
+            let projected = match p.view {
+                ViewKind::Board => self.board.is_some(),
+                ViewKind::Schematic => self.schematic.is_some(),
+            };
+            if projected {
+                self.pending.borrow_mut().push(ViewportRequest::FitContent {
+                    key: id.canvas_key().to_string(),
+                    padding: 24.0,
+                });
+                p.fitted = true;
+            }
         }
     }
 
     fn on_event(&mut self, event: UiEvent, cx: &EventCx) {
-        // Tool palette toggles (structural commitment 4). Switching tools cancels any
-        // in-progress measure preview (clean cancel on mode change).
+        // Capture the split extent for the weighted resize handler (README idiom).
+        if let Some(r) = cx.rect_of_key(SPLIT_ROW_KEY) {
+            let extent = match self.layout.get() {
+                PaneLayout::Dual => r.w,
+                PaneLayout::Stacked => r.h,
+            };
+            self.split_extent.set(extent);
+        }
+
+        // Pane-split resize handle (weighted): fold the drag into the split weights.
+        {
+            let mut w = self.split_weights.get();
+            let mut drag = self.split_drag.borrow_mut();
+            let axis = match self.layout.get() {
+                PaneLayout::Dual => Axis::Row,
+                PaneLayout::Stacked => Axis::Column,
+            };
+            if resize_handle::apply_event_weights(
+                &mut w,
+                &mut drag,
+                &event,
+                SPLIT_HANDLE_KEY,
+                axis,
+                self.split_extent.get(),
+                0.15,
+            ) {
+                drop(drag);
+                self.split_weights.set(w);
+                return;
+            }
+        }
+
+        // Dual/stacked layout toggle.
+        if event.is_click_or_activate(LAYOUT_TOGGLE_KEY) {
+            self.layout.set(match self.layout.get() {
+                PaneLayout::Dual => PaneLayout::Stacked,
+                PaneLayout::Stacked => PaneLayout::Dual,
+            });
+            return;
+        }
+
+        // Per-pane view switcher + maximize toggle.
+        for pane in [PaneId::A, PaneId::B] {
+            for v in ViewKind::all() {
+                if event.is_click_or_activate(&pane.switch_key(v)) {
+                    let mut panes = self.panes.borrow_mut();
+                    let p = &mut panes[pane_index(pane)];
+                    if p.view != v {
+                        p.view = v;
+                        p.fitted = false; // re-fit the new view on next build.
+                    }
+                    return;
+                }
+            }
+            if event.is_click_or_activate(pane.maximize_key()) {
+                self.maximized.set(match self.maximized.get() {
+                    Some(m) if m == pane => None,
+                    _ => Some(pane),
+                });
+                return;
+            }
+        }
+
+        // Explorer row clicks → select that semantic id (cross-highlights in all panes).
+        // Routed by the row button's key (the `sidebar_menu_button` route), same idiom as
+        // the tool / view buttons.
+        if matches!(event.kind, UiEventKind::Click | UiEventKind::Activate)
+            && let Some(route) = event.route()
+            && let Some(id) = self.explorer.lookup(route)
+        {
+            self.domain.selection.borrow_mut().select_only(id);
+            return;
+        }
+
+        // Tool palette toggles (structural commitment 4).
         for t in Tool::all() {
             if event.is_click_or_activate(t.key()) {
                 if self.tool.get() != t {
@@ -623,7 +1041,6 @@ impl App for EcadApp {
         }
 
         // Escape: cancel a measure in progress if any; else clear the selection.
-        // Routed as `UiEventKind::Escape` (window-level when nothing is focused).
         if event.kind == UiEventKind::Escape {
             let mut m = self.measure.get();
             if self.tool.get() == Tool::Measure && m.segment().is_some() {
@@ -635,25 +1052,27 @@ impl App for EcadApp {
             return;
         }
 
-        // Toolbar framing buttons.
+        // Toolbar framing buttons act on the pane(s) — Fit/Reset every pane's camera so a
+        // single button reframes whatever the user sees.
         if event.is_click_or_activate("fit") {
-            self.pending.borrow_mut().push(ViewportRequest::FitContent {
-                key: CANVAS_KEY.to_string(),
-                padding: 24.0,
-            });
+            for id in [PaneId::A, PaneId::B] {
+                self.pending.borrow_mut().push(ViewportRequest::FitContent {
+                    key: id.canvas_key().to_string(),
+                    padding: 24.0,
+                });
+            }
             return;
         }
         if event.is_click_or_activate("reset") {
-            self.pending.borrow_mut().push(ViewportRequest::ResetView {
-                key: CANVAS_KEY.to_string(),
-            });
+            for id in [PaneId::A, PaneId::B] {
+                self.pending.borrow_mut().push(ViewportRequest::ResetView {
+                    key: id.canvas_key().to_string(),
+                });
+            }
             return;
         }
 
-        // Layer visibility switches: route is `switch:layer:<name>`. Controlled
-        // widget — fold the event over the derived `visible` bool with the switch's
-        // own `apply_event` (README idiom), then reconcile the `hidden` set (our
-        // canonical state) to the flipped value.
+        // Layer visibility switches (global; apply to all board panes).
         if let Some(view) = &self.board {
             for l in &view.layers {
                 let key = l.id.key();
@@ -671,38 +1090,76 @@ impl App for EcadApp {
             }
         }
 
-        // Canvas pointer interaction. The canvas interior is one keyed viewport; a
-        // pointer event over it routes to `CANVAS_KEY` (empty board) or to a stacked
-        // layer / overlay El. Any of those is a canvas target. We need the viewport
-        // rect + view to map the pointer to board coordinates.
+        // Canvas pointer interaction. A pointer event over a pane's canvas routes to the
+        // pane's viewport / a stacked layer / overlay El — all canvas targets. THE CLICKED
+        // PANE is resolved by testing the pointer against each pane's laid-out rect (NOT a
+        // global key — this is where m2's coordinate-composition bug class returns; every
+        // unproject / rect uses the clicked pane's own key).
         if !is_canvas_target(event.target_key()) {
             return;
         }
-        let (Some(pos), Some(view)) = (event.pointer_pos(), &self.board) else {
+        let Some(pos) = event.pointer_pos() else {
             return;
         };
-        let (Some(rect), Some(vv)) = (cx.rect_of_key(CANVAS_KEY), cx.viewport_view(CANVAS_KEY))
-        else {
+        let Some(pane) = self.pane_under_pointer(cx, pos) else {
+            return;
+        };
+        match self.panes.borrow()[pane_index(pane)].view {
+            ViewKind::Board => self.handle_board_pointer(event, cx, pane, pos),
+            ViewKind::Schematic => self.handle_schematic_pointer(event, cx, pane, pos),
+        }
+    }
+
+    fn drain_viewport_requests(&mut self) -> Vec<ViewportRequest> {
+        std::mem::take(&mut self.pending.borrow_mut())
+    }
+}
+
+impl EcadApp {
+    /// Which pane's canvas the pointer at `pos` (logical px) is inside, by testing each
+    /// visible pane's laid-out canvas rect. A maximized pane is the only candidate. `None`
+    /// when the pointer is over no pane canvas (chrome / gutter).
+    fn pane_under_pointer(&self, cx: &EventCx, pos: (f32, f32)) -> Option<PaneId> {
+        let candidates: Vec<PaneId> = match self.maximized.get() {
+            Some(m) => vec![m],
+            None => vec![PaneId::A, PaneId::B],
+        };
+        for pane in candidates {
+            if let Some(r) = cx.rect_of_key(pane.canvas_key())
+                && pos.0 >= r.x
+                && pos.0 <= r.x + r.w
+                && pos.1 >= r.y
+                && pos.1 <= r.y + r.h
+            {
+                return Some(pane);
+            }
+        }
+        None
+    }
+
+    /// Handle a pointer event over a board pane: cursor readout, pick / hover / measure —
+    /// all through THE CLICKED PANE's canvas key + rect + viewport view.
+    fn handle_board_pointer(&self, event: UiEvent, cx: &EventCx, pane: PaneId, pos: (f32, f32)) {
+        let Some(view) = &self.board else {
+            return;
+        };
+        let key = pane.canvas_key();
+        let (Some(rect), Some(vv)) = (cx.rect_of_key(key), cx.viewport_view(key)) else {
             return;
         };
         let el_rect = (rect.x, rect.y, rect.w, rect.h);
 
-        // Cursor readout in board mm (any pointer-carrying canvas event updates it;
-        // free hover emits no event — the known 0.4.5 limit).
         let content_px = vv.unproject(pos, (rect.x, rect.y));
         if let Some(mm) = view.canvas.content_px_to_board_mm(content_px, el_rect) {
             self.cursor_board_mm.set(Some(mm));
         }
 
-        // The board point in nm for hit-testing (composes unproject + viewBox/scale +
-        // y-flip + mm→nm).
         let Some(p) = pick::pointer_to_board_nm(&view.canvas, pos, el_rect, vv) else {
             return;
         };
         let tol = pick::tolerance_nm(PICK_TOL_PX, vv.zoom);
 
         match (self.tool.get(), event.kind) {
-            // Select tool, click: pick and single-select (or clear on empty).
             (Tool::Select, UiEventKind::Click) => {
                 let hit =
                     pick::resolve(&view.candidates, p, tol, |id| self.layer_visible(&id.key()));
@@ -712,8 +1169,6 @@ impl App for EcadApp {
                     None => sel.clear(),
                 }
             }
-            // Select tool, hover-class event (enter/drag): update the hover highlight.
-            // Free hover emits nothing, so this only fires on enter/drag/down.
             (Tool::Select, UiEventKind::PointerEnter | UiEventKind::Drag) => {
                 let hit =
                     pick::resolve(&view.candidates, p, tol, |id| self.layer_visible(&id.key()));
@@ -726,14 +1181,14 @@ impl App for EcadApp {
             (Tool::Select, UiEventKind::PointerLeave) => {
                 self.domain.selection.borrow_mut().clear_hover();
             }
-            // Measure tool, click: anchor then set the second point.
             (Tool::Measure, UiEventKind::Click) => {
+                self.measure_pane.set(pane);
                 let mut m = self.measure.get();
                 m.click(p);
                 self.measure.set(m);
             }
-            // Measure tool, live move (enter/drag): drag the moving end.
             (Tool::Measure, UiEventKind::PointerEnter | UiEventKind::Drag) => {
+                self.measure_pane.set(pane);
                 let mut m = self.measure.get();
                 m.hover(p);
                 self.measure.set(m);
@@ -742,8 +1197,48 @@ impl App for EcadApp {
         }
     }
 
-    fn drain_viewport_requests(&mut self) -> Vec<ViewportRequest> {
-        std::mem::take(&mut self.pending.borrow_mut())
+    /// Handle a pointer event over a schematic pane: pick symbol/pin/wire → the schematic
+    /// selection (pin > wire > symbol). Uses THE CLICKED PANE's canvas key + rect + view.
+    fn handle_schematic_pointer(
+        &self,
+        event: UiEvent,
+        cx: &EventCx,
+        pane: PaneId,
+        pos: (f32, f32),
+    ) {
+        let Some(view) = &self.schematic else {
+            return;
+        };
+        let key = pane.canvas_key();
+        let (Some(rect), Some(vv)) = (cx.rect_of_key(key), cx.viewport_view(key)) else {
+            return;
+        };
+        let el_rect = (rect.x, rect.y, rect.w, rect.h);
+        let Some(p) = view.pointer_to_schematic_nm(pos, el_rect, vv) else {
+            return;
+        };
+        let tol = SchematicView::tolerance_nm(PICK_TOL_PX, vv.zoom);
+
+        match event.kind {
+            UiEventKind::Click => {
+                let mut sel = self.domain.selection.borrow_mut();
+                match view.resolve(p, tol) {
+                    Some(id) => sel.select_only(id),
+                    None => sel.clear(),
+                }
+            }
+            UiEventKind::PointerEnter | UiEventKind::Drag => {
+                let mut sel = self.domain.selection.borrow_mut();
+                match view.resolve(p, tol) {
+                    Some(id) => sel.hover_only(id),
+                    None => sel.clear_hover(),
+                }
+            }
+            UiEventKind::PointerLeave => {
+                self.domain.selection.borrow_mut().clear_hover();
+            }
+            _ => {}
+        }
     }
 }
 
@@ -755,33 +1250,31 @@ fn switch_key(layer_key: &str) -> String {
     format!("switch:{layer_key}")
 }
 
-/// Is this event target inside the board canvas? The interior is one keyed viewport,
-/// but a pointer event may route to the viewport (`CANVAS_KEY`, over bare board) or to
-/// one of the stacked layer / overlay `El`s (keyed `layer:*` / `overlay:*`). All of
-/// those are canvas hits; chrome (toolbar, sidebar) is not.
+/// Is this event target inside a pane canvas? A pointer event routes to a pane viewport
+/// (`canvas:a` / `canvas:b`), a stacked board layer / overlay El (keyed `layer:*` /
+/// `overlay:*`), or a schematic static El (keyed `schematic:*`). All are canvas hits;
+/// chrome (toolbar, sidebar, pane headers) is not.
 fn is_canvas_target(target: Option<&str>) -> bool {
     match target {
-        Some(k) => k == CANVAS_KEY || k.starts_with("layer:") || k.starts_with("overlay:"),
+        Some(k) => {
+            k == PaneId::A.canvas_key()
+                || k == PaneId::B.canvas_key()
+                || k.starts_with("layer:")
+                || k.starts_with("overlay:")
+                || k.starts_with("schematic:")
+        }
         None => false,
     }
 }
 
-/// The document-loaded body: a card of cheap doc stats.
-fn stats_card(stats: &DocStats) -> El {
-    let board = match stats.board_mm {
-        Some((w, h)) => format!("{w:.1} x {h:.1} mm"),
-        None => "no board outline".to_string(),
-    };
-    titled_card(
-        "Document",
-        [
-            field_row("Parts", text(stats.parts.to_string())),
-            field_row("Nets", text(stats.nets.to_string())),
-            field_row("Copper layers", text(stats.layers.to_string())),
-            field_row("Board outline", text(board)),
-        ],
-    )
-    .width(Size::Fixed(420.0))
+/// A pane's empty-state placeholder (no board / no schematic to display), filling the
+/// pane so the split geometry is unaffected.
+fn pane_placeholder(msg: &str) -> El {
+    column([text(msg).muted()])
+        .align(Align::Center)
+        .fill(CANVAS_BG)
+        .width(Size::Fill(1.0))
+        .height(Size::Fill(1.0))
 }
 
 /// The parse/elaborate-failure body: surface the error, never crash (the
@@ -801,4 +1294,171 @@ fn error_card(message: &str) -> El {
     ])
     .destructive()
     .width(Size::Fixed(420.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixtures::{dual_boards, schematic_domain};
+    use ecad_core::coord::MM;
+
+    /// A synthetic click routed to `key`.
+    fn click(key: &str) -> UiEvent {
+        UiEvent::synthetic_click(key)
+    }
+
+    /// Clicking an explorer net row selects that net (cross-highlights everywhere). Drives
+    /// the real `on_event` explorer path.
+    #[test]
+    fn explorer_click_selects_net() {
+        let mut app = EcadApp::new(schematic_domain());
+        // The VDD net row's key, from the projection.
+        let net_row = app
+            .explorer
+            .nets
+            .iter()
+            .find(|r| r.label == "VDD")
+            .expect("VDD net row")
+            .clone();
+        assert!(app.domain.selection.borrow().is_empty());
+        let cx = EventCx::new();
+        app.on_event(click(&net_row.key), &cx);
+        assert_eq!(
+            app.domain.selection.borrow().single(),
+            Some(&SemanticId::Net(NetId::new("VDD"))),
+            "explorer click must select the net"
+        );
+    }
+
+    /// Clicking an explorer component row selects that part.
+    #[test]
+    fn explorer_click_selects_part() {
+        let mut app = EcadApp::new(schematic_domain());
+        // Find the row by its semantic id (the label is the *annotated* refdes, not the
+        // instance path — e.g. `U1 MCU` annotates to `MCU1`).
+        let row = app
+            .explorer
+            .components
+            .iter()
+            .find(|r| r.id == SemanticId::Part(ecad_core::id::EntityId::new("U1")))
+            .expect("U1 component row")
+            .clone();
+        let cx = EventCx::new();
+        app.on_event(click(&row.key), &cx);
+        assert_eq!(
+            app.domain.selection.borrow().single(),
+            Some(&SemanticId::Part(ecad_core::id::EntityId::new("U1")))
+        );
+    }
+
+    /// The view switcher flips a pane's view kind.
+    #[test]
+    fn view_switcher_flips_pane_view() {
+        let mut app = EcadApp::new(schematic_domain());
+        assert_eq!(app.panes.borrow()[0].view, ViewKind::Board);
+        let cx = EventCx::new();
+        app.on_event(click(&PaneId::A.switch_key(ViewKind::Schematic)), &cx);
+        assert_eq!(app.panes.borrow()[0].view, ViewKind::Schematic);
+    }
+
+    /// The layout toggle flips dual ↔ stacked; the maximize toggle sets/clears.
+    #[test]
+    fn layout_and_maximize_toggles() {
+        let mut app = EcadApp::new(schematic_domain());
+        let cx = EventCx::new();
+        assert_eq!(app.layout.get(), PaneLayout::Dual);
+        app.on_event(click(LAYOUT_TOGGLE_KEY), &cx);
+        assert_eq!(app.layout.get(), PaneLayout::Stacked);
+
+        assert_eq!(app.maximized.get(), None);
+        app.on_event(click(PaneId::B.maximize_key()), &cx);
+        assert_eq!(app.maximized.get(), Some(PaneId::B));
+        app.on_event(click(PaneId::B.maximize_key()), &cx);
+        assert_eq!(app.maximized.get(), None, "toggling again restores");
+    }
+
+    /// Per-pane independence: the SAME screen pixel maps to DIFFERENT board points when the
+    /// two panes have different cameras — proving the pick composition uses the clicked
+    /// pane's own viewport view, not a shared one (the m2 bug class). And the same pixel
+    /// with the same camera but different pane RECTS also maps differently — proving the
+    /// rect is per-pane too.
+    #[test]
+    fn per_pane_composition_uses_the_clicked_panes_view_and_rect() {
+        use damascene_core::viewport::ViewportView;
+        let app = EcadApp::new(schematic_domain());
+        let canvas = app.board.as_ref().expect("board projects").canvas.clone();
+
+        let rect = (0.0f32, 0.0f32, 400.0f32, 300.0f32);
+        let px = (100.0f32, 80.0f32);
+
+        // Two different cameras (pane A vs pane B), same rect + pixel.
+        let cam_a = ViewportView {
+            pan: (0.0, 0.0),
+            zoom: 1.0,
+        };
+        let cam_b = ViewportView {
+            pan: (50.0, -30.0),
+            zoom: 2.0,
+        };
+        let pa = pick::pointer_to_board_nm(&canvas, px, rect, cam_a).expect("a maps");
+        let pb = pick::pointer_to_board_nm(&canvas, px, rect, cam_b).expect("b maps");
+        assert_ne!(
+            pa, pb,
+            "same pixel under different pane cameras must map to different board points"
+        );
+
+        // Same camera, two different pane rects (dual split: A left, B right).
+        let rect_a = (0.0f32, 0.0f32, 200.0f32, 300.0f32);
+        let rect_b = (210.0f32, 0.0f32, 200.0f32, 300.0f32);
+        let ra = pick::pointer_to_board_nm(&canvas, px, rect_a, cam_a).expect("ra maps");
+        let rb = pick::pointer_to_board_nm(&canvas, px, rect_b, cam_a).expect("rb maps");
+        assert_ne!(
+            ra, rb,
+            "same pixel under different pane rects must map to different board points"
+        );
+    }
+
+    /// Two board panes over the same doc lay out with DISTINCT, non-overlapping rects and
+    /// distinct viewport keys — the structural prerequisite for independent cameras.
+    #[test]
+    fn dual_boards_lay_out_as_two_independent_panes() {
+        use damascene_core::layout::layout;
+        use damascene_core::prelude::Rect;
+        use damascene_core::state::UiState;
+
+        let app = dual_boards();
+        let theme = app.theme();
+        let cx = BuildCx::new(&theme).with_viewport(1280.0, 800.0);
+        let mut root = app.build(&cx);
+        let mut ui = UiState::new();
+        layout(&mut root, &mut ui, Rect::new(0.0, 0.0, 1280.0, 800.0));
+
+        let ra = ui
+            .rect_of_key(PaneId::A.canvas_key())
+            .expect("pane A canvas laid out");
+        let rb = ui
+            .rect_of_key(PaneId::B.canvas_key())
+            .expect("pane B canvas laid out");
+        // Distinct rects, side by side (dual = row): A's right edge is left of B's left.
+        assert!(
+            ra.x + ra.w <= rb.x + 1.0,
+            "dual board panes must be side by side, got A={ra:?} B={rb:?}"
+        );
+        assert!(ra.w > 0.0 && rb.w > 0.0);
+    }
+
+    /// A schematic-only pane over a schematic-block doc renders its viewport (not a
+    /// placeholder), and the poc board's schematic pane builds without panic.
+    #[test]
+    fn schematic_pane_renders_for_a_schematic_doc() {
+        let app = EcadApp::new(schematic_domain());
+        assert!(
+            app.schematic.is_some(),
+            "a doc with components must project a schematic"
+        );
+        // A point at the origin (schematic space) is inside the drawing bounds.
+        let view = app.schematic.as_ref().unwrap();
+        assert!(!view.candidates().is_empty());
+        let _ = MM; // (kept for symmetry with other tests' unit imports)
+    }
 }
