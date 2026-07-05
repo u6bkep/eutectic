@@ -9,6 +9,7 @@ pub mod app;
 pub mod canvas;
 pub mod explorer;
 pub mod fixtures;
+pub mod harness;
 pub mod highlight;
 pub mod inspector;
 pub mod schematic_view;

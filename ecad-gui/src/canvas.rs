@@ -464,8 +464,9 @@ fn doc_world_features(doc: &Doc, lib: &PartLib, su: &Stackup) -> Result<Vec<NetF
 /// The membership netlist `world_features` needs, rebuilt from `doc.nets` (the
 /// crate-internal `route::doc_netlist` is not public). Roles are irrelevant to the
 /// geometry producer, so every member is `Passive` — matching what the internal
-/// bridge does.
-fn doc_netlist(doc: &Doc) -> BTreeMap<NetId, Vec<(PinRef, PinRole)>> {
+/// bridge does. Shared by the canvas renderer and the picker (`canvas::pick`) so the
+/// two consume one netlist.
+pub(crate) fn doc_netlist(doc: &Doc) -> BTreeMap<NetId, Vec<(PinRef, PinRole)>> {
     doc.nets
         .iter()
         .map(|(nid, net)| {
@@ -527,8 +528,10 @@ fn content_bounds(doc: &Doc, features: &[NetFeature]) -> (Nm, Nm, Nm, Nm) {
 /// forward query (identity flows from the stackup; z is never reconstructed
 /// heuristically): the feature's z was assigned from a slab at lowering, so its
 /// midpoint lies inside that slab. Midpoint (not overlap) disambiguates the shared
-/// faces between contiguous slabs. `None` if no slab spans it.
-fn slab_of_z<'a>(su: &'a Stackup, z: &ZRange) -> Option<&'a ecad_core::geom::Slab> {
+/// faces between contiguous slabs. `None` if no slab spans it. Shared by the canvas
+/// renderer and the picker (`canvas::pick`) so a feature bins onto the same layer in
+/// both.
+pub(crate) fn slab_of_z<'a>(su: &'a Stackup, z: &ZRange) -> Option<&'a ecad_core::geom::Slab> {
     let mid = z.lo + (z.hi - z.lo) / 2;
     // A zero-thickness feature (fab datum slabs are lo == hi) matches the slab whose
     // range touches that plane; prefer strict containment, fall back to touching.

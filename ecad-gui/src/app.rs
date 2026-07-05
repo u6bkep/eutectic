@@ -180,7 +180,7 @@ impl PaneId {
     /// The canvas viewport El key for this pane — distinct per pane so the two cameras are
     /// independent in damascene's `UiState` (through-line 3), *even when both panes show
     /// the same view kind*.
-    fn canvas_key(self) -> &'static str {
+    pub(crate) fn canvas_key(self) -> &'static str {
         match self {
             PaneId::A => "canvas:a",
             PaneId::B => "canvas:b",

@@ -48,13 +48,12 @@
 use super::LayerId;
 use damascene_core::viewport::ViewportView;
 use ecad_core::coord::{MM, Nm, Point};
-use ecad_core::doc::{Doc, PinRef};
+use ecad_core::doc::Doc;
 use ecad_core::geom::kernel::{DEFAULT_CIRCLE_SEGS, shape_to_region};
-use ecad_core::geom::{Extent, FeatureOrigin, NetFeature, Role, Shape2D, Slab, Stackup};
+use ecad_core::geom::{Extent, FeatureOrigin, NetFeature, Role, Shape2D, Stackup};
 use ecad_core::id::{EntityId, NetId, TraceId, ViaId};
-use ecad_core::part::{PartLib, PinRole};
+use ecad_core::part::PartLib;
 use ecad_core::route::{DesignRules, world_features};
-use std::collections::BTreeMap;
 
 /// A stable, geometry-free semantic identity — the currency of the selection model
 /// (structural commitment 2). Every variant is an id (or a small id tuple), **never**
@@ -235,7 +234,7 @@ pub fn candidates(doc: &Doc, lib: &PartLib, su: &Stackup) -> Vec<Candidate> {
         // barrel fans to one Conductor feature per spanned copper slab, so a via yields
         // one candidate per slab, keeping it pickable on any visible layer). A pour's
         // z is its copper slab; a trace/pad's z is its slab.
-        let Some(slab) = slab_of_z(su, z) else {
+        let Some(slab) = super::slab_of_z(su, z) else {
             continue;
         };
         out.push(Candidate {
@@ -259,38 +258,13 @@ pub fn candidates(doc: &Doc, lib: &PartLib, su: &Stackup) -> Vec<Candidate> {
 /// producer the canvas renders and the picker folds, so render and pick always agree
 /// (issue 0031). The GUI-side twin of `canvas::doc_world_features`.
 fn doc_world_features(doc: &Doc, lib: &PartLib, su: &Stackup) -> Result<Vec<NetFeature>, String> {
-    world_features(doc, lib, &doc_netlist(doc), &DesignRules::default(), su)
-}
-
-/// The membership netlist `world_features` needs, rebuilt from `doc.nets` (the
-/// crate-internal `route::doc_netlist` is not public). Roles are irrelevant to the
-/// geometry producer, so every member is `Passive` — matching the engine's own bridge
-/// and `canvas::doc_netlist`.
-fn doc_netlist(doc: &Doc) -> BTreeMap<NetId, Vec<(PinRef, PinRole)>> {
-    doc.nets
-        .iter()
-        .map(|(nid, net)| {
-            (
-                nid.clone(),
-                net.members
-                    .iter()
-                    .map(|pr| (pr.clone(), PinRole::Passive))
-                    .collect(),
-            )
-        })
-        .collect()
-}
-
-/// The stackup slab whose z-range contains the **midpoint** of a feature's z — the
-/// forward query the canvas uses to bin a feature onto its visual layer
-/// (`canvas::slab_of_z`), so the pick's `LayerId` matches the layer the feature renders
-/// on. Midpoint (not overlap) disambiguates the shared faces between contiguous slabs.
-fn slab_of_z<'a>(su: &'a Stackup, z: &ecad_core::geom::ZRange) -> Option<&'a Slab> {
-    let mid = z.lo + (z.hi - z.lo) / 2;
-    su.slabs
-        .iter()
-        .find(|s| s.z.lo <= mid && mid < s.z.hi)
-        .or_else(|| su.slabs.iter().find(|s| s.z.lo <= mid && mid <= s.z.hi))
+    world_features(
+        doc,
+        lib,
+        &super::doc_netlist(doc),
+        &DesignRules::default(),
+        su,
+    )
 }
 
 /// Resolve a board-space query point (nm) to the winning [`Pick`], honoring the

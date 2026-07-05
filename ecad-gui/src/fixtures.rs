@@ -443,27 +443,39 @@ pub fn all() -> Vec<(&'static str, EcadApp)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::{self, Rendered};
     use damascene_core::prelude::*;
 
-    /// Render one fixture through the headless bundle pipeline and assert the
-    /// lint is clean. Mirrors the pattern in the damascene-core README
-    /// ("Testing without a window").
-    fn assert_lint_clean(name: &str, app: &EcadApp) {
-        let theme = app.theme();
-        let viewport = Rect::new(0.0, 0.0, 1280.0, 800.0);
-        let cx = BuildCx::new(&theme).with_viewport(viewport.w, viewport.h);
-        let mut root = app.build(&cx);
-        let bundle = render_bundle_themed(&mut root, viewport, &theme);
+    /// The fixed review viewport shared by every headless render below.
+    fn viewport() -> Rect {
+        Rect::new(0.0, 0.0, 1280.0, 800.0)
+    }
+
+    /// Drive a fixture through the two-frame host-mirroring harness (so the render
+    /// reflects the fitted camera, exactly as the `review` binary dumps it) and
+    /// assert the lint is clean. Takes the app by value because the harness drains
+    /// its queued viewport requests across frames; returns the settled render so
+    /// coverage-checking scenes can inspect the post-fit cameras.
+    fn render_clean(name: &str, mut app: EcadApp) -> Rendered {
+        let r = harness::render_settled(&mut app, viewport());
         assert!(
-            bundle.lint.findings.is_empty(),
+            r.bundle.lint.findings.is_empty(),
             "fixture `{name}` has lint findings:\n{}",
-            bundle.lint.text()
+            r.bundle.lint.text()
         );
+        r
+    }
+
+    /// The two canvas viewport keys, for coverage assertions.
+    fn canvas_keys() -> [&'static str; 2] {
+        [PaneId::A.canvas_key(), PaneId::B.canvas_key()]
     }
 
     #[test]
     fn no_document_is_lint_clean() {
-        assert_lint_clean("no_document", &no_document());
+        // No-document / error scenes render no canvas viewport, so there is nothing
+        // to fit — lint only.
+        render_clean("no_document", no_document());
     }
 
     #[test]
@@ -476,7 +488,10 @@ mod tests {
             "sample.ecad failed to elaborate: {:?}",
             app.domain.doc.as_ref().err()
         );
-        assert_lint_clean("document_loaded", &app);
+        // sample.ecad has a board (pane A) but no schematic block, so pane B is a
+        // placeholder with no viewport — only the board pane is fit-checked.
+        let r = render_clean("document_loaded", app);
+        harness::assert_content_coverage("document_loaded", &r, &[PaneId::A.canvas_key()]);
     }
 
     #[test]
@@ -488,7 +503,7 @@ mod tests {
             app.domain.doc.is_err(),
             "broken.ecad unexpectedly elaborated"
         );
-        assert_lint_clean("parse_error", &app);
+        render_clean("parse_error", app);
     }
 
     #[test]
@@ -501,7 +516,9 @@ mod tests {
             "board.ecad failed to elaborate: {:?}",
             app.domain.doc.as_ref().err()
         );
-        assert_lint_clean("board", &app);
+        // BOARD_ECAD has no schematic block, so only pane A (board) has content.
+        let r = render_clean("board", app);
+        harness::assert_content_coverage("board", &r, &[PaneId::A.canvas_key()]);
     }
 
     #[test]
@@ -513,12 +530,14 @@ mod tests {
             !app.domain.selection.borrow().is_empty(),
             "board_with_selection has no selection"
         );
-        assert_lint_clean("board_with_selection", &app);
+        let r = render_clean("board_with_selection", app);
+        harness::assert_content_coverage("board_with_selection", &r, &[PaneId::A.canvas_key()]);
     }
 
     #[test]
     fn measure_in_progress_is_lint_clean() {
-        assert_lint_clean("measure_in_progress", &measure_in_progress());
+        let r = render_clean("measure_in_progress", measure_in_progress());
+        harness::assert_content_coverage("measure_in_progress", &r, &[PaneId::A.canvas_key()]);
     }
 
     #[test]
@@ -547,22 +566,32 @@ mod tests {
             !app.domain.selection.borrow().is_empty(),
             "cross-highlight scene must have a net selected"
         );
-        assert_lint_clean("dual_cross_highlight", &app);
+        // The dual scene shows a board (pane A) and a schematic (pane B), both with
+        // content — the headline artifact, so both panes must fit.
+        let r = render_clean("dual_cross_highlight", app);
+        harness::assert_content_coverage("dual_cross_highlight", &r, &canvas_keys());
     }
 
     #[test]
     fn stacked_layout_is_lint_clean() {
-        assert_lint_clean("stacked_layout", &stacked_layout());
+        // Same board|schematic content as the dual scene, stacked orientation.
+        let r = render_clean("stacked_layout", stacked_layout());
+        harness::assert_content_coverage("stacked_layout", &r, &canvas_keys());
     }
 
     #[test]
     fn maximized_pane_is_lint_clean() {
-        assert_lint_clean("maximized_pane", &maximized_pane());
+        // Pane B (schematic) is maximized; pane A is hidden (no viewport), so only
+        // the visible schematic pane is fit-checked.
+        let r = render_clean("maximized_pane", maximized_pane());
+        harness::assert_content_coverage("maximized_pane", &r, &[PaneId::B.canvas_key()]);
     }
 
     #[test]
     fn dual_boards_is_lint_clean() {
-        assert_lint_clean("dual_boards", &dual_boards());
+        // Two board panes over the same doc — both show board content, both fit.
+        let r = render_clean("dual_boards", dual_boards());
+        harness::assert_content_coverage("dual_boards", &r, &canvas_keys());
     }
 
     /// Inspector value honesty: the selected part's inspector shows the position
