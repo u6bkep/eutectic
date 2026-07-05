@@ -791,9 +791,12 @@ impl EcadApp {
         if let (Some((mx, my)), Some(view)) = (f.board_mm, &derived.board)
             && let Some(pane) = self.focused_board_pane()
             && let Some(rect) = cx.rect_of_key(pane.canvas_key())
-            && let Some(point) = view
-                .canvas
-                .board_mm_to_content_px((mx, my), (rect.x, rect.y, rect.w, rect.h))
+            && let Some(point) = view.canvas.board_mm_to_content_px(
+                (mx, my),
+                // The asset's honest content rect (natural viewBox size at the
+                // viewport origin) — the frame CenterOn's content point lives in.
+                view.canvas.content_rect((rect.x, rect.y, rect.w, rect.h)),
+            )
         {
             self.pending.borrow_mut().push(ViewportRequest::CenterOn {
                 key: pane.canvas_key().to_string(),

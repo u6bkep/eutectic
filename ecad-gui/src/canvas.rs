@@ -149,6 +149,25 @@ impl Canvas {
         ]
     }
 
+    /// The laid-out rect of the board's vector-asset El inside a pane's viewport —
+    /// the `el_rect` the `content_px` ↔ `board_mm` mappings below expect.
+    ///
+    /// Inside a damascene `viewport()`, a `vector(asset)` child with no explicit
+    /// size is laid out at its **natural** size — one viewBox unit (mm) per
+    /// logical px — anchored at the viewport's inner top-left. So the asset's
+    /// stretch rect is `(rect.x, rect.y, vw, vh)`, NOT the viewport's own rect
+    /// (under it the per-axis scale `rw/vw` is exactly 1). Passing the viewport
+    /// rect instead — the m2/m3 composition — was self-consistent (both pick
+    /// directions shared the wrong scale) but mismatched the real painted
+    /// geometry; the m6 drag tests, which drive the composition against the real
+    /// laid-out UI state, exposed it. Verified against the laid-out child rect in
+    /// the settled harness (inverse-transform of `rect_of_key("layer:…")` equals
+    /// `(rect.x, rect.y, vw, vh)` bit-for-bit at the probed zoom).
+    pub fn content_rect(&self, viewport_rect: (f32, f32, f32, f32)) -> (f32, f32, f32, f32) {
+        let [_, _, vw, vh] = self.view_box();
+        (viewport_rect.0, viewport_rect.1, vw, vh)
+    }
+
     /// Map a viewBox (mm) point back to board coordinates in mm, undoing the y-flip
     /// — the inverse of [`board_to_view`]. This is *only* the flip inverse; it
     /// assumes its input is already in viewBox-mm (not screen or content px). The

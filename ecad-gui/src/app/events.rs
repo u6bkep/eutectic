@@ -426,7 +426,9 @@ impl EcadApp {
             let (Some(rect), Some(vv)) = (cx.rect_of_key(key), cx.viewport_view(key)) else {
                 return;
             };
-            let el_rect = (rect.x, rect.y, rect.w, rect.h);
+            // The asset's honest stretch rect: the vector child is laid out at
+            // natural (viewBox) size in the viewport, NOT stretched to the pane.
+            let el_rect = view.canvas.content_rect((rect.x, rect.y, rect.w, rect.h));
 
             let content_px = vv.unproject(pos, (rect.x, rect.y));
             if let Some(mm) = view.canvas.content_px_to_board_mm(content_px, el_rect) {
@@ -671,7 +673,9 @@ impl EcadApp {
         let (Some(rect), Some(vv)) = (cx.rect_of_key(key), cx.viewport_view(key)) else {
             return;
         };
-        let el_rect = (rect.x, rect.y, rect.w, rect.h);
+        // Same natural-size layout fact as the board path: map through the
+        // asset's honest content rect, not the pane's viewport rect.
+        let el_rect = view.content_rect((rect.x, rect.y, rect.w, rect.h));
         let Some(p) = view.pointer_to_schematic_nm(pos, el_rect, vv) else {
             return;
         };

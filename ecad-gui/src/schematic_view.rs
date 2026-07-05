@@ -294,6 +294,18 @@ impl SchematicView {
         best.map(|c| c.id.clone())
     }
 
+    /// The laid-out rect of the schematic's vector-asset El inside a pane's
+    /// viewport — the `el_rect` [`pointer_to_schematic_nm`](Self::pointer_to_schematic_nm)
+    /// expects. Same natural-size layout fact as
+    /// [`Canvas::content_rect`](crate::canvas::Canvas::content_rect): the asset
+    /// child is laid out at one viewBox unit per logical px anchored at the
+    /// viewport's inner top-left, so the honest rect is `(x, y, vw, vh)` — not
+    /// the viewport's own rect.
+    pub fn content_rect(&self, viewport_rect: (f32, f32, f32, f32)) -> (f32, f32, f32, f32) {
+        let [_, _, vw, vh] = view_box(self.bounds);
+        (viewport_rect.0, viewport_rect.1, vw, vh)
+    }
+
     /// Map a viewport pointer (logical px) to a schematic point in nm (y-up), composing
     /// unproject + viewBox/rect scale + y-flip + mm→nm — the schematic twin of
     /// [`crate::canvas::pick::pointer_to_board_nm`]. `None` for a degenerate rect.
