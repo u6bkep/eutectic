@@ -128,6 +128,16 @@ pub(crate) fn pane_index(p: PaneId) -> usize {
 
 /// The event-route key of the dual/stacked layout toggle button.
 pub(crate) const LAYOUT_TOGGLE_KEY: &str = "layout:toggle";
+/// The toolbar Save button key AND the Ctrl+S hotkey action name (m6 save model).
+pub(crate) const SAVE_KEY: &str = "save";
+/// The toolbar Undo button key AND the Ctrl+Z hotkey action name.
+pub(crate) const UNDO_KEY: &str = "undo";
+/// The toolbar Redo button key AND the Ctrl+Shift+Z / Ctrl+Y hotkey action name.
+pub(crate) const REDO_KEY: &str = "redo";
+/// The conflict banner's "Reload from disk" action (discard my edits, apply disk).
+pub(crate) const CONFLICT_RELOAD_KEY: &str = "conflict:reload";
+/// The conflict banner's "Keep mine" action (dismiss; doc stays dirty).
+pub(crate) const CONFLICT_KEEP_KEY: &str = "conflict:keep";
 /// The event-route key of the findings-panel collapse toggle.
 pub(crate) const FINDINGS_TOGGLE_KEY: &str = "findings:toggle";
 /// The route-key prefix of a toolbar findings chip (a source label, or `ok`, appended).

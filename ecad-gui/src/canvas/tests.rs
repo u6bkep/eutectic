@@ -214,6 +214,8 @@ fn empty_overlay_is_none_populated_is_some() {
         )],
         measure: None,
         findings: Vec::new(),
+        ghost: Vec::new(),
+        ratsnest: Vec::new(),
     };
     let el = canvas
         .overlay_el(&overlay)

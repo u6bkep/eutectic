@@ -8,8 +8,9 @@
 use crate::app::domain::{BoardView, DocStats};
 use crate::app::libraries::LIBRARIES_TOGGLE_KEY;
 use crate::app::pane::{
-    CANVAS_BG, FINDINGS_TOGGLE_KEY, LAYOUT_TOGGLE_KEY, SPLIT_HANDLE_KEY, SPLIT_ROW_KEY,
-    finding_row_key, findings_chip_key, pane_index, pane_placeholder, switch_key,
+    CANVAS_BG, CONFLICT_KEEP_KEY, CONFLICT_RELOAD_KEY, FINDINGS_TOGGLE_KEY, LAYOUT_TOGGLE_KEY,
+    REDO_KEY, SAVE_KEY, SPLIT_HANDLE_KEY, SPLIT_ROW_KEY, UNDO_KEY, finding_row_key,
+    findings_chip_key, pane_index, pane_placeholder, switch_key,
 };
 use crate::app::{EcadApp, PaneId, PaneLayout, ViewKind};
 use crate::canvas::pick::SemanticId;
@@ -57,17 +58,50 @@ impl EcadApp {
 
         let split = self.pane_split(cx, &sets);
 
-        column([
-            self.viewer_toolbar(zoom),
+        let mut children = vec![self.viewer_toolbar(zoom)];
+        // The persistent conflict banner (m6 save model): rendered whenever the
+        // watcher delivered an external change while the doc was dirty. It stays
+        // until one of its two explicit actions resolves it — never a toast,
+        // never silent last-writer.
+        if let Some(banner) = self.conflict_banner() {
+            children.push(banner);
+        }
+        children.push(
             row([split, self.right_sidebar()])
                 .gap(tokens::SPACE_3)
                 .width(Size::Fill(1.0))
                 .height(Size::Fill(1.0)),
-            self.status_bar(zoom),
-        ])
-        .gap(tokens::SPACE_3)
-        .width(Size::Fill(1.0))
-        .height(Size::Fill(1.0))
+        );
+        children.push(self.status_bar(zoom));
+        column(children)
+            .gap(tokens::SPACE_3)
+            .width(Size::Fill(1.0))
+            .height(Size::Fill(1.0))
+    }
+
+    /// The conflict banner (m6): "file changed on disk; unsaved edits" with the
+    /// two explicit resolutions — Reload (discard my edits, apply disk) and Keep
+    /// mine (dismiss; doc stays dirty; the next save overwrites disk). `None`
+    /// when no conflict is pending.
+    fn conflict_banner(&self) -> Option<El> {
+        self.domain.edit.conflict.as_ref()?;
+        Some(
+            alert([
+                alert_title("File changed on disk"),
+                alert_description(
+                    "The file was modified outside this session while you have unsaved \
+                     edits. Reload discards your edits and follows the disk; Keep mine \
+                     keeps editing (the next Save overwrites the disk).",
+                ),
+                row([
+                    button("Reload from disk").key(CONFLICT_RELOAD_KEY),
+                    button("Keep mine").key(CONFLICT_KEEP_KEY).primary(),
+                ])
+                .gap(tokens::SPACE_2),
+            ])
+            .destructive()
+            .width(Size::Fill(1.0)),
+        )
     }
 
     /// The zoom to display in the toolbar / status bar: the active board pane's zoom
@@ -259,6 +293,18 @@ impl EcadApp {
         } else {
             None
         };
+        // The drag ghost + live ratsnest (m6): only in the pane the drag is
+        // happening in, and only once the drag has crossed the click slop (an
+        // un-moved press shows nothing). Both are pure vector math over state
+        // captured at drag start — no kernel call, and the static board layers
+        // are untouched (never re-tessellated) during the drag.
+        let (ghost, ratsnest) = {
+            let drag = self.drag.borrow();
+            match drag.as_ref() {
+                Some(d) if d.pane == pane && d.moved => (d.ghost_shapes(), d.ratsnest()),
+                _ => (Vec::new(), Vec::new()),
+            }
+        };
         // Findings with a derived board point become violation markers (both board
         // panes show them — a finding is a property of the board, not a pane).
         let finding_markers: Vec<(ecad_core::coord::Point, bool)> = findings
@@ -279,6 +325,8 @@ impl EcadApp {
             highlights,
             measure,
             findings: finding_markers,
+            ghost,
+            ratsnest,
         }
     }
 
@@ -512,14 +560,20 @@ impl EcadApp {
         }
     }
 
-    /// The toolbar: app title, filename badge, the dual/stacked layout toggle, the global
+    /// The toolbar: app title, filename badge (dirty-dot suffixed), Save (when the
+    /// doc has a path) + Undo / Redo, the dual/stacked layout toggle, the global
     /// tool palette, and Fit / Reset framing buttons + a live zoom-percent readout.
     fn viewer_toolbar(&self, zoom: f32) -> El {
-        let name = self
+        let mut name = self
             .domain
             .filename
             .clone()
             .unwrap_or_else(|| "untitled".into());
+        // The dirty marker (m6): commits not yet written to the file show as a
+        // bullet on the filename badge, cleared by Save / external reload.
+        if self.domain.edit.dirty {
+            name.push_str(" •");
+        }
         let active = self.tool.get();
         let tool_buttons: Vec<El> = Tool::all()
             .into_iter()
@@ -539,9 +593,28 @@ impl EcadApp {
         // beside them whenever the freshest source failed to load — unmissable, never a
         // toast.
         let mut lead: Vec<El> = vec![toolbar_title("ecad"), badge(name).info()];
+        // Save renders only for a doc that HAS a source path (the m6 save model:
+        // no-path docs — fixtures — have no save affordance), primary while dirty
+        // so the pending state is glanceable. Undo / Redo always render (no-ops
+        // on empty stacks).
+        if self.domain.source_path.is_some() {
+            let save = button("Save").key(SAVE_KEY);
+            lead.push(if self.domain.edit.dirty {
+                save.primary()
+            } else {
+                save
+            });
+        }
+        lead.push(button("Undo").key(UNDO_KEY));
+        lead.push(button("Redo").key(REDO_KEY));
         lead.extend(self.findings_chips());
         if let Some(err) = &self.domain.reload_error {
             lead.push(reload_error_chip(err));
+        }
+        // The save/commit failure chip (m6): persists until the next success.
+        if let Some(err) = &self.domain.edit.error {
+            let first = err.lines().next().unwrap_or(err);
+            lead.push(badge(format!("edit failed: {first}")).destructive());
         }
         lead.push(button(layout_label).key(LAYOUT_TOGGLE_KEY));
         lead.push(button("Libraries").key(LIBRARIES_TOGGLE_KEY));

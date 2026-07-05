@@ -221,11 +221,14 @@ impl EcadApp {
     /// the registry file immediately (when a save path is wired — `main.rs`
     /// wires the per-machine default; fixtures may leave it `None`),
     /// invalidate the row-status cache, and re-resolve + re-elaborate the
-    /// current doc through [`apply_reload`](EcadApp::apply_reload) — the *same*
-    /// code path as a source reload, so the revision bumps and cameras /
-    /// selection / layer visibility are preserved exactly as a reload
-    /// preserves them. The empty (no-document) state skips the re-elaborate
-    /// (there is no source to resolve).
+    /// current doc through `EcadApp::swap_source` — the same swap core a source
+    /// reload uses, so the revision bumps and cameras / selection / layer
+    /// visibility are preserved exactly as a reload preserves them. Unlike an
+    /// *external* reload it does NOT touch the m6 editing state: the doc's
+    /// source is the serialize-refreshed current state (unsaved edits
+    /// included), so dirty / undo / redo survive a registry edit. The empty
+    /// (no-document) state skips the re-elaborate (there is no source to
+    /// resolve).
     fn edit_registry(
         &mut self,
         edit: impl FnOnce(&mut Registry) -> Result<(), String>,
@@ -250,7 +253,7 @@ impl EcadApp {
             // fresh source may clear it).
             let prior_error = self.domain.reload_error.clone();
             let source = self.domain.source.clone();
-            self.apply_reload(source);
+            self.swap_source(source);
             if self.domain.reload_error.is_none() {
                 self.domain.reload_error = prior_error;
             }

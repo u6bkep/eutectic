@@ -404,6 +404,28 @@ impl Canvas {
             paths.push(finding_marker_path(*p, flip_sum, color));
         }
 
+        // Drag ghost (m6): the dragged component's pad shapes at the uncommitted
+        // position, as outline halos in the ghost accent — clearly "preview, not
+        // copper". Rendered before the ratsnest so the lines read on top.
+        for shape in &overlay.ghost {
+            paths.push(shape_halo_path(shape, flip_sum, ghost_color()));
+        }
+
+        // Live ratsnest (m6): a thin straight line from each ghost pad to the
+        // nearest other member pad of its net.
+        for (a, b) in &overlay.ratsnest {
+            let (ax, ay) = board_to_view(*a, flip_sum);
+            let (bx, by) = board_to_view(*b, flip_sum);
+            paths.push(
+                PathBuilder::new()
+                    .move_to(ax, ay)
+                    .line_to(bx, by)
+                    .stroke_solid(ratsnest_color(), RATSNEST_STROKE_MM)
+                    .stroke_line_cap(damascene_core::vector::VectorLineCap::Round)
+                    .build(),
+            );
+        }
+
         if paths.is_empty() {
             return None;
         }
@@ -431,6 +453,12 @@ pub struct Overlay {
     /// (vs a warning), drawn as a distinct violation ring — visually separate from the
     /// selection halo (a filled-colour crosshair ring, not a shape-tracing stroke).
     pub findings: Vec<(Point, bool)>,
+    /// The in-flight drag ghost (m6): the dragged component's pad shapes translated to
+    /// the uncommitted position (world nm, y-up). Empty when no drag is in progress.
+    pub ghost: Vec<Shape2D>,
+    /// The live ratsnest during a drag (m6): straight segments from each ghost pad to
+    /// the nearest other member pad of its net (world nm, y-up).
+    pub ratsnest: Vec<(Point, Point)>,
 }
 
 /// Accent stroke for a selected feature: a bright halo tracing the shape's outline.
@@ -511,6 +539,22 @@ fn overlay_hover_color() -> Color {
 fn measure_color() -> Color {
     Color::srgb_token("ecad.overlay.measure", 0xf5, 0xa5, 0x24, 0xff)
 }
+
+/// The drag-ghost accent — a violet outline, distinct from selection cyan, measure
+/// amber, and every finding/layer colour: reads as "uncommitted preview".
+fn ghost_color() -> Color {
+    Color::srgb_token("ecad.overlay.ghost", 0xb8, 0x8c, 0xff, 0xdd)
+}
+
+/// The live-ratsnest line — a pale desaturated yellow (the classic airwire look),
+/// translucent so it never obscures copper.
+fn ratsnest_color() -> Color {
+    Color::srgb_token("ecad.overlay.ratsnest", 0xe8, 0xe4, 0xa0, 0xbb)
+}
+
+/// Ratsnest stroke width in mm — thinner than the overlay halos (an airwire is a
+/// cue, not geometry).
+const RATSNEST_STROKE_MM: f32 = 0.08;
 
 // ----------------------------------------------------------------------------
 // Coordinate mapping (the single nm→mm + y-flip seam).

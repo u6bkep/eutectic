@@ -87,7 +87,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             else {
                 unreachable!("lib_source is constructed as Registry above")
             };
-            DomainState::from_source_registry(source, filename, registry, save_path)
+            let mut domain = DomainState::from_source_registry(source, filename, registry, save_path);
+            // The explicit-save target (m6): the loaded file itself. Only the
+            // windowed path sets this — fixtures have no save affordance.
+            domain.source_path = Some(std::path::PathBuf::from(path));
+            domain
         }
         None => DomainState::empty().with_lib_source(lib_source),
     };

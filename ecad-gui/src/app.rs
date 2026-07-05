@@ -42,12 +42,16 @@ pub(crate) use libraries::{
     LIBRARIES_ADD_KEY, LIBRARIES_CLOSE_KEY, LIBRARIES_TOGGLE_KEY, library_remove_key,
 };
 #[cfg(test)]
-pub(crate) use pane::{LAYOUT_TOGGLE_KEY, finding_row_key, pane_index};
+pub(crate) use pane::{
+    CONFLICT_KEEP_KEY, CONFLICT_RELOAD_KEY, LAYOUT_TOGGLE_KEY, REDO_KEY, SAVE_KEY, UNDO_KEY,
+    finding_row_key, pane_index,
+};
 
 use crate::findings::Findings;
 use crate::reload::{SourceMailbox, SourceMsg};
-use crate::tool::{MeasureState, Tool};
+use crate::tool::{DragState, MeasureState, Tool};
 use damascene_core::prelude::*;
+use ecad_core::command::Transaction;
 use ecad_core::doc::Doc;
 use std::cell::{Cell, RefCell};
 
@@ -137,6 +141,17 @@ pub struct EcadApp {
     /// ([`registry::row_status`](crate::registry::row_status)), so it must not run
     /// every frame.
     pub(crate) lib_statuses: RefCell<Option<Vec<LibRow>>>,
+    /// The Select tool's in-flight component drag (m6) — the uncommitted preview
+    /// state between pointer-down on a component and pointer-up (commit) / Esc
+    /// (cancel). `RefCell` per the interior-mutability pattern: updated in
+    /// `on_event`, read by the overlay builder in `build`.
+    pub(crate) drag: RefCell<Option<DragState>>,
+    /// Set when a moved drag just committed on `PointerUp`, so the trailing
+    /// `Click` (damascene fires PointerUp then Click for an up on the pressed
+    /// node) does not re-run click-select over the drop point. Cleared by the
+    /// next `PointerDown` (so an eaten Click can never go stale) and consumed by
+    /// the Click handler.
+    pub(crate) suppress_click: Cell<bool>,
 }
 
 impl EcadApp {
@@ -168,6 +183,8 @@ impl EcadApp {
             libraries_open: Cell::new(false),
             lib_ui: RefCell::new(LibUi::default()),
             lib_statuses: RefCell::new(None),
+            drag: RefCell::new(None),
+            suppress_click: Cell::new(false),
         }
     }
 
@@ -283,6 +300,33 @@ impl EcadApp {
         self.measure.set(m);
     }
 
+    /// Start a canned component drag with the ghost at `to` — for fixtures /
+    /// tests that render a drag-in-progress scene without driving live pointer
+    /// events. Uses the same drag builder as the interactive pointer-down path
+    /// (pad shapes + ratsnest pins from the cached candidates), anchored at the
+    /// component's current position with zero slop. Returns `false` when the
+    /// component doesn't resolve (no doc / no pad candidates).
+    pub fn set_drag(
+        &self,
+        comp: &ecad_core::id::EntityId,
+        pane: PaneId,
+        to: ecad_core::coord::Point,
+    ) -> bool {
+        let Ok(doc) = &self.domain.doc else {
+            return false;
+        };
+        let Some(c) = doc.components.get(comp) else {
+            return false;
+        };
+        let start = c.pos.value;
+        let Some(mut drag) = self.make_drag(comp.clone(), pane, start, 0) else {
+            return false;
+        };
+        drag.update(to);
+        *self.drag.borrow_mut() = Some(drag);
+        true
+    }
+
     /// Apply a live-source reload (m5). Re-elaborates `source` against the current
     /// library and:
     ///
@@ -299,10 +343,41 @@ impl EcadApp {
     ///
     /// `&mut self` because a reload swaps domain + derived state; called from
     /// `before_build` (host frame) after the mailbox drain, and directly by tests.
+    ///
+    /// This is the **external-reload** entry (disk content applied): on success it
+    /// additionally resets the m6 editing state — the doc now mirrors disk, so the
+    /// dirty flag clears, the undo/redo stacks empty (a snapshot from before an
+    /// external reload would silently discard the external edit if replayed), any
+    /// pending conflict is consumed, and the saved-content baselines re-anchor to
+    /// the fresh doc. Registry edits re-elaborate through [`swap_source`]
+    /// (`pub(crate)`) instead, which leaves the editing state alone.
+    ///
+    /// [`swap_source`]: EcadApp::swap_source
     pub fn apply_reload(&mut self, source: String) {
-        let (lib, notes, doc) = self.domain.elaborate_source(&source);
-        match doc {
-            Ok(doc) => {
+        if self.swap_source(source) {
+            let d = &mut self.domain;
+            d.edit.dirty = false;
+            d.edit.undo.clear();
+            d.edit.redo.clear();
+            d.edit.conflict = None;
+            d.edit.last_saved_write = None;
+            d.edit.saved_canon = d.doc.as_ref().ok().map(ecad_core::text::serialize);
+        }
+    }
+
+    /// The shared re-elaborate-and-swap core of every source transition (external
+    /// reload, registry edit, undo/redo): re-resolve libs + re-elaborate `source`
+    /// and, on success, swap in the new history/doc/lib, rebuild the derived
+    /// caches, prune the selection to ids that still resolve, bump the revision,
+    /// and clear any standing reload error — cameras / layer visibility / pane
+    /// layout / tool are untouched. On failure the last-good doc stays rendered
+    /// (permissive) and the error lands in `domain.reload_error`; returns whether
+    /// the swap happened. Never touches the m6 editing state — callers own that.
+    pub(crate) fn swap_source(&mut self, source: String) -> bool {
+        let (lib, notes, history) = self.domain.elaborate_source(&source);
+        match history {
+            Ok(history) => {
+                let doc = history.doc().clone();
                 let derived = DerivedCaches::build(&doc, &lib, &notes);
                 // Prune selection + hover to ids that still resolve in the NEW doc,
                 // using the freshly-built candidate/schematic ids as the resolvable set.
@@ -310,18 +385,193 @@ impl EcadApp {
                 *self.derived.borrow_mut() = derived;
                 self.domain.lib = lib;
                 self.domain.lib_notes = notes;
+                self.domain.history = Some(history);
                 self.domain.doc = Ok(doc);
                 self.domain.source = source;
                 self.domain.revision += 1;
                 self.domain.reload_error = None;
+                // Any in-flight drag preview is anchored to the old candidates; drop it.
+                *self.drag.borrow_mut() = None;
+                true
             }
             Err(err) => {
                 // Permissive: keep the last-good doc + caches + resolved lib on screen;
                 // surface the error persistently. Do NOT bump the revision (nothing
                 // derived changed).
                 self.domain.reload_error = Some(err);
+                false
             }
         }
+    }
+
+    /// A disk change arrived through the live-source mailbox (m5 watcher → m6 save
+    /// model). Three-way routing, per the decided model:
+    ///
+    /// - **our own save echo** (text equals the last Save write): consumed
+    ///   silently — the GUI never reloads its own write back;
+    /// - **doc clean**: auto-apply as before (the GUI follows external edits);
+    /// - **doc dirty**: never silent last-writer — park the text as the pending
+    ///   conflict; the persistent banner offers explicit Reload / Keep-mine. A
+    ///   newer delivery replaces the pending text.
+    pub(crate) fn handle_disk_change(&mut self, source: String) {
+        if self.domain.edit.last_saved_write.as_deref() == Some(source.as_str()) {
+            return; // watcher echo of our own write
+        }
+        if self.domain.edit.dirty {
+            self.domain.edit.conflict = Some(source);
+        } else {
+            self.apply_reload(source);
+        }
+    }
+
+    /// Commit a GUI-authored transaction — **the command-commit path** (m6). The
+    /// pre-commit doc is snapshotted (canonical `serialize`) onto the undo stack
+    /// (redo cleared, stack bounded), the engine commit runs against the held
+    /// [`History`](ecad_core::history::History), and on success the existing
+    /// reload machinery runs: derived caches rebuild as one bundle, the revision
+    /// bumps, and the selection is pruned to ids that still resolve (a moved
+    /// component stays selected). The doc is now dirty (commits not yet written
+    /// to the file). On failure nothing changes (engine atomicity) and the error
+    /// is returned (callers surface it in `edit.error`).
+    pub(crate) fn commit_edit(&mut self, txn: Transaction, label: &str) -> Result<(), String> {
+        let snapshot = match &self.domain.doc {
+            Ok(doc) => ecad_core::text::serialize(doc),
+            Err(e) => return Err(format!("no document to edit: {e}")),
+        };
+        self.domain.commit(txn, label)?;
+        let edit = &mut self.domain.edit;
+        edit.undo.push(snapshot);
+        if edit.undo.len() > domain::UNDO_CAP {
+            edit.undo.remove(0);
+        }
+        edit.redo.clear();
+        edit.dirty = true;
+        edit.error = None;
+        // The existing derived machinery: rebuild the whole bundle, prune, bump.
+        let doc = self.domain.doc.as_ref().expect("commit succeeded").clone();
+        let derived = DerivedCaches::build(&doc, &self.domain.lib, &self.domain.lib_notes);
+        self.prune_selection(&doc, &derived);
+        *self.derived.borrow_mut() = derived;
+        self.domain.revision += 1;
+        Ok(())
+    }
+
+    /// Undo the newest GUI commit by restoring its pre-commit source snapshot
+    /// through the same reload-like path (re-resolve libs — a snapshot may differ
+    /// in `use` lines — then re-elaborate): cameras and still-resolving selection
+    /// are preserved exactly like a reload. The current state is pushed onto the
+    /// redo stack. Dirty is recomputed by the string compare against the
+    /// last-saved content — undoing back to the saved state clears the flag;
+    /// anything else keeps it. No-op when the undo stack is empty.
+    pub fn undo(&mut self) {
+        let Some(snapshot) = self.domain.edit.undo.pop() else {
+            return;
+        };
+        let current = match &self.domain.doc {
+            Ok(doc) => ecad_core::text::serialize(doc),
+            Err(_) => {
+                self.domain.edit.undo.push(snapshot);
+                return;
+            }
+        };
+        if self.swap_source(snapshot.clone()) {
+            let edit = &mut self.domain.edit;
+            edit.redo.push(current);
+            edit.dirty = edit.saved_canon.as_deref() != Some(snapshot.as_str());
+        } else {
+            // The snapshot failed to elaborate (a registry edit in between can do
+            // that): keep the stack intact; swap_source surfaced the error.
+            self.domain.edit.undo.push(snapshot);
+        }
+    }
+
+    /// Redo the newest undone state (the mirror of [`undo`](Self::undo)); the
+    /// current state goes back onto the undo stack. Same dirty string-compare.
+    /// No-op when the redo stack is empty.
+    pub fn redo(&mut self) {
+        let Some(snapshot) = self.domain.edit.redo.pop() else {
+            return;
+        };
+        let current = match &self.domain.doc {
+            Ok(doc) => ecad_core::text::serialize(doc),
+            Err(_) => {
+                self.domain.edit.redo.push(snapshot);
+                return;
+            }
+        };
+        if self.swap_source(snapshot.clone()) {
+            let edit = &mut self.domain.edit;
+            edit.undo.push(current);
+            edit.dirty = edit.saved_canon.as_deref() != Some(snapshot.as_str());
+        } else {
+            self.domain.edit.redo.push(snapshot);
+        }
+    }
+
+    /// Explicit save (m6 save model): write `text::serialize(doc)` to the source
+    /// path atomically (temp + rename, like the registry), clear the dirty flag,
+    /// and remember the written text so the watcher echo of our own write is
+    /// consumed silently. No-ops: no source path (fixtures — no save affordance),
+    /// no loaded doc, or a clean doc (never rewrite the user's hand-authored file
+    /// into canonical form unless there is something to save). A write failure
+    /// surfaces in `edit.error` and the doc stays dirty.
+    pub fn save(&mut self) {
+        let Some(path) = self.domain.source_path.clone() else {
+            return;
+        };
+        let Ok(doc) = &self.domain.doc else {
+            return;
+        };
+        if !self.domain.edit.dirty {
+            return;
+        }
+        let text = ecad_core::text::serialize(doc);
+        match domain::atomic_write(&path, &text) {
+            Ok(()) => {
+                let edit = &mut self.domain.edit;
+                edit.dirty = false;
+                edit.saved_canon = Some(text.clone());
+                edit.last_saved_write = Some(text);
+                edit.error = None;
+            }
+            Err(e) => self.domain.edit.error = Some(e),
+        }
+    }
+
+    /// Resolve the conflict banner with **Reload**: discard my edits, apply the
+    /// disk text (through the external-reload path, which clears the editing
+    /// state). No-op when no conflict is pending.
+    pub fn conflict_reload(&mut self) {
+        if let Some(disk) = self.domain.edit.conflict.take() {
+            self.apply_reload(disk);
+        }
+    }
+
+    /// Resolve the conflict banner with **Keep mine**: dismiss; the doc stays
+    /// dirty and the next save overwrites disk. No-op when no conflict is pending.
+    pub fn conflict_keep(&mut self) {
+        self.domain.edit.conflict = None;
+    }
+
+    /// Is the doc dirty (commits not yet written to the file)?
+    pub fn dirty(&self) -> bool {
+        self.domain.edit.dirty
+    }
+
+    /// The pending disk-conflict text, if the watcher delivered an external
+    /// change while the doc was dirty (the banner is up). For tests / fixtures.
+    pub fn conflict(&self) -> Option<String> {
+        self.domain.edit.conflict.clone()
+    }
+
+    /// The undo / redo stack depths. For tests and the toolbar.
+    pub fn undo_depths(&self) -> (usize, usize) {
+        (self.domain.edit.undo.len(), self.domain.edit.redo.len())
+    }
+
+    /// Is a component drag in flight? For tests.
+    pub fn drag_active(&self) -> bool {
+        self.drag.borrow().is_some()
     }
 
     /// Prune the selection + hover sets to the ids that still resolve against the

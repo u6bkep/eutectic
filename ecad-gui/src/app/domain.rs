@@ -12,6 +12,7 @@ use crate::registry::{self, LibNote, Registry};
 use crate::schematic_view::SchematicView;
 use crate::selection::SelectionModel;
 use ecad_core::doc::Doc;
+use ecad_core::history::History;
 use std::cell::RefCell;
 
 /// Where a [`DomainState`]'s [`PartLib`](ecad_core::part::PartLib) comes from —
@@ -92,7 +93,61 @@ pub struct DomainState {
     /// unmissable banner until a good reload clears it. `None` when the current doc is
     /// the freshest source.
     pub reload_error: Option<String>,
+    /// The held engine [`History`] behind [`doc`](Self::doc) — the m6 editing
+    /// foundation. GUI mutations are engine commands committed against THIS history
+    /// ([`commit`](Self::commit)), so command-authored state survives across GUI
+    /// edits instead of being rebuilt from source each time. Rebuilt only on a
+    /// (re)load / undo / redo (each of which elaborates fresh source text). `None`
+    /// exactly when [`doc`](Self::doc) is `Err` (no document / failed load).
+    pub(crate) history: Option<History>,
+    /// The filesystem path the document was loaded from — where explicit Save
+    /// writes. `None` for fixtures / in-memory docs, which therefore have **no
+    /// save affordance** (the decided save model). Only `main.rs` sets it.
+    pub source_path: Option<std::path::PathBuf>,
+    /// The m6 editing state: dirty flag, undo/redo source snapshots, the
+    /// last-saved content (the dirty-compare + save-echo baselines), the pending
+    /// disk-conflict text, and the last save/commit error.
+    pub(crate) edit: EditState,
 }
+
+/// The GUI editing state (m6, the decided save model — `docs/gui-architecture.md`,
+/// "Save model"): edits live in memory as dirty state; explicit save writes
+/// `serialize(doc)`; a disk change while dirty is a conflict banner, never silent
+/// last-writer; undo/redo are source snapshots.
+#[derive(Debug, Default)]
+pub(crate) struct EditState {
+    /// True when the doc has commits not yet written to the file. Set by every
+    /// GUI commit; cleared by Save and by an applied external reload; recomputed
+    /// on undo/redo by comparing the restored snapshot to [`saved_canon`](Self::saved_canon).
+    pub(crate) dirty: bool,
+    /// Undo stack: the canonical `serialize(doc)` snapshot taken **before** each
+    /// GUI commit (newest last). Bounded at [`UNDO_CAP`]; cleared on external reload.
+    pub(crate) undo: Vec<String>,
+    /// Redo stack: snapshots displaced by undo (newest last). Cleared on every
+    /// new GUI commit and on external reload.
+    pub(crate) redo: Vec<String>,
+    /// The canonical `serialize(doc)` that corresponds to the on-disk state: set
+    /// at load / applied reload (serialize of the freshly loaded doc) and at Save
+    /// (the exact text written). The undo/redo dirty compare — "an undo/redo does
+    /// NOT clear dirty unless the restored snapshot equals the last-saved
+    /// content" — is a cheap string compare against this.
+    pub(crate) saved_canon: Option<String>,
+    /// The exact text of our own last Save write, for **watcher echo
+    /// suppression**: a mailbox delivery whose text equals this is our own write
+    /// coming back through the file watcher and is consumed silently. Cleared
+    /// when a genuinely external change applies (disk has moved on).
+    pub(crate) last_saved_write: Option<String>,
+    /// A disk change delivered while the doc was dirty — the pending conflict
+    /// (the full new source text). Renders as the persistent conflict banner with
+    /// explicit Reload / Keep-mine actions; a newer delivery replaces it.
+    pub(crate) conflict: Option<String>,
+    /// The last save/commit failure, rendered as a persistent destructive chip
+    /// until the next successful save/commit.
+    pub(crate) error: Option<String>,
+}
+
+/// Undo-stack bound: the oldest snapshot is dropped beyond this depth.
+pub(crate) const UNDO_CAP: usize = 100;
 
 impl DomainState {
     /// The empty state: no document loaded.
@@ -107,6 +162,9 @@ impl DomainState {
             selection: RefCell::new(SelectionModel::new()),
             revision: 0,
             reload_error: None,
+            history: None,
+            source_path: None,
+            edit: EditState::default(),
         }
     }
 
@@ -145,9 +203,14 @@ impl DomainState {
         lib: ecad_core::part::PartLib,
         extra: impl FnOnce(&Doc) -> Vec<ecad_core::command::Command>,
     ) -> Self {
-        let doc = elaborate(&source, &lib, extra);
+        let history = elaborate(&source, &lib, extra);
+        let (history, doc) = split_history(history);
         DomainState {
             source,
+            edit: EditState {
+                saved_canon: doc.as_ref().ok().map(ecad_core::text::serialize),
+                ..EditState::default()
+            },
             doc,
             lib_source: LibSource::Fixed(lib.clone()),
             lib,
@@ -156,6 +219,8 @@ impl DomainState {
             selection: RefCell::new(SelectionModel::new()),
             revision: 0,
             reload_error: None,
+            history,
+            source_path: None,
         }
     }
 
@@ -172,9 +237,14 @@ impl DomainState {
         save_path: Option<std::path::PathBuf>,
     ) -> Self {
         let (lib, lib_notes) = registry::resolve(&source, &registry);
-        let doc = elaborate(&source, &lib, |_| Vec::new());
+        let history = elaborate(&source, &lib, |_| Vec::new());
+        let (history, doc) = split_history(history);
         DomainState {
             source,
+            edit: EditState {
+                saved_canon: doc.as_ref().ok().map(ecad_core::text::serialize),
+                ..EditState::default()
+            },
             doc,
             lib_source: LibSource::Registry {
                 registry,
@@ -186,6 +256,8 @@ impl DomainState {
             selection: RefCell::new(SelectionModel::new()),
             revision: 0,
             reload_error: None,
+            history,
+            source_path: None,
         }
     }
 
@@ -202,40 +274,82 @@ impl DomainState {
     }
 
     /// Re-resolve + re-parse + re-elaborate `source` — the reload entry point.
-    /// Returns the freshly-resolved library + notes and the elaboration result
-    /// WITHOUT touching `self`; the caller ([`EcadApp::apply_reload`](crate::app::EcadApp::apply_reload))
-    /// decides whether to swap them in (success) or keep the last-good doc + lib and
-    /// surface the error (failure). Pure over `(source, self.lib_source)`.
+    /// Returns the freshly-resolved library + notes and the elaboration result (a
+    /// fresh [`History`] whose head is the new doc) WITHOUT touching `self`; the
+    /// caller ([`EcadApp::apply_reload`](crate::app::EcadApp::apply_reload) /
+    /// `swap_source`) decides whether to swap them in (success) or keep the
+    /// last-good doc + lib and surface the error (failure). Pure over
+    /// `(source, self.lib_source)`.
     pub(crate) fn elaborate_source(
         &self,
         source: &str,
-    ) -> (ecad_core::part::PartLib, Vec<LibNote>, Result<Doc, String>) {
+    ) -> (
+        ecad_core::part::PartLib,
+        Vec<LibNote>,
+        Result<History, String>,
+    ) {
         let (lib, notes) = self.resolve_lib(source);
-        let doc = elaborate(source, &lib, |_| Vec::new());
-        (lib, notes, doc)
+        let history = elaborate(source, &lib, |_| Vec::new());
+        (lib, notes, history)
     }
+
+    /// Commit a GUI-authored transaction against the held [`History`] — **the
+    /// command-commit path** (m6). On success the head doc swaps in and
+    /// [`source`](Self::source) is refreshed to the canonical `serialize(doc)`
+    /// projection, so every "re-elaborate the current source" path (registry
+    /// edits, undo snapshots) sees the command-authored state. On failure the
+    /// history head is unchanged (engine atomicity) and the diagnostics come back
+    /// as the `Err` string. Derived-cache rebuild / revision bump / dirty
+    /// bookkeeping are the caller's job ([`EcadApp::commit_edit`](crate::app::EcadApp::commit_edit)).
+    pub(crate) fn commit(
+        &mut self,
+        txn: ecad_core::command::Transaction,
+        label: &str,
+    ) -> Result<(), String> {
+        let Some(history) = self.history.as_mut() else {
+            return Err("no document loaded".to_string());
+        };
+        history.commit(txn, &self.lib, label).map_err(fmt_diags)?;
+        let doc = history.doc().clone();
+        self.source = ecad_core::text::serialize(&doc);
+        self.doc = Ok(doc);
+        Ok(())
+    }
+}
+
+/// Split an elaboration result into the stored `(history, doc)` pair: the held
+/// history (when the load succeeded) and the head-doc clone the render tier reads.
+fn split_history(history: Result<History, String>) -> (Option<History>, Result<Doc, String>) {
+    match history {
+        Ok(h) => {
+            let doc = h.doc().clone();
+            (Some(h), Ok(doc))
+        }
+        Err(e) => (None, Err(e)),
+    }
+}
+
+/// Render engine diagnostics as the one-string error the UI displays.
+fn fmt_diags(diags: Vec<ecad_core::diagnostic::Diagnostic>) -> String {
+    diags
+        .iter()
+        .map(|d| format!("[{}] {}", d.code, d.message))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Parse + elaborate `source` against `lib` through `ecad-core`'s public
 /// command API (`History` + `Command::LoadText` — the same entry point the
 /// `ecad-core` examples use), then commit the `extra` post-load command batch
-/// (fixture-routed copper) if non-empty. Never panics: any failure is the
-/// `Err` string for the UI to display.
+/// (fixture-routed copper) if non-empty. Returns the **whole `History`** (head =
+/// the loaded doc) so the caller can hold it for GUI command commits (m6). Never
+/// panics: any failure is the `Err` string for the UI to display.
 fn elaborate(
     source: &str,
     lib: &ecad_core::part::PartLib,
     extra: impl FnOnce(&Doc) -> Vec<ecad_core::command::Command>,
-) -> Result<Doc, String> {
+) -> Result<History, String> {
     use ecad_core::command::{Command, Transaction};
-    use ecad_core::history::History;
-
-    let fmt = |diags: Vec<ecad_core::diagnostic::Diagnostic>| {
-        diags
-            .iter()
-            .map(|d| format!("[{}] {}", d.code, d.message))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
 
     let mut history = History::new(Doc::default());
     history
@@ -244,18 +358,25 @@ fn elaborate(
             lib,
             "load",
         )
-        .map_err(fmt)
-        .and_then(|_| {
-            let cmds = extra(history.doc());
-            if cmds.is_empty() {
-                Ok(history.doc().clone())
-            } else {
-                history
-                    .commit(Transaction(cmds), lib, "fixture-route")
-                    .map(|_| history.doc().clone())
-                    .map_err(fmt)
-            }
-        })
+        .map_err(fmt_diags)?;
+    let cmds = extra(history.doc());
+    if !cmds.is_empty() {
+        history
+            .commit(Transaction(cmds), lib, "fixture-route")
+            .map_err(fmt_diags)?;
+    }
+    Ok(history)
+}
+
+/// Write `text` to `path` **atomically**: a temp file in the same directory,
+/// then rename over the target — a crash mid-save never leaves a half-written
+/// document (the same pattern as `registry::Registry::save`). Used by explicit
+/// Save; the GUI never writes the user's file through any other path.
+pub(crate) fn atomic_write(path: &std::path::Path, text: &str) -> Result<(), String> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, text).map_err(|e| format!("writing {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path)
+        .map_err(|e| format!("renaming {} over {}: {e}", tmp.display(), path.display()))
 }
 
 /// The board projection held in app state: the [`Canvas`] (for coordinate

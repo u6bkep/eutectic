@@ -7,16 +7,20 @@
 
 use crate::app::libraries::LIBRARIES_TOGGLE_KEY;
 use crate::app::pane::{
-    FINDINGS_TOGGLE_KEY, LAYOUT_TOGGLE_KEY, SPLIT_HANDLE_KEY, SPLIT_ROW_KEY, finding_index_of_key,
-    is_canvas_target, is_findings_chip_key, pane_index, switch_key,
+    CONFLICT_KEEP_KEY, CONFLICT_RELOAD_KEY, FINDINGS_TOGGLE_KEY, LAYOUT_TOGGLE_KEY, REDO_KEY,
+    SAVE_KEY, SPLIT_HANDLE_KEY, SPLIT_ROW_KEY, UNDO_KEY, finding_index_of_key, is_canvas_target,
+    is_findings_chip_key, pane_index, switch_key,
 };
 use crate::app::panels::error_card;
 use crate::app::{EcadApp, PaneId, PaneLayout, ViewKind};
-use crate::canvas::pick;
+use crate::canvas::pick::{self, SemanticId};
 use crate::reload::SourceMsg;
 use crate::schematic_view::SchematicView;
-use crate::tool::{MeasureState, Tool};
+use crate::tool::{DragState, MeasureState, Tool};
 use damascene_core::prelude::*;
+use ecad_core::command::{Command, Transaction};
+use ecad_core::coord::{Nm, Point};
+use ecad_core::id::EntityId;
 
 /// The pick grab radius in screen (logical) px — converted to a board distance
 /// through the current zoom by [`pick::tolerance_nm`], so the on-screen radius is
@@ -53,11 +57,12 @@ impl App for EcadApp {
     }
 
     fn before_build(&mut self) {
-        // (m5) Drain the live-source mailbox first: a file change reloads the doc +
-        // derived caches BEFORE this frame builds, so the frame reflects the new source.
-        // The drain coalesces a burst to the latest source (see `SourceMailbox::drain`).
+        // (m5/m6) Drain the live-source mailbox first: a disk change is routed by the
+        // save model BEFORE this frame builds (echo of our own save → consumed; clean
+        // doc → auto-apply reload; dirty doc → conflict banner, never silent
+        // last-writer). The drain coalesces a burst to the latest source.
         if let Some(SourceMsg::Changed(source)) = self.mailbox.drain() {
-            self.apply_reload(source);
+            self.handle_disk_change(source);
         }
 
         // Queue the initial fit-to-content once per pane, on the first frame after the doc
@@ -150,6 +155,38 @@ impl App for EcadApp {
             return;
         }
 
+        // Editing actions (m6): the Save / Undo / Redo toolbar buttons and their
+        // hotkey twins (Ctrl+S / Ctrl+Z / Ctrl+Shift+Z or Ctrl+Y — registered in
+        // `hotkeys()`, delivered as `UiEventKind::Hotkey` with the same action
+        // names). Suppressed while the Libraries modal is open: its text inputs
+        // own the keyboard, and a doc-level undo under a typing user would be a
+        // surprise (the buttons sit behind the scrim anyway).
+        if !self.libraries_open.get() {
+            if event.is_click_or_activate(SAVE_KEY) || event.is_hotkey(SAVE_KEY) {
+                self.save();
+                return;
+            }
+            if event.is_click_or_activate(UNDO_KEY) || event.is_hotkey(UNDO_KEY) {
+                self.undo();
+                return;
+            }
+            if event.is_click_or_activate(REDO_KEY) || event.is_hotkey(REDO_KEY) {
+                self.redo();
+                return;
+            }
+        }
+
+        // The conflict banner's two explicit actions (m6 save model): Reload
+        // (discard my edits, apply disk) and Keep mine (dismiss; stay dirty).
+        if event.is_click_or_activate(CONFLICT_RELOAD_KEY) {
+            self.conflict_reload();
+            return;
+        }
+        if event.is_click_or_activate(CONFLICT_KEEP_KEY) {
+            self.conflict_keep();
+            return;
+        }
+
         // Dual/stacked layout toggle.
         if event.is_click_or_activate(LAYOUT_TOGGLE_KEY) {
             self.layout.set(match self.layout.get() {
@@ -222,8 +259,13 @@ impl App for EcadApp {
             }
         }
 
-        // Escape: cancel a measure in progress if any; else clear the selection.
+        // Escape: cancel an in-flight drag first (preview discarded, nothing
+        // committed — m6), then a measure in progress, else clear the selection.
         if event.kind == UiEventKind::Escape {
+            if self.drag.borrow().is_some() {
+                *self.drag.borrow_mut() = None;
+                return;
+            }
             let mut m = self.measure.get();
             if self.tool.get() == Tool::Measure && m.segment().is_some() {
                 m.cancel();
@@ -280,12 +322,24 @@ impl App for EcadApp {
             }
         }
 
+        // A pointer-up with a drag in flight ALWAYS finishes the drag (commit if
+        // moved), even when the release lands outside the pane rect — otherwise a
+        // release over the chrome would strand the ghost. The drag's own last
+        // in-pane cursor is the drop point in that case.
+        if event.kind == UiEventKind::PointerUp && self.drag.borrow().is_some() {
+            self.finish_drag();
+            return;
+        }
+
         // Canvas pointer interaction. A pointer event over a pane's canvas routes to the
         // pane's viewport / a stacked layer / overlay El — all canvas targets. THE CLICKED
         // PANE is resolved by testing the pointer against each pane's laid-out rect (NOT a
         // global key — this is where m2's coordinate-composition bug class returns; every
-        // unproject / rect uses the clicked pane's own key).
-        if !is_canvas_target(event.target_key()) {
+        // unproject / rect uses the clicked pane's own key). The target key falls back to
+        // the route (identical for real pointer events, where `key` IS the target key) so
+        // headless tests can synthesize pointer events without a `UiTarget` (the struct is
+        // `#[non_exhaustive]` and cannot be built outside damascene).
+        if !is_canvas_target(event.target_key().or_else(|| event.route())) {
             return;
         }
         let Some(pos) = event.pointer_pos() else {
@@ -294,7 +348,8 @@ impl App for EcadApp {
         let Some(pane) = self.pane_under_pointer(cx, pos) else {
             return;
         };
-        match self.panes.borrow()[pane_index(pane)].view {
+        let view = self.panes.borrow()[pane_index(pane)].view;
+        match view {
             ViewKind::Board => self.handle_board_pointer(event, cx, pane, pos),
             ViewKind::Schematic => self.handle_schematic_pointer(event, cx, pane, pos),
         }
@@ -302,6 +357,20 @@ impl App for EcadApp {
 
     fn drain_viewport_requests(&mut self) -> Vec<ViewportRequest> {
         std::mem::take(&mut self.pending.borrow_mut())
+    }
+
+    /// The app-wide keyboard chords (m6): Save / Undo / Redo, delivered by
+    /// damascene 0.4.5 as [`UiEventKind::Hotkey`] events whose route is the
+    /// registered action name — the same names as the toolbar button keys, so
+    /// `on_event` handles both through one arm. Redo binds both the Ctrl+Shift+Z
+    /// and Ctrl+Y conventions.
+    fn hotkeys(&self) -> Vec<(KeyChord, String)> {
+        vec![
+            (KeyChord::ctrl('s'), SAVE_KEY.to_string()),
+            (KeyChord::ctrl('z'), UNDO_KEY.to_string()),
+            (KeyChord::ctrl_shift('z'), REDO_KEY.to_string()),
+            (KeyChord::ctrl('y'), REDO_KEY.to_string()),
+        ]
     }
 
     /// The app's current text selection — the Libraries menu's inputs are the
@@ -334,31 +403,59 @@ impl EcadApp {
         None
     }
 
-    /// Handle a pointer event over a board pane: cursor readout, pick / hover / measure —
-    /// all through THE CLICKED PANE's canvas key + rect + viewport view.
-    fn handle_board_pointer(&self, event: UiEvent, cx: &EventCx, pane: PaneId, pos: (f32, f32)) {
-        let derived = self.derived.borrow();
-        let Some(view) = &derived.board else {
-            return;
-        };
-        let key = pane.canvas_key();
-        let (Some(rect), Some(vv)) = (cx.rect_of_key(key), cx.viewport_view(key)) else {
-            return;
-        };
-        let el_rect = (rect.x, rect.y, rect.w, rect.h);
+    /// Handle a pointer event over a board pane: cursor readout, pick / hover /
+    /// measure / component drag (m6) — all through THE CLICKED PANE's canvas key +
+    /// rect + viewport view. `&mut self` because a drag commit mutates domain +
+    /// derived state; the `derived` borrow is scoped so the commit path can
+    /// re-borrow.
+    fn handle_board_pointer(
+        &mut self,
+        event: UiEvent,
+        cx: &EventCx,
+        pane: PaneId,
+        pos: (f32, f32),
+    ) {
+        // Scope the derived borrow: map the pointer into board space and pre-resolve
+        // what the drag-capable arms need, then drop the borrow before any commit.
+        let (p, tol) = {
+            let derived = self.derived.borrow();
+            let Some(view) = &derived.board else {
+                return;
+            };
+            let key = pane.canvas_key();
+            let (Some(rect), Some(vv)) = (cx.rect_of_key(key), cx.viewport_view(key)) else {
+                return;
+            };
+            let el_rect = (rect.x, rect.y, rect.w, rect.h);
 
-        let content_px = vv.unproject(pos, (rect.x, rect.y));
-        if let Some(mm) = view.canvas.content_px_to_board_mm(content_px, el_rect) {
-            self.cursor_board_mm.set(Some(mm));
-        }
+            let content_px = vv.unproject(pos, (rect.x, rect.y));
+            if let Some(mm) = view.canvas.content_px_to_board_mm(content_px, el_rect) {
+                self.cursor_board_mm.set(Some(mm));
+            }
 
-        let Some(p) = pick::pointer_to_board_nm(&view.canvas, pos, el_rect, vv) else {
-            return;
+            let Some(p) = pick::pointer_to_board_nm(&view.canvas, pos, el_rect, vv) else {
+                return;
+            };
+            (p, pick::tolerance_nm(PICK_TOL_PX, vv.zoom))
         };
-        let tol = pick::tolerance_nm(PICK_TOL_PX, vv.zoom);
 
         match (self.tool.get(), event.kind) {
+            (Tool::Select, UiEventKind::PointerDown) => {
+                // A fresh press can never inherit a stale eaten-click flag.
+                self.suppress_click.set(false);
+                self.begin_drag(pane, p, tol);
+            }
             (Tool::Select, UiEventKind::Click) => {
+                // The trailing Click of a just-committed drag: consumed (the drag
+                // was the interaction; re-selecting whatever sits under the drop
+                // point would fight it).
+                if self.suppress_click.replace(false) {
+                    return;
+                }
+                let derived = self.derived.borrow();
+                let Some(view) = &derived.board else {
+                    return;
+                };
                 let hit = pick::resolve(&view.candidates, p, tol, |id| self.layer_id_visible(id));
                 let mut sel = self.domain.selection.borrow_mut();
                 match hit {
@@ -366,13 +463,41 @@ impl EcadApp {
                     None => sel.clear(),
                 }
             }
-            (Tool::Select, UiEventKind::PointerEnter | UiEventKind::Drag) => {
+            (Tool::Select, UiEventKind::Drag) => {
+                // An in-flight component drag consumes pointer movement (the ghost
+                // tracks it); otherwise drag-over is a hover cue, as before.
+                let mut drag = self.drag.borrow_mut();
+                if let Some(d) = drag.as_mut() {
+                    d.update(p);
+                    return;
+                }
+                drop(drag);
+                let derived = self.derived.borrow();
+                let Some(view) = &derived.board else {
+                    return;
+                };
                 let hit = pick::resolve(&view.candidates, p, tol, |id| self.layer_id_visible(id));
                 let mut sel = self.domain.selection.borrow_mut();
                 match hit {
                     Some(pick) => sel.hover_only(pick.id),
                     None => sel.clear_hover(),
                 }
+            }
+            (Tool::Select, UiEventKind::PointerEnter) => {
+                let derived = self.derived.borrow();
+                let Some(view) = &derived.board else {
+                    return;
+                };
+                let hit = pick::resolve(&view.candidates, p, tol, |id| self.layer_id_visible(id));
+                let mut sel = self.domain.selection.borrow_mut();
+                match hit {
+                    Some(pick) => sel.hover_only(pick.id),
+                    None => sel.clear_hover(),
+                }
+            }
+            (Tool::Select, UiEventKind::PointerUp) => {
+                // Reached only when no drag is in flight (the on_event fast path
+                // finishes an active drag before pane resolution); nothing to do.
             }
             (Tool::Select, UiEventKind::PointerLeave) => {
                 self.domain.selection.borrow_mut().clear_hover();
@@ -390,6 +515,142 @@ impl EcadApp {
                 self.measure.set(m);
             }
             _ => {}
+        }
+    }
+
+    /// Pointer-down on the board with the Select tool (m6): if the pick resolves
+    /// to a component's pad (or the component itself), arm a [`DragState`] for
+    /// that component. Anything else (trace / via / pour / empty board) arms
+    /// nothing — the interaction stays a plain click-select.
+    fn begin_drag(&self, pane: PaneId, p: Point, tol: Nm) {
+        let comp = {
+            let derived = self.derived.borrow();
+            let Some(view) = &derived.board else {
+                return;
+            };
+            match pick::resolve(&view.candidates, p, tol, |id| self.layer_id_visible(id)) {
+                Some(pick::Pick {
+                    id: SemanticId::Pin { comp, .. },
+                    ..
+                }) => comp,
+                Some(pick::Pick {
+                    id: SemanticId::Part(comp),
+                    ..
+                }) => comp,
+                _ => return,
+            }
+        };
+        if let Some(drag) = self.make_drag(comp, pane, p, tol) {
+            *self.drag.borrow_mut() = Some(drag);
+        }
+    }
+
+    /// Build a [`DragState`] for `comp`: capture the component's doc position, its
+    /// pad shapes, and the ratsnest input (own pad centers + the other member pad
+    /// centers of each net) — all from the **cached** pick candidates + doc maps,
+    /// so nothing here (or in any later per-event update) calls the geometry
+    /// kernel. `None` when the component has no pad candidates (nothing to ghost).
+    pub(crate) fn make_drag(
+        &self,
+        comp: EntityId,
+        pane: PaneId,
+        start: Point,
+        slop: Nm,
+    ) -> Option<DragState> {
+        let doc = self.domain.doc.as_ref().ok()?;
+        let orig_pos = doc.components.get(&comp)?.pos.value;
+        let derived = self.derived.borrow();
+        let view = derived.board.as_ref()?;
+
+        // Pad centers for every candidate pad on the board, keyed by (comp, pad
+        // number) — the AABB midpoint is the honest cheap center (the AABB was
+        // derived from the pad's tessellated region at candidate build time). A
+        // multi-layer pad yields one candidate per layer; first wins (same center).
+        let mut centers: std::collections::BTreeMap<(&EntityId, &str), Point> =
+            std::collections::BTreeMap::new();
+        let mut shapes: Vec<ecad_core::geom::Shape2D> = Vec::new();
+        for c in &view.candidates {
+            if let SemanticId::Pin { comp: cc, pin } = &c.id {
+                let center = Point {
+                    x: (c.aabb.0.x + c.aabb.1.x) / 2,
+                    y: (c.aabb.0.y + c.aabb.1.y) / 2,
+                };
+                if *cc == comp {
+                    shapes.push(c.shape.clone());
+                }
+                centers.entry((cc, pin.as_str())).or_insert(center);
+            }
+        }
+        if shapes.is_empty() {
+            return None;
+        }
+
+        // Ratsnest input: for each net, the dragged component's member pad centers
+        // vs every OTHER member pad center. Netless pads contribute nothing.
+        let mut pins: Vec<(Point, Vec<Point>)> = Vec::new();
+        for net in doc.nets.values() {
+            let mut mine: Vec<Point> = Vec::new();
+            let mut others: Vec<Point> = Vec::new();
+            for m in &net.members {
+                let Some(center) = centers.get(&(&m.comp, m.pin.as_str())) else {
+                    continue; // an unplaced / suppressed member has no candidate
+                };
+                if m.comp == comp {
+                    mine.push(*center);
+                } else {
+                    others.push(*center);
+                }
+            }
+            if !others.is_empty() {
+                for c in mine {
+                    pins.push((c, others.clone()));
+                }
+            }
+        }
+
+        Some(DragState {
+            comp,
+            pane,
+            start,
+            cursor: start,
+            orig_pos,
+            moved: false,
+            slop,
+            shapes,
+            pins,
+        })
+    }
+
+    /// Pointer-up with a drag in flight: a **moved** drag commits the component
+    /// move as `Command::Pin(comp, orig_pos + delta)` — a hard placement, "the
+    /// user dragged it exactly here" — through the command-commit path (derived
+    /// caches rebuild, revision bumps, dirty set). Per the permissive philosophy
+    /// there is NO rejection path: a DRC-violating drop commits fine and the
+    /// violations surface as findings. An un-moved press-release just disarms
+    /// (the trailing Click stays a plain select). The moved component is left
+    /// selected.
+    fn finish_drag(&mut self) {
+        let Some(drag) = self.drag.borrow_mut().take() else {
+            return;
+        };
+        if !drag.moved {
+            return;
+        }
+        // Eat the trailing Click of this press (PointerUp fires first).
+        self.suppress_click.set(true);
+        let target = drag.target_pos();
+        let comp = drag.comp.clone();
+        match self.commit_edit(
+            Transaction::one(Command::Pin(comp.clone(), target)),
+            "move component",
+        ) {
+            Ok(()) => {
+                self.domain
+                    .selection
+                    .borrow_mut()
+                    .select_only(SemanticId::Part(comp));
+            }
+            Err(e) => self.domain.edit.error = Some(e),
         }
     }
 
