@@ -125,6 +125,27 @@ source; re-elaborate derives everything else; undo/redo is source snapshots
 debounced DRC) arrives via the mailbox pattern (`before_build` drain +
 external wakeup).
 
+## Library resolution (the single Libraries menu)
+
+Engine-side design: `architecture.md` §9 (library packages, `use` directive,
+permissive unresolved parts). The GUI's share, delivered 2026-07-05:
+
+- **One per-machine registry** — `$XDG_CONFIG_HOME/ecad/libraries` (fallback
+  `~/.config/ecad/libraries`), plain `NAME <absolute path>` lines, read/written
+  only by `ecad-gui/src/registry.rs` (path-injectable; tests never touch the
+  real config). There is deliberately exactly ONE place paths live — the
+  KiCad five-menus failure mode is out of bounds. Absolute paths never
+  serialize into a document.
+- **The Libraries modal** lists registry rows with live load status (parts
+  count / path missing / manifest error) and add/remove; edits save atomically
+  and immediately re-resolve + re-elaborate the open doc (cameras, selection,
+  layout preserved — same path as a source reload).
+- **Resolution is re-derived on every (re)load** from the doc's `use` names,
+  in source order, built-in toy lib appended last (real libraries shadow toy
+  names). Failures are findings (unregistered name, load error, collision),
+  never load blocks; unresolved-part and library rows join the findings panel
+  as non-navigating warnings and count into the status chip.
+
 ## Design reference: the Circuit Studio mockup
 
 A rough, **non-authoritative** UI mockup lives at
