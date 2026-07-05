@@ -504,7 +504,7 @@ impl EcadApp {
             Ok(doc) => {
                 let sel = self.domain.selection.borrow();
                 // Selection + hover both cross-highlight (hover is the pre-select cue).
-                HighlightSets::project(sel.selected().chain(sel.hovered()), doc)
+                HighlightSets::project(sel.selected().chain(sel.hovered()), doc, &self.domain.lib)
             }
             Err(_) => HighlightSets::default(),
         }
@@ -934,12 +934,25 @@ impl App for EcadApp {
         // loaded (or after a view switch reset the flag) — the layout pass resolves each
         // request against the live per-pane viewport rect + content extents. The split
         // extent for the resize handler is captured in `on_event` from last frame's layout.
+        //
+        // Only fit (and mark `fitted`) a pane that is actually built into the tree THIS
+        // frame. When a pane is hidden (the other pane is maximized), its viewport El is
+        // absent, so damascene drops the unmatched FitContent request at end of layout
+        // (clear_pending_viewport_requests). Marking such a pane fitted anyway would strand
+        // it: on restore it would render with the default camera and never re-fit. So a
+        // hidden pane is left un-fitted and gets its fit on the first frame it is visible.
+        let maximized = self.maximized.get();
         let mut panes = self.panes.borrow_mut();
         for (i, p) in panes.iter_mut().enumerate() {
             if p.fitted {
                 continue;
             }
             let id = if i == 0 { PaneId::A } else { PaneId::B };
+            // A pane is hidden this frame iff some OTHER pane is maximized.
+            let visible = maximized.map(|m| m == id).unwrap_or(true);
+            if !visible {
+                continue;
+            }
             let projected = match p.view {
                 ViewKind::Board => self.board.is_some(),
                 ViewKind::Schematic => self.schematic.is_some(),
@@ -1375,6 +1388,56 @@ mod tests {
         assert_eq!(app.maximized.get(), Some(PaneId::B));
         app.on_event(click(PaneId::B.maximize_key()), &cx);
         assert_eq!(app.maximized.get(), None, "toggling again restores");
+    }
+
+    /// A pane hidden by maximize on its first frame must NOT be marked fitted — otherwise
+    /// its dropped FitContent request (damascene discards requests whose viewport is absent
+    /// this frame) would strand it at the default camera forever. On restore, the still
+    /// un-fitted pane must re-arm its fit. Regression for the stuck-`fitted` bug.
+    #[test]
+    fn hidden_pane_defers_its_fit_until_visible() {
+        let mut app = EcadApp::new(schematic_domain());
+        // Maximize B on the very first frame — A is hidden this frame.
+        app.maximized.set(Some(PaneId::B));
+        app.before_build();
+
+        // Only the visible pane (B) queued a fit; the hidden pane (A) is still un-fitted.
+        assert!(app.panes.borrow()[pane_index(PaneId::B)].fitted, "B fits");
+        assert!(
+            !app.panes.borrow()[pane_index(PaneId::A)].fitted,
+            "hidden A must NOT be marked fitted (its request would be dropped)"
+        );
+        let reqs = app.drain_viewport_requests();
+        assert!(
+            reqs.iter().any(|r| matches!(
+                r,
+                ViewportRequest::FitContent { key, .. } if key == PaneId::B.canvas_key()
+            )),
+            "B's fit was queued"
+        );
+        assert!(
+            !reqs.iter().any(|r| matches!(
+                r,
+                ViewportRequest::FitContent { key, .. } if key == PaneId::A.canvas_key()
+            )),
+            "A's fit must NOT be queued while hidden"
+        );
+
+        // Restore the split; A is now visible and must fit on this frame.
+        app.maximized.set(None);
+        app.before_build();
+        assert!(
+            app.panes.borrow()[pane_index(PaneId::A)].fitted,
+            "restored A must now fit"
+        );
+        let reqs = app.drain_viewport_requests();
+        assert!(
+            reqs.iter().any(|r| matches!(
+                r,
+                ViewportRequest::FitContent { key, .. } if key == PaneId::A.canvas_key()
+            )),
+            "A's fit is queued once it becomes visible"
+        );
     }
 
     /// Per-pane independence: the SAME screen pixel maps to DIFFERENT board points when the

@@ -16,7 +16,7 @@
 //!
 //! | Selected id            | Board overlay lights                         | Schematic overlay lights                    |
 //! |------------------------|----------------------------------------------|---------------------------------------------|
-//! | `Part(refdes)`         | the part's footprint copper (its pins)       | the part's symbol body + its pins           |
+//! | `Part(refdes)`         | all of the part's pad copper (every pin, netted or not) | the part's symbol body + its pins  |
 //! | `Pin{comp,pad}`        | that pad's copper                            | that pin's stub                             |
 //! | `Net(n)`               | all copper of net `n` (traces/vias/pours/pins)| all wires + tagged pins of net `n`          |
 //! | `Trace(t)`             | the trace's copper (direct)                  | the trace's NET's wires + tagged pins       |
@@ -31,6 +31,8 @@
 use crate::canvas::pick::SemanticId;
 use ecad_core::doc::{Doc, PinRef};
 use ecad_core::id::NetId;
+use ecad_core::part::PartLib;
+use ecad_core::schematic::pin_slots;
 use std::collections::BTreeSet;
 
 /// The expanded id sets a frame highlights, one per view. Built once per frame from the
@@ -52,7 +54,11 @@ pub struct HighlightSets {
 impl HighlightSets {
     /// Project a set of selected ids into the per-view highlight sets, resolving nets from
     /// the doc. Pure over `(selected, doc)`.
-    pub fn project<'a>(selected: impl Iterator<Item = &'a SemanticId>, doc: &Doc) -> HighlightSets {
+    pub fn project<'a>(
+        selected: impl Iterator<Item = &'a SemanticId>,
+        doc: &Doc,
+        lib: &PartLib,
+    ) -> HighlightSets {
         let mut sets = HighlightSets::default();
         for id in selected {
             match id {
@@ -63,11 +69,7 @@ impl HighlightSets {
                     // has the body) and every pin of the part.
                     sets.board.insert(id.clone());
                     sets.schematic.insert(id.clone());
-                    for pr in part_pins(doc, id) {
-                        let pin = SemanticId::Pin {
-                            comp: pr.comp.clone(),
-                            pin: pr.pin.clone(),
-                        };
+                    for pin in part_pins(doc, lib, id) {
                         sets.board.insert(pin.clone());
                         sets.schematic.insert(pin);
                     }
@@ -128,21 +130,31 @@ impl HighlightSets {
     }
 }
 
-/// Every pin of a `Part` id, as `PinRef`s (comp + pad number), from the net membership —
-/// the pins that actually exist as copper/schematic candidates.
-fn part_pins(doc: &Doc, part: &SemanticId) -> Vec<PinRef> {
+/// Every pin of a `Part` id, as `Pin` [`SemanticId`]s (comp + pad number), enumerated from
+/// the part *definition* — NOT net membership. Board pick candidates key **every** pad by
+/// `Pin{comp,pad}` regardless of net (`world_features` emits a Pad candidate for
+/// unconnected pads too), and the schematic emits a pin candidate per `pin_slot`. Deriving
+/// pins from `doc.nets` alone would omit unconnected pads, so selecting a part with (or made
+/// entirely of) unconnected pads would light nothing on the board. The `PinSlot::id` is the
+/// same pad-number join key `world_features`/`FeatureOrigin::Pad` tags copper with, so these
+/// ids match both views' candidates by construction.
+fn part_pins(doc: &Doc, lib: &PartLib, part: &SemanticId) -> Vec<SemanticId> {
     let SemanticId::Part(eid) = part else {
         return Vec::new();
     };
-    let mut out = Vec::new();
-    for net in doc.nets.values() {
-        for pr in &net.members {
-            if &pr.comp == eid {
-                out.push(pr.clone());
-            }
-        }
-    }
-    out
+    let Some(comp) = doc.components.get(eid) else {
+        return Vec::new();
+    };
+    let Some(def) = lib.get(&comp.part) else {
+        return Vec::new();
+    };
+    pin_slots(def)
+        .into_iter()
+        .map(|slot| SemanticId::Pin {
+            comp: eid.clone(),
+            pin: slot.id,
+        })
+        .collect()
 }
 
 /// The net a `Pin` id belongs to, if any.

@@ -146,3 +146,42 @@ fn poc_schematic_projects_non_empty() {
     let wires = view.candidates().iter().filter(|c| c.priority == 1).count();
     assert!(wires >= 1, "poc schematic must project its authored wires");
 }
+
+/// `pointer_to_schematic_nm` inverts the forward projection (unproject, viewBox/rect scale,
+/// y-flip). This is exactly the m2 pane-coord bug class the review targets; the board twin
+/// (`pointer_to_board_nm`) is covered, this closes the schematic gap. Forward-map a known
+/// schematic point to a pixel (identity camera ⇒ unproject is the identity), invert it, and
+/// require the recovered point to match within one nm-rounding step.
+#[test]
+fn pointer_to_schematic_nm_round_trips() {
+    use damascene_core::viewport::ViewportView;
+    let (doc, lib, view) = fixture();
+    // A concrete on-screen schematic point: U1's placement centre.
+    let p = center_of(&doc, &lib, "U1");
+
+    let rect = (10.0f32, 20.0f32, 640.0f32, 480.0f32);
+    let cam = ViewportView {
+        pan: (0.0, 0.0),
+        zoom: 1.0,
+    };
+
+    // Forward: schematic-nm → viewBox-mm (with y-flip) → content px within the rect. This
+    // mirrors what pointer_to_schematic_nm inverts; under identity the pointer px == content px.
+    let (rx, ry, rw, rh) = rect;
+    let vb = view_box(view.bounds);
+    let (vx, vy, vw, vh) = (vb[0], vb[1], vb[2], vb[3]);
+    let (_, y0, _, y1) = view.bounds;
+    let flip_sum = y0 + y1;
+    let vmm = to_view(p, flip_sum); // (mm, y-down)
+    let px = (rx + (vmm.0 - vx) * (rw / vw), ry + (vmm.1 - vy) * (rh / vh));
+
+    let back = view
+        .pointer_to_schematic_nm(px, rect, cam)
+        .expect("non-degenerate rect maps");
+    // One nm-rounding step of slack in each axis (f32 mm→nm round-trip).
+    let tol = (MM as f32 / 100.0).max(1.0) as Nm;
+    assert!(
+        (back.x - p.x).abs() <= tol && (back.y - p.y).abs() <= tol,
+        "round-trip {back:?} must recover {p:?} within {tol}nm"
+    );
+}
