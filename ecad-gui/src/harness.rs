@@ -214,6 +214,16 @@ pub fn assert_content_coverage(scene: &str, r: &Rendered, keys: &[&str]) {
     }
 }
 
+/// The measured **content-space** bounds of the viewport carrying `key` — the
+/// laid-out extent of its child, pre-transform (damascene's
+/// `viewport_content_bounds`). This is the ground truth the pointer↔board
+/// composition's content-rect assumption is pinned against (see
+/// `Canvas::content_rect`).
+pub fn content_bounds_of(r: &Rendered, key: &str) -> Option<damascene_core::prelude::Rect> {
+    let id = computed_id_for_key(&r.tree, key)?;
+    r.ui.viewport_content_bounds(&id)
+}
+
 /// Depth-first search for the `computed_id` of the node carrying `key`.
 fn computed_id_for_key(root: &El, key: &str) -> Option<String> {
     if root.key.as_deref() == Some(key) {

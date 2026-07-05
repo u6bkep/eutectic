@@ -699,6 +699,49 @@ mod tests {
         harness::assert_content_coverage("board", &r, &[PaneId::A.canvas_key()]);
     }
 
+    /// Pins the load-bearing layout assumption behind `Canvas::content_rect` (and
+    /// with it every pointer↔board mapping): a `vector()` child lays out at its
+    /// NATURAL viewBox size, top-left-anchored at the viewport origin, so the
+    /// asset stretch rect is `(rect.x, rect.y, vw, vh)`. The m2/m3 composition
+    /// wrongly used the pane rect here and stayed invisible because both pick
+    /// directions shared the error — this test fails against the real laid-out
+    /// UI state if damascene's layout contract ever changes.
+    #[test]
+    fn canvas_child_lays_out_at_natural_viewbox_size_at_viewport_origin() {
+        let mut app = board();
+        let (_, _, vw, vh) = app
+            .derived
+            .borrow()
+            .board
+            .as_ref()
+            .expect("board scene projects a canvas")
+            .canvas
+            .content_rect((0.0, 0.0, 0.0, 0.0));
+        let r = harness::render_settled(&mut app, viewport());
+        let content = harness::content_bounds_of(&r, PaneId::A.canvas_key())
+            .expect("canvas viewport has measured content bounds");
+        // The bounds carry the viewport's own (untransformed) window origin;
+        // "anchored at the viewport origin" pins content.xy == pane.xy.
+        let pane =
+            r.ui.rect_of_key(PaneId::A.canvas_key())
+                .expect("canvas viewport has a laid-out rect");
+        assert!(
+            (content.x - pane.x).abs() < 0.5 && (content.y - pane.y).abs() < 0.5,
+            "canvas content must anchor at the viewport origin ({}, {}), got ({}, {})",
+            pane.x,
+            pane.y,
+            content.x,
+            content.y
+        );
+        assert!(
+            (content.w - vw).abs() < 0.5 && (content.h - vh).abs() < 0.5,
+            "canvas content must lay out at natural viewBox size {vw}×{vh}, \
+             got {}×{}",
+            content.w,
+            content.h
+        );
+    }
+
     #[test]
     fn board_with_selection_is_lint_clean() {
         let app = board_with_selection();

@@ -415,7 +415,12 @@ impl EcadApp {
     ///   newer delivery replaces the pending text.
     pub(crate) fn handle_disk_change(&mut self, source: String) {
         if self.domain.edit.last_saved_write.as_deref() == Some(source.as_str()) {
-            return; // watcher echo of our own write
+            // Watcher echo of our own write — consumed ONCE. Clearing the token
+            // means a later byte-identical delivery is the genuine external
+            // write it is (and, while dirty, raises the conflict banner rather
+            // than being silently swallowed).
+            self.domain.edit.last_saved_write = None;
+            return;
         }
         if self.domain.edit.dirty {
             self.domain.edit.conflict = Some(source);
@@ -1559,6 +1564,19 @@ net GND U1.GND
         assert_eq!(app.revision(), rev, "an echo must not reload");
         assert!(app.conflict().is_none(), "an echo is not a conflict");
         assert!(!app.dirty());
+
+        // The echo token is ONE-SHOT: after the echo is consumed, a later
+        // byte-identical delivery is a genuine external write. While dirty it
+        // must raise the conflict banner, not be silently swallowed.
+        let echoed = std::fs::read_to_string(&file).unwrap();
+        commit_move(&mut app, 3, 0);
+        assert!(app.dirty());
+        app.mailbox_push(SourceMsg::Changed(echoed));
+        app.before_build();
+        assert!(
+            app.conflict().is_some(),
+            "an identical external write after the echo was consumed is a real conflict"
+        );
     }
 
     /// The conflict flow, Reload branch: a disk change while dirty parks as the
