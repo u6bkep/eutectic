@@ -125,6 +125,41 @@ source; re-elaborate derives everything else; undo/redo is source snapshots
 debounced DRC) arrives via the mailbox pattern (`before_build` drain +
 external wakeup).
 
+## Design reference: the Circuit Studio mockup
+
+A rough, **non-authoritative** UI mockup lives at
+`reference/eda-ui-mockup/eda-tool-ui-prototype/` (Claude Design handoff,
+2026-07-04; read `project/Circuit Studio.dc.html` + `NetExplorer.dc.html` —
+working HTML/JS prototypes, layout and styling spelled out in source). It
+fixes the shell anatomy v1 milestones should follow:
+
+- **Menu bar**: app menus, dual/stacked layout toggle, current filename, and
+  a persistent DRC status chip (count + warnings) — live DRC gets a
+  glanceable home in the chrome, not only canvas halos.
+- **Toolbar**: grouped icon actions (file, undo/redo, clipboard, zoom,
+  checks) + units and grid-pitch chips on the right.
+- **Left tool palette**: one **global** tool strip grouped by domain
+  (select/pan · schematic: wire/bus/label/symbol/power · board:
+  route/via/pad/zone · measure/text/delete). One active tool app-wide —
+  the tool state machine is global mode with per-view-kind applicability,
+  not per-pane tools.
+- **Center**: two panes, each with a header holding a view-type dropdown
+  (Schematic / PCB Layout / 3D) and a maximize toggle; draggable divider
+  (ratio-clamped); dual ↔ stacked orientation. A one-split simplification
+  of the split-tree — fine for v1.
+- **Right sidebar**: Properties inspector (identity card + key/value rows)
+  above an Explorer tree (sheets / components / nets, counts, per-net color
+  swatches); explorer selection cross-highlights into panes (the semantic
+  selection model made visible). Explorer docks left in stacked layout.
+- **Status bar**: cursor X/Y in mm, dx/dy, grid pitch, zoom, active-layer
+  chip, selected net, DRC state.
+
+Treat visual specifics (dark palette, mono for identifiers/numerics, spacing)
+as taste guidance to re-express through damascene's theme/tokens, not values
+to copy. Non-binding details: the "Run DRC" toolbar button (we are
+live-check; a jump-to-findings affordance belongs there instead) and the
+KiCad-flavored placeholder filenames.
+
 ## v1 scope (decided)
 
 Delivered as milestones, roughly in order:
