@@ -689,6 +689,42 @@ importer (0017), and the `Cubic`/NURBS curve primitive for MCAD bodies.
 
 ---
 
+## 9. Library packages: parts as data, names as the dependency key
+
+*(Implemented 2026-07-05, `ecad-core/src/library.rs` — motivated by the GUI: a `.ecad` file must be
+openable standalone, and part libraries must not exist only as Rust code.)*
+
+A **library package** is a directory containing a manifest (`ecad.lib`, see `library::MANIFEST_NAME`)
+plus the asset files it references. The manifest is a hand-rolled line grammar in the `.ecad` family:
+`part NAME footprint=REL [symbol=REL:SYMBOL_NAME]`, optionally opening a `{ role NUMBER NAME KIND }`
+block — the serialized home for the authored knowledge (pin-role relabeling, symbol↔footprint joins)
+that previously lived in example code. `library::load_library(dir) -> Result<PartLib, String>` is the
+import boundary; symbol joins are strict (a pad/pin mismatch is a load error).
+
+**Path hygiene is enforced at the format level**: manifest paths are relative to the manifest's
+directory; absolute paths and `..` traversal are parse errors. A package is relocatable and
+self-contained by construction — the KiCad failure mode (machine-local absolute paths committed into
+project files) is unrepresentable.
+
+**Documents declare libraries by name**: the `use NAME` source directive (inert to elaboration,
+round-trips through the serializer). The committed document carries only names; binding a name to a
+directory is the *caller's* job — `elaborate` keeps its `PartLib` parameter, and the app resolves
+`library::use_names(...)` through its registry, loads each package, and unions them
+(`library::union`, deterministic first-wins with collision notes). Part references stay bare names
+in v1; qualified `lib:part` names can come later without a format break.
+
+**Unresolved parts degrade, never abort** (the permissive philosophy applied to loading): an
+instance whose part is not in the lib is skipped, its downstream references are cascade-suppressed
+through the same machinery as DNP drops (schematic `sym`/`wire` included), and a non-blocking
+`W_UNRESOLVED_PART` finding (with a known-parts hint) rides `ReconReport`. A doc with missing
+libraries still opens; the findings say what's missing.
+
+**Dependency-manager direction** (deliberate, not yet built): the name is the resolution key, so a
+future cargo-like resolver is just another way to bind it — name → pinned checkout in a
+content-addressed cache, with a lockfile recording url/rev/hash per library. Those fields land in
+the manifest additively. The per-machine name→path registry lives at the app layer (GUI Libraries
+menu), never in the engine and never in committed artifacts.
+
 ## Open questions / hard parts (carry these forward)
 
 - **The reconciliation / minimal-perturbation engine** is the single load-bearing risk. Precise
@@ -704,6 +740,8 @@ importer (0017), and the `Cubic`/NURBS curve primitive for MCAD bodies.
   (0004/0008), via-span selection, rip-up/partial-reroute machinery.
 - **Part library** — hard because of *scale*, not difficulty. Plan: import KiCad's existing
   detailed libraries, add type information via good import tools + agent-in-the-loop editing.
+  The container is now in place (§9 library packages); the scale problem — populating packages
+  from KiCad's libraries with typed roles — remains.
 
 ## Prior art to mine
 
