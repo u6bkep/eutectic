@@ -369,10 +369,13 @@ impl GenDirective {
     /// Every coordinate/length (nm) a directive contributes — the values an ingest
     /// boundary range-checks against [`crate::geom::MAX_COORD`] (issue 0018). Points
     /// contribute both components; scalar spans (widths/gaps/heights, slab z-faces) their
-    /// signed magnitude. Directives with no geometry (connectivity, alignment) contribute
-    /// nothing. `Rotate`'s quaternion is angle-scaled, not a coordinate, so it is
-    /// deliberately excluded. Shared by the text-parse and command-ingress validators so
-    /// both bound the same fields.
+    /// signed magnitude. Directives with no geometry (connectivity, alignment, identity,
+    /// declaration) contribute nothing. `Rotate`'s quaternion is angle-scaled, not a
+    /// coordinate, so it is deliberately excluded. Shared by the text-parse and
+    /// command-ingress validators so both bound the same fields.
+    ///
+    /// The match is **exhaustive** (no wildcard, issue 0033): a new [`GenDirective`]
+    /// variant fails to compile here until its coordinate contribution is decided.
     pub fn coords(&self) -> Vec<Nm> {
         let shape_coords = |s: &Shape2D| s.coords().into_iter().flat_map(|p| [p.x, p.y]).collect();
         match self {
@@ -388,7 +391,23 @@ impl GenDirective {
             }
             GenDirective::MinSep { gap, .. } => vec![*gap],
             GenDirective::Slab(s) => vec![s.z.lo, s.z.hi],
-            _ => vec![],
+            // No geometry: instantiation / declaration / identity directives, the
+            // alignment + connectivity directives (they only *reference* paths), and
+            // `Rotate` (a quaternion, not a coordinate). Listed explicitly so a future
+            // geometry-bearing variant cannot silently skip the MAX_COORD range check.
+            GenDirective::Instance { .. }
+            | GenDirective::Param { .. }
+            | GenDirective::Def { .. }
+            | GenDirective::InstGenerative { .. }
+            | GenDirective::Class { .. }
+            | GenDirective::AlignX { .. }
+            | GenDirective::AlignY { .. }
+            | GenDirective::ConnectInterface { .. }
+            | GenDirective::ConnectPins { .. }
+            | GenDirective::NoConnect { .. }
+            | GenDirective::Rotate { .. }
+            | GenDirective::Font { .. }
+            | GenDirective::Use { .. } => vec![],
         }
     }
 
@@ -399,6 +418,9 @@ impl GenDirective {
     /// and placement (`near`/`minsep`/`align`/`place`/`fix`/`rotate`/`nearpin`) directives.
     /// A directive that declares or references nothing (a `Board`, `Slab`, `Text`, …) yields
     /// an empty list.
+    ///
+    /// The match is **exhaustive** (no wildcard, issue 0033): a new [`GenDirective`]
+    /// variant fails to compile here until its referenced-path contribution is decided.
     pub fn refs(&self) -> Vec<(String, String)> {
         match self {
             GenDirective::Place { path, .. } => vec![(format!("place `{path}`"), path.clone())],
@@ -436,7 +458,24 @@ impl GenDirective {
                 .iter()
                 .map(|(comp, _)| ("no-connect".to_string(), comp.clone()))
                 .collect(),
-            _ => vec![],
+            // References no instance path: the instantiation/declaration directives (they
+            // *declare* a path, not reference one — a dangling self-reference is impossible)
+            // and the pure-geometry / identity directives. Listed explicitly so a future
+            // path-referencing variant cannot silently escape the DNP dangling-reference
+            // scan.
+            GenDirective::Instance { .. }
+            | GenDirective::Param { .. }
+            | GenDirective::Def { .. }
+            | GenDirective::InstGenerative { .. }
+            | GenDirective::Board { .. }
+            | GenDirective::Cutout { .. }
+            | GenDirective::Hole { .. }
+            | GenDirective::Region(_)
+            | GenDirective::Slab(_)
+            | GenDirective::Class { .. }
+            | GenDirective::Text { .. }
+            | GenDirective::Font { .. }
+            | GenDirective::Use { .. } => vec![],
         }
     }
 }
