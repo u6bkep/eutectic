@@ -3,7 +3,7 @@
 //! for board text concentrates here.
 
 use crate::doc::*;
-use crate::geom::{Feature, NetFeature, Role, Shape2D, Slab, Stackup, ZRange};
+use crate::geom::{Feature, FeatureOrigin, NetFeature, Role, Shape2D, Slab, Stackup, ZRange};
 use crate::id::NetId;
 use crate::ir::{GenDirective, RegionDecl, Source};
 
@@ -116,11 +116,10 @@ pub fn features(source: &Source) -> Result<Vec<crate::geom::NetFeature>, String>
     // not separate `Void` features. The same region (holes included) is the mask area.
     if let Some(region) = board_region(source) {
         let area = Shape2D::Area { region };
-        out.push(NetFeature::netless(Feature::prism(
-            Role::Substrate,
-            area.clone(),
-            board_z,
-        )));
+        out.push(
+            NetFeature::netless(Feature::prism(Role::Substrate, area.clone(), board_z))
+                .with_origin(FeatureOrigin::Board),
+        );
 
         // Solder mask: one board-area solid per `Role::Mask` slab in the stackup, at the
         // slab's honest z, carrying the slab's material (Decision 13 — mask is a positive
@@ -131,7 +130,9 @@ pub fn features(source: &Source) -> Result<Vec<crate::geom::NetFeature>, String>
         for slab in su.slabs.iter().filter(|s| s.role == Role::Mask) {
             let mut mask = Feature::prism(Role::Mask, area.clone(), slab.z);
             mask.material = slab.material.clone();
-            out.push(NetFeature::netless(mask));
+            // The mask solid is the board region at mask z — its owning "entity" is the
+            // board (Decision 13: mask is a derived board-area solid), so `Board`.
+            out.push(NetFeature::netless(mask).with_origin(FeatureOrigin::Board));
         }
     }
 
@@ -167,10 +168,16 @@ pub fn features(source: &Source) -> Result<Vec<crate::geom::NetFeature>, String>
                 continue;
             }
             let net_opt = net.as_ref().map(|n| NetId::new(n.clone()));
-            out.push(NetFeature::new(
-                net_opt,
-                Feature::prism(role.clone(), shape.clone(), slab.z),
-            ));
+            out.push(
+                NetFeature::new(
+                    net_opt.clone(),
+                    Feature::prism(role.clone(), shape.clone(), slab.z),
+                )
+                .with_origin(FeatureOrigin::Region {
+                    net: net_opt,
+                    layer: layer.clone(),
+                }),
+            );
         }
     }
 
@@ -184,6 +191,8 @@ pub fn features(source: &Source) -> Result<Vec<crate::geom::NetFeature>, String>
     if let Some(full) = su.full_z() {
         for d in source {
             if let GenDirective::Hole { center, dia } = d {
+                // A pierce-everything NPTH void is a fab artifact, not a selectable
+                // owning entity in the GUI vocabulary → `Unattributed`.
                 out.push(NetFeature::netless(Feature::prism(
                     Role::Void,
                     Shape2D::disc(*center, dia / 2),
@@ -207,15 +216,13 @@ pub fn features(source: &Source) -> Result<Vec<crate::geom::NetFeature>, String>
             orient,
         } = d
         {
-            out.extend(text_features(
-                string,
-                *at,
-                *height,
-                layer,
-                *orient,
-                &su,
-                font.as_ref(),
-            )?);
+            // Board-authored text → `BoardText` provenance (distinct from footprint
+            // markings, which carry their component).
+            out.extend(
+                text_features(string, *at, *height, layer, *orient, &su, font.as_ref())?
+                    .into_iter()
+                    .map(|nf| nf.with_origin(FeatureOrigin::BoardText)),
+            );
         }
     }
 

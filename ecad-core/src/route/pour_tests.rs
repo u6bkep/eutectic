@@ -1685,3 +1685,210 @@ fn bare_pin_keeps_all_layer_plane_incidence() {
         drc(h.doc(), &lib)
     );
 }
+
+// ----------------------------------------------------------------------------
+// Feature provenance (issue 0031): the derived `world_features` stream carries a
+// `FeatureOrigin` naming the source entity every feature was lowered from.
+// ----------------------------------------------------------------------------
+
+/// The full origin contract: on a small board carrying a netted pad, a copper pour,
+/// a routed trace, and a through via, `world_features` tags every feature with its
+/// owning source entity — a trace's copper its `TraceId`, a via's barrel + drill its
+/// `ViaId`, a pad's copper `(component, pad number)`, a pour its `Region { net,
+/// layer }` identity, the substrate/mask the `Board`, and footprint silk its
+/// component. The set of `Unattributed` features is asserted to be *exactly* the
+/// expected kinds (here: none — the scene has no NPTH `hole`) so any future feature
+/// kind that ships without a considered origin surfaces as a regression.
+#[test]
+fn world_features_carry_source_provenance() {
+    use crate::geom::FeatureOrigin;
+    use crate::id::{TraceId, ViaId};
+    use crate::route::model::{Trace, Via};
+
+    let mut lib = part_library();
+    // A real KiCad footprint whose pad *name* differs from its *number* would be
+    // ideal, but `one_pad` uses number == name "1"; the pad-number contract is
+    // exercised end-to-end by the GUI's `picked_pin_projects_its_net`. Here we just
+    // need a netted through-hole pad so a Pad origin appears.
+    lib.insert("PT".into(), one_pad("F.Cu"));
+    let outline = Shape2D::polygon(vec![
+        Point::mm(0, 0),
+        Point::mm(20, 0),
+        Point::mm(20, 20),
+        Point::mm(0, 20),
+    ]);
+    let src = vec![
+        board_rect(Point::mm(0, 0), Point::mm(20, 20)),
+        G::Instance {
+            path: "g".into(),
+            part: "PT".into(),
+            params: std::collections::BTreeMap::new(),
+            label: None,
+        },
+        G::Place {
+            path: "g".into(),
+            pos: Point::mm(5, 5),
+        },
+        G::ConnectPins {
+            net: "GND".into(),
+            pins: vec![("g".into(), "1".into())],
+        },
+        G::Region(RegionDecl {
+            shape: outline,
+            role: Role::Conductor,
+            net: Some("GND".into()),
+            layer: "F.Cu".into(),
+        }),
+    ];
+    let mut h = History::new(Default::default());
+    h.commit(Transaction::one(Command::SetSource(src)), &lib, "prov")
+        .expect("elaborates");
+    // Add a routed trace and a through via on GND.
+    h.commit(
+        Transaction::one(Command::AddTrace(
+            TraceId(7),
+            Trace {
+                net: NetId::new("GND"),
+                layer: "F.Cu".into(),
+                path: vec![Point::mm(5, 5), Point::mm(15, 5)],
+                width: 150_000,
+                prov: crate::doc::Provenance::Pinned,
+            },
+        )),
+        &lib,
+        "trace",
+    )
+    .unwrap();
+    h.commit(
+        Transaction::one(Command::AddVia(
+            ViaId(9),
+            Via {
+                net: NetId::new("GND"),
+                at: Point::mm(10, 10),
+                span: None,
+                drill: 300_000,
+                pad: 600_000,
+                prov: crate::doc::Provenance::Pinned,
+            },
+        )),
+        &lib,
+        "via",
+    )
+    .unwrap();
+
+    let doc = h.doc().clone();
+    let su = stackup(&doc.source);
+    let world =
+        world_features(&doc, &lib, &netlist_of(&doc), &DesignRules::default(), &su).unwrap();
+
+    let has = |o: FeatureOrigin| world.iter().any(|nf| nf.origin == o);
+
+    // A trace's copper carries its TraceId.
+    assert!(
+        has(FeatureOrigin::Trace(TraceId(7))),
+        "a trace's copper must carry its TraceId"
+    );
+    // A via's barrel (conductor prism, fanned per copper slab) carries its ViaId; so
+    // does its plated drill Void. Assert both a Conductor and a Void feature name v9.
+    assert!(
+        world
+            .iter()
+            .any(|nf| nf.origin == FeatureOrigin::Via(ViaId(9))
+                && nf.feature.role == Role::Conductor),
+        "a via's copper barrel must carry its ViaId"
+    );
+    assert!(
+        world
+            .iter()
+            .any(|nf| nf.origin == FeatureOrigin::Via(ViaId(9)) && nf.feature.role == Role::Void),
+        "a via's plated drill Void must carry its ViaId"
+    );
+    // A pad's copper carries (component, pad number). The `one_pad` component id is
+    // its instance path "g"; pad number is "1".
+    assert!(
+        world.iter().any(|nf| {
+            nf.origin
+                == FeatureOrigin::Pad {
+                    comp: crate::id::EntityId::new("g"),
+                    pad: "1".to_string(),
+                }
+                && nf.feature.role == Role::Conductor
+        }),
+        "a pad's copper must carry (component, pad number)"
+    );
+    // The pour carries Region { net = GND, layer = F.Cu }.
+    assert!(
+        has(FeatureOrigin::Region {
+            net: Some(NetId::new("GND")),
+            layer: "F.Cu".to_string(),
+        }),
+        "a pour must carry its Region net+layer identity"
+    );
+    // The board substrate + mask solids carry Board.
+    assert!(
+        world
+            .iter()
+            .any(|nf| nf.origin == FeatureOrigin::Board && nf.feature.role == Role::Substrate),
+        "the substrate must carry Board provenance"
+    );
+    assert!(
+        world
+            .iter()
+            .any(|nf| nf.origin == FeatureOrigin::Board && nf.feature.role == Role::Mask),
+        "mask solids must carry Board provenance"
+    );
+
+    // The Unattributed set: assert exactly which feature kinds (role) are
+    // unattributed. This scene authors no NPTH `hole`, and every derived feature has
+    // a considered origin, so the set must be EMPTY. A future feature kind shipped
+    // without an origin lands here and fails this assertion.
+    let unattributed_roles: std::collections::BTreeSet<String> = world
+        .iter()
+        .filter(|nf| nf.origin == FeatureOrigin::Unattributed)
+        .map(|nf| format!("{:?}", nf.feature.role))
+        .collect();
+    assert!(
+        unattributed_roles.is_empty(),
+        "no feature in this scene should be Unattributed; got roles: {unattributed_roles:?}"
+    );
+}
+
+/// The one genuinely-unattributable kind: an authored NPTH `hole` lowers to a
+/// pierce-everything `Role::Void` with no owning selectable entity → `Unattributed`.
+/// Asserted separately so the "Unattributed set is exactly {NPTH hole void}" contract
+/// is explicit and a regression (a hole silently gaining/losing attribution) surfaces.
+#[test]
+fn npth_hole_is_the_only_unattributed_kind() {
+    use crate::geom::FeatureOrigin;
+
+    let lib = part_library();
+    let src = vec![
+        board_rect(Point::mm(0, 0), Point::mm(20, 20)),
+        G::Hole {
+            center: Point::mm(10, 10),
+            dia: 3 * MM,
+        },
+    ];
+    let mut h = History::new(Default::default());
+    h.commit(Transaction::one(Command::SetSource(src)), &lib, "hole")
+        .expect("elaborates");
+    let doc = h.doc().clone();
+    let su = stackup(&doc.source);
+    let world =
+        world_features(&doc, &lib, &netlist_of(&doc), &DesignRules::default(), &su).unwrap();
+
+    let unattributed: Vec<&crate::geom::NetFeature> = world
+        .iter()
+        .filter(|nf| nf.origin == FeatureOrigin::Unattributed)
+        .collect();
+    assert_eq!(
+        unattributed.len(),
+        1,
+        "exactly one Unattributed feature (the NPTH hole void)"
+    );
+    assert_eq!(
+        unattributed[0].feature.role,
+        Role::Void,
+        "the only Unattributed feature is the NPTH hole's Void"
+    );
+}

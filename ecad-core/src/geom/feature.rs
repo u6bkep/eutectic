@@ -5,7 +5,7 @@
 use super::limits::{BOARD_THICKNESS, COPPER_THICKNESS, MASK_THICKNESS, SILK_THICKNESS};
 use super::shape::{Shape2D, clearance_violated};
 use crate::coord::Nm;
-use crate::id::NetId;
+use crate::id::{EntityId, NetId, TraceId, ViaId};
 
 // ----------------------------------------------------------------------------
 // z-stackup, roles, materials, features.
@@ -117,26 +117,101 @@ impl Feature {
     }
 }
 
-/// A physical [`Feature`] paired with the electrical **net** it carries, if any.
+/// The **owning source entity** a derived [`Feature`] was lowered from — the
+/// provenance annotation the render/pick/findings consumers key on (issue 0031).
+///
+/// `world_features` derives one flat stream of physical geometry from many source
+/// entities (traces, vias, pads, pours, the board, silk/text). The net is an
+/// *electrical* annotation (Decision 12); this is the orthogonal *structural*
+/// annotation — which authored/routed entity a piece of geometry belongs to. It is
+/// populated at derivation, where the source entity is in hand, and lets a consumer
+/// map a rendered feature back to a selectable id **without a second walk over the
+/// doc** (the GUI hit-test's former double-derivation, issue 0031).
+///
+/// Every variant names an entity using the existing id vocabulary
+/// ([`TraceId`]/[`ViaId`]/[`EntityId`]/[`NetId`] from `id.rs`, pad numbers as the
+/// `PinRef` join key) — no parallel id space. [`Unattributed`](FeatureOrigin::Unattributed)
+/// is the explicit escape hatch for geometry that genuinely has no single owning
+/// entity worth naming today (the pierce-everything drill/mask `Void`s); it is a
+/// named variant, not a silent `None`, so an engine test can assert *exactly* which
+/// feature kinds are unattributed and a future regression surfaces loudly.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FeatureOrigin {
+    /// A routed trace's copper, by its [`TraceId`].
+    Trace(TraceId),
+    /// A via's copper (its annular barrel on one spanned copper slab), by [`ViaId`].
+    Via(ViaId),
+    /// A placed component's **pad** copper, by the owning component ([`EntityId`]) and
+    /// the **pad number** — the `PinRef`/net-membership join key (the stable
+    /// symbol↔footprint identity), *never* the functional pin name (a review-blocked
+    /// bug class; see `ecad-gui`'s `SemanticId::Pin`).
+    Pad { comp: EntityId, pad: String },
+    /// A placed component's footprint **graphic or text** marking (silk / fab), by the
+    /// owning component. Not electrically netted; distinct from board-authored markings
+    /// so a consumer can attribute footprint silk to its part.
+    ComponentMarking(EntityId),
+    /// An authored **region** — a copper pour, keep-out, or filled void — by its net
+    /// (when it carries one) + the slab name it targets. A copper pour's `net` is
+    /// `Some` and its net+layer *is* its stable authored identity (a pour has no id of
+    /// its own, matching `ecad-gui`'s `SemanticId::Pour`); a keep-out / netless region
+    /// carries `net == None`.
+    Region { net: Option<NetId>, layer: String },
+    /// The board **substrate / outline** body (and the mask solids derived from that
+    /// same board region): geometry whose owning "entity" is the board itself.
+    Board,
+    /// A **board-authored** text/silk marking (a top-level `Text` directive), distinct
+    /// from footprint markings which carry their component.
+    BoardText,
+    /// Genuinely unattributable derived geometry: the pierce-everything plated drill
+    /// `Void`s (via barrels + pad drills) and mask-opening `Void`s, which are fab
+    /// artifacts of an entity but are not themselves a selectable owning entity in the
+    /// GUI's vocabulary. Named (not a silent absence) so the set stays asserted.
+    Unattributed,
+}
+
+/// A physical [`Feature`] paired with the electrical **net** it carries, if any, and
+/// the source-entity [`FeatureOrigin`] it was derived from.
+///
 /// This is the converged copper-clearance currency (it replaced the former ad-hoc
 /// copper-piece type): the net is an
 /// *annotation alongside* the geometry, **never a field on [`Feature`]** —
 /// connectivity is authoritative and lives separately (see
 /// docs/geometry-model-convergence.md, Decision 12). `net == None` means no
 /// electrical identity: board substrate, a silk marking, a void, or a floating pad.
+///
+/// `origin` is the orthogonal *structural* provenance (issue 0031): which authored /
+/// routed entity the geometry belongs to. It is **additive** — the two constructors
+/// default it to [`FeatureOrigin::Unattributed`], so every existing consumer (DRC,
+/// export, autoroute ingest) is untouched; a derivation site that knows the source
+/// entity tags it via [`with_origin`](NetFeature::with_origin).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NetFeature {
     pub net: Option<NetId>,
     pub feature: Feature,
+    pub origin: FeatureOrigin,
 }
 
 impl NetFeature {
+    /// A netted-or-netless feature with **unattributed** origin. Existing consumers
+    /// call this; a derivation that knows its source entity chains
+    /// [`with_origin`](NetFeature::with_origin).
     pub fn new(net: Option<NetId>, feature: Feature) -> NetFeature {
-        NetFeature { net, feature }
+        NetFeature {
+            net,
+            feature,
+            origin: FeatureOrigin::Unattributed,
+        }
     }
-    /// A feature with no electrical identity (substrate, silk, void).
+    /// A feature with no electrical identity (substrate, silk, void), unattributed
+    /// origin.
     pub fn netless(feature: Feature) -> NetFeature {
-        NetFeature { net: None, feature }
+        NetFeature::new(None, feature)
+    }
+    /// Attach the source-entity provenance (builder; issue 0031). Additive: callers
+    /// that do not set it leave [`FeatureOrigin::Unattributed`].
+    pub fn with_origin(mut self, origin: FeatureOrigin) -> NetFeature {
+        self.origin = origin;
+        self
     }
     /// Do two features belong to the **same** net? Two unnetted pieces are *not* the
     /// same net — an unnetted piece shares identity with nothing. (The different-net

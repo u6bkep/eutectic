@@ -5,7 +5,9 @@
 
 use crate::doc::{Doc, PinRef};
 use crate::geom::kernel::{DEFAULT_CIRCLE_SEGS, Region, difference, shape_to_region, union_all};
-use crate::geom::{Extent, Feature, Material, NetFeature, Role, Shape2D, Stackup, ZRange};
+use crate::geom::{
+    Extent, Feature, FeatureOrigin, Material, NetFeature, Role, Shape2D, Stackup, ZRange,
+};
 use crate::id::NetId;
 use crate::part::{PartLib, PinRole};
 use std::collections::BTreeMap;
@@ -110,19 +112,26 @@ pub(crate) fn net_features(
 
     // Traces: one Conductor prism on the trace's named copper slab. An unresolvable /
     // non-copper name contributes nothing (a committed trace always resolves — the
-    // commit-time slab gate in `command::apply`).
-    for t in doc.traces.values() {
+    // commit-time slab gate in `command::apply`). Provenance is the `TraceId`.
+    for (tid, t) in &doc.traces {
         if let Some(z) = cu.iter().find(|s| s.name == t.layer).map(|s| s.z) {
             let f = Feature::prism(Role::Conductor, Shape2D::trace(t.path.clone(), t.width), z);
-            out.push((t.layer.clone(), NetFeature::new(Some(t.net.clone()), f)));
+            out.push((
+                t.layer.clone(),
+                NetFeature::new(Some(t.net.clone()), f).with_origin(FeatureOrigin::Trace(*tid)),
+            ));
         }
     }
 
     // Vias: one Conductor prism per copper slab the via spans (single-slab fan-out).
-    for v in doc.vias.values() {
+    // Every fanned-out barrel prism carries the same `ViaId`.
+    for (vid, v) in &doc.vias {
         for s in v.spanned_slabs(&cu) {
             let f = Feature::prism(Role::Conductor, Shape2D::disc(v.at, v.pad / 2), s.z);
-            out.push((s.name.clone(), NetFeature::new(Some(v.net.clone()), f)));
+            out.push((
+                s.name.clone(),
+                NetFeature::new(Some(v.net.clone()), f).with_origin(FeatureOrigin::Via(*vid)),
+            ));
         }
     }
 
@@ -146,7 +155,13 @@ pub(crate) fn net_features(
                 }
                 let Extent::Prism { z, .. } = &f.extent;
                 if let Some(s) = cu.iter().find(|s| s.z == *z) {
-                    out.push((s.name.clone(), NetFeature::new(Some(net.clone()), f)));
+                    out.push((
+                        s.name.clone(),
+                        NetFeature::new(Some(net.clone()), f).with_origin(FeatureOrigin::Pad {
+                            comp: c.id.clone(),
+                            pad: pin.number.clone(),
+                        }),
+                    ));
                 }
             }
         }
@@ -207,11 +222,14 @@ pub fn world_features(
     // through-cut `Void` (a disc of the drill diameter). `Via.drill` was a scalar that
     // never reached the drill file — now it is an enumerable `Void`, like a pad drill.
     if let Some(full) = su.full_z() {
-        for v in doc.vias.values() {
-            out.push(NetFeature::netless(
-                Feature::prism(Role::Void, Shape2D::disc(v.at, v.drill / 2), full)
-                    .with_material(Material::named("copper")),
-            ));
+        for (vid, v) in &doc.vias {
+            out.push(
+                NetFeature::netless(
+                    Feature::prism(Role::Void, Shape2D::disc(v.at, v.drill / 2), full)
+                        .with_material(Material::named("copper")),
+                )
+                .with_origin(FeatureOrigin::Via(*vid)),
+            );
         }
     }
 
@@ -232,17 +250,26 @@ pub fn world_features(
         for pin in &def.pins {
             for f in pin.pad_features(c, su) {
                 if f.role != Role::Conductor {
-                    out.push(NetFeature::netless(f));
+                    // A pad's plated-drill / mask-opening `Void` belongs to its pad
+                    // (comp + pad number) — the id is in hand here.
+                    out.push(NetFeature::netless(f).with_origin(FeatureOrigin::Pad {
+                        comp: c.id.clone(),
+                        pad: pin.number.clone(),
+                    }));
                 }
             }
         }
         for f in crate::part::graphic_features(def, c, su) {
-            out.push(NetFeature::netless(f));
+            out.push(
+                NetFeature::netless(f).with_origin(FeatureOrigin::ComponentMarking(c.id.clone())),
+            );
         }
         let rd = refdes.get(id).map(String::as_str).unwrap_or("");
         let lbl = crate::annotate::label(c, def, &reg);
         for f in crate::part::text_features(def, c, su, rd, &lbl, font.as_ref()) {
-            out.push(NetFeature::netless(f));
+            out.push(
+                NetFeature::netless(f).with_origin(FeatureOrigin::ComponentMarking(c.id.clone())),
+            );
         }
     }
 
@@ -273,10 +300,16 @@ pub fn world_features(
             })
             .collect();
         let fill = difference(&outline, &union_all(obstacles));
-        out.push(NetFeature::new(
-            Some(net),
-            Feature::prism(Role::Conductor, Shape2D::Area { region: fill }, z),
-        ));
+        out.push(
+            NetFeature::new(
+                Some(net.clone()),
+                Feature::prism(Role::Conductor, Shape2D::Area { region: fill }, z),
+            )
+            .with_origin(FeatureOrigin::Region {
+                net: Some(net),
+                layer: r.layer.clone(),
+            }),
+        );
     }
     Ok(out)
 }
