@@ -19,10 +19,12 @@
 //!    with no second walk over the doc. Each candidate is one [`Candidate`] pairing a
 //!    [`SemanticId`] with the world-space [`Shape2D`] to test and the [`LayerId`] it
 //!    lives on;
-//! 4. containment: a candidate hits when the query point is inside its shape inflated
-//!    by the tolerance, tested through the same [`shape_to_region`] kernel the SVG
-//!    backend and DRC use — so a filled pad/pour uses exact area containment and a
-//!    zero-area trace/via disc uses its honest inflated copper extent;
+//! 4. containment: a candidate hits when the query point's distance to its copper region
+//!    is within the tolerance. That region — a filled pad/pour's exact area, a zero-area
+//!    trace/via's honest inflated copper extent — is tessellated **once** at candidate
+//!    build time through the same [`shape_to_region`] kernel the SVG backend and DRC use;
+//!    the per-event pick then does an integer AABB reject and a point-to-region distance
+//!    test on that cached region (no per-event offset/re-tessellation);
 //! 5. resolution: among hits on **visible** layers, the most *specific* wins
 //!    ([`PickPriority`]): pad/pin ▸ trace ▸ via ▸ pour ▸ board outline. Ties within a
 //!    priority break by top-most layer (highest z) first.
@@ -49,7 +51,7 @@ use super::LayerId;
 use damascene_core::viewport::ViewportView;
 use ecad_core::coord::{MM, Nm, Point};
 use ecad_core::doc::Doc;
-use ecad_core::geom::kernel::{DEFAULT_CIRCLE_SEGS, shape_to_region};
+use ecad_core::geom::kernel::{DEFAULT_CIRCLE_SEGS, Region, shape_to_region};
 use ecad_core::geom::{Extent, FeatureOrigin, NetFeature, Role, Shape2D, Stackup};
 use ecad_core::id::{EntityId, NetId, TraceId, ViaId};
 use ecad_core::part::PartLib;
@@ -99,15 +101,38 @@ pub enum PickPriority {
     Outline = 4,
 }
 
-/// One thing the pointer could land on: a semantic id, the world-space shape to test
-/// containment against, and the visual layer it lives on (so the pick can skip hidden
-/// layers). Built by [`candidates`]; never stored in the selection model.
+/// One thing the pointer could land on: a semantic id, the visual layer it lives on (so
+/// the pick can skip hidden layers), and the **pre-derived** hit-test geometry. Built by
+/// [`candidates`]; never stored in the selection model.
+///
+/// # Derived-state discipline (the perf contract)
+///
+/// All geometry-kernel work is hoisted here, at candidate build time (per doc revision,
+/// cached in `DerivedCaches`): [`region`](Candidate::region) is the shape's copper extent
+/// tessellated **once**, and [`aabb`](Candidate::aabb) is that region's integer bounding
+/// box. [`resolve`] is then a pure per-event lookup — an integer AABB reject followed by a
+/// point-to-region distance test on the *cached* region — with **no** per-event offset or
+/// re-tessellation. The zoom-dependent tolerance is applied as a distance threshold at
+/// query time, so it is never an input to any cached state.
 #[derive(Clone, Debug)]
 pub struct Candidate {
     /// The id this candidate selects when it wins the pick.
     pub id: SemanticId,
-    /// The world-frame (nm, y-up) copper/area shape to test the query point against.
+    /// The world-frame (nm, y-up) copper/area shape — retained for the overlay highlight
+    /// geometry (`app::panels`) and the halo location (`findings`). **Not** used on the
+    /// per-event hit-test path; [`region`](Candidate::region) is what [`resolve`] tests.
     pub shape: Shape2D,
+    /// The shape's copper extent tessellated to a [`Region`] **once** at build time (the
+    /// same [`shape_to_region`] realisation the old per-event `hits` produced, but at the
+    /// shape's own radius, tolerance-free). [`resolve`]'s narrow phase distance-tests the
+    /// query point against this immutable region — no per-event inflate/tessellate.
+    pub region: Region,
+    /// The `region`'s integer axis-aligned bounding box `(min, max)` in nm — the broad
+    /// phase reject. A pointer whose position, minus the tolerance, falls outside this box
+    /// (saturating) cannot be within tolerance of the region, so it is skipped before the
+    /// distance test. A degenerate (empty) region yields a zero-extent box at the origin;
+    /// such a candidate never hits, matching the old empty-region containment.
+    pub aabb: (Point, Point),
     /// The visual layer this candidate sits on — matched against the visibility
     /// predicate so hidden layers are not pickable.
     pub layer: LayerId,
@@ -237,9 +262,25 @@ pub fn candidates(doc: &Doc, lib: &PartLib, su: &Stackup) -> Vec<Candidate> {
         let Some(slab) = super::slab_of_z(su, z) else {
             continue;
         };
+        // Hoist ALL geometry-kernel work here (per-revision, cached in DerivedCaches):
+        // tessellate the copper extent to a Region ONCE (the same realisation the old
+        // per-event `hits` produced via `shape_to_region`, but at the shape's own radius —
+        // tolerance is applied as a distance threshold at query time, not baked in), and
+        // take its integer AABB for the broad-phase reject. An `Area` shape short-circuits
+        // to a region clone inside `shape_to_region` (no tessellation).
+        let region = shape_to_region(shape, DEFAULT_CIRCLE_SEGS);
+        // The region's own bbox is the honest broad-phase box: `resolve` distance-tests
+        // this exact region, and every ring vertex lies within it. An empty region (no
+        // rings ≥ 3 verts) has no bbox and can never hit; a zero-extent box at origin is a
+        // safe placeholder (the narrow-phase `point_within` still returns false).
+        let aabb = region
+            .bbox()
+            .unwrap_or((Point { x: 0, y: 0 }, Point { x: 0, y: 0 }));
         out.push(Candidate {
             id,
             shape: shape.clone(),
+            region,
+            aabb,
             layer: LayerId::Slab(slab.name.clone()),
             priority,
             z_top: z.hi,
@@ -268,13 +309,24 @@ fn doc_world_features(doc: &Doc, lib: &PartLib, su: &Stackup) -> Result<Vec<NetF
 }
 
 /// Resolve a board-space query point (nm) to the winning [`Pick`], honoring the
-/// visibility predicate and the priority ordering. Pure and unit-testable.
+/// visibility predicate and the priority ordering. Pure and unit-testable, and — by the
+/// derived-state contract on [`Candidate`] — a **pure per-event lookup**: no geometry
+/// derivation runs here, only integer compares and a distance test against each
+/// candidate's pre-built region.
 ///
 /// `visible(&LayerId) -> bool` is the canvas's own visibility test (a hidden layer is
-/// not pickable). `tol_nm` is the board-space grab radius from [`tolerance_nm`]. A
-/// candidate hits when `p` is inside its shape inflated by `tol_nm`, via the region
-/// kernel. Among hits the winner is the lowest [`PickPriority`], breaking ties by
-/// highest `z_top` (top-most layer). `None` when nothing (visible) is within tolerance.
+/// not pickable). `tol_nm` is the board-space grab radius from [`tolerance_nm`].
+///
+/// Two phases per candidate:
+/// - **broad phase** — [`aabb_admits`]: reject any candidate whose AABB, grown by
+///   `tol_nm`, excludes `p` (saturating integer compares; overflow-safe near the
+///   coordinate extremes). This lands ~100× on the poc board.
+/// - **narrow phase** — [`Region::point_within`]: on the few survivors, the point is a
+///   hit when its distance to the cached region is `≤ tol_nm` (inside counts as 0). This
+///   is the offset-free equivalent of the old "inside shape inflated by tol" test.
+///
+/// Among hits the winner is the lowest [`PickPriority`], breaking ties by highest `z_top`
+/// (top-most layer). `None` when nothing (visible) is within tolerance.
 pub fn resolve<'a>(
     cands: &'a [Candidate],
     p: Point,
@@ -286,7 +338,12 @@ pub fn resolve<'a>(
         if !visible(&c.layer) {
             continue;
         }
-        if !hits(&c.shape, p, tol_nm) {
+        // Broad phase: integer AABB reject before touching the region.
+        if !aabb_admits(c.aabb, p, tol_nm) {
+            continue;
+        }
+        // Narrow phase: exact point-to-region distance against the cached region.
+        if !c.region.point_within(p, tol_nm) {
             continue;
         }
         best = Some(match best {
@@ -309,19 +366,18 @@ pub fn resolve<'a>(
     })
 }
 
-/// Does `shape`, inflated by `tol_nm`, contain point `p`? Realised through the same
-/// [`shape_to_region`] kernel the SVG backend uses: a filled `Polygon`/`Area` tests
-/// exact area containment, and a zero-area `Stroke` (trace / disc / capsule) gets its
-/// honest inflated copper region — so a hairline trace is pickable within `radius +
-/// tol`. `tol_nm` floors at 0 (a negative tolerance never shrinks below the true
-/// extent).
-fn hits(shape: &Shape2D, p: Point, tol_nm: Nm) -> bool {
-    let inflated = shape.inflated(tol_nm.max(0));
-    let region = match &inflated {
-        Shape2D::Area { region } => region.clone(),
-        _ => shape_to_region(&inflated, DEFAULT_CIRCLE_SEGS),
-    };
-    region.contains_point(p)
+/// Broad-phase reject: could point `p` be within `tol_nm` of a region whose AABB is
+/// `(min, max)`? True iff `p` lies in the box grown by `tol_nm` on every side. The grow
+/// and the box edges are computed with **saturating** integer arithmetic so a coordinate
+/// near the `Nm` (i64) extremes cannot overflow into a wrong verdict — the reject is
+/// conservative (it never drops a candidate that the narrow phase would accept). A
+/// negative `tol_nm` floors at 0 (never shrinks the box).
+fn aabb_admits((min, max): (Point, Point), p: Point, tol_nm: Nm) -> bool {
+    let tol = tol_nm.max(0);
+    p.x >= min.x.saturating_sub(tol)
+        && p.x <= max.x.saturating_add(tol)
+        && p.y >= min.y.saturating_sub(tol)
+        && p.y <= max.y.saturating_add(tol)
 }
 
 #[cfg(test)]
@@ -473,4 +529,58 @@ mod tests {
 
     /// The pick tolerance in px used by the zoom test (mirrors the app constant).
     const PICK_TOL_PX_TEST: f32 = 6.0;
+
+    /// Manual perf probe (`cargo test -p ecad-gui -- --ignored pick_resolve_perf
+    /// --nocapture`): reproduces the profiler's measurement on the real poc board
+    /// (192 candidates, 186 pads). Prints mean per-event `resolve` cost at four
+    /// pointer positions (pad / trace / pour / empty). The regression this branch
+    /// fixed had resolve running the full offset+tessellate kernel per candidate per
+    /// event (~800 ms/event debug); after hoisting the region+AABB into candidate
+    /// build time, resolve is a pure AABB-reject + cached-region distance lookup and
+    /// must land well under 1 ms/event debug. Ignored so it never runs in CI (it reads
+    /// the poc board off disk and is a timing measurement, not an assertion).
+    #[test]
+    #[ignore = "manual perf probe; run with --ignored --nocapture"]
+    fn pick_resolve_perf() {
+        use std::time::Instant;
+        let d = crate::fixtures::poc_board_domain();
+        let doc = d.doc.as_ref().expect("poc board elaborates").clone();
+        let su = ecad_core::elaborate::stackup(&doc.source);
+        let t_build = Instant::now();
+        let cands = candidates(&doc, &d.lib, &su);
+        let build_ms = t_build.elapsed().as_secs_f64() * 1e3;
+        let pads = cands
+            .iter()
+            .filter(|c| matches!(c.id, SemanticId::Pin { .. }))
+            .count();
+        eprintln!(
+            "poc board: {} candidates ({pads} pads); candidates() build = {build_ms:.2} ms",
+            cands.len()
+        );
+        // A screen-px tolerance at zoom 1.0, as the app uses.
+        let tol = tolerance_nm(PICK_TOL_PX_TEST, 1.0);
+        // Four representative pointer positions. Exact hit targets are not important —
+        // the profiler found the cost FLAT across position, which this probe verifies.
+        let spots: [(&str, Point); 4] = [
+            (
+                "pad",
+                cands.first().map(|c| c.aabb.0).unwrap_or(mm(0.0, 0.0)),
+            ),
+            ("trace", mm(10.0, 7.0)),
+            ("pour", mm(5.0, 3.0)),
+            ("empty", mm(-50.0, -50.0)),
+        ];
+        let iters = 200;
+        for (label, p) in spots {
+            let t = Instant::now();
+            let mut sink = 0usize;
+            for _ in 0..iters {
+                if resolve(&cands, p, tol, all_visible).is_some() {
+                    sink += 1;
+                }
+            }
+            let per_ev_ms = t.elapsed().as_secs_f64() * 1e3 / iters as f64;
+            eprintln!("resolve @ {label:>5}: {per_ev_ms:.4} ms/event (hits={sink}/{iters})");
+        }
+    }
 }

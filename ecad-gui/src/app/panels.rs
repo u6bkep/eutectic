@@ -31,6 +31,18 @@ impl EcadApp {
         !self.hidden.borrow().contains(key)
     }
 
+    /// Visibility of a [`LayerId`] on the per-event pick path, without allocating a key
+    /// string per candidate. The hidden set is empty in the common case (nothing hidden),
+    /// so this short-circuits to `true` before formatting the `"layer:…"` key; the
+    /// `format!` runs only when at least one layer is actually hidden. Equivalent to
+    /// `self.layer_visible(&id.key())` but off the hot allocation path (the profiler's
+    /// incidental: `resolve`'s visibility closure was allocating a `LayerId` key per
+    /// candidate every event — 192× on the poc board).
+    pub(crate) fn layer_id_visible(&self, id: &crate::canvas::LayerId) -> bool {
+        let hidden = self.hidden.borrow();
+        hidden.is_empty() || !hidden.contains(&id.key())
+    }
+
     /// The viewer body: the toolbar, the two-pane split (center), the right sidebar
     /// (inspector + explorer + layer panel), and the status bar. Reached when the doc
     /// loaded (at least one pane always renders — a board pane falls back to a placeholder

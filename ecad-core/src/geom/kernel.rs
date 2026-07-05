@@ -139,6 +139,13 @@ fn pt_seg_lt(p: Point, a: Point, b: Point, thr2: i128) -> bool {
     num < thr2 * den
 }
 
+/// Is `dist²(p, seg a–b) ≤ thr2`? The boundary-inclusive twin of [`pt_seg_lt`], compared
+/// as `num ≤ thr2·den`.
+fn pt_seg_le(p: Point, a: Point, b: Point, thr2: i128) -> bool {
+    let (num, den) = pt_seg_d2(p, a, b);
+    num <= thr2 * den
+}
+
 /// Is the minimum distance between segments `a1a2` and `b1b2` `< thr` (thr² = `thr2`)?
 /// Intersection ⇒ distance 0. Else the min is at one of the four endpoint-to-opposite
 /// distances.
@@ -247,6 +254,30 @@ impl Region {
     /// Is `p` inside the filled region (boundary counts as inside)?
     pub fn contains_point(&self, p: Point) -> bool {
         locate(p, &self.rings) != Loc::Outside
+    }
+
+    /// Is the point-to-region distance `≤ thr`? A point inside (or on the boundary of)
+    /// the filled region has distance 0, so it is always within; otherwise the distance
+    /// is the minimum over all ring edges and this returns `dist ≤ thr`. `thr < 0` floors
+    /// at 0 (never within unless the point is inside).
+    ///
+    /// Exact-integer: containment via [`locate`], distance-to-edge via [`pt_seg_le`]
+    /// (`dist² ≤ thr²`, no cross-multiply of two large numerators). This is the pick
+    /// picker's narrow-phase primitive — for a convex disc (round-join) offset,
+    /// `within(region, p, thr)` equals `contains(dilate(region, thr), p)` exactly, but
+    /// tested against the *undilated* region so no per-query offset/tessellation runs.
+    pub fn point_within(&self, p: Point, thr: Nm) -> bool {
+        if self.contains_point(p) {
+            return true;
+        }
+        if thr <= 0 {
+            return false;
+        }
+        let thr2 = (thr as i128) * (thr as i128);
+        self.rings
+            .iter()
+            .flat_map(|r| ring_edges(r))
+            .any(|(a, b)| pt_seg_le(p, a, b, thr2))
     }
 
     /// Total signed area ×2 (CCW outer minus CW holes). The filled area is

@@ -359,8 +359,7 @@ impl EcadApp {
 
         match (self.tool.get(), event.kind) {
             (Tool::Select, UiEventKind::Click) => {
-                let hit =
-                    pick::resolve(&view.candidates, p, tol, |id| self.layer_visible(&id.key()));
+                let hit = pick::resolve(&view.candidates, p, tol, |id| self.layer_id_visible(id));
                 let mut sel = self.domain.selection.borrow_mut();
                 match hit {
                     Some(pick) => sel.select_only(pick.id),
@@ -368,8 +367,7 @@ impl EcadApp {
                 }
             }
             (Tool::Select, UiEventKind::PointerEnter | UiEventKind::Drag) => {
-                let hit =
-                    pick::resolve(&view.candidates, p, tol, |id| self.layer_visible(&id.key()));
+                let hit = pick::resolve(&view.candidates, p, tol, |id| self.layer_id_visible(id));
                 let mut sel = self.domain.selection.borrow_mut();
                 match hit {
                     Some(pick) => sel.hover_only(pick.id),

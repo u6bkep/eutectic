@@ -484,3 +484,58 @@ fn boolean_is_deterministic() {
     let d2 = difference(&a, &b);
     assert_eq!(d1, d2, "same inputs ⇒ identical region");
 }
+
+#[test]
+fn point_within_inside_is_zero_distance() {
+    // A 10mm square centred at origin: any interior/boundary point is within any thr,
+    // including thr = 0 (distance 0).
+    let sq = Region::from_ring(square(0, 0, 5 * MM));
+    assert!(sq.point_within(pt(0, 0), 0), "centre is inside");
+    assert!(
+        sq.point_within(pt(5 * MM, 0), 0),
+        "boundary counts as inside"
+    );
+    assert!(sq.point_within(pt(-2 * MM, 3 * MM), 0), "interior point");
+}
+
+#[test]
+fn point_within_outside_uses_edge_distance() {
+    // Square [-5,5]^2 (mm). A point 2mm to the right of the right edge (at x=7, y=0) is
+    // exactly 2mm from the region; within 2mm (≤, boundary of the tolerance disc) and
+    // within 3mm, but not within 1mm.
+    let sq = Region::from_ring(square(0, 0, 5 * MM));
+    let p = pt(7 * MM, 0);
+    assert!(!sq.point_within(p, MM), "1mm < 2mm gap → miss");
+    assert!(sq.point_within(p, 2 * MM), "exactly 2mm → hit (≤)");
+    assert!(sq.point_within(p, 3 * MM), "3mm > 2mm gap → hit");
+}
+
+#[test]
+fn point_within_corner_is_round_join() {
+    // Distance to a convex corner is the Euclidean distance to the corner point (round
+    // join), NOT the axis-aligned box distance. Corner at (5,5); a point at (8,9) is
+    // 5mm away (3-4-5). Within 5mm, not within 4mm — a miter/box test would disagree.
+    let sq = Region::from_ring(square(0, 0, 5 * MM));
+    let p = pt(8 * MM, 9 * MM);
+    assert!(
+        !sq.point_within(p, 4 * MM),
+        "4mm < 5mm corner distance → miss"
+    );
+    assert!(
+        sq.point_within(p, 5 * MM),
+        "exactly 5mm to the corner → hit"
+    );
+}
+
+#[test]
+fn point_within_negative_thr_floors_to_containment() {
+    let sq = Region::from_ring(square(0, 0, 5 * MM));
+    assert!(
+        sq.point_within(pt(0, 0), -1),
+        "inside regardless of negative thr"
+    );
+    assert!(
+        !sq.point_within(pt(7 * MM, 0), -1),
+        "outside with negative thr never hits"
+    );
+}
