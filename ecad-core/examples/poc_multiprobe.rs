@@ -44,10 +44,7 @@ use ecad_core::geom::{
 };
 use ecad_core::history::History;
 use ecad_core::id::NetId;
-use ecad_core::kicad::{
-    apply_role_map, import_footprint_file, import_symbol_named, join_symbol_footprint,
-};
-use ecad_core::part::{PartDef, PartLib, PinRole};
+use ecad_core::library::load_library;
 use ecad_core::query::{Engine, Key};
 use ecad_core::route::DesignRules;
 use ecad_core::schematic::{
@@ -57,153 +54,10 @@ use ecad_core::schematic_svg::schematic_svg;
 use ecad_core::text::{serialize, serialize_schematic_block};
 use std::collections::BTreeMap;
 
+/// The `poc` library package: the manifest-driven directory the `use poc`
+/// directive below names. Loaded through the engine's [`load_library`] — the old
+/// hand-rolled `build_lib()` now lives as data in `poc/parts/ecad.lib`.
 const PARTS: &str = "poc/parts";
-
-// ---------------------------------------------------------------------------
-// Part building helpers
-// ---------------------------------------------------------------------------
-
-/// Import a footprint's geometry as a (role-less, Passive) PartDef.
-fn fp(file: &str) -> PartDef {
-    import_footprint_file(&format!("{PARTS}/{file}"))
-        .unwrap_or_else(|e| panic!("import {file}: {e}"))
-}
-
-/// Re-label imported footprint pads with functional names + electrical roles,
-/// keyed by pad *number* — a jellybean part with no symbol gets its roles from a
-/// hand-map. This is just the library's [`apply_role_map`] (issue 0002's
-/// lightweight role overlay); the example wraps it to panic on a typo'd map.
-/// Assigning the *same* name to several pads is fine and intended — connecting that
-/// name fans out to all of them (see the duplicate power pads on the RP2350 below).
-fn relabel(part: PartDef, map: &[(&str, &str, PinRole)]) -> PartDef {
-    apply_role_map(part, map).expect("role map references a missing pad")
-}
-
-fn build_lib() -> (PartLib, PartDef) {
-    let mut lib = PartLib::new();
-
-    // U1: RP2350A QFN-60 — authoritative symbol + footprint, joined through the
-    // framework. The six IOVDD and three DVDD pads keep their shared functional
-    // names: connecting "IOVDD" now fans out to all six pads (no uniquify hack).
-    let sym = import_symbol_named(
-        &std::fs::read_to_string(format!("{PARTS}/MCU_RaspberryPi.kicad_sym")).unwrap(),
-        "RP2350A",
-    )
-    .expect("RP2350A symbol");
-    let mcu_fp = fp("RP2350A_QFN-60.kicad_mod");
-    let jr = join_symbol_footprint(&sym, &mcu_fp);
-    assert!(
-        jr.symbol_only.is_empty() && jr.footprint_only.is_empty(),
-        "RP2350A join not clean: {:?} / {:?}",
-        jr.symbol_only,
-        jr.footprint_only
-    );
-    let rp2350 = jr.part;
-    lib.insert("RP2350A".into(), rp2350.clone());
-
-    // J1..J10: JST-SH 3-pin (pads 1,2,3,MP) — passive connector, no relabel.
-    lib.insert("JST_SH".into(), fp("JST_SH_3pin_Horizontal.kicad_mod"));
-
-    // U2: QSPI flash W25Q (SOIC-8). Pinout: 1=/CS 2=IO1(DO) 3=IO2(/WP) 4=GND
-    // 5=IO0(DI) 6=CLK 7=IO3(/HOLD) 8=VCC.
-    use PinRole::*;
-    lib.insert(
-        "W25Q".into(),
-        relabel(
-            fp("Flash_SOIC-8.kicad_mod"),
-            &[
-                ("1", "CS_N", Input),
-                ("2", "IO1", Bidir),
-                ("3", "IO2", Bidir),
-                ("4", "GND", Passive),
-                ("5", "IO0", Bidir),
-                ("6", "CLK", Input),
-                ("7", "IO3", Bidir),
-                ("8", "VCC", PowerIn),
-            ],
-        ),
-    );
-
-    // Y1: 12 MHz crystal, 3225 4-pad. 1/3 = terminals, 2/4 = case GND.
-    lib.insert(
-        "XTAL".into(),
-        relabel(
-            fp("Crystal_3225.kicad_mod"),
-            &[
-                ("1", "X1", Passive),
-                ("2", "GNDa", Passive),
-                ("3", "X2", Passive),
-                ("4", "GNDb", Passive),
-            ],
-        ),
-    );
-
-    // U3: 3.3 V LDO/reg (AP2112K-3.3, SOT-23-5): 1=VIN 2=GND 3=EN 4=NC 5=VOUT.
-    lib.insert(
-        "REG".into(),
-        relabel(
-            fp("Regulator_SOT-23-5.kicad_mod"),
-            &[
-                ("1", "VIN", PowerIn),
-                ("2", "GND", Passive),
-                ("3", "EN", Input),
-                ("4", "NC", Passive),
-                ("5", "VOUT", PowerOut),
-            ],
-        ),
-    );
-
-    // J11: USB-C receptacle (USB 2.0). The four VBUS pads, four GND pads, and the
-    // two DP / two DM pads share a name each: connecting "VBUS"/"GND"/"DP"/"DM" fans
-    // out to every physical pad (no per-pad distinct-name workaround needed).
-    lib.insert(
-        "USBC".into(),
-        relabel(
-            fp("USB_C_Receptacle.kicad_mod"),
-            &[
-                ("A1", "GND", Passive),
-                ("A4", "VBUS", PowerIn),
-                ("A5", "CC1", Passive),
-                ("A6", "DP", Bidir),
-                ("A7", "DM", Bidir),
-                ("A8", "SBU1", Passive),
-                ("A9", "VBUS", PowerIn),
-                ("A12", "GND", Passive),
-                ("B1", "GND", Passive),
-                ("B4", "VBUS", PowerIn),
-                ("B5", "CC2", Passive),
-                ("B6", "DP", Bidir),
-                ("B7", "DM", Bidir),
-                ("B8", "SBU2", Passive),
-                ("B9", "VBUS", PowerIn),
-                ("B12", "GND", Passive),
-                ("SH", "SHIELD", Passive),
-            ],
-        ),
-    );
-
-    // L1: core-buck inductor 3.3 uH (2020). R/C/inductor passives keep pads "1","2".
-    lib.insert("IND".into(), fp("Inductor_2020.kicad_mod"));
-    lib.insert("R".into(), fp("R_0402.kicad_mod"));
-    lib.insert("C".into(), fp("C_0402.kicad_mod"));
-    // SW1 BOOTSEL, SW2 RUN — 2-terminal tactile.
-    lib.insert("BTN".into(), fp("Button_EVQP7A.kicad_mod"));
-    // D1: WS2812B-2020 status LED. 1=VDD 2=DOUT 3=GND 4=DIN.
-    lib.insert(
-        "LED".into(),
-        relabel(
-            fp("LED_WS2812B.kicad_mod"),
-            &[
-                ("1", "VDD", PowerIn),
-                ("2", "DOUT", Output),
-                ("3", "GND", Passive),
-                ("4", "DIN", Input),
-            ],
-        ),
-    );
-
-    (lib, rp2350)
-}
 
 // ---------------------------------------------------------------------------
 // Source authoring (the netlist + placement program)
@@ -332,6 +186,13 @@ impl Builder {
 
 fn build_source() -> Source {
     let mut b = Builder::new();
+
+    // --- library declaration (library packages, slice 1) --------------------
+    // The FIRST source directive: the document declares — by NAME, never a path —
+    // the library package its parts come from, so the serialized board.ecad opens
+    // with `use poc` and is resolvable standalone. Inert to elaboration; `main`
+    // below resolves the name to `poc/parts` and loads it.
+    b.s.push(G::Use { name: "poc".into() });
 
     // --- 4-layer stackup (Decision 13) --------------------------------------
     // Honest z per side: bottom copper at [0,C]; two inner copper planes in the core;
@@ -894,7 +755,11 @@ schematic {
 // ---------------------------------------------------------------------------
 
 fn main() {
-    let (lib, rp2350) = build_lib();
+    // The `use poc` directive in the source names this library package; the caller
+    // (us) resolves the name to its directory and loads it — libraries are data now.
+    let lib = load_library(std::path::Path::new(PARTS))
+        .unwrap_or_else(|e| panic!("load library package `poc` from {PARTS}: {e}"));
+    let rp2350 = &lib["RP2350A"];
     println!("== Stage 1: RP2350A QFN-60 sourced + verified through framework ==");
     println!(
         "  RP2350A joined pins: {} (60 signal/power + 1 EP)",

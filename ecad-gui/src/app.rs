@@ -2345,9 +2345,11 @@ board (0mm, 0mm) (10mm, 0mm) (10mm, 10mm) (0mm, 10mm)
         assert!(!f.is_clean());
     }
 
-    /// A source that fails elaboration — an instance of a part not in the library.
+    /// A source that fails the load — a malformed `inst` (missing its part token).
+    /// An unknown part no longer fails (library packages: it degrades to a
+    /// `W_UNRESOLVED_PART` finding), so the error path needs a genuine syntax fault.
     const BROKEN_SRC: &str = "\
-inst U1 NotAPart
+inst U1
 net GND U1.GND
 ";
 }

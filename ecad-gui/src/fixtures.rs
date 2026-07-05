@@ -25,10 +25,13 @@ net GND reg.GND C1.p2
 board (0mm, 0mm) (20mm, 0mm) (20mm, 15mm) (0mm, 15mm)
 ";
 
-/// A source that parses structurally but references a part not in the library,
-/// so elaboration reports a diagnostic — the parse/elaborate-error state.
+/// A source with a genuinely malformed directive (an `inst` missing its part
+/// token), so the load reports a hard diagnostic — the parse/elaborate-error
+/// state. NOTE: an *unknown part* no longer fails the load (library packages,
+/// slice 1) — it degrades to a `W_UNRESOLVED_PART` finding — so this fixture
+/// uses a syntax error to stay on the error path.
 pub const BROKEN_ECAD: &str = "\
-inst U1 NotAPart
+inst U1
 net GND U1.GND
 ";
 
@@ -361,130 +364,20 @@ fn poc_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../poc")
 }
 
-/// Build the multiprobe part library exactly as `examples/poc_multiprobe.rs` does:
-/// KiCad footprints imported from `poc/parts`, with functional pad-role overlays.
-/// Panics on a missing/broken part file — this is test scaffolding, not the app
-/// path.
-fn poc_lib() -> ecad_core::part::PartLib {
-    use ecad_core::kicad::{
-        apply_role_map, import_footprint_file, import_symbol_named, join_symbol_footprint,
-    };
-    use ecad_core::part::{PartDef, PartLib, PinRole::*};
-
-    let parts = poc_dir().join("parts");
-    let fp = |file: &str| -> PartDef {
-        import_footprint_file(parts.join(file).to_str().unwrap())
-            .unwrap_or_else(|e| panic!("import {file}: {e}"))
-    };
-    let relabel = |part: PartDef, map: &[(&str, &str, ecad_core::part::PinRole)]| -> PartDef {
-        apply_role_map(part, map).expect("role map references a missing pad")
-    };
-
-    let mut lib = PartLib::new();
-
-    let sym = import_symbol_named(
-        &std::fs::read_to_string(parts.join("MCU_RaspberryPi.kicad_sym")).unwrap(),
-        "RP2350A",
-    )
-    .expect("RP2350A symbol");
-    let mcu_fp = fp("RP2350A_QFN-60.kicad_mod");
-    lib.insert("RP2350A".into(), join_symbol_footprint(&sym, &mcu_fp).part);
-
-    lib.insert("JST_SH".into(), fp("JST_SH_3pin_Horizontal.kicad_mod"));
-    lib.insert(
-        "W25Q".into(),
-        relabel(
-            fp("Flash_SOIC-8.kicad_mod"),
-            &[
-                ("1", "CS_N", Input),
-                ("2", "IO1", Bidir),
-                ("3", "IO2", Bidir),
-                ("4", "GND", Passive),
-                ("5", "IO0", Bidir),
-                ("6", "CLK", Input),
-                ("7", "IO3", Bidir),
-                ("8", "VCC", PowerIn),
-            ],
-        ),
-    );
-    lib.insert(
-        "XTAL".into(),
-        relabel(
-            fp("Crystal_3225.kicad_mod"),
-            &[
-                ("1", "X1", Passive),
-                ("2", "GNDa", Passive),
-                ("3", "X2", Passive),
-                ("4", "GNDb", Passive),
-            ],
-        ),
-    );
-    lib.insert(
-        "REG".into(),
-        relabel(
-            fp("Regulator_SOT-23-5.kicad_mod"),
-            &[
-                ("1", "VIN", PowerIn),
-                ("2", "GND", Passive),
-                ("3", "EN", Input),
-                ("4", "NC", Passive),
-                ("5", "VOUT", PowerOut),
-            ],
-        ),
-    );
-    lib.insert(
-        "USBC".into(),
-        relabel(
-            fp("USB_C_Receptacle.kicad_mod"),
-            &[
-                ("A1", "GND", Passive),
-                ("A4", "VBUS", PowerIn),
-                ("A5", "CC1", Passive),
-                ("A6", "DP", Bidir),
-                ("A7", "DM", Bidir),
-                ("A8", "SBU1", Passive),
-                ("A9", "VBUS", PowerIn),
-                ("A12", "GND", Passive),
-                ("B1", "GND", Passive),
-                ("B4", "VBUS", PowerIn),
-                ("B5", "CC2", Passive),
-                ("B6", "DP", Bidir),
-                ("B7", "DM", Bidir),
-                ("B8", "SBU2", Passive),
-                ("B9", "VBUS", PowerIn),
-                ("B12", "GND", Passive),
-                ("SH", "SHIELD", Passive),
-            ],
-        ),
-    );
-    lib.insert("IND".into(), fp("Inductor_2020.kicad_mod"));
-    lib.insert("R".into(), fp("R_0402.kicad_mod"));
-    lib.insert("C".into(), fp("C_0402.kicad_mod"));
-    lib.insert("BTN".into(), fp("Button_EVQP7A.kicad_mod"));
-    lib.insert(
-        "LED".into(),
-        relabel(
-            fp("LED_WS2812B.kicad_mod"),
-            &[
-                ("1", "VDD", PowerIn),
-                ("2", "DOUT", Output),
-                ("3", "GND", Passive),
-                ("4", "DIN", Input),
-            ],
-        ),
-    );
-    lib
-}
-
-/// The real multiprobe board loaded from `poc/out/board.ecad` with [`poc_lib`].
-/// Used by the end-to-end canvas smoke test.
+/// The real multiprobe board loaded from `poc/out/board.ecad` with the `poc`
+/// library package loaded from `poc/parts` (the same manifest-driven
+/// [`ecad_core::library::load_library`] path the `poc_multiprobe` example uses —
+/// the board's `use poc` directive names it). Panics on a missing/broken package —
+/// this is test scaffolding, not the app path. Used by the end-to-end canvas
+/// smoke test.
 pub fn poc_board_domain() -> DomainState {
+    let parts = poc_dir().join("parts");
+    let lib = ecad_core::library::load_library(&parts)
+        .unwrap_or_else(|e| panic!("load library package from {}: {e}", parts.display()));
     let path = poc_dir().join("out/board.ecad");
     let source =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    DomainState::from_source_with(source, Some("board.ecad".to_string()), poc_lib(), |_| {
-        Vec::new()
-    })
+    DomainState::from_source_with(source, Some("board.ecad".to_string()), lib, |_| Vec::new())
 }
 
 /// Every fixture, paired with a stable scene name for artifact filenames. The
@@ -558,6 +451,35 @@ mod tests {
         // placeholder with no viewport — only the board pane is fit-checked.
         let r = render_clean("document_loaded", app);
         harness::assert_content_coverage("document_loaded", &r, &[PaneId::A.canvas_key()]);
+    }
+
+    /// Library packages, slice 1: a source whose only fault is an *unknown part*
+    /// LOADS (permissive degrade) with a `W_UNRESOLVED_PART` finding on the report —
+    /// the instance is skipped and its netted pins are cascade-suppressed, never a
+    /// hard error. (Findings-panel display of the warning is next slice.)
+    #[test]
+    fn unresolved_part_loads_with_finding() {
+        let d = DomainState::from_source(
+            "inst U1 NotAPart\nnet GND U1.GND\n".to_string(),
+            Some("unresolved.ecad".to_string()),
+        );
+        let doc = d
+            .doc
+            .as_ref()
+            .expect("an unknown part must degrade, not fail the load");
+        assert!(
+            doc.components.is_empty(),
+            "the unresolved instance is skipped"
+        );
+        assert_eq!(
+            doc.report.unresolved_parts.len(),
+            1,
+            "the skip surfaces as a finding: {:?}",
+            doc.report.unresolved_parts
+        );
+        let (id, part, _help) = &doc.report.unresolved_parts[0];
+        assert_eq!(id.to_string(), "U1");
+        assert_eq!(part, "NotAPart");
     }
 
     #[test]
