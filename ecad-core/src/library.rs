@@ -89,15 +89,24 @@ fn parse_role_kind(tok: &str) -> Result<PinRole, String> {
     })
 }
 
-/// Reject an absolute manifest path (the hygiene guard — see the module docs: a
-/// committed library package must be relocatable, so its manifest may reference
-/// assets only *relative* to itself).
+/// Reject an absolute or package-escaping manifest path (the hygiene guard — see
+/// the module docs: a committed library package must be relocatable and
+/// self-contained, so its manifest may reference assets only *within* itself).
 fn check_relative(rel: &str, lineno: usize) -> Result<(), String> {
     if Path::new(rel).is_absolute() {
         return Err(format!(
             "line {lineno}: absolute path `{rel}` is not allowed in a manifest \
              (paths are relative to the manifest's directory; absolute paths must \
              never appear in committed artifacts)"
+        ));
+    }
+    if Path::new(rel)
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(format!(
+            "line {lineno}: path `{rel}` escapes the library package via `..` \
+             (a package must be self-contained: assets live beside the manifest)"
         ));
     }
     Ok(())
@@ -399,6 +408,16 @@ part LED footprint=led.kicad_mod {
         let err =
             parse_manifest("part M footprint=f.kicad_mod symbol=/abs/s.kicad_sym:M\n").unwrap_err();
         assert!(err.contains("absolute path"), "got: {err}");
+    }
+
+    #[test]
+    fn manifest_rejects_parent_dir_traversal() {
+        // Self-containment: a `..` path escapes the package directory.
+        let err = parse_manifest("part R footprint=../outside/R.kicad_mod\n").unwrap_err();
+        assert!(err.contains("escapes the library package"), "got: {err}");
+        let err = parse_manifest("part M footprint=f.kicad_mod symbol=a/../../s.kicad_sym:M\n")
+            .unwrap_err();
+        assert!(err.contains("escapes the library package"), "got: {err}");
     }
 
     #[test]
