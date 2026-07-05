@@ -157,12 +157,23 @@ impl InspectorData {
                 })
             }
             SemanticId::Pin { comp, pin } => {
+                // `pin` is the pad *number* (the `PinRef` / net-membership join key), so
+                // this lookup keys nets correctly. The functional name is a derived label:
+                // find the `PinDef` by number and show its name when it differs.
                 let c = doc.components.get(comp)?;
                 let pr = PinRef::new(comp, pin);
                 let net = pin_net(doc, &pr);
+                let name = lib
+                    .get(&c.part)
+                    .and_then(|d| d.pins.iter().find(|p| &p.number == pin))
+                    .map(|p| p.name.clone());
+                let pin_label = match &name {
+                    Some(n) if n != pin => format!("{pin} ({n})"),
+                    _ => pin.clone(),
+                };
                 let rows = vec![
                     Row::new("Component", comp.as_str()),
-                    Row::new("Pin", pin.clone()),
+                    Row::new("Pin", pin_label),
                     Row::new("Part", c.part.clone()),
                     Row::new(
                         "Net",

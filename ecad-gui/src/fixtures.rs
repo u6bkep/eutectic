@@ -460,4 +460,87 @@ mod tests {
             "inspector Position must be the doc's authored position, not a hardcoded value"
         );
     }
+
+    /// Pin-pick identity round-trip (regression for the m3 pin blocker). A picked
+    /// `SemanticId::Pin` must carry the pad *number* (the `PinRef` / net-membership
+    /// join key), NOT the functional pin name — otherwise the inspector's net lookup
+    /// misses and every netted, renamed pad reads "(unconnected)". Drives the full
+    /// pick → inspector chain over the real poc board (real KiCad footprints, where
+    /// pad name != number), asserting that a pad which IS on a net projects that net.
+    #[test]
+    fn picked_pin_projects_its_net() {
+        use crate::canvas::pick::{SemanticId, candidates};
+        use crate::inspector::InspectorData;
+
+        use ecad_core::doc::PinRef;
+
+        let d = poc_board_domain();
+        let doc = d.doc.as_ref().expect("poc board elaborates");
+        let su = ecad_core::elaborate::stackup(&doc.source);
+        let cands = candidates(doc, &d.lib, &su);
+        let pin_cands: Vec<&SemanticId> = cands
+            .iter()
+            .filter(|c| matches!(c.id, SemanticId::Pin { .. }))
+            .map(|c| &c.id)
+            .collect();
+        assert!(
+            !pin_cands.is_empty(),
+            "poc board has real footprints, so the picker must emit pin candidates"
+        );
+
+        // Ground truth is keyed by pad NUMBER (the `PinRef` contract), established
+        // independently of what the picker put in the candidate. For every pin whose
+        // pad number is netted AND whose functional name differs from its number (the
+        // exact case the blocker hit), require the picker to emit a matching candidate
+        // whose inspector projection reports that same net. If the picker stored the
+        // NAME instead of the NUMBER, either no candidate carries the number (miss) or
+        // the projected id keys the wrong node (unconnected) — both fail here.
+        let mut checked = 0usize;
+        for (eid, comp) in &doc.components {
+            let Some(def) = d.lib.get(&comp.part) else {
+                continue;
+            };
+            for p in &def.pins {
+                if p.name == p.number {
+                    continue; // toy-style pins can't distinguish the bug
+                }
+                let pr = PinRef::new(eid, &p.number);
+                let net = doc
+                    .nets
+                    .iter()
+                    .find(|(_, n)| n.members.contains(&pr))
+                    .map(|(nid, _)| nid.to_string());
+                let Some(net) = net else { continue };
+
+                // The picker must have emitted a candidate identifying this exact pad
+                // by NUMBER (not name) — otherwise a directly-picked pad is unreachable.
+                let want = SemanticId::Pin {
+                    comp: eid.clone(),
+                    pin: p.number.clone(),
+                };
+                assert!(
+                    pin_cands.iter().any(|id| **id == want),
+                    "picker must emit a Pin candidate keyed by pad number for \
+                     {eid:?}.{} (name {}); the candidate set is name-keyed",
+                    p.number,
+                    p.name
+                );
+
+                let data = InspectorData::project(&want, doc, &d.lib).expect("pin projects");
+                let net_row = data.rows.iter().find(|r| r.key == "Net").unwrap();
+                assert_eq!(
+                    net_row.value, net,
+                    "picked pad {eid:?}.{} (name {}) is on net {net} but the inspector \
+                     reports {:?} — pin identity must be the pad number, not the name",
+                    p.number, p.name, net_row.value
+                );
+                assert_eq!(data.net.as_deref(), Some(net.as_str()));
+                checked += 1;
+            }
+        }
+        assert!(
+            checked > 0,
+            "poc board must have at least one netted pad whose name differs from its number"
+        );
+    }
 }

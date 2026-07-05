@@ -73,7 +73,11 @@ pub enum SemanticId {
     /// its own; net+layer is its stable authored identity).
     Pour { net: NetId, layer: String },
     /// A single pin/pad of a placed component, identified by the owning component +
-    /// pin name (`PinRef`'s two parts, spelled out so the id is `Hash + Ord`).
+    /// **pad number** — `PinRef`'s two parts, spelled out so the id is `Hash + Ord`.
+    /// The `pin` field is the pad *number* (the stable symbol↔footprint join key that
+    /// `PinRef` and net membership key on), **not** the functional pin name; the
+    /// inspector derives the display name from the number. See `docs/gui-architecture.md`
+    /// and `PinRef`'s contract (`ecad_core::doc::PinRef`).
     Pin { comp: EntityId, pin: String },
 }
 
@@ -210,7 +214,7 @@ pub fn candidates(doc: &Doc, lib: &PartLib, su: &Stackup) -> Vec<Candidate> {
                 out.push(Candidate {
                     id: SemanticId::Pin {
                         comp: c.id.clone(),
-                        pin: pin.name.clone(),
+                        pin: pin.number.clone(),
                     },
                     shape: shape.clone(),
                     layer: LayerId::Slab(slab.name.clone()),
