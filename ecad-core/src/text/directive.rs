@@ -268,6 +268,11 @@ pub(crate) fn render_directive(d: &GenDirective) -> String {
             // absent.
             format!("font \"{path}\"")
         }
+        GenDirective::Use { name } => {
+            // `use <name>` — a library-package declaration (a bare name, never a path;
+            // the caller resolves names to directories — see `crate::library`).
+            format!("use {name}")
+        }
         GenDirective::Def {
             name,
             params,
@@ -697,6 +702,20 @@ pub(crate) fn parse_line(line: &str) -> Result<Item, String> {
                 return Err("font: empty path".into());
             }
             Item::Directive(GenDirective::Font { path })
+        }
+        "use" => {
+            // `use <name>` — declare a library package the document depends on. Exactly
+            // one bare token: the library *name* (resolution to a directory is the
+            // caller's job — a path, absolute or relative, never appears in a document).
+            const USAGE: &str = "use <library-name>";
+            let toks: Vec<&str> = rest.split_whitespace().collect();
+            match toks.as_slice() {
+                [name] => Item::Directive(GenDirective::Use {
+                    name: (*name).to_string(),
+                }),
+                [] => return Err(format!("{USAGE} (missing name)")),
+                _ => return Err(format!("use takes exactly one name ({USAGE})")),
+            }
         }
         "connect" => {
             let (a, b) = two_tokens(rest, "connect <compA>.<port> <compB>.<port>")?;

@@ -146,7 +146,14 @@ pub fn elaborate(
         }
     }
 
-    // Pass 1: instances.
+    // Pass 1: instances. An instance whose part the library does not provide is a
+    // **degrade**, not a fault (the library-packages model: a document declaring a
+    // library the caller failed to resolve must still open): the instance is skipped
+    // (no component materializes), its id seeds the cascade-suppression set (so later
+    // net/connect/near references to it are silenced, exactly like a DNP-dropped
+    // part), and the skip surfaces as a non-blocking `W_UNRESOLVED_PART` finding on
+    // the [`ReconReport`].
+    let mut unresolved_parts: Vec<(EntityId, String, String)> = Vec::new();
     for d in source {
         if let GenDirective::Instance {
             path,
@@ -157,15 +164,8 @@ pub fn elaborate(
         {
             let id = EntityId::new(path.clone());
             if !lib.contains_key(part) {
-                errors.push(
-                    Diagnostic::error(
-                        "E_UNKNOWN_PART",
-                        format!("instance `{path}` uses unknown part `{part}`"),
-                        Location::Entity(id.clone()),
-                    )
-                    .with_help(known_parts(lib)),
-                );
-                // Poison: the instance does not exist, so suppress its cascade.
+                unresolved_parts.push((id.clone(), part.clone(), known_parts(lib)));
+                // The instance does not exist, so suppress its cascade.
                 reported_missing.insert(id);
                 continue;
             }
@@ -645,6 +645,12 @@ pub fn elaborate(
     dnp_dangling.sort();
     dnp_dangling.dedup();
     report.dnp_dangling = dnp_dangling;
+    // Library-packages degrade: instances whose part the lib does not provide were
+    // skipped in pass 1; each surfaces as a `W_UNRESOLVED_PART` warning (deduped +
+    // sorted for a deterministic report), never a hard error.
+    unresolved_parts.sort();
+    unresolved_parts.dedup();
+    report.unresolved_parts = unresolved_parts;
 
     for (id, ov) in overrides {
         if !base.contains_key(id) || ov.pos.is_none() {

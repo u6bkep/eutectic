@@ -87,12 +87,13 @@ fn transaction_is_atomic_on_error() {
     )
     .unwrap();
     let before = ecad_core::project::render(h.doc());
-    // A source referencing an unknown part must fail and leave head untouched.
-    let bad = vec![GenDirective::Instance {
-        path: "x".into(),
-        part: "Nope".into(),
-        params: std::collections::BTreeMap::new(),
-        label: None,
+    // A source with a structural fault — a net referencing an instance the source
+    // never declares (`E_UNKNOWN_INSTANCE`) — must fail and leave head untouched.
+    // (An unknown *part* is no longer a fault: it degrades to a `W_UNRESOLVED_PART`
+    // finding — library packages, slice 1.)
+    let bad = vec![GenDirective::ConnectPins {
+        net: "N".into(),
+        pins: vec![("ghost".into(), "1".into())],
     }];
     let r = h.commit(Transaction::one(Command::SetSource(bad)), &lib, "bad");
     assert!(r.is_err());

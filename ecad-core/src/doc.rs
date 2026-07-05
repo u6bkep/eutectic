@@ -366,6 +366,15 @@ pub struct ReconReport {
     /// with the part absent, so this does **not** dirty [`is_clean`](Self::is_clean). Each
     /// entry is `(referencing_context, dropped_path)`, deduped and sorted.
     pub dnp_dangling: Vec<(String, String)>,
+    /// Instances whose part name the provided [`PartLib`](crate::part::PartLib) does not
+    /// resolve (the library-packages model: the document declares libraries by *name*
+    /// via `use`, and a caller may fail to resolve one). A **degrade**, not a fault
+    /// (like [`dnp_dangling`](Self::dnp_dangling)): the instance is skipped — no
+    /// component materializes, and references to it are cascade-suppressed — but the
+    /// doc still loads, so this does **not** dirty [`is_clean`](Self::is_clean); it
+    /// surfaces as a `W_UNRESOLVED_PART` warning per instance. Each entry is
+    /// `(instance id, part name, known-parts help)`, deduped and sorted.
+    pub unresolved_parts: Vec<(EntityId, String, String)>,
     /// Components not placed by the authored schematic layout tree (Decision 20). A
     /// **degrade**, not a fault (like [`font_load_failure`](Self::font_load_failure)):
     /// the schematic view stays total (§20c) by dropping each into the derived unplaced
@@ -403,11 +412,13 @@ impl ReconReport {
             && self.orphaned.is_empty()
             && self.refdes_pin_dups.is_empty()
             && self.courtyard_overlaps.is_empty()
-        // NB: `font_load_failure`, `unmasked_copper`, `dnp_dangling`, and
-        // `unplaced_components` are deliberately excluded — a font that fails to load
+        // NB: `font_load_failure`, `unmasked_copper`, `dnp_dangling`, `unresolved_parts`,
+        // and `unplaced_components` are deliberately excluded — a font that fails to load
         // degrades to the stroke font (Decision 17), unmasked outer copper (issue 0024)
         // still elaborates/exports honestly, a DNP dangling reference is an intentional
-        // variant toggle (Decision 21b), an unplaced component still renders in the
+        // variant toggle (Decision 21b), an unresolved part is skipped so a doc whose
+        // libraries a caller failed to resolve still opens (the library-packages
+        // degrade), and an unplaced component still renders in the
         // derived bin (Decision 20c), and a `schematic_wire_warnings` finding is a
         // presentational-wire disagreement with the netlist (Decision 20d) — the netlist
         // is still the truth. `schematic_override_warnings` is likewise excluded (a doc-level
@@ -509,6 +520,23 @@ impl crate::diagnostic::Diagnose for ReconReport {
                 .with_help(
                     "this pin is skipped; remove the reference, or the `if=` clause, if unintended",
                 ),
+            );
+        }
+        for (id, part, known) in &self.unresolved_parts {
+            // Degrade, not fault (library packages): the part name resolved to nothing in
+            // the provided library, so the instance is skipped — the doc still loads. The
+            // warning keeps the skip visible; `is_clean` ignores it.
+            out.push(
+                Diagnostic::warning(
+                    "W_UNRESOLVED_PART",
+                    format!(
+                        "instance `{id}` uses unresolved part `{part}`; the instance is skipped"
+                    ),
+                    Location::Entity(id.clone()),
+                )
+                .with_help(format!(
+                    "declare a library providing it (`use <name>`), or fix the part name; {known}"
+                )),
             );
         }
         for name in &self.unmasked_copper {

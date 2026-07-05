@@ -327,6 +327,17 @@ pub enum GenDirective {
     Font {
         path: String,
     },
+    /// A **library-package declaration**: `use <name>` names a part library the document
+    /// depends on. The name is a bare token — *never* a filesystem path (absolute paths
+    /// must not appear in committed artifacts; the document commits only names). The
+    /// directive is **inert to elaboration** — resolution is the caller's job: the caller
+    /// maps names to library directories, loads them ([`crate::library::load_library`]),
+    /// unions them ([`crate::library::union`]) and passes the resulting [`crate::part::PartLib`]
+    /// into `commit`/`elaborate` exactly as before. [`crate::library::use_names`]
+    /// enumerates these declarations in source order for that resolver.
+    Use {
+        name: String,
+    },
 }
 
 /// The generative program (tier 1 authoritative).

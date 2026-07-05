@@ -78,6 +78,11 @@ fn placement_scene() -> Source {
 /// A hand-built source touching *every* GenDirective variant.
 fn all_variants() -> Source {
     vec![
+        // A library-package declaration (`use <name>`) — inert to elaboration,
+        // round-trips as a bare name (library packages, slice 1).
+        GenDirective::Use {
+            name: "jellybean".into(),
+        },
         GenDirective::Instance {
             path: "psu.reg".into(),
             part: "LDO".into(),
@@ -2867,5 +2872,114 @@ fn def_override_survives_and_decays_by_stamped_path() {
             .orphaned
             .contains(&EntityId::new("sense[1].U")),
         "the removed stamped instance's override is surfaced as an orphan"
+    );
+}
+
+// ---- library packages, slice 1: `use` directive + permissive unresolved parts ----
+
+/// `use <name>` parses, renders canonically, and is a serialize fixpoint. Exactly one
+/// bare token: a missing name or extra tokens are parse errors; no block form.
+#[test]
+fn use_directive_round_trips() {
+    let Parsed { source, .. } = parse("use poc\nuse jellybean  # comment").expect("parse");
+    assert_eq!(
+        source,
+        vec![
+            GenDirective::Use { name: "poc".into() },
+            GenDirective::Use {
+                name: "jellybean".into()
+            },
+        ]
+    );
+    // Fixpoint: serialize -> parse -> serialize is byte-stable.
+    let doc = doc_of(source, BTreeMap::new());
+    let once = serialize(&doc);
+    assert_eq!(once, "use poc\nuse jellybean\n");
+    let reparsed = parse(&once).expect("reparse");
+    assert_eq!(serialize(&doc_of(reparsed.source, BTreeMap::new())), once);
+
+    // Errors: zero or two names, and a block body.
+    assert!(parse("use").is_err(), "missing name");
+    assert!(parse("use a b").is_err(), "extra token");
+    let err = parse("use a {\n}").unwrap_err();
+    assert!(
+        err.iter().any(|d| d.code == "E_BLOCK"),
+        "no block form: {err:?}"
+    );
+}
+
+/// `use_names` enumerates the declarations of a parsed source in source order.
+#[test]
+fn use_names_reads_parsed_source() {
+    let Parsed { source, .. } = parse("use poc\ninst c1 Cap\nuse extra").expect("parse");
+    assert_eq!(crate::library::use_names(&source), vec!["poc", "extra"]);
+}
+
+/// Library packages, slice 1 (the behavior change): a doc whose ONLY faults are
+/// unresolved parts LOADS with `W_UNRESOLVED_PART` findings — the instance is
+/// skipped, and net/nc references to it are cascade-suppressed (no `E_UNKNOWN_*`
+/// errors). `use` itself is inert to elaboration.
+#[test]
+fn unresolved_part_loads_with_finding_and_suppresses_cascade() {
+    let src = "use ghostlib\n\
+               inst c1 Cap\n\
+               inst u9 NotAPart\n\
+               net GND c1.p2 u9.GND\n\
+               nc u9.VDD\n\
+               near u9 c1 2mm";
+    let Parsed { source, .. } = parse(src).expect("parse");
+    let doc = placed(source); // commits — an Err here fails the test
+    assert!(doc.components.contains_key(&EntityId::new("c1")));
+    assert!(
+        !doc.components.contains_key(&EntityId::new("u9")),
+        "the unresolved instance is skipped, not materialized"
+    );
+    assert_eq!(doc.report.unresolved_parts.len(), 1);
+    let (id, part, help) = &doc.report.unresolved_parts[0];
+    assert_eq!(id, &EntityId::new("u9"));
+    assert_eq!(part, "NotAPart");
+    assert!(
+        help.contains("known parts:"),
+        "the known-parts hint survives: {help}"
+    );
+    // The finding is a warning (a degrade): the doc stays clean and the Diagnose
+    // surface renders it as W_UNRESOLVED_PART.
+    assert!(
+        doc.report.is_clean(),
+        "unresolved parts do not dirty is_clean"
+    );
+    use crate::diagnostic::Diagnose;
+    assert!(
+        doc.report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == "W_UNRESOLVED_PART"
+                && d.severity == crate::diagnostic::Severity::Warning),
+        "got: {:?}",
+        doc.report.diagnostics()
+    );
+    // Cascade suppression: the net still carries c1's pin; u9's references vanished
+    // silently (no E_UNKNOWN_INSTANCE — the commit above succeeded).
+    let gnd = &doc.nets[&crate::id::NetId::new("GND")];
+    assert!(gnd.members.iter().any(|m| m.comp.as_str() == "c1"));
+    assert!(!gnd.members.iter().any(|m| m.comp.as_str() == "u9"));
+}
+
+/// A genuinely malformed source still hard-fails: permissive unresolved parts must
+/// not soften structural faults (an unknown *instance* reference, a syntax error).
+#[test]
+fn malformed_source_still_hard_fails() {
+    // Syntax fault: `inst` missing its part token.
+    assert!(parse("inst u1").is_err());
+    // Structural fault: a net referencing an instance the source never declares.
+    let lib = part_library();
+    let mut h = History::new(Default::default());
+    let Parsed { source, .. } = parse("inst c1 Cap\nnet N c1.p1 ghost.1").expect("parse");
+    let err = h
+        .commit(Transaction::one(Command::SetSource(source)), &lib, "bad")
+        .unwrap_err();
+    assert!(
+        err.iter().any(|d| d.code == "E_UNKNOWN_INSTANCE"),
+        "got: {err:?}"
     );
 }
