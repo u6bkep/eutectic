@@ -539,7 +539,7 @@ mod tests {
         let doc = d.doc.as_ref().expect("drc fixture elaborates");
         let su = ecad_core::elaborate::stackup(&doc.source);
         let cands = candidates(doc, &d.lib, &su);
-        let f = Findings::compute(doc, &d.lib, &cands);
+        let f = Findings::compute(doc, &d.lib, &cands, &d.lib_notes);
         assert!(
             f.items.iter().any(|i| i.code == "E_DRC_CLEARANCE"),
             "the drc_violation fixture must flag a clearance short"

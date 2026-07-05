@@ -14,6 +14,7 @@ use crate::explorer::Explorer;
 use crate::findings::Findings;
 use crate::highlight::HighlightSets;
 use crate::inspector::InspectorData;
+use crate::registry::{self, LibNote, Registry};
 use crate::reload::{SourceMailbox, SourceMsg};
 use crate::schematic_view::SchematicView;
 use crate::selection::SelectionModel;
@@ -23,6 +24,31 @@ use ecad_core::doc::Doc;
 use ecad_core::geom::Shape2D;
 use ecad_core::id::NetId;
 use std::cell::{Cell, RefCell};
+
+/// Where a [`DomainState`]'s [`PartLib`](ecad_core::part::PartLib) comes from —
+/// the resolver *input* (library packages, slice 2). Resolution re-runs on
+/// every (re)load: a reload may add or remove `use` lines, and a registry edit
+/// re-resolves the current doc.
+///
+/// - [`Fixed`](LibSource::Fixed): a pre-resolved library. The fixture path
+///   (`from_source_with`) and the toy default (`from_source`) — resolution is
+///   the identity, zero notes.
+/// - [`Registry`](LibSource::Registry): the per-machine name → path registry
+///   (`docs/architecture.md` §9). Each load parses the source's `use` names and
+///   resolves them through [`registry::resolve`]; `save_path` is where a
+///   Libraries-menu edit persists the registry (`None` = don't persist — tests
+///   and fixtures). Only `main.rs` computes the real default location.
+pub enum LibSource {
+    /// A pre-resolved, load-time-fixed library (fixtures / the toy default).
+    Fixed(ecad_core::part::PartLib),
+    /// Resolve `use` names through the per-machine registry on every load.
+    Registry {
+        /// The name → directory registry (mutated by the Libraries menu).
+        registry: Registry,
+        /// Where menu edits save the registry; `None` = in-memory only.
+        save_path: Option<std::path::PathBuf>,
+    },
+}
 
 /// Domain state: the source-of-truth half of `gui-architecture.md` through-line
 /// 3 (domain state / pane state split).
@@ -44,9 +70,19 @@ pub struct DomainState {
     /// UI. Per the permissive philosophy (`gui-architecture.md`, "Editing
     /// philosophy"), a bad load never crashes — it renders as an alert.
     pub doc: Result<Doc, String>,
-    /// The part library used to elaborate and (later) render. The built-in
-    /// library is enough for the skeleton; a real project supplies its own.
+    /// Where the library comes from — the resolver input. Resolution re-runs
+    /// on every (re)load against this (see [`LibSource`]); the *result* is
+    /// cached in [`lib`](Self::lib) + [`lib_notes`](Self::lib_notes) below.
+    pub lib_source: LibSource,
+    /// The **resolved** part library for the current load — what elaboration
+    /// and rendering use. Re-derived from [`lib_source`](Self::lib_source) on
+    /// every successful (re)load; for a [`LibSource::Fixed`] domain this is
+    /// simply that library.
     pub lib: ecad_core::part::PartLib,
+    /// The library-resolution notes for the current load (unregistered `use`
+    /// names, packages that failed to load, union collisions) — data, not
+    /// errors (§9 permissive rule). Merged into the findings panel.
+    pub lib_notes: Vec<LibNote>,
     /// The filename the document was loaded from, for the toolbar badge.
     /// `None` in the no-document state.
     pub filename: Option<String>,
@@ -75,12 +111,25 @@ impl DomainState {
         DomainState {
             source: String::new(),
             doc: Err("no document".to_string()),
+            lib_source: LibSource::Fixed(ecad_core::part::part_library()),
             lib: ecad_core::part::part_library(),
+            lib_notes: Vec::new(),
             filename: None,
             selection: RefCell::new(SelectionModel::new()),
             revision: 0,
             reload_error: None,
         }
+    }
+
+    /// Replace this domain's [`LibSource`] without re-elaborating — for wiring
+    /// the registry into the **empty** (no-document) state, where there is
+    /// nothing to resolve yet but the Libraries menu must still edit the real
+    /// registry. A loaded document should use
+    /// [`from_source_registry`](Self::from_source_registry) instead, which
+    /// resolves before elaborating.
+    pub fn with_lib_source(mut self, lib_source: LibSource) -> Self {
+        self.lib_source = lib_source;
+        self
     }
 
     /// Load a document from `.ecad` source text, parsing + elaborating it
@@ -107,41 +156,13 @@ impl DomainState {
         lib: ecad_core::part::PartLib,
         extra: impl FnOnce(&Doc) -> Vec<ecad_core::command::Command>,
     ) -> Self {
-        use ecad_core::command::{Command, Transaction};
-        use ecad_core::history::History;
-
-        let fmt = |diags: Vec<ecad_core::diagnostic::Diagnostic>| {
-            diags
-                .iter()
-                .map(|d| format!("[{}] {}", d.code, d.message))
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-
-        let mut history = History::new(Doc::default());
-        let doc = history
-            .commit(
-                Transaction::one(Command::LoadText(source.clone())),
-                &lib,
-                "load",
-            )
-            .map_err(fmt)
-            .and_then(|_| {
-                let cmds = extra(history.doc());
-                if cmds.is_empty() {
-                    Ok(history.doc().clone())
-                } else {
-                    history
-                        .commit(Transaction(cmds), &lib, "fixture-route")
-                        .map(|_| history.doc().clone())
-                        .map_err(fmt)
-                }
-            });
-
+        let doc = elaborate(&source, &lib, extra);
         DomainState {
             source,
             doc,
+            lib_source: LibSource::Fixed(lib.clone()),
             lib,
+            lib_notes: Vec::new(),
             filename,
             selection: RefCell::new(SelectionModel::new()),
             revision: 0,
@@ -149,32 +170,103 @@ impl DomainState {
         }
     }
 
-    /// Re-parse + re-elaborate `source` against **this** domain's existing library and
-    /// filename — the reload entry point. Returns the freshly-elaborated
-    /// `Result<Doc, String>` WITHOUT touching `self`; the caller
-    /// ([`EcadApp::apply_reload`]) decides whether to swap it in (success) or keep the
-    /// last-good doc and surface the error (failure). Pure over `(source, self.lib)`.
-    fn elaborate_source(&self, source: &str) -> Result<Doc, String> {
-        use ecad_core::command::{Command, Transaction};
-        use ecad_core::history::History;
-
-        let fmt = |diags: Vec<ecad_core::diagnostic::Diagnostic>| {
-            diags
-                .iter()
-                .map(|d| format!("[{}] {}", d.code, d.message))
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        let mut history = History::new(Doc::default());
-        history
-            .commit(
-                Transaction::one(Command::LoadText(source.to_string())),
-                &self.lib,
-                "reload",
-            )
-            .map_err(fmt)
-            .map(|_| history.doc().clone())
+    /// Load a document from `.ecad` source, resolving its `use` names through
+    /// the per-machine `registry` (library packages, slice 2 — the windowed
+    /// `main.rs` path). Resolution runs first ([`registry::resolve`]: registry
+    /// hits unioned in source order, the built-in toy library appended last),
+    /// then the source elaborates against the resolved lib. Resolution
+    /// failures are notes (`lib_notes`), never load errors.
+    pub fn from_source_registry(
+        source: String,
+        filename: Option<String>,
+        registry: Registry,
+        save_path: Option<std::path::PathBuf>,
+    ) -> Self {
+        let (lib, lib_notes) = registry::resolve(&source, &registry);
+        let doc = elaborate(&source, &lib, |_| Vec::new());
+        DomainState {
+            source,
+            doc,
+            lib_source: LibSource::Registry {
+                registry,
+                save_path,
+            },
+            lib,
+            lib_notes,
+            filename,
+            selection: RefCell::new(SelectionModel::new()),
+            revision: 0,
+            reload_error: None,
+        }
     }
+
+    /// Resolve `source`'s libraries against **this** domain's [`LibSource`] —
+    /// the shared resolution step of the initial load and every reload. A
+    /// `Fixed` source is the identity (its lib, zero notes); a `Registry`
+    /// source re-runs [`registry::resolve`], because a reload may add or
+    /// remove `use` lines and a registry edit changes what a name binds to.
+    fn resolve_lib(&self, source: &str) -> (ecad_core::part::PartLib, Vec<LibNote>) {
+        match &self.lib_source {
+            LibSource::Fixed(lib) => (lib.clone(), Vec::new()),
+            LibSource::Registry { registry, .. } => registry::resolve(source, registry),
+        }
+    }
+
+    /// Re-resolve + re-parse + re-elaborate `source` — the reload entry point.
+    /// Returns the freshly-resolved library + notes and the elaboration result
+    /// WITHOUT touching `self`; the caller ([`EcadApp::apply_reload`]) decides
+    /// whether to swap them in (success) or keep the last-good doc + lib and
+    /// surface the error (failure). Pure over `(source, self.lib_source)`.
+    fn elaborate_source(
+        &self,
+        source: &str,
+    ) -> (ecad_core::part::PartLib, Vec<LibNote>, Result<Doc, String>) {
+        let (lib, notes) = self.resolve_lib(source);
+        let doc = elaborate(source, &lib, |_| Vec::new());
+        (lib, notes, doc)
+    }
+}
+
+/// Parse + elaborate `source` against `lib` through `ecad-core`'s public
+/// command API (`History` + `Command::LoadText` — the same entry point the
+/// `ecad-core` examples use), then commit the `extra` post-load command batch
+/// (fixture-routed copper) if non-empty. Never panics: any failure is the
+/// `Err` string for the UI to display.
+fn elaborate(
+    source: &str,
+    lib: &ecad_core::part::PartLib,
+    extra: impl FnOnce(&Doc) -> Vec<ecad_core::command::Command>,
+) -> Result<Doc, String> {
+    use ecad_core::command::{Command, Transaction};
+    use ecad_core::history::History;
+
+    let fmt = |diags: Vec<ecad_core::diagnostic::Diagnostic>| {
+        diags
+            .iter()
+            .map(|d| format!("[{}] {}", d.code, d.message))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let mut history = History::new(Doc::default());
+    history
+        .commit(
+            Transaction::one(Command::LoadText(source.to_string())),
+            lib,
+            "load",
+        )
+        .map_err(fmt)
+        .and_then(|_| {
+            let cmds = extra(history.doc());
+            if cmds.is_empty() {
+                Ok(history.doc().clone())
+            } else {
+                history
+                    .commit(Transaction(cmds), lib, "fixture-route")
+                    .map(|_| history.doc().clone())
+                    .map_err(fmt)
+            }
+        })
 }
 
 /// Which view a pane renders (mockup: the pane header's view-type switcher). v1 has two
@@ -420,10 +512,11 @@ impl DerivedCaches {
         }
     }
 
-    /// Build every derived cache from a document + library. A projection failure
-    /// (unreachable for a committed doc) degrades to "no board view" rather than
-    /// crashing — the permissive philosophy.
-    fn build(doc: &Doc, lib: &ecad_core::part::PartLib) -> DerivedCaches {
+    /// Build every derived cache from a document + resolved library (+ the
+    /// load's library-resolution notes, which merge into the findings). A
+    /// projection failure (unreachable for a committed doc) degrades to "no
+    /// board view" rather than crashing — the permissive philosophy.
+    fn build(doc: &Doc, lib: &ecad_core::part::PartLib, lib_notes: &[LibNote]) -> DerivedCaches {
         // The layered canvas + pick candidates, from the one `world_features` stream.
         let board = Canvas::new(doc, lib)
             .and_then(|canvas| {
@@ -443,7 +536,7 @@ impl DerivedCaches {
         // source) — empty candidate list when the board didn't project, which is fine
         // (findings then carry no board-mm point, panel-only).
         let candidates: &[Candidate] = board.as_ref().map_or(&[], |b| &b.candidates);
-        let findings = Findings::compute(doc, lib, candidates);
+        let findings = Findings::compute(doc, lib, candidates, lib_notes);
         DerivedCaches {
             board,
             schematic,
@@ -456,7 +549,7 @@ impl DerivedCaches {
 impl EcadApp {
     pub fn new(domain: DomainState) -> Self {
         let derived = match &domain.doc {
-            Ok(doc) => DerivedCaches::build(doc, &domain.lib),
+            Ok(doc) => DerivedCaches::build(doc, &domain.lib, &domain.lib_notes),
             Err(_) => DerivedCaches::empty(),
         };
         EcadApp {
@@ -589,21 +682,25 @@ impl EcadApp {
     /// `&mut self` because a reload swaps domain + derived state; called from
     /// `before_build` (host frame) after the mailbox drain, and directly by tests.
     pub fn apply_reload(&mut self, source: String) {
-        match self.domain.elaborate_source(&source) {
+        let (lib, notes, doc) = self.domain.elaborate_source(&source);
+        match doc {
             Ok(doc) => {
-                let derived = DerivedCaches::build(&doc, &self.domain.lib);
+                let derived = DerivedCaches::build(&doc, &lib, &notes);
                 // Prune selection + hover to ids that still resolve in the NEW doc,
                 // using the freshly-built candidate/schematic ids as the resolvable set.
                 self.prune_selection(&doc, &derived);
                 *self.derived.borrow_mut() = derived;
+                self.domain.lib = lib;
+                self.domain.lib_notes = notes;
                 self.domain.doc = Ok(doc);
                 self.domain.source = source;
                 self.domain.revision += 1;
                 self.domain.reload_error = None;
             }
             Err(err) => {
-                // Permissive: keep the last-good doc + caches on screen; surface the
-                // error persistently. Do NOT bump the revision (nothing derived changed).
+                // Permissive: keep the last-good doc + caches + resolved lib on screen;
+                // surface the error persistently. Do NOT bump the revision (nothing
+                // derived changed).
                 self.domain.reload_error = Some(err);
             }
         }
@@ -1033,6 +1130,11 @@ impl EcadApp {
     /// message, as a click-to-select focusable row keyed by index. Built on the same
     /// focusable-list-item anatomy as `sidebar_menu_button` (which is label-only), so a
     /// click routes to the app and the row reads as an interactive nav entry.
+    ///
+    /// An [informational](crate::findings::Finding::is_informational) finding (an
+    /// unresolved part / library-resolution note — no refs, no board point, nothing to
+    /// navigate to) renders the same anatomy WITHOUT the interactive affordances: no
+    /// key, not focusable, no pointer cursor — a plain data row.
     fn finding_row(&self, index: usize, f: &crate::findings::Finding) -> El {
         let sev = if f.is_error() {
             badge("ERR").destructive()
@@ -1045,18 +1147,21 @@ impl EcadApp {
         ])
         .gap(0.0)
         .width(Size::Fill(1.0));
-        row([sev, body])
-            .key(finding_row_key(index))
+        let base = row([sev, body])
             .style_profile(StyleProfile::Solid)
             .metrics_role(MetricsRole::ListItem)
-            .focusable()
-            .cursor(Cursor::Pointer)
             .fill(tokens::CARD)
             .radius(tokens::RADIUS_SM)
             .gap(tokens::SPACE_2)
             .padding(Sides::xy(tokens::SPACE_2, tokens::SPACE_1))
             .align(Align::Center)
-            .width(Size::Fill(1.0))
+            .width(Size::Fill(1.0));
+        if f.is_informational() {
+            return base;
+        }
+        base.key(finding_row_key(index))
+            .focusable()
+            .cursor(Cursor::Pointer)
             .ghost()
     }
 
@@ -1317,6 +1422,12 @@ impl EcadApp {
         let Some(f) = derived.findings.items.get(index) else {
             return;
         };
+        // Informational rows (unresolved part / library note) have nothing to select
+        // or navigate to — and they render without a route key, so this is belt and
+        // braces against a stale index.
+        if f.is_informational() {
+            return;
+        }
         // Fold every ref into the selection (multi-select — a clearance highlights BOTH
         // nets). Clear first, then add each ref.
         {

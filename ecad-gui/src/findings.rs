@@ -45,6 +45,7 @@
 //! same discipline as the layer assets). `build` never recomputes findings.
 
 use crate::canvas::pick::{Candidate, SemanticId};
+use crate::registry::LibNote;
 use ecad_core::coord::{MM, Nm, Point};
 use ecad_core::diagnostic::{Diagnose, Diagnostic, Location, Severity};
 use ecad_core::doc::{Doc, PinRef};
@@ -81,6 +82,16 @@ impl Finding {
     pub fn is_error(&self) -> bool {
         self.severity == Severity::Error
     }
+
+    /// Is this an **informational** row — one with no geometry to navigate to
+    /// (no semantic refs, no board point)? The unresolved-part / library-
+    /// resolution rows are informational by construction: the entity they name
+    /// does not exist in the doc, so there is nothing to select, halo, or zoom
+    /// to. The panel renders these as plain (non-focusable) rows and a click
+    /// does nothing.
+    pub fn is_informational(&self) -> bool {
+        self.refs.is_empty() && self.board_mm.is_none()
+    }
 }
 
 /// The per-revision findings set: the folded DRC + ERC + connectivity findings plus
@@ -106,7 +117,24 @@ impl Findings {
     /// *revision* changed (the caller gates on that), at which point the incremental
     /// engine's memo would be invalidated anyway. The engine's value is its early
     /// cutoff *within* a revision; across a reload the doc is a new value.
-    pub fn compute(doc: &Doc, lib: &PartLib, candidates: &[Candidate]) -> Findings {
+    ///
+    /// Two library-package sources merge into the same list (slice 2), both as
+    /// **warnings** that count into the chip (a glanceable "your doc has
+    /// unresolved refs") but with codes distinct from every DRC/ERC code:
+    ///
+    /// - the engine's `W_UNRESOLVED_PART` entries riding
+    ///   `doc.report.unresolved_parts` — one row per skipped instance. The
+    ///   instance does not exist in `doc.components`, so the row is
+    ///   [informational](Finding::is_informational): no refs, no halo, no zoom.
+    /// - the GUI-side library-resolution notes (`lib_notes`: unregistered `use`
+    ///   name / package load error / union collision) — informational rows with
+    ///   the `W_LIB_*` codes from [`crate::registry`].
+    pub fn compute(
+        doc: &Doc,
+        lib: &PartLib,
+        candidates: &[Candidate],
+        lib_notes: &[LibNote],
+    ) -> Findings {
         let mut engine = Engine::new();
 
         // Collect the raw diagnostics from the three findings queries. DRC violations
@@ -159,6 +187,34 @@ impl Findings {
         }
         for d in engine.query(doc, lib, Key::Floating).as_floating() {
             items.push(finding_from_diagnostic(d, doc, candidates));
+        }
+
+        // Library packages: unresolved-part warnings from the recon report — one row
+        // per skipped instance. The instance is absent from `doc.components` (that is
+        // what "skipped" means), so there is no geometry: refs stay empty and the row
+        // is informational.
+        for (id, part, _help) in &doc.report.unresolved_parts {
+            items.push(Finding {
+                severity: Severity::Warning,
+                code: "W_UNRESOLVED_PART",
+                message: format!(
+                    "instance `{id}` uses unresolved part `{part}`; the instance is skipped"
+                ),
+                refs: Vec::new(),
+                board_mm: None,
+            });
+        }
+
+        // GUI-side library-resolution notes (unregistered `use` / load error /
+        // collision) — informational warning rows with `W_LIB_*` codes.
+        for n in lib_notes {
+            items.push(Finding {
+                severity: Severity::Warning,
+                code: n.code,
+                message: n.message.clone(),
+                refs: Vec::new(),
+                board_mm: None,
+            });
         }
 
         // Deterministic order: errors before warnings, then by code, then message.

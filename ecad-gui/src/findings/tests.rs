@@ -4,12 +4,13 @@ use super::*;
 use crate::canvas::pick::candidates;
 use crate::fixtures::{board_domain, drc_violation_domain};
 
-/// Compute the findings over a domain fixture (the doc + its board pick candidates).
+/// Compute the findings over a domain fixture (the doc + its board pick candidates +
+/// the load's library-resolution notes).
 fn findings_of(d: &crate::app::DomainState) -> Findings {
     let doc = d.doc.as_ref().expect("fixture elaborates");
     let su = ecad_core::elaborate::stackup(&doc.source);
     let cands = candidates(doc, &d.lib, &su);
-    Findings::compute(doc, &d.lib, &cands)
+    Findings::compute(doc, &d.lib, &cands, &d.lib_notes)
 }
 
 /// The deliberate-clearance fixture flags `E_DRC_CLEARANCE` between the two offending

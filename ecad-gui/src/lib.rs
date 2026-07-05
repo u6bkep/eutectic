@@ -13,10 +13,12 @@ pub mod fixtures;
 pub mod harness;
 pub mod highlight;
 pub mod inspector;
+pub mod registry;
 pub mod reload;
 pub mod schematic_view;
 pub mod selection;
 pub mod tool;
 
-pub use app::{DomainState, EcadApp, PaneId, PaneLayout, PaneState, ViewKind};
+pub use app::{DomainState, EcadApp, LibSource, PaneId, PaneLayout, PaneState, ViewKind};
+pub use registry::{LibNote, Registry};
 pub use reload::{SourceMailbox, SourceMsg};
