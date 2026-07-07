@@ -43,6 +43,7 @@ tessellated by lyon in the backend, cached by `content_hash`.
   highlights never force re-tessellation of the board.
 - **Hit-testing is ours.** `ViewportView::{project, unproject}` maps pointer
   ↔ board coordinates; picking queries the engine's geometry kernel.
+  Damascene handles chrome hit-testing; the canvas interior is one keyed El.
 - **Drag-pan on the board is ours too.** Damascene's default (plain
   primary-button) pan trigger only engages when a press hits nothing or the
   viewport's own node; every canvas child (layer/grid/overlay vector El) is a
@@ -59,7 +60,6 @@ tessellated by lyon in the backend, cached by `content_hash`.
   hysteresis margin per side), cached per (pitch bucket, viewBox, index
   window) and per pane — a typical build is an asset clone; worst case is
   O(visible dots). The user can never out-pan or out-zoom the grid.
-  Damascene handles chrome hit-testing; the canvas interior is one keyed El.
 - **The swap seam.** The canvas is wrapped behind a small internal interface
   (features in → El out). If boards outgrow the vector path (tessellation or
   draw cost), the escape ladder is: per-El custom WGSL shaders riding
