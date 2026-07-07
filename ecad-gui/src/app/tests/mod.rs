@@ -14,6 +14,7 @@ mod panes;
 mod reload;
 mod routing;
 mod selection;
+mod tools;
 
 use super::*;
 use crate::fixtures::{SCHEMATIC_ECAD, board, drc_violation, edit_board_domain};

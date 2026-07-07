@@ -75,6 +75,7 @@ pub fn all() -> Vec<(&'static str, EcadApp)> {
         ("stacked_layout", stacked_layout()),
         ("maximized_pane", maximized_pane()),
         ("dual_boards", dual_boards()),
+        ("per_kind_tools", per_kind_tools()),
         ("unresolved_libs", unresolved_libs()),
         ("libraries_menu", libraries_menu()),
         ("drag_in_progress", drag_in_progress()),
