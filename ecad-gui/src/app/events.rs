@@ -14,6 +14,7 @@ use crate::app::pane::{
     is_canvas_target, is_findings_chip_key, pane_index, strip_target_of_key, switch_key,
 };
 use crate::app::{EcadApp, PaneId, PaneLayout, ViewKind};
+use crate::chrome::menubar::{MENUBAR_KEY, REVERT_KEY};
 use crate::panels::findings::error_card;
 use crate::reload::SourceMsg;
 use crate::tool::Tool;
@@ -41,10 +42,14 @@ impl App for EcadApp {
             }
         };
         // The Libraries menu floats over whichever body rendered (it must be
-        // reachable even with no document — that is when you register libs).
+        // reachable even with no document — that is when you register libs). The
+        // open menu-bar menu (if any) stacks as its own anchored overlay.
         overlays(
             main,
-            [self.libraries_open.get().then(|| self.libraries_modal())],
+            [
+                self.libraries_open.get().then(|| self.libraries_modal()),
+                self.menu_overlay(),
+            ],
         )
     }
 
@@ -136,6 +141,22 @@ impl App for EcadApp {
             }
         }
 
+        // Menu bar (oracle region 1): fold top-level trigger clicks + the
+        // click-outside scrim into the open-menu slot. A click on an open menu's
+        // ROW is not a trigger, so `apply_event` returns false and leaves the slot
+        // alone — we close the menu here and fall through so the row's wired action
+        // (Save / Undo / Fit / Libraries / …, keyed with its existing route)
+        // dispatches through its handler below, exactly like the retired button.
+        {
+            let mut open = self.open_menu.borrow_mut();
+            if menubar::apply_event(&mut open, &event, MENUBAR_KEY) {
+                return;
+            }
+            if open.is_some() && matches!(event.kind, UiEventKind::Click | UiEventKind::Activate) {
+                *open = None;
+            }
+        }
+
         // Libraries menu (slice 2): the toolbar toggle opens/closes; while open,
         // the modal's own controls (inputs / add / remove / close / scrim) are
         // handled first — everything else sits behind the scrim.
@@ -166,6 +187,13 @@ impl App for EcadApp {
                 self.redo();
                 return;
             }
+        }
+
+        // File ▸ Revert to Saved (menu bar): reload the document from disk,
+        // discarding in-memory edits (through the external-reload path).
+        if event.is_click_or_activate(REVERT_KEY) {
+            self.revert_to_saved();
+            return;
         }
 
         // The conflict banner's two explicit actions (m6 save model): Reload

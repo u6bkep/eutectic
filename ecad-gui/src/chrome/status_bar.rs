@@ -1,6 +1,7 @@
 //! The bottom status bar: live cursor readout, measure readout, active-layer /
-//! selected-net chips, compact DRC state, and the zoom percent. Moved out of
-//! `app/panels.rs` as pure code motion (gui-module-split).
+//! selected-net chips, compact DRC findings state, and the focused pane's zoom as
+//! a `×N` scale factor ([`chrome::zoom_scale_label`](crate::chrome::zoom_scale_label)).
+//! Moved out of `app/panels.rs` as pure code motion (gui-module-split).
 
 use crate::app::{EcadApp, ViewKind};
 use crate::inspector::InspectorData;
@@ -55,7 +56,14 @@ impl EcadApp {
             };
             items.push(text(drc).muted().mono());
         }
-        items.push(text(format!("Zoom {:.0}%", zoom * 100.0)).muted().mono());
+        // Zoom of the focused pane as a scale factor `×N` relative to the natural
+        // 1 mm : 1 px framing (the meaningful readout; the old percentage was
+        // relative to nothing). The per-pane canvas zoom chip is another slice.
+        items.push(
+            text(format!("zoom {}", crate::chrome::zoom_scale_label(zoom)))
+                .muted()
+                .mono(),
+        );
 
         toolbar(items)
             .gap(tokens::SPACE_3)

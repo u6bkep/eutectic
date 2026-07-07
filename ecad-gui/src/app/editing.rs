@@ -263,6 +263,24 @@ impl EcadApp {
         }
     }
 
+    /// **Revert to Saved** (File menu): re-read the document from its source path
+    /// and apply it through the external-reload path — discarding in-memory edits,
+    /// clearing dirty / undo / redo, exactly as an on-disk change would when the
+    /// doc is clean. No-op without a source path (an in-memory doc has nothing to
+    /// revert to). A read failure surfaces as the persistent reload-error chip
+    /// (permissive: the last-good doc stays on screen), never a crash.
+    pub fn revert_to_saved(&mut self) {
+        let Some(path) = self.domain.source_path.clone() else {
+            return;
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(text) => self.apply_reload(text),
+            Err(e) => {
+                self.domain.reload_error = Some(format!("revert failed: {e}"));
+            }
+        }
+    }
+
     /// Resolve the conflict banner with **Reload**: discard my edits, apply the
     /// disk text (through the external-reload path, which clears the editing
     /// state). No-op when no conflict is pending.

@@ -180,6 +180,13 @@ pub struct EcadApp {
     /// (top copper). Set from the layer panel's set-active affordance; switching
     /// it while a route is pending drops a via (ladder level 1).
     pub(crate) active_layer: RefCell<Option<String>>,
+    /// The open top-level menu-bar menu, by its lowercase value token (`"file"`,
+    /// `"edit"`, …), or `None` when every menu is closed. The app-owned open-menu
+    /// slot damascene's [`menubar`](damascene_core::menubar) folds trigger clicks
+    /// into (`RefCell` for the interior-mutability pattern: flipped in `on_event`,
+    /// read in `build`). Clicking outside (the popover scrim) or invoking any row
+    /// closes it.
+    pub(crate) open_menu: RefCell<Option<String>>,
 }
 
 /// The trace / via defaults the Route tool commits with, sourced from the same
@@ -232,7 +239,16 @@ impl EcadApp {
             route: RefCell::new(None),
             trace_drag: RefCell::new(None),
             active_layer: RefCell::new(None),
+            open_menu: RefCell::new(None),
         }
+    }
+
+    /// Open a top-level menu-bar menu by its lowercase value token (`"file"`,
+    /// `"edit"`, …), or close all with `None` — for fixtures / tests that render a
+    /// menu-expanded scene without driving the trigger click. The interactive path
+    /// folds trigger clicks into this slot in `on_event`.
+    pub fn set_open_menu(&self, menu: Option<&str>) {
+        *self.open_menu.borrow_mut() = menu.map(str::to_string);
     }
 
     /// Open or close the Libraries menu — for fixtures / tests. Opening

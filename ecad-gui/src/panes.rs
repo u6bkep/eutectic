@@ -38,7 +38,9 @@ impl EcadApp {
 
         let split = self.pane_split(cx, &sets);
 
-        let mut children = vec![self.viewer_toolbar(zoom)];
+        // The two top chrome strips (oracle regions 1 + 2): the menu bar over the
+        // icon toolbar. The open menu itself renders as a root overlay in `build`.
+        let mut children = vec![self.menubar_bar(), self.viewer_toolbar()];
         // The persistent conflict banner (m6 save model): rendered whenever the
         // watcher delivered an external change while the doc was dirty. It stays
         // until one of its two explicit actions resolves it — never a toast,
