@@ -348,7 +348,10 @@ const HASH: Glyph = &[
 const STAR: Glyph = &[&[(2, 2), (2, 6)], &[(0, 5), (4, 3)], &[(0, 3), (4, 5)]];
 const PERCENT: Glyph = &[&[(0, 0), (4, 6)], &[(1, 5)], &[(3, 1)]];
 const BANG: Glyph = &[&[(2, 6), (2, 2)], &[(2, 0)]];
-const QUESTION: Glyph = &[&[(0, 5), (1, 6), (3, 6), (4, 5), (4, 4), (2, 3), (2, 2)], &[(2, 0)]];
+const QUESTION: Glyph = &[
+    &[(0, 5), (1, 6), (3, 6), (4, 5), (4, 4), (2, 3), (2, 2)],
+    &[(2, 0)],
+];
 const COMMA: Glyph = &[&[(2, 1), (1, 0)]];
 const SEMICOLON: Glyph = &[&[(2, 3)], &[(2, 1), (1, 0)]];
 const CARET: Glyph = &[&[(0, 4), (2, 6), (4, 4)]];
@@ -495,7 +498,11 @@ mod tests {
                 g.iter().any(|s| !s.is_empty()),
                 "`{ch}` should carry ≥1 point (nonzero geometry)"
             );
-            assert_ne!(glyph_strokes(ch), FALLBACK, "`{ch}` must not be the tofu box");
+            assert_ne!(
+                glyph_strokes(ch),
+                FALLBACK,
+                "`{ch}` must not be the tofu box"
+            );
         }
         // Space is the one supported glyph that is intentionally empty (advance only).
         assert!(glyph_strokes(' ').is_empty(), "space is advance-only");
