@@ -190,7 +190,7 @@ impl EcadApp {
     /// A board pane's canvas: the cached layer Els + the per-frame overlay, in a viewport
     /// keyed to *this pane* (independent camera). Falls back to a placeholder when the
     /// board projection failed.
-    fn board_canvas(&self, _cx: &BuildCx, pane: PaneId, sets: &HighlightSets) -> El {
+    fn board_canvas(&self, cx: &BuildCx, pane: PaneId, sets: &HighlightSets) -> El {
         let derived = self.derived.borrow();
         let Some(view) = &derived.board else {
             return pane_placeholder("No board to display");
@@ -200,37 +200,48 @@ impl EcadApp {
         // router still recognises these as canvas targets (the `layer:` / `overlay:`
         // prefixes survive) and the pane is resolved by pointer rect, not by key.
         let prefix = pane.canvas_key();
-        let mut children: Vec<El> = view
-            .canvas
-            .layer_els(&view.layers, |id| self.layer_visible(&id.key()))
-            .into_iter()
-            .enumerate()
-            .map(|(i, el)| el.key(format!("layer:{prefix}:{i}")))
-            .collect();
+        let zoom = cx.viewport_view(pane.canvas_key()).map_or(1.0, |v| v.zoom);
+        // Canvas furniture: the dot grid + origin axes, UNDER every board layer (the
+        // first child). Its pitch adapts to the pane's zoom; it shares the layers'
+        // viewBox so it registers, and it is never a pick candidate (picking folds the
+        // geometry kernel, not canvas Els — see `canvas::pick`).
+        let mut children: Vec<El> = Vec::new();
+        if let Some(grid) = view.canvas.grid_el(zoom) {
+            children.push(grid.key(format!("grid:{prefix}")));
+        }
+        children.extend(
+            view.canvas
+                .layer_els(&view.layers, |id| self.layer_visible(&id.key()))
+                .into_iter()
+                .enumerate()
+                .map(|(i, el)| el.key(format!("layer:{prefix}:{i}"))),
+        );
         let overlay = self.build_board_overlay(view, pane, sets, &derived.findings);
         if let Some(el) = view.canvas.overlay_el(&overlay) {
             // Re-key the overlay per pane (the canvas hardcodes "overlay:dynamic"); wrap it
             // in a keyed container so two board panes' overlays don't collide.
             children.push(el.key(format!("overlay:{prefix}")));
         }
-        viewport(children)
+        let vp = viewport(children)
             .key(pane.canvas_key())
             .min_zoom(0.1)
             .max_zoom(64.0)
             .pan_bounds(PanBounds::Contain)
             .fill(CANVAS_BG)
             .width(Size::Fill(1.0))
-            .height(Size::Fill(1.0))
+            .height(Size::Fill(1.0));
+        with_zoom_chip(vp, zoom)
     }
 
     /// A schematic pane's canvas: the cached schematic asset + the per-frame highlight
     /// overlay, in a viewport keyed to this pane. Falls back to a placeholder when the doc
     /// has no components.
-    fn schematic_canvas(&self, _cx: &BuildCx, pane: PaneId, sets: &HighlightSets) -> El {
+    fn schematic_canvas(&self, cx: &BuildCx, pane: PaneId, sets: &HighlightSets) -> El {
         let derived = self.derived.borrow();
         let Some(view) = &derived.schematic else {
             return pane_placeholder("No schematic to display");
         };
+        let zoom = cx.viewport_view(pane.canvas_key()).map_or(1.0, |v| v.zoom);
         let static_key = format!("schematic:{}", pane.canvas_key());
         let mut children = vec![view.static_el(&static_key)];
         // Schematic-side findings (ERC / floating-pad with entity refs) halo the symbol:
@@ -242,14 +253,15 @@ impl EcadApp {
         if let Some(el) = view.overlay_el(&overlay_ids, pane.overlay_key()) {
             children.push(el);
         }
-        viewport(children)
+        let vp = viewport(children)
             .key(pane.canvas_key())
             .min_zoom(0.02)
             .max_zoom(64.0)
             .pan_bounds(PanBounds::Contain)
             .fill(CANVAS_BG)
             .width(Size::Fill(1.0))
-            .height(Size::Fill(1.0))
+            .height(Size::Fill(1.0));
+        with_zoom_chip(vp, zoom)
     }
 
     /// Build a board pane's dynamic overlay from the cross-view highlight sets + the
@@ -391,5 +403,75 @@ impl EcadApp {
             }
             _ => None,
         }
+    }
+}
+
+/// The per-pane zoom-chip background — the oracle's chip token (`bg-5`, `#1a1a1f`),
+/// slightly translucent so it floats over the canvas.
+const CHIP_BG: Color = Color::srgb_token("ecad.canvas.chip", 0x1a, 0x1a, 0x1f, 0xee);
+
+/// Overlay a canvas viewport with a small bottom-right **zoom chip** (UI oracle
+/// canvas furniture). The chip layer is an unkeyed, non-`block_pointer` fill over the
+/// viewport, so it neither becomes a hit target (hit-testing only visits keyed nodes)
+/// nor occludes the viewport's geometric wheel-zoom / drag-pan gates — the canvas
+/// keeps its pointer behaviour untouched. The viewport keeps its `canvas_key`, so
+/// `rect_of_key` / content-bounds lookups still resolve it.
+fn with_zoom_chip(canvas: El, zoom: f32) -> El {
+    stack([
+        canvas,
+        column([zoom_chip(zoom)])
+            .justify(Justify::End)
+            .align(Align::End)
+            .padding(Sides::all(tokens::SPACE_2))
+            .width(Size::Fill(1.0))
+            .height(Size::Fill(1.0)),
+    ])
+    .width(Size::Fill(1.0))
+    .height(Size::Fill(1.0))
+}
+
+/// The zoom chip itself: `×N` at two significant figures, mono (numerics render in
+/// JetBrains Mono per the oracle), in a muted pill.
+fn zoom_chip(zoom: f32) -> El {
+    text(format_zoom(zoom))
+        .mono()
+        .muted()
+        .caption()
+        .fill(CHIP_BG)
+        .stroke(tokens::BORDER)
+        .radius(tokens::RADIUS_MD)
+        .padding(Sides::xy(tokens::SPACE_2, tokens::SPACE_1))
+        .width(Size::Hug)
+        .height(Size::Hug)
+}
+
+/// Format a viewport zoom as `×N` to two significant figures, relative to the natural
+/// 1 mm = 1 px scale (`×1.0` at zoom 1). The decimal count tracks the magnitude so two
+/// sig figs show at every scale: `×0.10`, `×2.5`, `×12`, `×64`.
+///
+/// This is deliberately a *different* readout from the status bar's `Zoom NN%` (a
+/// whole-percent global readout). If a shared chrome/format helper lands on main, the
+/// orchestrator can unify the two at merge; implemented locally here per the slice brief.
+pub(crate) fn format_zoom(zoom: f32) -> String {
+    let z = zoom.max(1e-6);
+    let decimals = (1 - z.log10().floor() as i32).max(0) as usize;
+    format!("×{z:.decimals$}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_zoom;
+
+    /// The zoom chip reads `×N` to two significant figures across scales — the decimal
+    /// count tracks the magnitude so `[0.1, 1)` shows two decimals, `[1, 10)` one, and
+    /// `≥ 10` none. Pins the readout the per-pane chip renders.
+    #[test]
+    fn zoom_chip_shows_two_sig_figs() {
+        assert_eq!(format_zoom(1.0), "×1.0");
+        assert_eq!(format_zoom(2.5), "×2.5");
+        assert_eq!(format_zoom(0.35), "×0.35");
+        assert_eq!(format_zoom(0.1), "×0.10");
+        assert_eq!(format_zoom(64.0), "×64");
+        assert_eq!(format_zoom(18.0), "×18");
     }
 }
