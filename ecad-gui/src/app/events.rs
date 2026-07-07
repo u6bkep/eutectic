@@ -11,9 +11,9 @@ use crate::app::pane::{
     SAVE_KEY, SPLIT_HANDLE_KEY, SPLIT_ROW_KEY, UNDO_KEY, active_layer_of_key, finding_index_of_key,
     is_canvas_target, is_findings_chip_key, pane_index, switch_key,
 };
-use crate::app::panels::error_card;
 use crate::app::{EcadApp, PaneId, PaneLayout, ViewKind};
 use crate::canvas::pick::{self, SemanticId};
+use crate::panels::findings::error_card;
 use crate::reload::SourceMsg;
 use crate::schematic_view::SchematicView;
 use crate::tool::{self, DragState, MeasureState, RouteState, Tool, TraceDragState};

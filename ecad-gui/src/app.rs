@@ -13,20 +13,23 @@
 //! - [`pane`] — [`ViewKind`] / [`PaneLayout`] / [`PaneId`] / [`PaneState`], pane/layout
 //!   state, and the shared key vocabulary + canvas-target predicate + placeholders.
 //! - [`libraries`] — the Libraries modal (UI + event handling + registry editing).
-//! - [`panels`] — every `build`-time panel/chrome builder + the findings-row click.
 //! - [`events`] — the [`App`] impl (`build` / `before_build` / `on_event`) + pointer
 //!   routing.
+//!
+//! The `build`-time panel/chrome builders that used to live in `app/panels.rs`
+//! moved to their own top-level regions (gui-module-split): `crate::chrome`
+//! (toolbar + status bar), `crate::panes` (the pane tree + overlays), and
+//! `crate::panels` (the right-sidebar panels + the findings-row click).
 //!
 //! This module ([`app`](self)) remains the facade: it owns the [`EcadApp`] struct
 //! (so its private fields stay reachable from every submodule), the `EcadApp::new` +
 //! accessor + reload impl block, and the tests. Public items keep their old paths
 //! through the re-exports below (`lib.rs` re-exports these unchanged).
 
-mod domain;
+pub(crate) mod domain;
 mod events;
-mod libraries;
-mod pane;
-mod panels;
+pub(crate) mod libraries;
+pub(crate) mod pane;
 
 pub use domain::{DomainState, LibSource};
 pub use pane::{PaneId, PaneLayout, PaneState, ViewKind};
