@@ -19,16 +19,21 @@
 //!
 //! # Coverage
 //!
-//! Uppercase `A`–`Z`, digits `0`–`9`, space, `.`, `-`, `:`, `/`, plus `Ω` and `µ` (the
-//! two symbols component labels reach for). These are simple utilitarian block glyphs —
-//! legible, not beautiful. **Lowercase** letters have no dedicated glyphs yet, so they
-//! **case-fold** to the uppercase form; a genuinely **unknown** character renders a
-//! fallback box outline so it is visibly wrong rather than silently dropped; a space
-//! renders nothing.
+//! Uppercase `A`–`Z`, digits `0`–`9`, and **almost all printable ASCII punctuation**:
+//! space `.` `-` `:` `/` `\` `( )` `[ ]` `{ }` `+` `=` `<` `>` `_` `|` `#` `*` `%` `!`
+//! `?` `,` `;` `^` `~` `` ` `` `'` `"`, plus `Ω` and `µ` (the two symbols component
+//! labels reach for). These are simple utilitarian block glyphs — legible, not beautiful.
+//! **Lowercase** letters have no dedicated glyphs yet, so they **case-fold** to the
+//! uppercase form; a space renders nothing.
+//!
+//! **Deliberately still fallback** (a visible box, never silent tofu): `@`, `&`, `$` —
+//! their conventional forms are loops/bowls that do not read as legible 5×7 centreline
+//! block strokes, and they are not plausibly reachable from component / net / value
+//! labels. A real Hershey import (below) is the path to honest coverage of these.
 //!
 //! # Deliberate follow-ups (NOT in this slice)
 //!
-//! - true lowercase glyphs (today they case-fold) + the rest of printable ASCII,
+//! - true lowercase glyphs (today they case-fold) + the last three ASCII symbols (`@&$`),
 //! - importing a real Hershey vector font (far larger, properly kerned coverage),
 //! - outline / TTF fonts (filled glyphs — a different lowering than this stroke path).
 
@@ -307,7 +312,10 @@ const D9: Glyph = &[
     &[(4, 4), (4, 1), (3, 0), (1, 0)],
 ];
 
-// ---- punctuation ------------------------------------------------------------
+// ---- punctuation & symbols --------------------------------------------------
+// All drawn in the same 5×7 block style as the letters: columns x ∈ [0, 4], cap
+// height y = 6, baseline y = 0, midline y = 3. Kept angular (no curves) to match
+// the utilitarian letterforms; a single-point stroke is a disc (a dot).
 /// A space: no strokes (advance only).
 const SPACE: Glyph = &[];
 /// A period: a single point ⇒ a disc of the pen radius (`Shape2D::trace` of one point).
@@ -315,6 +323,39 @@ const DOT: Glyph = &[&[(2, 0)]];
 const DASH: Glyph = &[&[(1, 3), (3, 3)]];
 const COLON: Glyph = &[&[(2, 1)], &[(2, 4)]];
 const SLASH: Glyph = &[&[(0, 0), (4, 6)]];
+const BACKSLASH: Glyph = &[&[(0, 6), (4, 0)]];
+// Brackets, braces, parens — the delimiters user labels and the `refdes (Part)`
+// schematic header reach for. Parens/braces bow toward the centre; brackets are square.
+const LPAREN: Glyph = &[&[(3, 6), (2, 5), (1, 3), (2, 1), (3, 0)]];
+const RPAREN: Glyph = &[&[(1, 6), (2, 5), (3, 3), (2, 1), (1, 0)]];
+const LBRACKET: Glyph = &[&[(3, 6), (1, 6), (1, 0), (3, 0)]];
+const RBRACKET: Glyph = &[&[(1, 6), (3, 6), (3, 0), (1, 0)]];
+const LBRACE: Glyph = &[&[(3, 6), (2, 6), (2, 4), (1, 3), (2, 2), (2, 0), (3, 0)]];
+const RBRACE: Glyph = &[&[(1, 6), (2, 6), (2, 4), (3, 3), (2, 2), (2, 0), (1, 0)]];
+// Operators / separators reachable in values and expressions ("+5V", "5%", key=val).
+const PLUS: Glyph = &[&[(2, 1), (2, 5)], &[(0, 3), (4, 3)]];
+const EQUALS: Glyph = &[&[(0, 2), (4, 2)], &[(0, 4), (4, 4)]];
+const LT: Glyph = &[&[(4, 5), (0, 3), (4, 1)]];
+const GT: Glyph = &[&[(0, 5), (4, 3), (0, 1)]];
+const UNDERSCORE: Glyph = &[&[(0, 0), (4, 0)]];
+const PIPE: Glyph = &[&[(2, 0), (2, 6)]];
+const HASH: Glyph = &[
+    &[(1, 0), (1, 6)],
+    &[(3, 0), (3, 6)],
+    &[(0, 2), (4, 2)],
+    &[(0, 4), (4, 4)],
+];
+const STAR: Glyph = &[&[(2, 2), (2, 6)], &[(0, 5), (4, 3)], &[(0, 3), (4, 5)]];
+const PERCENT: Glyph = &[&[(0, 0), (4, 6)], &[(1, 5)], &[(3, 1)]];
+const BANG: Glyph = &[&[(2, 6), (2, 2)], &[(2, 0)]];
+const QUESTION: Glyph = &[&[(0, 5), (1, 6), (3, 6), (4, 5), (4, 4), (2, 3), (2, 2)], &[(2, 0)]];
+const COMMA: Glyph = &[&[(2, 1), (1, 0)]];
+const SEMICOLON: Glyph = &[&[(2, 3)], &[(2, 1), (1, 0)]];
+const CARET: Glyph = &[&[(0, 4), (2, 6), (4, 4)]];
+const TILDE: Glyph = &[&[(0, 3), (1, 4), (3, 2), (4, 3)]];
+const BACKTICK: Glyph = &[&[(1, 6), (2, 4)]];
+const APOS: Glyph = &[&[(2, 6), (2, 4)]];
+const QUOTE: Glyph = &[&[(1, 6), (1, 4)], &[(3, 6), (3, 4)]];
 
 // ---- symbols commonly used in component labels -----------------------------
 /// Ω (ohm, U+03A9): a horseshoe loop splaying into two feet — so `{value:si:Ω}` renders
@@ -337,16 +378,17 @@ const OMEGA: Glyph = &[&[
 /// the descender leg.
 const MU: Glyph = &[&[(0, 5), (0, 0)], &[(0, 1), (1, 0), (3, 0), (4, 1), (4, 5)]];
 
-/// The fallback for any character not covered (the rest of printable ASCII / symbols is a
-/// deliberate follow-up): a box outline, so an unsupported glyph is *visibly* wrong
-/// rather than silently dropped. Lowercase does **not** reach this — it case-folds.
+/// The fallback for any character not covered (`@`/`&`/`$`, non-ASCII, control chars): a
+/// box outline, so an unsupported glyph is *visibly* wrong rather than silently dropped.
+/// Lowercase does **not** reach this — it case-folds.
 const FALLBACK: Glyph = &[&[(0, 0), (4, 0), (4, 6), (0, 6), (0, 0)]];
 
 /// The stroke polylines for `ch` in cell coordinates. Covers uppercase `A`–`Z`, digits
-/// `0`–`9`, space, `.`, `-`, `:`, `/`, `Ω`, and `µ` (`µ`/`μ` share a glyph). A space
-/// returns an empty slice (advance only); **lowercase** case-folds to its uppercase glyph;
-/// any other unsupported character returns the [`FALLBACK`] box. The returned strokes are
-/// scaled + traced by the lowering.
+/// `0`–`9`, most printable ASCII punctuation (see the module Coverage note), `Ω`, and `µ`
+/// (`µ`/`μ` share a glyph). A space returns an empty slice (advance only); **lowercase**
+/// case-folds to its uppercase glyph; `@`/`&`/`$` and any non-ASCII / control character
+/// return the [`FALLBACK`] box (visibly wrong, never silently dropped). The returned
+/// strokes are scaled + traced by the lowering.
 pub fn glyph_strokes(ch: char) -> Glyph {
     match ch {
         'A' => A,
@@ -390,6 +432,31 @@ pub fn glyph_strokes(ch: char) -> Glyph {
         '-' => DASH,
         ':' => COLON,
         '/' => SLASH,
+        '\\' => BACKSLASH,
+        '(' => LPAREN,
+        ')' => RPAREN,
+        '[' => LBRACKET,
+        ']' => RBRACKET,
+        '{' => LBRACE,
+        '}' => RBRACE,
+        '+' => PLUS,
+        '=' => EQUALS,
+        '<' => LT,
+        '>' => GT,
+        '_' => UNDERSCORE,
+        '|' => PIPE,
+        '#' => HASH,
+        '*' => STAR,
+        '%' => PERCENT,
+        '!' => BANG,
+        '?' => QUESTION,
+        ',' => COMMA,
+        ';' => SEMICOLON,
+        '^' => CARET,
+        '~' => TILDE,
+        '`' => BACKTICK,
+        '\'' => APOS,
+        '"' => QUOTE,
         'Ω' => OMEGA,
         // Micro sign (U+00B5) and Greek small mu (U+03BC) share one glyph.
         'µ' | 'μ' => MU,
@@ -404,27 +471,59 @@ pub fn glyph_strokes(ch: char) -> Glyph {
 mod tests {
     use super::*;
 
-    /// Every covered character returns at least one stroke (space is the lone, intended
-    /// exception), and the advance is positive.
+    /// The full supported set (every printable-ASCII glyph the font draws, minus space,
+    /// plus `Ω`/`µ`), as one string — the source of truth for the coverage tests below.
+    /// Space is excluded here because it is intentionally advance-only.
+    const SUPPORTED: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\
+                             .-:/\\()[]{}+=<>_|#*%!?,;^~`'\"Ωµ";
+
+    /// The three printable-ASCII symbols deliberately left as the fallback box (module
+    /// Coverage note): not legible as block strokes, not reachable from labels.
+    const INTENTIONAL_FALLBACK: &str = "@&$";
+
+    /// Every supported glyph draws **nonzero geometry** — at least one stroke carrying at
+    /// least one point (a single point is a disc under `Shape2D::trace`). This is the
+    /// no-silent-tofu guard: a supported char must never resolve to the empty run *or* to
+    /// the [`FALLBACK`] box. Space is the lone advance-only exception.
     #[test]
-    fn covered_chars_have_strokes_and_advance() {
+    fn full_supported_set_draws_nonzero_geometry_per_glyph() {
         const { assert!(GLYPH_ADVANCE > 0) };
-        let covered = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-:/";
-        for ch in covered.chars() {
+        for ch in SUPPORTED.chars() {
+            let g = glyph_strokes(ch);
+            assert!(!g.is_empty(), "`{ch}` should have ≥1 stroke (no tofu)");
             assert!(
-                !glyph_strokes(ch).is_empty(),
-                "`{ch}` should have ≥1 stroke"
+                g.iter().any(|s| !s.is_empty()),
+                "`{ch}` should carry ≥1 point (nonzero geometry)"
             );
+            assert_ne!(glyph_strokes(ch), FALLBACK, "`{ch}` must not be the tofu box");
         }
-        // Space is the one covered glyph that is intentionally empty (advance only).
+        // Space is the one supported glyph that is intentionally empty (advance only).
         assert!(glyph_strokes(' ').is_empty(), "space is advance-only");
     }
 
-    /// A genuinely unknown character falls back to a visible box rather than vanishing —
-    /// but lowercase does not: it case-folds to its uppercase glyph.
+    /// The header string that motivated this slice (`refdes (Part)`) now renders every
+    /// glyph — the parens are no longer tofu.
+    #[test]
+    fn schematic_header_string_has_no_tofu() {
+        for ch in "CAP1 (Cap)".chars() {
+            if ch == ' ' {
+                continue;
+            }
+            assert_ne!(
+                glyph_strokes(ch),
+                FALLBACK,
+                "header char `{ch}` must not be tofu"
+            );
+        }
+    }
+
+    /// The deliberately-unsupported symbols fall back to the visible box (documented gap),
+    /// while lowercase does not: it case-folds to its uppercase glyph.
     #[test]
     fn unknown_char_boxes_but_lowercase_case_folds() {
-        assert_eq!(glyph_strokes('@'), FALLBACK, "unsupported char → box");
+        for ch in INTENTIONAL_FALLBACK.chars() {
+            assert_eq!(glyph_strokes(ch), FALLBACK, "`{ch}` → box (documented gap)");
+        }
         for (lo, up) in [('a', 'A'), ('r', 'R'), ('k', 'K'), ('z', 'Z')] {
             assert_eq!(
                 glyph_strokes(lo),
@@ -454,8 +553,7 @@ mod tests {
     /// `y ∈ [0, CELL_HEIGHT]`), so scaling can't surprise the layout.
     #[test]
     fn strokes_stay_within_the_cell() {
-        let all = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-:/ ";
-        for ch in all.chars().chain(['a', '@', 'Ω', 'µ', 'μ']) {
+        for ch in SUPPORTED.chars().chain([' ', 'a', '@', 'μ']) {
             for stroke in glyph_strokes(ch) {
                 for &(x, y) in *stroke {
                     assert!((0..=GLYPH_ADVANCE).contains(&x), "{ch}: x={x} out of cell");
