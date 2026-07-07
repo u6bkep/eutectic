@@ -433,8 +433,8 @@ fn halo_point(refs: &[SemanticId], doc: &Doc, candidates: &[Candidate]) -> Optio
 }
 
 /// The net a board candidate id belongs to, if any — the net-match half of
-/// [`halo_point`]. Mirrors `app::EcadApp::candidate_net` (kept local so findings has no
-/// dependency on the app struct).
+/// [`halo_point`]. Mirrors `EcadApp::candidate_net` (built in `panes`; kept local so
+/// findings has no dependency on the app struct).
 fn candidate_net(id: &SemanticId, doc: &Doc) -> Option<NetId> {
     match id {
         SemanticId::Trace(t) => doc.traces.get(t).map(|t| t.net.clone()),

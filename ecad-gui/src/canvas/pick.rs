@@ -119,7 +119,7 @@ pub struct Candidate {
     /// The id this candidate selects when it wins the pick.
     pub id: SemanticId,
     /// The world-frame (nm, y-up) copper/area shape — retained for the overlay highlight
-    /// geometry (`app::panels`) and the halo location (`findings`). **Not** used on the
+    /// geometry (`panes`) and the halo location (`findings`). **Not** used on the
     /// per-event hit-test path; [`region`](Candidate::region) is what [`resolve`] tests.
     pub shape: Shape2D,
     /// The shape's copper extent tessellated to a [`Region`] **once** at build time (the
