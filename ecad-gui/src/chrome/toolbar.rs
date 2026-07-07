@@ -11,7 +11,7 @@
 //!   `ViewportRequest` (only Fit / Reset / CenterOn), so there is no action to
 //!   dispatch without inventing one.
 //! - `[findings jump, command palette]` — findings jump toggles the findings
-//!   panel ([`FINDINGS_TOGGLE_KEY`], same as the chips); the palette is disabled
+//!   panel (the Findings accordion header key, same toggle the chips use); the palette is disabled
 //!   (gw-12, unimplemented).
 //!
 //! Right side: a static `Units: mm` chip stating the current truth. Grid / Snap
@@ -22,7 +22,7 @@
 //! to live here moved to the menu bar's right cluster (`chrome::menubar`).
 
 use crate::app::EcadApp;
-use crate::app::pane::{FINDINGS_TOGGLE_KEY, REDO_KEY, SAVE_KEY, UNDO_KEY};
+use crate::app::pane::{REDO_KEY, SAVE_KEY, SidebarSection, UNDO_KEY};
 use crate::chrome::icons;
 use crate::chrome::menubar::FIT_KEY;
 use damascene_core::prelude::*;
@@ -78,7 +78,7 @@ impl EcadApp {
         let group_inspect = row([
             icon_button(icons::FINDINGS.clone())
                 .tooltip("Findings")
-                .key(FINDINGS_TOGGLE_KEY),
+                .key(SidebarSection::Findings.toggle_key()),
             disabled("command"),
         ])
         .gap(tokens::SPACE_1);
