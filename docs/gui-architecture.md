@@ -114,6 +114,15 @@ Cheap now, expensive to retrofit. Every roadmap feature reduces to these:
 4. **Tools as a mode state machine with a preview channel** — the active tool
    owns uncommitted preview geometry rendered into the overlay; commit writes
    to the source (via the command layer), then re-elaborates.
+   *Revised 2026-07-07:* the mode variable is keyed **per view kind**, not
+   app-global (Blender semantics: schematic panes share one active tool,
+   board panes another; moving between panes swaps which is live). Tool
+   state lives in view state so a future popped-out window carries it. The
+   preview/commit machinery is unchanged. Rationale: a single global tool
+   rail plus hover-focus is geometrically broken — traveling from a board
+   pane to an app-edge rail transits other panes and dims the tools you
+   are heading for. Tools therefore render as per-pane overlay strips
+   (see the UI oracle), never as an app-edge rail.
 5. **Findings as data** — DRC/connectivity/ERC findings carry stable feature
    references + locations so they render as canvas halos and populate a
    findings panel with click-to-zoom. Toasts only for genuinely transient
@@ -155,40 +164,43 @@ permissive unresolved parts). The GUI's share, delivered 2026-07-05:
   never load blocks; unresolved-part and library rows join the findings panel
   as non-navigating warnings and count into the status chip.
 
-## Design reference: the Circuit Studio mockup
+## Design reference: the UI oracle (binding)
 
-A rough, **non-authoritative** UI mockup lives at
-`reference/eda-ui-mockup/eda-tool-ui-prototype/` (Claude Design handoff,
-2026-07-04; read `project/Circuit Studio.dc.html` + `NetExplorer.dc.html` —
-working HTML/JS prototypes, layout and styling spelled out in source). It
-fixes the shell anatomy v1 milestones should follow:
+The shell/anatomy design of record is **`docs/ui-oracle/shell.dc.html`** —
+a working HTML mockup (serve the directory over HTTP and click around; see
+`docs/ui-oracle/README.md` for how to view it and, crucially, for the
+**binding vs decorative** split, the color-token → damascene-theme table,
+and the view-kind ↔ wishlist-ticket map). Implementation slices are checked
+against that page, not against memory of it. Adopted 2026-07-07 after
+windowed review; it supersedes the generic "Circuit Studio" mockup
+(`reference/eda-ui-mockup/`, kept only as provenance).
 
-- **Menu bar**: app menus, dual/stacked layout toggle, current filename, and
-  a persistent DRC status chip (count + warnings) — live DRC gets a
-  glanceable home in the chrome, not only canvas halos.
-- **Toolbar**: grouped icon actions (file, undo/redo, clipboard, zoom,
-  checks) + units and grid-pitch chips on the right.
-- **Left tool palette**: one **global** tool strip grouped by domain
-  (select/pan · schematic: wire/bus/label/symbol/power · board:
-  route/via/pad/zone · measure/text/delete). One active tool app-wide —
-  the tool state machine is global mode with per-view-kind applicability,
-  not per-pane tools.
-- **Center**: two panes, each with a header holding a view-type dropdown
-  (Schematic / PCB Layout / 3D) and a maximize toggle; draggable divider
-  (ratio-clamped); dual ↔ stacked orientation. A one-split simplification
-  of the split-tree — fine for v1.
-- **Right sidebar**: Properties inspector (identity card + key/value rows)
-  above an Explorer tree (sheets / components / nets, counts, per-net color
-  swatches); explorer selection cross-highlights into panes (the semantic
-  selection model made visible). Explorer docks left in stacked layout.
-- **Status bar**: cursor X/Y in mm, dx/dy, grid pitch, zoom, active-layer
-  chip, selected net, DRC state.
+Binding headlines (details and exact vocabulary live in the oracle):
 
-Treat visual specifics (dark palette, mono for identifiers/numerics, spacing)
-as taste guidance to re-express through damascene's theme/tokens, not values
-to copy. Non-binding details: the "Run DRC" toolbar button (we are
-live-check; a jump-to-findings affordance belongs there instead) and the
-KiCad-flavored placeholder filenames.
+- **Blender-style split tree** of panes — split right / split down / close
+  in every pane header; no fixed dual/stacked layouts. Each pane header
+  carries a view-kind dropdown over six kinds: Schematic (with in-pane
+  sheet breadcrumb), PCB Layout, 3D (gw-09), Gerber preview (gw-08),
+  Source, Diff/Review (gw-20). A reserved, deliberately inert
+  pop-out-to-OS-window header button marks gw-21's future home.
+- **Per-pane overlay tool strips** with per-view-kind tool memory (see the
+  revised structural commitment #4). No app-edge tool rail, ever.
+- **Menu bar** enumerating the command surface (File/Edit/View/Place/Route/
+  Inspect/Tools/Help, including Autoroute), filename + dirty dot, and
+  per-source findings chips (DRC/ERC/NET/LIB) — no "Run DRC" button;
+  checks are live and the chips are the status.
+- **Right sidebar**: four sections whose headers are always visible —
+  Properties (editable fields, gw-05, with the permissive-editing hint),
+  Layers (visibility, swatches, active-layer radio), Explorer (search,
+  class-grouped nets, gw-01), Findings (rule ids, hover-waive gw-02,
+  waived subsection).
+- **Canvas furniture**: dot grid + axes, per-pane zoom chip; layer-colored
+  copper; ratsnest and DRC halos as overlay. **Status bar**: X/Y, dx/dy,
+  grid, zoom, focused tool, selection-filter state, active layer, net,
+  findings state.
+- Overlays: Ctrl+K command palette (gw-12), Libraries dialog (registry
+  semantics), library-browser flyout on place-symbol (gw-03),
+  selection-filter popover (gw-04).
 
 ## v1 scope (decided)
 
