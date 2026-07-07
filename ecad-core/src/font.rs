@@ -20,23 +20,19 @@
 //! # Coverage
 //!
 //! Uppercase `A`–`Z`, digits `0`–`9`, and **almost all printable ASCII punctuation**:
-//! space `.` `-` `:` `/` `\` `( )` `[ ]` `{ }` `+` `=` `<` `>` `|` `#` `*` `%` `!`
+//! space `.` `-` `:` `/` `\` `( )` `[ ]` `{ }` `+` `=` `<` `>` `_` `|` `#` `*` `%` `!`
 //! `?` `,` `;` `^` `~` `` ` `` `'` `"`, plus `Ω` and `µ` (the two symbols component
 //! labels reach for). These are simple utilitarian block glyphs — legible, not beautiful.
 //! **Lowercase** letters have no dedicated glyphs yet, so they **case-fold** to the
 //! uppercase form; a space renders nothing.
 //!
-//! **Deliberately still fallback** (a visible box, never silent tofu): `@`, `&`, `$`,
-//! and `_`. The first three are loops/bowls that do not read as legible 5×7 centreline
-//! block strokes and are not plausibly reachable from component / net / value labels.
-//! `_` is trivially a bottom stroke, but it is the one added glyph reachable from
-//! **footprint fab-layer** value text (KiCad names like `C_0402_1005Metric`), so drawing
-//! it would change board/Gerber output — out of scope for this schematic-text slice. It
-//! is deferred to a follow-up where the board golden change is the reviewed deliverable.
+//! **Deliberately still fallback** (a visible box, never silent tofu): `@`, `&`, `$` —
+//! their conventional forms are loops/bowls that do not read as legible 5×7 centreline
+//! block strokes, and they are not plausibly reachable from component / net / value
+//! labels. A real Hershey import (below) is the path to honest coverage of these.
 //!
 //! # Deliberate follow-ups (NOT in this slice)
 //!
-//! - `_` (a bottom stroke), gated on accepting the board fab-layer golden change,
 //! - true lowercase glyphs (today they case-fold) + the last three ASCII symbols (`@&$`),
 //! - importing a real Hershey vector font (far larger, properly kerned coverage),
 //! - outline / TTF fonts (filled glyphs — a different lowering than this stroke path).
@@ -341,6 +337,7 @@ const PLUS: Glyph = &[&[(2, 1), (2, 5)], &[(0, 3), (4, 3)]];
 const EQUALS: Glyph = &[&[(0, 2), (4, 2)], &[(0, 4), (4, 4)]];
 const LT: Glyph = &[&[(4, 5), (0, 3), (4, 1)]];
 const GT: Glyph = &[&[(0, 5), (4, 3), (0, 1)]];
+const UNDERSCORE: Glyph = &[&[(0, 0), (4, 0)]];
 const PIPE: Glyph = &[&[(2, 0), (2, 6)]];
 const HASH: Glyph = &[
     &[(1, 0), (1, 6)],
@@ -384,17 +381,17 @@ const OMEGA: Glyph = &[&[
 /// the descender leg.
 const MU: Glyph = &[&[(0, 5), (0, 0)], &[(0, 1), (1, 0), (3, 0), (4, 1), (4, 5)]];
 
-/// The fallback for any character not covered (`@`/`&`/`$`/`_`, non-ASCII, control
-/// chars): a box outline, so an unsupported glyph is *visibly* wrong rather than silently
-/// dropped. Lowercase does **not** reach this — it case-folds.
+/// The fallback for any character not covered (`@`/`&`/`$`, non-ASCII, control chars): a
+/// box outline, so an unsupported glyph is *visibly* wrong rather than silently dropped.
+/// Lowercase does **not** reach this — it case-folds.
 const FALLBACK: Glyph = &[&[(0, 0), (4, 0), (4, 6), (0, 6), (0, 0)]];
 
 /// The stroke polylines for `ch` in cell coordinates. Covers uppercase `A`–`Z`, digits
 /// `0`–`9`, most printable ASCII punctuation (see the module Coverage note), `Ω`, and `µ`
 /// (`µ`/`μ` share a glyph). A space returns an empty slice (advance only); **lowercase**
-/// case-folds to its uppercase glyph; `@`/`&`/`$`/`_` and any non-ASCII / control
-/// character return the [`FALLBACK`] box (visibly wrong, never silently dropped). The
-/// returned strokes are scaled + traced by the lowering.
+/// case-folds to its uppercase glyph; `@`/`&`/`$` and any non-ASCII / control character
+/// return the [`FALLBACK`] box (visibly wrong, never silently dropped). The returned
+/// strokes are scaled + traced by the lowering.
 pub fn glyph_strokes(ch: char) -> Glyph {
     match ch {
         'A' => A,
@@ -449,6 +446,7 @@ pub fn glyph_strokes(ch: char) -> Glyph {
         '=' => EQUALS,
         '<' => LT,
         '>' => GT,
+        '_' => UNDERSCORE,
         '|' => PIPE,
         '#' => HASH,
         '*' => STAR,
@@ -480,13 +478,11 @@ mod tests {
     /// plus `Ω`/`µ`), as one string — the source of truth for the coverage tests below.
     /// Space is excluded here because it is intentionally advance-only.
     const SUPPORTED: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\
-                             .-:/\\()[]{}+=<>|#*%!?,;^~`'\"Ωµ";
+                             .-:/\\()[]{}+=<>_|#*%!?,;^~`'\"Ωµ";
 
-    /// The printable-ASCII symbols deliberately left as the fallback box (module Coverage
-    /// note): `@&$` are not legible as block strokes and not reachable from labels; `_` is
-    /// a trivial stroke but is the one added glyph reachable from footprint fab-layer text,
-    /// so it is deferred to keep board/Gerber output frozen this slice.
-    const INTENTIONAL_FALLBACK: &str = "@&$_";
+    /// The three printable-ASCII symbols deliberately left as the fallback box (module
+    /// Coverage note): not legible as block strokes, not reachable from labels.
+    const INTENTIONAL_FALLBACK: &str = "@&$";
 
     /// Every supported glyph draws **nonzero geometry** — at least one stroke carrying at
     /// least one point (a single point is a disc under `Shape2D::trace`). This is the
