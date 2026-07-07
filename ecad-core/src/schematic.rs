@@ -38,7 +38,7 @@ mod validate;
 
 pub use model::{Align, Container, Direction, LayoutNode, SchematicLayout, Symbol, Wire, WireEnd};
 pub use reflow::{Placement, reflow};
-pub use symbol::{Extent, PinSide, PinSlot, pin_slots, symbol_extent};
+pub use symbol::{Extent, PinSide, PinSlot, header_width, pin_slots, symbol_extent};
 pub use validate::{validate, validate_wires};
 
 #[cfg(test)]

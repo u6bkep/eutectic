@@ -36,6 +36,28 @@ const SIDE_NAME_PAD: Nm = 2_540_000; // clearance between the two columns of pin
 pub(crate) const MIN_BOX_W: Nm = 5_080_000; // a pinless / tiny part still gets a 2-pitch box.
 pub(crate) const MIN_BOX_H: Nm = 5_080_000;
 
+/// Nominal per-character advance of the component **header** (`refdes (Part)`), in nm.
+/// The header renders at 1.5 mm (`schematic_svg::HEADER_TEXT_H`) — larger than the pin
+/// names [`NAME_CHAR_W`] is tuned for — so its advance is correspondingly wider. Like
+/// `NAME_CHAR_W` this is a layout-time nominal, not a font metric (the renderer owns the
+/// exact glyph advance); it is deliberately an **upper bound** on the real per-glyph
+/// advance so the reflow slot [`header_width`] reserves never understates the drawn
+/// header and lets two neighbours' headers collide. The stroke font advances
+/// `font::GLYPH_ADVANCE / font::CELL_HEIGHT = 6/7` of the text height per glyph → 1.286 mm
+/// at 1.5 mm; this rounds that up (a consistency test in `schematic_svg` pins the bound).
+pub(crate) const HEADER_CHAR_W: Nm = 1_300_000;
+
+/// The horizontal extent (nm) the rendered component header reserves in the reflow flow:
+/// its character count times [`HEADER_CHAR_W`]. This is the *measurement* the box-with-pins
+/// slot maxes against so adjacent symbols' headers cannot overlap (the header is drawn from
+/// the box's left edge, so a header wider than the box would otherwise spill onto the
+/// neighbour). Keyed on the fully-formatted header string (`"C3 (Cap)"`), because both the
+/// derived refdes and the part name contribute width — sizing on the part name alone (the
+/// old floor) understated it badly.
+pub fn header_width(header: &str) -> Nm {
+    header.chars().count() as Nm * HEADER_CHAR_W
+}
+
 /// Every box-edge pin identity of a part, in the layout enumeration order: discrete pins
 /// first (declaration order), then interface-port signals (`port.signal`, BTreeMap
 /// order). The names are what widths key on; the count drives height. This is the single

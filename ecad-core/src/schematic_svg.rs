@@ -477,6 +477,68 @@ mod tests {
         assert!(s.contains(">VCC<"), "net name tag expected:\n{s}");
     }
 
+    /// The rendered horizontal bounds `[left, left + header_width(text)]` of each
+    /// `class="header"` `<text>`, in mm, in document order — the geometry a reader sees for
+    /// the `refdes (Part)` labels.
+    fn header_bounds(svg: &str) -> Vec<(f64, f64)> {
+        let mm_per_nm = crate::doc::MM as f64;
+        svg.match_indices("class=\"header\"")
+            .map(|(i, _)| {
+                let tail = &svg[i..];
+                let x_key = "x=\"";
+                let xs = tail.find(x_key).unwrap() + x_key.len();
+                let xe = tail[xs..].find('"').unwrap() + xs;
+                let left: f64 = tail[xs..xe].parse().unwrap();
+                let ts = tail.find('>').unwrap() + 1;
+                let te = tail[ts..].find("</text>").unwrap() + ts;
+                let text = &tail[ts..te];
+                let width_mm = crate::schematic::header_width(text) as f64 / mm_per_nm;
+                (left, left + width_mm)
+            })
+            .collect()
+    }
+
+    /// Regression (header-overlap fix): two adjacent single-column parts packed with **no
+    /// gap** must not have overlapping rendered headers. Before the fix the box was sized to
+    /// a floor of the part name alone, so the far wider `Cap1 (Cap)` header spilled onto the
+    /// neighbour; now the flow reserves `header_width` per symbol, so the headers are at
+    /// worst edge-to-edge.
+    #[test]
+    fn adjacent_headers_do_not_intersect() {
+        let s = render(
+            "inst C1 Cap\ninst C2 Cap\nschematic {\n  row {\n    sym C1\n    sym C2\n  }\n}\n",
+        );
+        let mut bounds = header_bounds(&s);
+        assert_eq!(bounds.len(), 2, "two headers expected:\n{s}");
+        bounds.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let (_, right0) = bounds[0];
+        let (left1, _) = bounds[1];
+        assert!(
+            right0 <= left1,
+            "adjacent headers overlap: {:?} then {:?} (right {right0} > left {left1})\n{s}",
+            bounds[0],
+            bounds[1],
+        );
+    }
+
+    /// The layout-time header nominal ([`header_width`]) must be an **upper bound** on the
+    /// stroke font's real per-glyph advance at [`HEADER_TEXT_H`] (`GLYPH_ADVANCE / CELL_HEIGHT`
+    /// of the text height). Otherwise the reserved slot would understate a header the GUI
+    /// stroke-renders and let two neighbours collide — the bug this slice fixes. Pins the two
+    /// constants together so a change to either can't silently reintroduce the overlap.
+    #[test]
+    fn header_width_upper_bounds_the_stroke_advance() {
+        use crate::font::{CELL_HEIGHT, GLYPH_ADVANCE};
+        let stroke_advance_per_char = GLYPH_ADVANCE as i64 * HEADER_TEXT_H / CELL_HEIGHT as i64;
+        // header_width of a one-char string is exactly the per-char nominal.
+        let nominal_per_char = crate::schematic::header_width("M");
+        assert!(
+            nominal_per_char >= stroke_advance_per_char,
+            "header nominal {nominal_per_char} < stroke advance {stroke_advance_per_char} at \
+             HEADER_TEXT_H={HEADER_TEXT_H}: reserved header slots would understate the drawn text",
+        );
+    }
+
     #[test]
     fn header_shows_annotated_refdes_not_the_path() {
         // Two caps under non-refdes instance paths (`CA`, `CB`): the annotator assigns

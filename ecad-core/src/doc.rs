@@ -661,7 +661,24 @@ impl Doc {
             .iter()
             .map(|(id, c)| (id.clone(), c.part.clone()))
             .collect();
-        crate::schematic::reflow(&layout, &parts, lib, &self.def_fragments)
+        // The header labels the renderer draws above each box (`refdes (Part)`), so reflow
+        // can reserve enough horizontal room that adjacent headers never overlap. Built from
+        // the same annotate query the renderer uses, with the same path fallback for a
+        // component the query omits — keeping the reserved width in lockstep with the drawn
+        // text.
+        let refdes = crate::annotate::refdes(self, lib, &crate::annotate::registry(&self.source));
+        let headers: BTreeMap<EntityId, String> = self
+            .components
+            .iter()
+            .map(|(id, c)| {
+                let designator = refdes
+                    .get(id)
+                    .map(String::as_str)
+                    .unwrap_or_else(|| id.as_str());
+                (id.clone(), format!("{designator} ({})", c.part))
+            })
+            .collect();
+        crate::schematic::reflow(&layout, &parts, lib, &self.def_fragments, &headers)
     }
 
     pub fn input_rev(&self, which: InputId) -> u64 {

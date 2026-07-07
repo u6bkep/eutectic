@@ -102,7 +102,7 @@ fn row_advances_along_x_column_along_neg_y() {
     let r = SchematicLayout {
         roots: vec![row(vec![sym("C1"), sym("C2")])],
     };
-    let pr = reflow(&r, &u, &lib, &BTreeMap::new());
+    let pr = reflow(&r, &u, &lib, &BTreeMap::new(), &BTreeMap::new());
     // In a row, C2 sits to the right of C1 (greater x), same y.
     assert!(pr[&EntityId::new("C2")].center.x > pr[&EntityId::new("C1")].center.x);
     assert_eq!(
@@ -113,7 +113,7 @@ fn row_advances_along_x_column_along_neg_y() {
     let c = SchematicLayout {
         roots: vec![column(vec![sym("C1"), sym("C2")])],
     };
-    let pc = reflow(&c, &u, &lib, &BTreeMap::new());
+    let pc = reflow(&c, &u, &lib, &BTreeMap::new(), &BTreeMap::new());
     // In a column, C2 sits below C1 (lesser y), same x.
     assert!(pc[&EntityId::new("C2")].center.y < pc[&EntityId::new("C1")].center.y);
     assert_eq!(
@@ -135,8 +135,14 @@ fn gap_widens_spacing() {
             children: vec![sym("C1"), sym("C2")],
         })],
     };
-    let close = reflow(&mk(0), &u, &lib, &BTreeMap::new());
-    let far = reflow(&mk(10 * 1_000_000), &u, &lib, &BTreeMap::new());
+    let close = reflow(&mk(0), &u, &lib, &BTreeMap::new(), &BTreeMap::new());
+    let far = reflow(
+        &mk(10 * 1_000_000),
+        &u,
+        &lib,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    );
     let dx0 = close[&EntityId::new("C2")].center.x - close[&EntityId::new("C1")].center.x;
     let dx1 = far[&EntityId::new("C2")].center.x - far[&EntityId::new("C1")].center.x;
     assert_eq!(dx1 - dx0, 10 * 1_000_000);
@@ -156,9 +162,27 @@ fn align_shifts_cross_axis() {
             children: vec![sym("U1"), sym("C1")],
         })],
     };
-    let start = reflow(&mk(Align::Start), &u, &lib, &BTreeMap::new());
-    let center = reflow(&mk(Align::Center), &u, &lib, &BTreeMap::new());
-    let end = reflow(&mk(Align::End), &u, &lib, &BTreeMap::new());
+    let start = reflow(
+        &mk(Align::Start),
+        &u,
+        &lib,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    );
+    let center = reflow(
+        &mk(Align::Center),
+        &u,
+        &lib,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    );
+    let end = reflow(
+        &mk(Align::End),
+        &u,
+        &lib,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    );
     let cap_y = |m: &BTreeMap<EntityId, Placement>| m[&EntityId::new("C1")].center.y;
     // Start puts the short box at the top; End at the bottom; Center between.
     assert!(cap_y(&start) > cap_y(&center));
@@ -176,7 +200,7 @@ fn nested_containers_size_to_content() {
             row(vec![sym("C3")]),
         ])],
     };
-    let p = reflow(&layout, &u, &lib, &BTreeMap::new());
+    let p = reflow(&layout, &u, &lib, &BTreeMap::new(), &BTreeMap::new());
     assert_eq!(p.len(), 3);
     // The second row (C3) sits below the first (C1/C2).
     assert!(p[&EntityId::new("C3")].center.y < p[&EntityId::new("C1")].center.y);
@@ -197,8 +221,8 @@ fn pinned_offset_shifts_symbol() {
             dy: -2_000_000,
         })])],
     };
-    let pb = reflow(&base, &u, &lib, &BTreeMap::new());
-    let ps = reflow(&shifted, &u, &lib, &BTreeMap::new());
+    let pb = reflow(&base, &u, &lib, &BTreeMap::new(), &BTreeMap::new());
+    let ps = reflow(&shifted, &u, &lib, &BTreeMap::new(), &BTreeMap::new());
     let b = pb[&EntityId::new("C1")].center;
     let s = ps[&EntityId::new("C1")].center;
     // dx/dy applied on top of the (unchanged, centered) flow position.
@@ -219,7 +243,7 @@ fn rot_swaps_extent() {
             dy: 0,
         })])],
     };
-    let p = reflow(&layout, &u, &lib, &BTreeMap::new());
+    let p = reflow(&layout, &u, &lib, &BTreeMap::new(), &BTreeMap::new());
     let e = p[&EntityId::new("U1")].extent;
     assert_eq!(e.w, upright.h);
     assert_eq!(e.h, upright.w);
@@ -235,7 +259,7 @@ fn unplaced_components_land_in_the_bin() {
     let layout = SchematicLayout {
         roots: vec![row(vec![sym("C1")])],
     };
-    let p = reflow(&layout, &u, &lib, &BTreeMap::new());
+    let p = reflow(&layout, &u, &lib, &BTreeMap::new(), &BTreeMap::new());
     assert_eq!(p.len(), 3); // totality: every component has a coordinate.
     // The bin sits below the placed content (negative y region well under C1).
     assert!(p[&EntityId::new("C2")].center.y < p[&EntityId::new("C1")].center.y);
@@ -246,7 +270,13 @@ fn unplaced_components_land_in_the_bin() {
 fn empty_layout_puts_everything_in_the_bin() {
     let lib = part_library();
     let u = universe(&[("C1", "Cap"), ("C2", "Cap")]);
-    let p = reflow(&SchematicLayout::default(), &u, &lib, &BTreeMap::new());
+    let p = reflow(
+        &SchematicLayout::default(),
+        &u,
+        &lib,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    );
     assert_eq!(p.len(), 2);
 }
 
@@ -255,7 +285,13 @@ fn missing_part_still_gets_a_placement() {
     let lib = part_library();
     // A component whose part is not in the lib: the view stays total (min box).
     let u = universe(&[("X1", "NoSuchPart")]);
-    let p = reflow(&SchematicLayout::default(), &u, &lib, &BTreeMap::new());
+    let p = reflow(
+        &SchematicLayout::default(),
+        &u,
+        &lib,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    );
     assert_eq!(p[&EntityId::new("X1")].extent, MIN_EXTENT);
 }
 
@@ -275,8 +311,8 @@ fn reflow_is_deterministic() {
     // Two runs must be byte-equal. BTreeMap iteration is deterministic, so a
     // Debug-rendered dump is a faithful byte-level proxy for the placement set.
     let dump = |m: &BTreeMap<EntityId, Placement>| format!("{m:?}");
-    let a = reflow(&layout, &u, &lib, &BTreeMap::new());
-    let b = reflow(&layout, &u, &lib, &BTreeMap::new());
+    let a = reflow(&layout, &u, &lib, &BTreeMap::new(), &BTreeMap::new());
+    let b = reflow(&layout, &u, &lib, &BTreeMap::new(), &BTreeMap::new());
     assert_eq!(dump(&a), dump(&b));
     assert_eq!(a, b);
 }
@@ -585,7 +621,7 @@ fn def_instance_sym_expands_to_the_stamped_fragment() {
     let layout = SchematicLayout {
         roots: vec![row(vec![sym("sense[0]")])],
     };
-    let p = reflow(&layout, &u, &lib, &fragments);
+    let p = reflow(&layout, &u, &lib, &fragments, &BTreeMap::new());
     // Totality: both internal components got a coordinate, as a group (not the bin).
     assert_eq!(p.len(), 2);
     // The fragment is a column: C1 sits below R1 (lesser y), same x.
@@ -611,7 +647,7 @@ fn two_instances_render_with_identical_relative_geometry() {
     let layout = SchematicLayout {
         roots: vec![row(vec![sym("a"), sym("b")])],
     };
-    let p = reflow(&layout, &u, &lib, &fragments);
+    let p = reflow(&layout, &u, &lib, &fragments, &BTreeMap::new());
     assert_eq!(p.len(), 4);
     // Internal relative geometry: (C1 - R1) offset must be identical across instances —
     // the "renders identically everywhere" guarantee.
@@ -644,7 +680,7 @@ fn nested_def_instance_expands_recursively() {
     let layout = SchematicLayout {
         roots: vec![row(vec![sym("outer")])],
     };
-    let p = reflow(&layout, &u, &lib, &fragments);
+    let p = reflow(&layout, &u, &lib, &fragments, &BTreeMap::new());
     // Both the outer C1 and the nested R1 land — the nested instance expanded.
     assert_eq!(p.len(), 2);
     assert!(p.contains_key(&EntityId::new("outer.in.R1")));
@@ -672,7 +708,7 @@ fn doc_level_sym_overrides_fragment_placement() {
             }),
         ])],
     };
-    let p = reflow(&layout, &u, &lib, &fragments);
+    let p = reflow(&layout, &u, &lib, &fragments, &BTreeMap::new());
     assert_eq!(p.len(), 2);
 
     // The doc-level R1 wins: its placement carries the authored dx (+7mm). The fragment
@@ -691,7 +727,7 @@ fn doc_level_sym_overrides_fragment_placement() {
             }),
         ])],
     };
-    let pb = reflow(&base_layout, &u, &lib, &fragments);
+    let pb = reflow(&base_layout, &u, &lib, &fragments, &BTreeMap::new());
     assert_eq!(
         p[&EntityId::new("sense[0].R1")].center.x - pb[&EntityId::new("sense[0].R1")].center.x,
         7_000_000,
@@ -788,7 +824,7 @@ fn def_instance_with_no_fragment_lands_in_the_bin() {
     let layout = SchematicLayout {
         roots: vec![row(vec![sym("sense[0]")])],
     };
-    let p = reflow(&layout, &u, &lib, &fragments);
+    let p = reflow(&layout, &u, &lib, &fragments, &BTreeMap::new());
     // Totality: both internal components still get a coordinate (in the bin).
     assert_eq!(p.len(), 2);
 }

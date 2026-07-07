@@ -5,7 +5,7 @@
 use crate::doc::{Nm, Point};
 use crate::id::EntityId;
 use crate::part::PartLib;
-use crate::schematic::symbol::{Extent, MIN_BOX_H, MIN_BOX_W, symbol_extent};
+use crate::schematic::symbol::{Extent, MIN_BOX_H, MIN_BOX_W, header_width, symbol_extent};
 use crate::schematic::{Align, Container, Direction, LayoutNode, SchematicLayout, Symbol};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -19,6 +19,19 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct Placement {
     pub center: Point,
     pub extent: Extent,
+}
+
+/// A symbol's two flow rectangles. The **drawn** box ([`symbol_extent`], rotation-applied)
+/// is what the renderer strokes and what [`Placement::extent`] carries; the **slot** is the
+/// space the flow reserves for it — the drawn box widened to fit the header label that hangs
+/// off its top-left corner (`slot.w = draw.w.max(header_width(..))`). Keeping them distinct
+/// lets a long `refdes (Part)` header reserve room between neighbours without inflating the
+/// box geometry (so pin stubs stay put), which is the header-overlap fix: the drawn box is a
+/// pure function of the part, the label reservation lives only in the flow.
+#[derive(Clone, Copy, Debug)]
+struct SymSizing {
+    slot: Extent,
+    draw: Extent,
 }
 
 /// Gap between the placed extent and the unplaced bin, and between bin cells.
@@ -45,11 +58,20 @@ pub(crate) const MIN_EXTENT: Extent = Extent {
 /// component **not** in the tree lands in the derived **unplaced bin** — a plain grid
 /// below the placed extent (§20c totality: every component always has a coordinate). A
 /// component whose part is missing from the lib still gets a [`MIN_EXTENT`] placement.
+///
+/// `headers` maps each component path to its fully-formatted header label (`"C3 (Cap)"` —
+/// the derived refdes + part name the renderer draws above the box). Each placed symbol
+/// reserves a flow slot at least [`header_width`] wide so neighbouring headers cannot
+/// overlap; a path absent from the map (or an empty label) reserves nothing beyond the box.
+/// The label is threaded in rather than re-derived here because the refdes is an annotate
+/// query result ([`crate::annotate::refdes`]) reflow's inputs don't carry —
+/// [`Doc::reflow_schematic`](crate::doc::Doc::reflow_schematic) computes it and passes it.
 pub fn reflow(
     layout: &SchematicLayout,
     components: &BTreeMap<EntityId, String>,
     lib: &PartLib,
     def_fragments: &BTreeMap<String, SchematicLayout>,
+    headers: &BTreeMap<EntityId, String>,
 ) -> BTreeMap<EntityId, Placement> {
     // Decision 20 (def-embedded layout): before the prune/place pipeline, expand every
     // def-instance `sym` (a `sym` whose path is a `def_fragments` key) into the def's
@@ -72,14 +94,29 @@ pub fn reflow(
             .map(symbol_extent)
             .unwrap_or(MIN_EXTENT)
     };
-    // A symbol's laid extent applies the authored rot's 90/270 swap on top of the box.
-    let sized = |sym: &Symbol| -> Extent {
+    // The header-label reservation for a path (0 if it has no label — bin cells and direct
+    // callers that pass no headers).
+    let header_reserve = |path: &str| -> Nm {
+        headers
+            .get(&EntityId::new(path))
+            .map(|h| header_width(h))
+            .unwrap_or(0)
+    };
+    // A symbol's drawn box (rot's 90/270 swap applied) plus its flow slot (the box widened
+    // to fit its header label). The header hangs off the box's left edge, so a label wider
+    // than the box reserves the extra width in the flow — never in the drawn geometry.
+    let sized = |sym: &Symbol| -> SymSizing {
         let e = extent_of(&sym.path);
-        if sym.swaps_extent() {
+        let draw = if sym.swaps_extent() {
             Extent { w: e.h, h: e.w }
         } else {
             e
-        }
+        };
+        let slot = Extent {
+            w: draw.w.max(header_reserve(&sym.path)),
+            h: draw.h,
+        };
+        SymSizing { slot, draw }
     };
 
     let mut out: BTreeMap<EntityId, Placement> = BTreeMap::new();
@@ -111,7 +148,13 @@ pub fn reflow(
         .filter(|id| !placed.contains(*id))
         .collect();
     if !unplaced.is_empty() {
-        place_bin(&unplaced, &extent_of, placed_extent, &mut out);
+        place_bin(
+            &unplaced,
+            &extent_of,
+            &header_reserve,
+            placed_extent,
+            &mut out,
+        );
     }
 
     out
@@ -303,9 +346,9 @@ fn prune_unplaceable(nodes: &[LayoutNode], placeable: &impl Fn(&str) -> bool) ->
 /// pure *position* shift applied in [`place_node`] and deliberately does **not** enlarge
 /// the slot, so a pinned offset may overlap a neighbour (that is the escape hatch's whole
 /// point — absolute positioning ignores flow).
-fn measure(node: &LayoutNode, sized: &impl Fn(&Symbol) -> Extent) -> Extent {
+fn measure(node: &LayoutNode, sized: &impl Fn(&Symbol) -> SymSizing) -> Extent {
     match node {
-        LayoutNode::Symbol(s) => sized(s),
+        LayoutNode::Symbol(s) => sized(s).slot,
         LayoutNode::Container(c) => measure_container(c, sized),
         // A wire is presentational (§20d) and reserves no flow slot; trivia is preserved
         // for round-trip. Neither has flow geometry.
@@ -326,7 +369,7 @@ fn flow_children(c: &Container) -> Vec<&LayoutNode> {
 
 /// A container's content extent: main-axis is the sum of child main extents plus gaps;
 /// cross-axis is the max child cross extent. Empty container ⇒ zero extent.
-fn measure_container(c: &Container, sized: &impl Fn(&Symbol) -> Extent) -> Extent {
+fn measure_container(c: &Container, sized: &impl Fn(&Symbol) -> SymSizing) -> Extent {
     let child_ext: Vec<Extent> = flow_children(c).iter().map(|n| measure(n, sized)).collect();
     if child_ext.is_empty() {
         return Extent { w: 0, h: 0 };
@@ -351,7 +394,7 @@ fn measure_container(c: &Container, sized: &impl Fn(&Symbol) -> Extent) -> Exten
 fn place_container(
     c: &Container,
     origin: Point,
-    sized: &impl Fn(&Symbol) -> Extent,
+    sized: &impl Fn(&Symbol) -> SymSizing,
     out: &mut BTreeMap<EntityId, Placement>,
 ) -> Extent {
     let ext = measure_container(c, sized);
@@ -380,7 +423,7 @@ fn place_container(
                 y: origin.y - main,
             },
         };
-        place_node(child, slot, *ce, sized, out);
+        place_node(child, slot, sized, out);
         main += match c.dir {
             Direction::Row => ce.w,
             Direction::Column => ce.h,
@@ -401,23 +444,26 @@ fn cross_offset(align: Align, track: Nm, child: Nm) -> Nm {
 }
 
 /// Place one node whose slot top-left corner is `slot` and whose slot extent is `ext`.
-/// A symbol lands centered in its slot (the slot *is* its box — [`measure`] does not
-/// inflate for the pinned offset), then shifted by its pinned `dx`/`dy`. A container
-/// recurses.
+/// A symbol's **drawn box** lands flush with the slot's top-left corner (`ext` is the slot,
+/// which may be wider than the box to reserve header room — see [`SymSizing`]), so the
+/// header that hangs off the box's left edge stays inside the slot and off the neighbour;
+/// the box is then shifted by its pinned `dx`/`dy`. The stored [`Placement::extent`] is the
+/// drawn box, not the slot. A container recurses.
 fn place_node(
     node: &LayoutNode,
     slot: Point,
-    ext: Extent,
-    sized: &impl Fn(&Symbol) -> Extent,
+    sized: &impl Fn(&Symbol) -> SymSizing,
     out: &mut BTreeMap<EntityId, Placement>,
 ) {
     match node {
         LayoutNode::Symbol(s) => {
-            let box_ext = sized(s);
-            // Center of the slot (top-left corner minus half-extent in y-up space).
+            let box_ext = sized(s).draw;
+            // The drawn box hugs the slot's top-left corner (the header reservation, if any,
+            // is the slack on the box's right). Center = corner minus half the *box* extent
+            // in y-up space (the slot height equals the box height, so y is unaffected).
             let center = Point {
-                x: slot.x + ext.w / 2 + s.dx,
-                y: slot.y - ext.h / 2 + s.dy,
+                x: slot.x + box_ext.w / 2 + s.dx,
+                y: slot.y - box_ext.h / 2 + s.dy,
             };
             out.insert(
                 EntityId::new(s.path.clone()),
@@ -437,17 +483,27 @@ fn place_node(
 }
 
 /// Place the unplaced bin: a plain grid of `BIN_COLS` columns, sitting one [`BIN_GAP`]
-/// below the placed content (§20c). Cells are uniform (widest × tallest unplaced box) so
-/// the grid is a clean lattice; ids fill row-major in sorted order. Deterministic.
+/// below the placed content (§20c). Cells are uniform so the grid is a clean lattice; the
+/// cell width is the widest of every unplaced box **and every unplaced header label**
+/// (`header_reserve`), so a header can never spill past its cell onto the next — the same
+/// reservation the placed flow makes. Boxes hug their cell's left edge (matching the flow's
+/// header-left anchoring), so a header, drawn from the box's left, stays inside its
+/// header-wide cell. Ids fill row-major in sorted order. Deterministic.
 fn place_bin(
     unplaced: &[&EntityId],
     extent_of: &impl Fn(&str) -> Extent,
+    header_reserve: &impl Fn(&str) -> Nm,
     placed: Extent,
     out: &mut BTreeMap<EntityId, Placement>,
 ) {
     const BIN_COLS: usize = 8;
     let exts: Vec<Extent> = unplaced.iter().map(|id| extent_of(id.as_str())).collect();
-    let cell_w = exts.iter().map(|e| e.w).max().unwrap_or(MIN_BOX_W);
+    let cell_w = unplaced
+        .iter()
+        .zip(&exts)
+        .map(|(id, e)| e.w.max(header_reserve(id.as_str())))
+        .max()
+        .unwrap_or(MIN_BOX_W);
     let cell_h = exts.iter().map(|e| e.h).max().unwrap_or(MIN_BOX_H);
     // The bin's top edge is one gap below the placed content's bottom (origin y = 0, so
     // the content spans y ∈ [−placed.h, 0]).
@@ -455,7 +511,9 @@ fn place_bin(
     for (i, (id, e)) in unplaced.iter().zip(&exts).enumerate() {
         let col = (i % BIN_COLS) as Nm;
         let row = (i / BIN_COLS) as Nm;
-        // Cell top-left corner, then center the box in its cell.
+        // Cell top-left corner; the box hugs it (its header, anchored at the box's left,
+        // then fits within the header-wide cell reserved above). Vertically centred in the
+        // cell so uneven box heights read as a tidy row of baselines.
         let slot = Point {
             x: col * (cell_w + BIN_GAP),
             y: top - row * (cell_h + BIN_GAP),
@@ -464,7 +522,7 @@ fn place_bin(
             (*id).clone(),
             Placement {
                 center: Point {
-                    x: slot.x + cell_w / 2,
+                    x: slot.x + e.w / 2,
                     y: slot.y - cell_h / 2,
                 },
                 extent: *e,

@@ -2359,7 +2359,13 @@ fn max_coord_scale_lengths_reflow_without_panic() {
         (EntityId::new("C2"), "Cap".to_string()),
     ]);
     // Must not panic (debug add-overflow) — the whole point of the range check.
-    let placed = crate::schematic::reflow(&doc.schematic.unwrap(), &parts, &lib, &BTreeMap::new());
+    let placed = crate::schematic::reflow(
+        &doc.schematic.unwrap(),
+        &parts,
+        &lib,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    );
     assert_eq!(placed.len(), 2);
 }
 
