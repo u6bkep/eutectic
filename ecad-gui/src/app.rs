@@ -398,12 +398,6 @@ impl EcadApp {
         self.tool_for(kind)
     }
 
-    /// Focus a pane (Blender hover-focus semantics; the interactive path sets
-    /// this from pointer events + strip clicks) — public for fixtures / tests.
-    pub fn set_focused_pane(&self, pane: PaneId) {
-        self.focused_pane.set(pane);
-    }
-
     /// Set the measure preview state — for fixtures / tests that render a
     /// measure-in-progress scene without driving live pointer events.
     pub fn set_measure(&self, m: MeasureState) {
