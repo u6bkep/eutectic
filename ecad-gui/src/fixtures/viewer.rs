@@ -140,3 +140,14 @@ pub fn board_domain() -> DomainState {
 pub fn board() -> EcadApp {
     EcadApp::new(board_domain())
 }
+
+/// The menu-bar scene (chrome region 1): the board with the **File** menu
+/// expanded, so the review artifact shows the menu popover (wired Save/Revert/
+/// Libraries rows + the disabled remainder). Drives the app-owned open-menu slot
+/// directly — the popover is a pure projection of that state, no live
+/// pointer/popover machinery needed headless.
+pub fn menubar_open() -> EcadApp {
+    let app = board();
+    app.set_open_menu(Some("file"));
+    app
+}

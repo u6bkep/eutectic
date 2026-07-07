@@ -68,6 +68,7 @@ pub fn all() -> Vec<(&'static str, EcadApp)> {
         ("document_loaded", document_loaded()),
         ("parse_error", parse_error()),
         ("board", board()),
+        ("menubar_open", menubar_open()),
         ("board_with_selection", board_with_selection()),
         ("drc_violation", drc_violation()),
         ("measure_in_progress", measure_in_progress()),

@@ -10,6 +10,7 @@
 
 mod editing;
 mod libraries;
+mod menubar;
 mod panes;
 mod reload;
 mod routing;

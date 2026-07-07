@@ -172,6 +172,20 @@ fn canvas_child_lays_out_at_natural_viewbox_size_at_viewport_origin() {
     );
 }
 
+/// The menu-bar scene (chrome region 1): the File menu is expanded, so the menu
+/// popover is in the tree — it must render lint-clean over the fitted board.
+#[test]
+fn menubar_open_is_lint_clean() {
+    let app = menubar_open();
+    assert_eq!(
+        app.open_menu.borrow().as_deref(),
+        Some("file"),
+        "the scene must have the File menu open"
+    );
+    let r = render_clean("menubar_open", app);
+    harness::assert_content_coverage("menubar_open", &r, &[PaneId::A.canvas_key()]);
+}
+
 #[test]
 fn board_with_selection_is_lint_clean() {
     let app = board_with_selection();
