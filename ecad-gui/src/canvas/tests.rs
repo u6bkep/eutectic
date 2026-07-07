@@ -220,6 +220,68 @@ fn empty_overlay_is_none_populated_is_some() {
     assert_eq!(el.key.as_deref(), Some("overlay:dynamic"));
 }
 
+/// The adaptive grid-pitch rule ([`grid_pitch_mm`]): at three representative zooms the
+/// pitch is the expected `1 / 2 / 5 × 10ⁿ` mm value, and the resulting on-screen dot
+/// spacing (`pitch · zoom`, since 1 mm = 1 px at zoom 1) lands inside the target band —
+/// the lower bound is [`GRID_MIN_PX`] by construction and the upper bound is
+/// `GRID_MIN_PX · 2.5` (the largest 1→2→5→10 step), well under the ~40 px ceiling.
+#[test]
+fn grid_pitch_rule_adapts_across_zoom() {
+    use super::grid_pitch_mm;
+    // (zoom, expected pitch mm) — one case per decade / step so the 1/2/5 rounding is
+    // exercised: zoomed out → coarse, unit zoom, zoomed in → fine.
+    for (zoom, want) in [(0.5_f32, 20.0_f32), (1.0, 10.0), (4.0, 2.0), (20.0, 0.5)] {
+        let pitch = grid_pitch_mm(zoom);
+        assert!(
+            (pitch - want).abs() < 1e-4,
+            "zoom {zoom}: pitch {pitch} != expected {want}"
+        );
+        let spacing_px = pitch * zoom;
+        assert!(
+            (super::GRID_MIN_PX..super::GRID_MIN_PX * 2.5).contains(&spacing_px),
+            "zoom {zoom}: on-screen spacing {spacing_px} px outside [{}, {}) px",
+            super::GRID_MIN_PX,
+            super::GRID_MIN_PX * 2.5
+        );
+    }
+    // A non-finite / non-positive zoom falls back to the unit-zoom pitch (no panic, no NaN).
+    assert_eq!(grid_pitch_mm(0.0), grid_pitch_mm(1.0));
+    assert_eq!(grid_pitch_mm(f32::NAN), grid_pitch_mm(1.0));
+}
+
+/// The grid is furniture, not geometry: it renders as its own `grid:static` asset that
+/// shares the layers' viewBox (so it registers) but is **never a pick candidate**. The
+/// picker folds the `world_features` kernel, not canvas Els, so a click on a bare grid
+/// lattice point — the board origin `(0,0)`, a dot, but outside all copper — resolves to
+/// nothing, exactly as bare canvas does. The grid El's key is its own namespace, distinct
+/// from the `layer:` / `overlay:` picked-into prefixes.
+#[test]
+fn grid_never_wins_a_pick() {
+    use crate::canvas::pick::{candidates, resolve};
+
+    let d = board_domain();
+    let doc = d.doc.as_ref().expect("fixture elaborates");
+    let canvas = Canvas::new(doc, &d.lib).unwrap();
+
+    // The grid El exists, shares the viewBox, and is its own key namespace.
+    let grid = canvas.grid_el(8.0).expect("board canvas has furniture");
+    let key = grid.key.as_deref().unwrap();
+    assert_eq!(key, "grid:static");
+    assert!(
+        !key.starts_with("layer:") && !key.starts_with("overlay:"),
+        "grid must not masquerade as a pickable layer/overlay El (key {key})"
+    );
+
+    // The origin (0,0) is a grid dot (every lattice is a multiple of the pitch) but sits
+    // outside the pour outline (1,1)-(19,14) and every pad — so the pick finds nothing.
+    let su = ecad_core::elaborate::stackup(&doc.source);
+    let cands = candidates(doc, &d.lib, &su);
+    assert!(
+        resolve(&cands, Point { x: 0, y: 0 }, 0, |_| true).is_none(),
+        "a click on a bare grid dot must pick nothing — the grid is not a candidate"
+    );
+}
+
 /// The real 4-layer multiprobe board (poc/out/board.ecad) parses, elaborates, and
 /// projects to non-empty assets for the copper layers without panicking — the
 /// end-to-end smoke test over a genuine board. Reads the poc file at test time via

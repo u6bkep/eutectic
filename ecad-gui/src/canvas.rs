@@ -257,9 +257,18 @@ impl Canvas {
         let mut buckets: BTreeMap<String, Vec<VectorPath>> = BTreeMap::new();
 
         // The derived outline layer: the board region (outline ∖ cutouts) as an
-        // unfilled stroked path (matching `svg.rs`'s `outline-board`).
+        // unfilled **dashed** stroke in the Edge colour (the UI oracle's board-edge
+        // treatment — `#eab308`, dashed). Board-space dashes, so they scale with the
+        // rest of the geometry (this is a cached static layer, built without a zoom).
         if let Some(region) = ecad_core::elaborate::board_region(&doc.source) {
-            let path = region_stroke_path(&region, flip_sum, outline_color(), 0.1);
+            let path = dashed_region_stroke_path(
+                &region,
+                flip_sum,
+                outline_color(),
+                EDGE_STROKE_MM,
+                EDGE_DASH_MM,
+                EDGE_GAP_MM,
+            );
             buckets
                 .entry(LayerId::Outline.key())
                 .or_default()
@@ -495,6 +504,156 @@ impl Canvas {
                 .key("overlay:dynamic"),
         )
     }
+
+    /// The **canvas furniture** layer (UI oracle): a subtle background dot grid and
+    /// the origin axes, drawn UNDER every board layer. Shares the layers' viewBox so
+    /// it registers pixel-exact, and is `Painted` like the layers. `None` for a
+    /// degenerate pitch/bounds.
+    ///
+    /// # Zoom-aware pitch (the adaptive rule)
+    ///
+    /// The grid pitch adapts so the on-screen dot spacing stays legible: [`grid_pitch_mm`]
+    /// picks the smallest `1 / 2 / 5 × 10ⁿ` mm value whose screen spacing
+    /// (`pitch_mm · zoom`, since 1 mm = 1 px at zoom 1) is at least [`GRID_MIN_PX`]. That
+    /// keeps spacing in `[GRID_MIN_PX, GRID_MIN_PX · 2.5)` ≈ `[8, 20)` px — comfortably
+    /// inside the ~8–40 px target. Dot and axis stroke sizes are a fixed fraction of the
+    /// pitch, so the whole asset depends only on the pitch **bucket** (not the continuous
+    /// zoom, and never the pan): panning re-emits a byte-identical asset (`content_hash`
+    /// dedupes the upload) and only a pitch change re-tessellates. This is the "static
+    /// layer stack" discipline — the grid is doc-independent but pitch-cached, not a
+    /// per-frame dynamic overlay.
+    ///
+    /// # Coverage
+    ///
+    /// Dots are laid at board multiples of the pitch (so a dot lands on the origin, where
+    /// the axes cross) across the content bounds inflated by [`GRID_OVERSCAN`] — enough to
+    /// fill the fit padding and modest pans. Zoomed out far below the fit (content smaller
+    /// than the pane) the overscan runs out and the gutters beyond it show no grid; this is
+    /// the honest consequence of a pan-independent static layer and is acceptable furniture.
+    pub fn grid_el(&self, zoom: f32) -> Option<El> {
+        let pitch = grid_pitch_mm(zoom);
+        // `grid_pitch_mm` returns a positive finite pitch (guarded zoom → step·decade);
+        // this is a defensive floor, not a reachable branch on a committed doc.
+        if pitch <= 0.0 {
+            return None;
+        }
+        let (x0, y0, x1, y1) = self.bounds;
+        let flip_sum = y0 + y1;
+        let flip_sum_mm = nm_to_mm(flip_sum);
+        let (bx0, by0, bx1, by1) = (nm_to_mm(x0), nm_to_mm(y0), nm_to_mm(x1), nm_to_mm(y1));
+        let (ox, oy) = ((bx1 - bx0) * GRID_OVERSCAN, (by1 - by0) * GRID_OVERSCAN);
+        let (gx0, gy0, gx1, gy1) = (bx0 - ox, by0 - oy, bx1 + ox, by1 + oy);
+
+        let mut paths: Vec<VectorPath> = Vec::new();
+
+        // Dot field: a small square per lattice point, all one even-odd-free fill path.
+        let r = (pitch * GRID_DOT_FRAC).max(GRID_DOT_MIN_MM);
+        let (i0, i1) = ((gx0 / pitch).floor() as i64, (gx1 / pitch).ceil() as i64);
+        let (j0, j1) = ((gy0 / pitch).floor() as i64, (gy1 / pitch).ceil() as i64);
+        let mut dots = PathBuilder::new();
+        for i in i0..=i1 {
+            let vx = i as f32 * pitch; // board x == view x
+            for j in j0..=j1 {
+                let vy = flip_sum_mm - j as f32 * pitch; // board y → view y (flip)
+                dots = dots
+                    .move_to(vx - r, vy - r)
+                    .line_to(vx + r, vy - r)
+                    .line_to(vx + r, vy + r)
+                    .line_to(vx - r, vy + r)
+                    .close();
+            }
+        }
+        paths.push(
+            dots.fill(Some(VectorFill {
+                color: VectorColor::Solid(grid_dot_color()),
+                opacity: 1.0,
+                rule: VectorFillRule::NonZero,
+            }))
+            .build(),
+        );
+
+        // Origin axes: board x = 0 (view x = 0) and board y = 0 (view y = flip_sum_mm),
+        // each spanning the grid region, in the faint accent. Only drawn when the axis
+        // falls within the (overscanned) region.
+        let axis_w = (pitch * GRID_AXIS_FRAC).max(MIN_STROKE_MM);
+        if gx0 <= 0.0 && 0.0 <= gx1 {
+            let (ay0, ay1) = (flip_sum_mm - gy0, flip_sum_mm - gy1);
+            paths.push(
+                PathBuilder::new()
+                    .move_to(0.0, ay0)
+                    .line_to(0.0, ay1)
+                    .stroke_solid(grid_axis_color(), axis_w)
+                    .build(),
+            );
+        }
+        if gy0 <= 0.0 && 0.0 <= gy1 {
+            paths.push(
+                PathBuilder::new()
+                    .move_to(gx0, flip_sum_mm)
+                    .line_to(gx1, flip_sum_mm)
+                    .stroke_solid(grid_axis_color(), axis_w)
+                    .build(),
+            );
+        }
+
+        let asset = VectorAsset::from_paths(self.view_box(), paths);
+        Some(
+            vector(asset)
+                .vector_render_mode(VectorRenderMode::Painted)
+                .key("grid:static"),
+        )
+    }
+}
+
+/// Smallest on-screen dot spacing (logical px) the adaptive grid pitch targets — the
+/// lower bound of the ~8–40 px band the UI oracle's grid lives in.
+const GRID_MIN_PX: f32 = 8.0;
+
+/// How far past the content bounds the dot field extends, as a fraction of the content
+/// extent on each side (fills the fit padding + modest pans without tracking the camera).
+const GRID_OVERSCAN: f32 = 0.5;
+
+/// Grid-dot half-side as a fraction of the pitch. On-screen dot side is
+/// `2 · frac · spacing_px`; with spacing ∈ [8, 20) px this keeps the dot ≈ 1–2.4 px —
+/// visible but subtle furniture.
+const GRID_DOT_FRAC: f32 = 0.06;
+
+/// Floor on the dot half-side in mm, so a dot never tessellates to nothing.
+const GRID_DOT_MIN_MM: f32 = 0.01;
+
+/// Origin-axis stroke width as a fraction of the pitch (a hair heavier than a dot).
+const GRID_AXIS_FRAC: f32 = 0.06;
+
+/// The board-edge (Edge layer) dash geometry, in board mm: stroke width, dash-on
+/// length, gap-off length. Board-space so the dashes scale with the board.
+const EDGE_STROKE_MM: f32 = 0.12;
+const EDGE_DASH_MM: f32 = 0.8;
+const EDGE_GAP_MM: f32 = 0.5;
+
+/// The adaptive grid pitch in board mm for a viewport `zoom`: the smallest
+/// `1 / 2 / 5 × 10ⁿ` value whose on-screen spacing (`pitch · zoom`, since 1 mm = 1 px at
+/// zoom 1) is at least [`GRID_MIN_PX`]. Because the 1→2→5→10 ratios never exceed 2.5, the
+/// resulting spacing lands in `[GRID_MIN_PX, GRID_MIN_PX · 2.5)` px. A non-finite or
+/// non-positive zoom falls back to 1.0 (matching the pick-tolerance guard).
+pub(crate) fn grid_pitch_mm(zoom: f32) -> f32 {
+    let z = if zoom.is_finite() && zoom > 0.0 {
+        zoom
+    } else {
+        1.0
+    };
+    let ideal = GRID_MIN_PX / z; // smallest pitch (mm) that yields ≥ GRID_MIN_PX on screen
+    let decade = 10f32.powf(ideal.log10().floor());
+    let n = ideal / decade; // in [1, 10)
+    let step = if n <= 1.0 {
+        1.0
+    } else if n <= 2.0 {
+        2.0
+    } else if n <= 5.0 {
+        5.0
+    } else {
+        10.0
+    };
+    step * decade
 }
 
 /// The per-frame dynamic-overlay contents: highlighted world-space shapes (selection
@@ -876,6 +1035,64 @@ fn region_stroke_path(region: &Region, flip_sum: Nm, color: Color, width_mm: f32
     b.stroke_solid(color, width_mm).build()
 }
 
+/// A [`Region`] as an **unfilled dashed** stroked outline: each ring is walked
+/// edge-by-edge, and the on-mm segments of a `dash_mm`-on / `gap_mm`-off cycle are
+/// emitted as separate subpaths (damascene strokes have no native dash array, so the
+/// dashes are geometry). The dash phase carries across a ring's edges and its closing
+/// edge, so the pattern is continuous around corners. Dashes are in board mm (this is
+/// a cached static layer with no zoom in hand), so they scale with the board like
+/// every other feature. Rings with fewer than three vertices are skipped.
+fn dashed_region_stroke_path(
+    region: &Region,
+    flip_sum: Nm,
+    color: Color,
+    width_mm: f32,
+    dash_mm: f32,
+    gap_mm: f32,
+) -> VectorPath {
+    let mut b = PathBuilder::new();
+    let period = (dash_mm + gap_mm).max(1e-4);
+    for ring in &region.rings {
+        if ring.len() < 3 {
+            continue;
+        }
+        // Distance into the current dash cycle (0..period); < dash_mm is "pen down".
+        let mut phase = 0.0_f32;
+        let n = ring.len();
+        for k in 0..n {
+            let a = board_to_view(ring[k], flip_sum);
+            let c = board_to_view(ring[(k + 1) % n], flip_sum);
+            let (dx, dy) = (c.0 - a.0, c.1 - a.1);
+            let seg_len = dx.hypot(dy);
+            if seg_len <= 1e-6 {
+                continue;
+            }
+            let (ux, uy) = (dx / seg_len, dy / seg_len);
+            // March along the segment, cutting the dash pattern into it.
+            let mut pos = 0.0_f32;
+            while pos < seg_len {
+                let in_dash = phase < dash_mm;
+                let remaining = if in_dash {
+                    dash_mm - phase
+                } else {
+                    period - phase
+                };
+                let step = remaining.min(seg_len - pos);
+                if in_dash {
+                    let (sx, sy) = (a.0 + ux * pos, a.1 + uy * pos);
+                    let (ex, ey) = (a.0 + ux * (pos + step), a.1 + uy * (pos + step));
+                    b = b.move_to(sx, sy).line_to(ex, ey);
+                }
+                pos += step;
+                phase = (phase + step) % period;
+            }
+        }
+    }
+    b.stroke_solid(color, width_mm)
+        .stroke_line_cap(damascene_core::vector::VectorLineCap::Butt)
+        .build()
+}
+
 /// Silk / fab markings, mirroring `svg.rs`'s `svg_surface` shape arm: a `Stroke`
 /// (`fp_line` / `fp_arc` / stroke-font text) becomes a stroked centreline polyline
 /// whose pen is the shape's inflation diameter (`radius * 2`); a `Polygon`
@@ -917,14 +1134,27 @@ fn marking_paths(shape: &Shape2D, flip_sum: Nm, color: Color) -> Vec<VectorPath>
 // (the same rule the SVG backend's hardcoded `layer_color` would trip, were it
 // linted). Per-net colours are a later ticket.
 
-/// The board outline / edge colour: a pale off-white, like a fab silkscreen edge.
+/// The board outline / edge colour: the UI oracle's Edge token (`#eab308`) — the
+/// same amber that strokes the board outline and swatches the Edge layer.
 fn outline_color() -> Color {
-    Color::srgb_token("ecad.layer.outline", 0xd8, 0xd8, 0xd8, 0xff)
+    Color::srgb_token("ecad.layer.edge", 0xea, 0xb3, 0x08, 0xff)
 }
 
 /// Drill / hole colour: near-black, so a plated barrel reads as a punched void.
 fn hole_color() -> Color {
     Color::srgb_token("ecad.layer.drill", 0x10, 0x10, 0x10, 0xff)
+}
+
+/// The background dot-grid colour — a dim near-bg grey (`#28282e`), so the grid reads
+/// as furniture under the copper, never competing with it.
+fn grid_dot_color() -> Color {
+    Color::srgb_token("ecad.grid.dot", 0x28, 0x28, 0x2e, 0xff)
+}
+
+/// The origin-axis colour — the UI accent (`#3b82f6`) at low alpha, a faint hint of
+/// where the board origin sits without drawing the eye.
+fn grid_axis_color() -> Color {
+    Color::srgb_token("ecad.grid.axis", 0x3b, 0x82, 0xf6, 0x55)
 }
 
 /// The default colour for a stackup slab, by role + copper side (top warm, bottom
