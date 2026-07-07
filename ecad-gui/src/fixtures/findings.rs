@@ -73,6 +73,20 @@ pub fn drc_violation() -> EcadApp {
     EcadApp::new(drc_violation_domain())
 }
 
+/// The right-sidebar accordion with **Findings expanded** and **Layers collapsed**
+/// (over the DRC-violation board, so the Findings body has real rows and the header
+/// carries populated err/warn chips). Proves the accordion's headline invariant: the
+/// collapsed Layers section still shows its header — nothing lives below an invisible
+/// fold — while a section that is closed by default (Findings) can be opened. The
+/// other two sections keep their defaults (Properties open, Explorer collapsed).
+pub fn sidebar_findings_expanded() -> EcadApp {
+    use crate::app::pane::SidebarSection;
+    let app = EcadApp::new(drc_violation_domain());
+    app.set_section_open(SidebarSection::Findings, true);
+    app.set_section_open(SidebarSection::Layers, false);
+    app
+}
+
 // ---------------------------------------------------------------------------
 // Library-packages slice-2 scenes: a doc whose `use` name resolves to nothing
 // (registry-driven, permissive degrade → findings rows + a loaded-but-degraded

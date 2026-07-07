@@ -204,11 +204,135 @@ pub(crate) const REDO_KEY: &str = "redo";
 pub(crate) const CONFLICT_RELOAD_KEY: &str = "conflict:reload";
 /// The conflict banner's "Keep mine" action (dismiss; doc stays dirty).
 pub(crate) const CONFLICT_KEEP_KEY: &str = "conflict:keep";
-/// The event-route key of the findings-panel collapse toggle.
-pub(crate) const FINDINGS_TOGGLE_KEY: &str = "findings:toggle";
+/// The right-sidebar accordion sections, top to bottom (`gui-architecture.md`
+/// "Right sidebar" + the UI oracle). All four headers are always visible; each
+/// body expands/collapses independently. The order here is the render order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SidebarSection {
+    /// The selection inspector (identity card + property rows), or doc stats.
+    Properties,
+    /// The board layer panel (visibility, swatch, active-layer radio).
+    Layers,
+    /// The components + nets explorer.
+    Explorer,
+    /// The DRC/ERC/connectivity/library findings list.
+    Findings,
+}
+
+/// The route-key prefix of a sidebar section's accordion header.
+const SECTION_KEY_PREFIX: &str = "sidebar:section:";
+
+impl SidebarSection {
+    /// The four sections in render order (top to bottom).
+    pub(crate) fn all() -> [SidebarSection; 4] {
+        [
+            SidebarSection::Properties,
+            SidebarSection::Layers,
+            SidebarSection::Explorer,
+            SidebarSection::Findings,
+        ]
+    }
+
+    /// The stable slug used in the header's route key (and the `all()` lookup).
+    pub(crate) fn slug(self) -> &'static str {
+        match self {
+            SidebarSection::Properties => "properties",
+            SidebarSection::Layers => "layers",
+            SidebarSection::Explorer => "explorer",
+            SidebarSection::Findings => "findings",
+        }
+    }
+
+    /// The uppercase header label (the oracle's small-caps section titles).
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            SidebarSection::Properties => "PROPERTIES",
+            SidebarSection::Layers => "LAYERS",
+            SidebarSection::Explorer => "EXPLORER",
+            SidebarSection::Findings => "FINDINGS",
+        }
+    }
+
+    /// The leading header icon (a damascene builtin name — the oracle's Material
+    /// Symbols are decorative; these are the closest lucide-set equivalents).
+    pub(crate) fn icon(self) -> &'static str {
+        match self {
+            SidebarSection::Properties => "settings",
+            SidebarSection::Layers => "layout-dashboard",
+            SidebarSection::Explorer => "folder",
+            SidebarSection::Findings => "alert-circle",
+        }
+    }
+
+    /// The event-route key of this section's accordion header (click toggles it).
+    pub(crate) fn toggle_key(self) -> String {
+        format!("{SECTION_KEY_PREFIX}{}", self.slug())
+    }
+}
+
+/// The [`SidebarSection`] a route key names, if it is an accordion header.
+pub(crate) fn section_of_key(route: &str) -> Option<SidebarSection> {
+    let slug = route.strip_prefix(SECTION_KEY_PREFIX)?;
+    SidebarSection::all().into_iter().find(|s| s.slug() == slug)
+}
+
+/// The per-section expanded/collapsed state of the right-sidebar accordion. All
+/// four headers render regardless; this only governs which bodies are open.
+/// Fully-free expansion: any subset may be open at once and open bodies share the
+/// remaining height (`Size::Fill`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SectionOpen {
+    properties: bool,
+    layers: bool,
+    explorer: bool,
+    findings: bool,
+}
+
+impl Default for SectionOpen {
+    /// Default open: Properties + Layers (per the oracle); Explorer + Findings
+    /// start collapsed.
+    fn default() -> Self {
+        SectionOpen {
+            properties: true,
+            layers: true,
+            explorer: false,
+            findings: false,
+        }
+    }
+}
+
+impl SectionOpen {
+    /// Is `section` currently expanded?
+    pub(crate) fn is_open(self, section: SidebarSection) -> bool {
+        match section {
+            SidebarSection::Properties => self.properties,
+            SidebarSection::Layers => self.layers,
+            SidebarSection::Explorer => self.explorer,
+            SidebarSection::Findings => self.findings,
+        }
+    }
+
+    /// `self` with `section`'s open flag set to `open`.
+    pub(crate) fn with(mut self, section: SidebarSection, open: bool) -> Self {
+        match section {
+            SidebarSection::Properties => self.properties = open,
+            SidebarSection::Layers => self.layers = open,
+            SidebarSection::Explorer => self.explorer = open,
+            SidebarSection::Findings => self.findings = open,
+        }
+        self
+    }
+
+    /// `self` with `section` toggled.
+    pub(crate) fn toggled(self, section: SidebarSection) -> Self {
+        self.with(section, !self.is_open(section))
+    }
+}
+
 /// The route-key prefix of a toolbar findings chip (a source label, or `ok`, appended).
 /// Each chip needs its own key (keys are unique in the tree); clicking any of them
-/// toggles/focuses the findings panel exactly like [`FINDINGS_TOGGLE_KEY`].
+/// toggles the [`SidebarSection::Findings`] accordion section, exactly like clicking
+/// that section's header.
 pub(crate) const FINDINGS_CHIP_PREFIX: &str = "findings:chip:";
 
 /// The route key for the toolbar findings chip named `tag` (a source label or `ok`).

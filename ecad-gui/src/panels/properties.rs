@@ -8,10 +8,11 @@ use crate::inspector::InspectorData;
 use damascene_core::prelude::*;
 
 impl EcadApp {
-    /// The inspector panel: an identity card + key/value rows for the single selected
-    /// entity, or the m2 stats card when nothing is selected. Works regardless of which
-    /// pane the selection came from (the selection is shared, semantic).
-    pub(crate) fn inspector_panel(&self) -> El {
+    /// The Properties accordion body: an identity card + key/value rows for the single
+    /// selected entity, or the m2 stats card when nothing is selected. Works regardless
+    /// of which pane the selection came from (the selection is shared, semantic). This is
+    /// the section content only — the accordion header is composed in `panels::sidebar`.
+    pub(crate) fn inspector_body(&self) -> El {
         let doc = match &self.domain.doc {
             Ok(doc) => doc,
             Err(_) => return self.empty_inspector(),
@@ -29,9 +30,7 @@ impl EcadApp {
         for r in &data.rows {
             children.push(field_row(r.key.clone(), text(r.value.clone()).mono()));
         }
-        sidebar([sidebar_header([h3("Properties")]), sidebar_group(children)])
-            .width(Size::Fill(1.0))
-            .height(Size::Hug)
+        sidebar_group(children).width(Size::Fill(1.0))
     }
 
     /// The inspector's empty state: the m2 doc stats, rendered as sidebar rows.
@@ -43,22 +42,16 @@ impl EcadApp {
                     Some((w, h)) => format!("{w:.1} x {h:.1} mm"),
                     None => "none".to_string(),
                 };
-                sidebar([
-                    sidebar_header([h3("Properties")]),
-                    sidebar_group([
-                        text("No selection").muted(),
-                        field_row("Parts", text(s.parts.to_string()).mono()),
-                        field_row("Nets", text(s.nets.to_string()).mono()),
-                        field_row("Copper layers", text(s.layers.to_string()).mono()),
-                        field_row("Board", text(board).mono()),
-                    ]),
+                sidebar_group([
+                    text("No selection").muted(),
+                    field_row("Parts", text(s.parts.to_string()).mono()),
+                    field_row("Nets", text(s.nets.to_string()).mono()),
+                    field_row("Copper layers", text(s.layers.to_string()).mono()),
+                    field_row("Board", text(board).mono()),
                 ])
                 .width(Size::Fill(1.0))
-                .height(Size::Hug)
             }
-            Err(_) => sidebar([sidebar_header([h3("Properties")])])
-                .width(Size::Fill(1.0))
-                .height(Size::Hug),
+            Err(_) => sidebar_group([text("No document").muted()]).width(Size::Fill(1.0)),
         }
     }
 }

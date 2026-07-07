@@ -9,9 +9,10 @@ mod pointer;
 
 use crate::app::libraries::LIBRARIES_TOGGLE_KEY;
 use crate::app::pane::{
-    CONFLICT_KEEP_KEY, CONFLICT_RELOAD_KEY, FINDINGS_TOGGLE_KEY, LAYOUT_TOGGLE_KEY, REDO_KEY,
-    SAVE_KEY, SPLIT_HANDLE_KEY, SPLIT_ROW_KEY, UNDO_KEY, active_layer_of_key, finding_index_of_key,
-    is_canvas_target, is_findings_chip_key, pane_index, strip_target_of_key, switch_key,
+    CONFLICT_KEEP_KEY, CONFLICT_RELOAD_KEY, LAYOUT_TOGGLE_KEY, REDO_KEY, SAVE_KEY,
+    SPLIT_HANDLE_KEY, SPLIT_ROW_KEY, SidebarSection, UNDO_KEY, active_layer_of_key,
+    finding_index_of_key, is_canvas_target, is_findings_chip_key, pane_index, section_of_key,
+    strip_target_of_key, switch_key,
 };
 use crate::app::{EcadApp, PaneId, PaneLayout, ViewKind};
 use crate::chrome::menubar::{MENUBAR_KEY, REVERT_KEY};
@@ -238,17 +239,24 @@ impl App for EcadApp {
             }
         }
 
-        // Findings panel: collapse toggle, then a row click → select the finding's refs
-        // + centre the focused board pane on its board point (click-to-select-and-zoom).
-        // A toolbar findings chip (any per-source chip, or the ✓ chip) toggles the panel
-        // exactly like the collapse toggle.
-        if event.is_click_or_activate(FINDINGS_TOGGLE_KEY)
-            || (matches!(event.kind, UiEventKind::Click | UiEventKind::Activate)
-                && event.route().is_some_and(is_findings_chip_key))
+        // Sidebar accordion: a header click toggles that section's body. All four
+        // headers stay visible; only the open set changes.
+        if matches!(event.kind, UiEventKind::Click | UiEventKind::Activate)
+            && let Some(section) = event.route().and_then(section_of_key)
         {
-            self.findings_open.set(!self.findings_open.get());
+            self.toggle_section(section);
             return;
         }
+        // A toolbar findings chip (any per-source chip, or the ✓ chip) toggles the
+        // Findings section exactly like clicking its header (preserved wiring).
+        if matches!(event.kind, UiEventKind::Click | UiEventKind::Activate)
+            && event.route().is_some_and(is_findings_chip_key)
+        {
+            self.toggle_section(SidebarSection::Findings);
+            return;
+        }
+        // A findings row click → select the finding's refs + centre the focused
+        // board pane on its board point (click-to-select-and-zoom).
         if matches!(event.kind, UiEventKind::Click | UiEventKind::Activate)
             && let Some(route) = event.route()
             && let Some(index) = finding_index_of_key(route)

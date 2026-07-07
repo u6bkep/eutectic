@@ -3,42 +3,42 @@
 //! and the parse/elaborate-failure `error_card`. Moved out of `app/panels.rs`
 //! as pure code motion (gui-module-split).
 
-use crate::app::pane::{FINDINGS_TOGGLE_KEY, finding_row_key};
+use crate::app::pane::finding_row_key;
 use crate::app::{EcadApp, PaneId, ViewKind};
 use crate::findings::Findings;
 use damascene_core::prelude::*;
 
+/// The small err/warn count chips shown on the right of the Findings accordion
+/// header (the oracle's tiny red/amber pills). One error chip when `errors > 0`,
+/// one warning chip when `warnings > 0`; nothing when the board is clean.
+///
+/// These carry no route key: a click anywhere on the header (chips included)
+/// bubbles to the header row and toggles the section. Because the section label
+/// fills the row and ellipsizes, the chips always keep their natural width — the
+/// old "Findings (5 err, 0 wa…" truncation-into-the-Hide-button collision is
+/// structurally impossible now (there is no Hide button, and the counts are
+/// discrete boxes, not part of the title text).
+pub(crate) fn findings_header_chips(findings: &Findings) -> Vec<El> {
+    let mut chips = Vec::new();
+    if findings.errors > 0 {
+        chips.push(badge(format!("{} err", findings.errors)).destructive());
+    }
+    if findings.warnings > 0 {
+        chips.push(badge(format!("{} warn", findings.warnings)).warning());
+    }
+    chips
+}
+
 impl EcadApp {
-    /// The findings panel (right sidebar, collapsible like the explorer): a header with
-    /// the error/warning tally, then one click-to-select row per finding (a severity
-    /// badge beside the code and message). Clicking a row selects the finding's refs
-    /// (cross-highlighting the panes) and centres the focused board pane on the
-    /// violation. Collapsed to just the header when `findings_open` is false or when
-    /// there are no findings (a clean board shows a compact "no issues" line).
-    pub(crate) fn findings_panel(&self, findings: &Findings) -> El {
-        let open = self.findings_open.get();
-        let title = if findings.is_clean() {
-            "Findings".to_string()
-        } else {
-            format!(
-                "Findings ({} err, {} warn)",
-                findings.errors, findings.warnings
-            )
-        };
-        let toggle = button(if open { "Hide" } else { "Show" }).key(FINDINGS_TOGGLE_KEY);
-        let header = sidebar_header([row([h3(title).width(Size::Fill(1.0)).ellipsis(), toggle])
-            .align(Align::Center)
-            .width(Size::Fill(1.0))]);
-        if !open {
-            return sidebar([header]).width(Size::Fill(1.0)).height(Size::Hug);
-        }
+    /// The Findings accordion body: one click-to-select row per finding (a severity
+    /// badge beside the code and message), or a compact "no issues" line when the board
+    /// is clean. Clicking a row selects the finding's refs (cross-highlighting the panes)
+    /// and centres the focused board pane on the violation. This is the section content
+    /// only — the accordion header (with the err/warn count chips) is composed in
+    /// `panels::sidebar`.
+    pub(crate) fn findings_body(&self, findings: &Findings) -> El {
         if findings.is_clean() {
-            return sidebar([
-                header,
-                sidebar_group([text("No issues — DRC clean.").muted()]),
-            ])
-            .width(Size::Fill(1.0))
-            .height(Size::Hug);
+            return sidebar_group([text("No issues — DRC clean.").muted()]).width(Size::Fill(1.0));
         }
         let rows: Vec<El> = findings
             .items
@@ -46,12 +46,8 @@ impl EcadApp {
             .enumerate()
             .map(|(i, f)| self.finding_row(i, f))
             .collect();
-        sidebar([
-            header,
-            sidebar_group([column(rows).gap(tokens::SPACE_1).width(Size::Fill(1.0))]),
-        ])
-        .width(Size::Fill(1.0))
-        .height(Size::Hug)
+        sidebar_group([column(rows).gap(tokens::SPACE_1).width(Size::Fill(1.0))])
+            .width(Size::Fill(1.0))
     }
 
     /// One findings row: a severity badge (error red / warning amber) + the code +

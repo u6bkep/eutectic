@@ -71,6 +71,7 @@ pub fn all() -> Vec<(&'static str, EcadApp)> {
         ("menubar_open", menubar_open()),
         ("board_with_selection", board_with_selection()),
         ("drc_violation", drc_violation()),
+        ("sidebar_findings_expanded", sidebar_findings_expanded()),
         ("measure_in_progress", measure_in_progress()),
         ("dual_cross_highlight", dual_cross_highlight()),
         ("stacked_layout", stacked_layout()),

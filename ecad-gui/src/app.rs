@@ -44,6 +44,7 @@ pub use pane::{PaneId, PaneLayout, PaneState, ViewKind};
 // bundle and the Libraries UI state that were moved to submodules.
 use domain::DerivedCaches;
 use libraries::{LibRow, LibUi};
+use pane::{SectionOpen, SidebarSection};
 // The tests (a child module using `super::*`) reach these moved items through the
 // facade — keep their old flat paths available. Pure code motion: nothing is renamed.
 #[cfg(test)]
@@ -144,8 +145,10 @@ pub struct EcadApp {
     /// The live-source mailbox (m5): drained in `before_build`; a file change reloads.
     /// A [`SourceMailbox::disconnected`] mailbox (fixtures / no file) never yields.
     pub(crate) mailbox: SourceMailbox,
-    /// Whether the findings panel section is expanded (collapsible like the explorer).
-    pub(crate) findings_open: Cell<bool>,
+    /// The right-sidebar accordion's per-section expanded state (all four headers
+    /// always render; this governs which bodies are open). Default: Properties +
+    /// Layers open.
+    pub(crate) sections: Cell<SectionOpen>,
     /// Whether the Libraries menu (modal) is open.
     pub(crate) libraries_open: Cell<bool>,
     /// Libraries-menu interaction state (inputs + text selection + last error).
@@ -230,7 +233,7 @@ impl EcadApp {
             measure: Cell::new(MeasureState::default()),
             measure_pane: Cell::new(PaneId::A),
             mailbox: SourceMailbox::disconnected(),
-            findings_open: Cell::new(true),
+            sections: Cell::new(SectionOpen::default()),
             libraries_open: Cell::new(false),
             lib_ui: RefCell::new(LibUi::default()),
             lib_statuses: RefCell::new(None),
@@ -258,6 +261,21 @@ impl EcadApp {
             *self.lib_statuses.borrow_mut() = None;
         }
         self.libraries_open.set(open);
+    }
+
+    /// Is the given sidebar accordion section currently expanded?
+    pub(crate) fn section_open(&self, section: SidebarSection) -> bool {
+        self.sections.get().is_open(section)
+    }
+
+    /// Toggle a sidebar accordion section (a header click, or a findings chip).
+    pub(crate) fn toggle_section(&self, section: SidebarSection) {
+        self.sections.set(self.sections.get().toggled(section));
+    }
+
+    /// Set a sidebar accordion section's expanded state — for fixtures / tests.
+    pub(crate) fn set_section_open(&self, section: SidebarSection, open: bool) {
+        self.sections.set(self.sections.get().with(section, open));
     }
 
     /// Pre-fill the Libraries add-entry inputs — for tests that drive the add

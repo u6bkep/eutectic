@@ -27,11 +27,12 @@ impl EcadApp {
         hidden.is_empty() || !hidden.contains(&id.key())
     }
 
-    /// The right sidebar layer panel: one row per layer (top of the stack first),
-    /// each a colour swatch, name, and a visibility switch; copper rows also get
-    /// the set-active routing marker (m6 slice B). Order mirrors draw order
-    /// reversed, so the top copper reads at the top of the list.
-    pub(crate) fn layer_panel(&self, layers: &[BoardLayer]) -> El {
+    /// The Layers accordion body: one row per layer (top of the stack first), each a
+    /// colour swatch, name, and a visibility switch; copper rows also get the set-active
+    /// routing marker (m6 slice B). Order mirrors draw order reversed, so the top copper
+    /// reads at the top of the list. This is the section content only — the accordion
+    /// header (with the active-layer name on its right) is composed in `panels::sidebar`.
+    pub(crate) fn layer_panel_body(&self, layers: &[BoardLayer]) -> El {
         let copper = self.copper_layer_names();
         let active = self.active_layer_name();
         // Draw order is bottom-first; the panel lists top-first.
@@ -40,15 +41,11 @@ impl EcadApp {
             .rev()
             .map(|l| self.layer_row(l, &copper, active.as_deref()))
             .collect();
-        sidebar([
-            sidebar_header([h3("Layers")]),
-            sidebar_group([
-                sidebar_group_label("Board"),
-                column(rows).gap(tokens::SPACE_1),
-            ]),
+        sidebar_group([
+            sidebar_group_label("Board"),
+            column(rows).gap(tokens::SPACE_1),
         ])
         .width(Size::Fill(1.0))
-        .height(Size::Hug)
     }
 
     /// One layer-panel row: colour swatch + name + a visibility [`switch`]. A

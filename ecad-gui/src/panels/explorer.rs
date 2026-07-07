@@ -7,10 +7,12 @@ use crate::explorer::Explorer;
 use damascene_core::prelude::*;
 
 impl EcadApp {
-    /// The explorer panel (mockup NetExplorer anatomy): Components + Nets sections, each a
-    /// list of click-to-select rows with a count badge; the selected row gets the mockup's
-    /// selected cue (`sidebar_menu_button`'s `current` treatment).
-    pub(crate) fn explorer_panel(&self, explorer: &Explorer) -> El {
+    /// The Explorer accordion body (mockup NetExplorer anatomy): Components + Nets
+    /// sub-groups, each a list of click-to-select rows with a count badge; the selected
+    /// row gets the mockup's selected cue (`sidebar_menu_button`'s `current` treatment).
+    /// This is the section content only — the accordion header is composed in
+    /// `panels::sidebar`.
+    pub(crate) fn explorer_body(&self, explorer: &Explorer) -> El {
         let sel = self.domain.selection.borrow();
         let comp_rows: Vec<El> = explorer
             .components
@@ -22,8 +24,7 @@ impl EcadApp {
             .iter()
             .map(|r| self.explorer_row(r, sel.is_selected(&r.id)))
             .collect();
-        sidebar([
-            sidebar_header([h3("Explorer")]),
+        column([
             sidebar_group([
                 sidebar_group_label(format!("Components ({})", comp_rows.len())),
                 column(comp_rows)
@@ -35,8 +36,8 @@ impl EcadApp {
                 column(net_rows).gap(tokens::SPACE_1).width(Size::Fill(1.0)),
             ]),
         ])
+        .gap(tokens::SPACE_3)
         .width(Size::Fill(1.0))
-        .height(Size::Hug)
     }
 
     /// One explorer row: a click-to-select `sidebar_menu_button` labelled with the id +
