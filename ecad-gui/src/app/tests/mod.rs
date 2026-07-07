@@ -3,9 +3,10 @@
 //! drag placement), [`libraries`] (registry-driven resolution + the Libraries
 //! menu), [`panes`] (layout / maximize / view-switch + per-pane composition),
 //! [`reload`] (the m5 live-source loop), [`routing`] (m6 slice B trace drawing +
-//! refinement), and [`selection`] (explorer / findings clicks + highlight
-//! projection). This module holds the shared helpers + imports, reached by each
-//! concern module through `use super::*`.
+//! refinement), [`selection`] (explorer / findings clicks + highlight
+//! projection), and [`tools`] (per-view-kind tool slots + the pane strips).
+//! This module holds the shared helpers + imports, reached by each concern
+//! module through `use super::*`.
 
 mod editing;
 mod libraries;
@@ -26,6 +27,13 @@ use ecad_core::id::EntityId;
 /// A synthetic click routed to `key`.
 fn click(key: &str) -> UiEvent {
     UiEvent::synthetic_click(key)
+}
+
+/// A synthetic click on PANE A's tool-strip button for `tool` — the way a user
+/// picks a tool (pane A is the board pane in the editing fixtures, so this sets
+/// the BOARD kind's slot).
+fn strip_click(tool: Tool) -> UiEvent {
+    click(&PaneId::A.strip_key(tool))
 }
 
 /// A settled render of an app through the harness (drives before_build → reload).

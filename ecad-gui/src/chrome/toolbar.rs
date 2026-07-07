@@ -1,20 +1,20 @@
 //! The viewer toolbar: app title, filename badge, Save / Undo / Redo, the
-//! per-source findings chips, the reload-error chip, layout toggle, tool
-//! palette, and framing buttons. Moved out of `app/panels.rs` as pure code
-//! motion (gui-module-split).
+//! per-source findings chips, the reload-error chip, layout toggle, and framing
+//! buttons. Moved out of `app/panels.rs` as pure code motion (gui-module-split).
+//! The tool palette moved into the per-pane overlay strips
+//! (`crate::panes::strip`) — tools are pane furniture, not app chrome.
 
 use crate::app::libraries::LIBRARIES_TOGGLE_KEY;
 use crate::app::pane::{LAYOUT_TOGGLE_KEY, REDO_KEY, SAVE_KEY, UNDO_KEY, findings_chip_key};
 use crate::app::{EcadApp, PaneLayout};
 use crate::findings::FindingSource;
-use crate::tool::Tool;
 use damascene_core::prelude::*;
 use ecad_core::diagnostic::Severity;
 
 impl EcadApp {
     /// The toolbar: app title, filename badge (dirty-dot suffixed), Save (when the
-    /// doc has a path) + Undo / Redo, the dual/stacked layout toggle, the global
-    /// tool palette, and Fit / Reset framing buttons + a live zoom-percent readout.
+    /// doc has a path) + Undo / Redo, the dual/stacked layout toggle, and Fit /
+    /// Reset framing buttons + a live zoom-percent readout.
     pub(crate) fn viewer_toolbar(&self, zoom: f32) -> El {
         let mut name = self
             .domain
@@ -26,14 +26,6 @@ impl EcadApp {
         if self.domain.edit.dirty {
             name.push_str(" •");
         }
-        let active = self.tool.get();
-        let tool_buttons: Vec<El> = Tool::all()
-            .into_iter()
-            .map(|t| {
-                let b = button(t.label()).key(t.key());
-                if t == active { b.primary() } else { b }
-            })
-            .collect();
         let layout_label = match self.layout.get() {
             PaneLayout::Dual => "Dual",
             PaneLayout::Stacked => "Stacked",
@@ -71,7 +63,6 @@ impl EcadApp {
         lead.push(button(layout_label).key(LAYOUT_TOGGLE_KEY));
         lead.push(button("Libraries").key(LIBRARIES_TOGGLE_KEY));
         lead.push(spacer());
-        lead.push(row(tool_buttons).gap(tokens::SPACE_1));
         lead.push(text(format!("{:.0}%", zoom * 100.0)).muted().mono());
         lead.push(button("Fit").key("fit"));
         lead.push(button("Reset").key("reset"));

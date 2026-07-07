@@ -11,12 +11,12 @@ use crate::app::libraries::LIBRARIES_TOGGLE_KEY;
 use crate::app::pane::{
     CONFLICT_KEEP_KEY, CONFLICT_RELOAD_KEY, FINDINGS_TOGGLE_KEY, LAYOUT_TOGGLE_KEY, REDO_KEY,
     SAVE_KEY, SPLIT_HANDLE_KEY, SPLIT_ROW_KEY, UNDO_KEY, active_layer_of_key, finding_index_of_key,
-    is_canvas_target, is_findings_chip_key, pane_index, switch_key,
+    is_canvas_target, is_findings_chip_key, pane_index, strip_target_of_key, switch_key,
 };
 use crate::app::{EcadApp, PaneId, PaneLayout, ViewKind};
 use crate::panels::findings::error_card;
 use crate::reload::SourceMsg;
-use crate::tool::{MeasureState, Tool};
+use crate::tool::Tool;
 use damascene_core::prelude::*;
 
 impl App for EcadApp {
@@ -240,19 +240,23 @@ impl App for EcadApp {
             return;
         }
 
-        // Tool palette toggles (structural commitment 4). Switching tools cancels
-        // every in-flight preview (measure / pending route / vertex drag) — a
-        // preview never outlives its tool.
-        for t in Tool::all() {
-            if event.is_click_or_activate(t.key()) {
-                if self.tool.get() != t {
-                    self.measure.set(MeasureState::default());
-                    *self.route.borrow_mut() = None;
-                    *self.trace_drag.borrow_mut() = None;
-                }
-                self.tool.set(t);
-                return;
+        // Per-pane tool-strip buttons (structural commitment 4, revised): a strip
+        // click sets THE CLICKED PANE'S VIEW KIND's tool slot (all panes of that
+        // kind follow — Blender semantics) and focuses that pane. A tool the kind
+        // doesn't offer is ignored (applicability is structural — the button isn't
+        // rendered, so only a synthesized event can get here). `set_tool` cancels
+        // the kind's in-flight previews on a change — a preview never outlives
+        // its tool.
+        if matches!(event.kind, UiEventKind::Click | UiEventKind::Activate)
+            && let Some(route) = event.route()
+            && let Some((pane, tool)) = strip_target_of_key(route)
+        {
+            let kind = self.panes.borrow()[pane_index(pane)].view;
+            if kind.offers_tool(tool) {
+                self.set_tool(kind, tool);
+                self.focused_pane.set(pane);
             }
+            return;
         }
 
         // The layer panel's set-active affordance (m6 slice B): make that copper
@@ -270,8 +274,11 @@ impl App for EcadApp {
 
         // Escape: cancel an in-flight preview first — component drag, then a
         // trace-vertex drag, then a pending route (preview discarded, nothing
-        // committed — m6); with the Route tool idle, Esc exits the tool back to
-        // Select; then a measure in progress; else clear the selection.
+        // committed — m6); with the Route tool idle, Esc exits the board kind's
+        // slot back to Select; then a measure in progress; else clear the
+        // selection. The Route/Measure checks key off the BOARD kind's slot —
+        // every preview today is a board-pane preview, so this is the same
+        // layering as before the per-kind re-keying.
         if event.kind == UiEventKind::Escape {
             if self.drag.borrow().is_some() {
                 *self.drag.borrow_mut() = None;
@@ -285,12 +292,12 @@ impl App for EcadApp {
                 *self.route.borrow_mut() = None;
                 return;
             }
-            if self.tool.get() == Tool::Route {
-                self.tool.set(Tool::Select);
+            if self.tool_for(ViewKind::Board) == Tool::Route {
+                self.set_tool(ViewKind::Board, Tool::Select);
                 return;
             }
             let mut m = self.measure.get();
-            if self.tool.get() == Tool::Measure && m.segment().is_some() {
+            if self.tool_for(ViewKind::Board) == Tool::Measure && m.segment().is_some() {
                 m.cancel();
                 self.measure.set(m);
             } else {
@@ -376,6 +383,9 @@ impl App for EcadApp {
         let Some(pane) = self.pane_under_pointer(cx, pos) else {
             return;
         };
+        // A pointer touching a pane focuses it (Blender hover-focus): the focused
+        // pane's kind's tool slot is the live tool the status bar reads out.
+        self.focused_pane.set(pane);
         let view = self.panes.borrow()[pane_index(pane)].view;
         match view {
             ViewKind::Board => self.handle_board_pointer(event, cx, pane, pos),

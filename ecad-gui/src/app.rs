@@ -126,9 +126,16 @@ pub struct EcadApp {
     /// The last pointer position over a board pane in **board mm**, for the status-bar
     /// cursor readout. Set by whichever board pane the pointer last moved over.
     pub(crate) cursor_board_mm: Cell<Option<(f32, f32)>>,
-    /// The active tool (structural commitment 4). Global mode; `Cell` because it is
-    /// flipped in `on_event` and read in `build`.
-    pub(crate) tool: Cell<Tool>,
+    /// The active tool per **view kind** (structural commitment 4, revised: Blender
+    /// semantics — all board panes share one slot, all schematic panes another; the
+    /// live tool is the focused pane's kind's entry). A kind with no entry defaults
+    /// to [`Tool::Select`], so future view kinds need no registration. View-state
+    /// territory (not [`DomainState`]): a future popped-out window carries it.
+    pub(crate) tools: RefCell<std::collections::BTreeMap<ViewKind, Tool>>,
+    /// The focused pane — the pane the pointer last touched (Blender hover-focus)
+    /// or whose strip was last clicked. Its view kind's tool slot is the *live*
+    /// tool ([`live_tool`](Self::live_tool)); the status bar reads it out.
+    pub(crate) focused_pane: Cell<PaneId>,
     /// The measure tool's uncommitted preview state (the preview channel — renders
     /// only to the overlay, never the doc). The pane the measure is happening in, so the
     /// overlay draws it in the right place.
@@ -211,7 +218,8 @@ impl EcadApp {
             hidden: RefCell::new(std::collections::HashSet::new()),
             pending: RefCell::new(Vec::new()),
             cursor_board_mm: Cell::new(None),
-            tool: Cell::new(Tool::default()),
+            tools: RefCell::new(std::collections::BTreeMap::new()),
+            focused_pane: Cell::new(PaneId::A),
             measure: Cell::new(MeasureState::default()),
             measure_pane: Cell::new(PaneId::A),
             mailbox: SourceMailbox::disconnected(),
@@ -327,10 +335,39 @@ impl EcadApp {
         self.maximized.set(pane);
     }
 
-    /// Set the active tool — for fixtures / tests that want a canned tool mode. The
-    /// interactive path flips this in `on_event`.
-    pub fn set_tool(&self, tool: Tool) {
-        self.tool.set(tool);
+    /// The active tool of view kind `kind` (per-view-kind tool memory, revised
+    /// structural commitment 4). A kind with no entry yet defaults to
+    /// [`Tool::Select`].
+    pub fn tool_for(&self, kind: ViewKind) -> Tool {
+        self.tools.borrow().get(&kind).copied().unwrap_or_default()
+    }
+
+    /// Set view kind `kind`'s active tool — the strip clicks land here, and
+    /// fixtures / tests use it directly. Changing the **board** kind's tool
+    /// cancels every in-flight board preview (measure / pending route / vertex
+    /// drag) — a preview never outlives its tool. (All previews today are board
+    /// previews; a schematic-kind switch has nothing to cancel.)
+    pub fn set_tool(&self, kind: ViewKind, tool: Tool) {
+        if kind == ViewKind::Board && self.tool_for(kind) != tool {
+            self.measure.set(MeasureState::default());
+            *self.route.borrow_mut() = None;
+            *self.trace_drag.borrow_mut() = None;
+        }
+        self.tools.borrow_mut().insert(kind, tool);
+    }
+
+    /// The **live** tool: the focused pane's view kind's tool slot (the tool the
+    /// status bar reads out; moving focus between panes of different kinds swaps
+    /// it without touching either kind's memory).
+    pub fn live_tool(&self) -> Tool {
+        let kind = self.panes.borrow()[pane::pane_index(self.focused_pane.get())].view;
+        self.tool_for(kind)
+    }
+
+    /// Focus a pane (Blender hover-focus semantics; the interactive path sets
+    /// this from pointer events + strip clicks) — public for fixtures / tests.
+    pub fn set_focused_pane(&self, pane: PaneId) {
+        self.focused_pane.set(pane);
     }
 
     /// Set the measure preview state — for fixtures / tests that render a

@@ -30,7 +30,7 @@ pub fn route_in_progress() -> EcadApp {
     use crate::tool::Tool;
     use ecad_core::id::EntityId;
     let app = EcadApp::new(edit_board_domain());
-    app.set_tool(Tool::Route);
+    app.set_tool(crate::app::ViewKind::Board, Tool::Route);
     let armed = app.set_route(
         &EntityId::new("C1"),
         "p1",
@@ -69,7 +69,7 @@ pub fn route_layer_switch() -> EcadApp {
     use crate::tool::Tool;
     use ecad_core::id::EntityId;
     let app = EcadApp::new(edit_board_domain());
-    app.set_tool(Tool::Route);
+    app.set_tool(crate::app::ViewKind::Board, Tool::Route);
     let armed = app.set_route(&EntityId::new("C1"), "p1", &[mm_pt(10, 5)], None);
     debug_assert!(armed, "C1.p1 has a pad candidate on net GND");
     app.set_active_layer("B.Cu");

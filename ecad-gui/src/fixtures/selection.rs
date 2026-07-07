@@ -38,7 +38,7 @@ pub fn measure_in_progress() -> EcadApp {
     use crate::tool::{MeasureState, Tool};
     use ecad_core::coord::{MM, Point};
     let app = EcadApp::new(board_domain());
-    app.set_tool(Tool::Measure);
+    app.set_tool(ViewKind::Board, Tool::Measure);
     let mut m = MeasureState::default();
     m.click(Point {
         x: 3 * MM,
@@ -143,5 +143,19 @@ pub fn maximized_pane() -> EcadApp {
 pub fn dual_boards() -> EcadApp {
     let app = EcadApp::new(schematic_domain());
     app.set_pane_views(ViewKind::Board, ViewKind::Board);
+    app
+}
+
+/// Per-view-kind tool memory made visible (revised structural commitment 4): a
+/// board pane and a schematic pane whose overlay strips show DIFFERENT active
+/// tools simultaneously — the board kind holds Route, the schematic kind holds
+/// Measure. The schematic strip has no Route button at all (applicability is
+/// structural).
+pub fn per_kind_tools() -> EcadApp {
+    use crate::tool::Tool;
+    let app = EcadApp::new(schematic_domain());
+    app.set_pane_views(ViewKind::Board, ViewKind::Schematic);
+    app.set_tool(ViewKind::Board, Tool::Route);
+    app.set_tool(ViewKind::Schematic, Tool::Measure);
     app
 }

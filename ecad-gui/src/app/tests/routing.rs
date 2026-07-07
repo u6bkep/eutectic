@@ -40,8 +40,8 @@ fn route_draw_start_waypoint_commit() {
     let mut app = edit_app();
     let r = settle(&mut app);
     let cx = EventCx::new().with_ui_state(&r.ui);
-    app.on_event(click(Tool::Route.key()), &cx);
-    assert_eq!(app.tool.get(), Tool::Route);
+    app.on_event(strip_click(Tool::Route), &cx);
+    assert_eq!(app.tool_for(ViewKind::Board), Tool::Route);
 
     let c1 = pin_center_of(&app, &EntityId::new("C1"), "p1");
     let c2 = pin_center_of(&app, &EntityId::new("C2"), "p1");
@@ -110,7 +110,7 @@ fn route_commit_on_foreign_pin_is_permissive() {
     let mut app = edit_app();
     let r = settle(&mut app);
     let cx = EventCx::new().with_ui_state(&r.ui);
-    app.on_event(click(Tool::Route.key()), &cx);
+    app.on_event(strip_click(Tool::Route), &cx);
 
     let c1_gnd = pin_center_of(&app, &EntityId::new("C1"), "p1"); // net GND
     let c2_vbus = pin_center_of(&app, &EntityId::new("C2"), "p2"); // net VBUS
@@ -137,19 +137,23 @@ fn route_esc_cancels_pending_then_exits_tool() {
     let mut app = edit_app();
     let r = settle(&mut app);
     let cx = EventCx::new().with_ui_state(&r.ui);
-    app.on_event(click(Tool::Route.key()), &cx);
+    app.on_event(strip_click(Tool::Route), &cx);
     let c1 = pin_center_of(&app, &EntityId::new("C1"), "p1");
     app.on_event(pointer(UiEventKind::Click, px_of_board(&app, &r, c1)), &cx);
     assert!(app.route_active());
 
     app.on_event(escape(), &cx);
     assert!(!app.route_active(), "Esc cancels the pending route first");
-    assert_eq!(app.tool.get(), Tool::Route, "…but stays in the tool");
+    assert_eq!(
+        app.tool_for(ViewKind::Board),
+        Tool::Route,
+        "…but stays in the tool"
+    );
     assert!(!app.dirty(), "nothing committed");
 
     app.on_event(escape(), &cx);
     assert_eq!(
-        app.tool.get(),
+        app.tool_for(ViewKind::Board),
         Tool::Select,
         "the second Esc exits the tool"
     );
@@ -162,7 +166,7 @@ fn route_start_on_empty_space_does_nothing() {
     let mut app = edit_app();
     let r = settle(&mut app);
     let cx = EventCx::new().with_ui_state(&r.ui);
-    app.on_event(click(Tool::Route.key()), &cx);
+    app.on_event(strip_click(Tool::Route), &cx);
     // (0.5, 0.5) mm: on the board but outside the pour outline (1,1) and
     // away from every pad.
     let px = px_of_board(
@@ -187,7 +191,7 @@ fn layer_switch_drops_via_and_undo_removes_whole_route() {
     let mut app = edit_app();
     let r = settle(&mut app);
     let cx = EventCx::new().with_ui_state(&r.ui);
-    app.on_event(click(Tool::Route.key()), &cx);
+    app.on_event(strip_click(Tool::Route), &cx);
     assert_eq!(
         app.active_layer_name().as_deref(),
         Some("F.Cu"),
@@ -258,7 +262,7 @@ fn vertex_drag_inserts_moves_and_commits_same_id() {
     let cx = EventCx::new().with_ui_state(&r.ui);
 
     // Draw a naive straight GND trace C1.p1 → C2.p1 with the Route tool.
-    app.on_event(click(Tool::Route.key()), &cx);
+    app.on_event(strip_click(Tool::Route), &cx);
     let c1 = pin_center_of(&app, &EntityId::new("C1"), "p1");
     let c2 = pin_center_of(&app, &EntityId::new("C2"), "p1");
     app.on_event(pointer(UiEventKind::Click, px_of_board(&app, &r, c1)), &cx);
@@ -275,7 +279,7 @@ fn vertex_drag_inserts_moves_and_commits_same_id() {
     let orig_path = vec![c1, c2];
 
     // Back to Select (the commit left the trace selected).
-    app.on_event(click(Tool::Select.key()), &cx);
+    app.on_event(strip_click(Tool::Select), &cx);
     assert_eq!(
         app.domain.selection.borrow().single(),
         Some(&SemanticId::Trace(tid))
@@ -347,7 +351,7 @@ fn vertex_drag_esc_cancels_without_commit() {
     let mut app = edit_app();
     let r = settle(&mut app);
     let cx = EventCx::new().with_ui_state(&r.ui);
-    app.on_event(click(Tool::Route.key()), &cx);
+    app.on_event(strip_click(Tool::Route), &cx);
     let c1 = pin_center_of(&app, &EntityId::new("C1"), "p1");
     let c2 = pin_center_of(&app, &EntityId::new("C2"), "p1");
     app.on_event(pointer(UiEventKind::Click, px_of_board(&app, &r, c1)), &cx);
@@ -364,7 +368,7 @@ fn vertex_drag_esc_cancels_without_commit() {
         .path
         .clone();
     let dirty_after_draw = app.dirty();
-    app.on_event(click(Tool::Select.key()), &cx);
+    app.on_event(strip_click(Tool::Select), &cx);
 
     // Press ON the endpoint vertex, drag, Esc.
     app.on_event(

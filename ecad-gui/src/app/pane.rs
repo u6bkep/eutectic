@@ -3,12 +3,17 @@
 //! chrome (route keys, the canvas-target predicate, placeholders). Split out of
 //! `app.rs` as pure code motion.
 
+use crate::tool::Tool;
 use damascene_core::prelude::*;
 
 /// Which view a pane renders (mockup: the pane header's view-type switcher). v1 has two
 /// read-only view kinds; `3D` etc. are wishlist. A schematic and a board pane over the
 /// same doc share the semantic selection but project it into their own overlays.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// `Ord`/`Hash` so the kind can key the per-view-kind tool map (revised structural
+/// commitment 4): the active tool is stored per KIND, so every pane of a kind shares
+/// one tool slot, and a kind with no entry yet defaults to [`Tool::Select`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ViewKind {
     /// The layered board canvas (milestone 2/3).
     Board,
@@ -28,6 +33,26 @@ impl ViewKind {
     /// Both view kinds, in switcher order.
     pub fn all() -> [ViewKind; 2] {
         [ViewKind::Board, ViewKind::Schematic]
+    }
+
+    /// The tools this kind's per-pane strip offers, grouped for the strip's thin
+    /// separators (UI-oracle strip anatomy: the shared pick tools first, then the
+    /// kind-specific group). Applicability is STRUCTURAL: a tool that makes no
+    /// sense for a kind (Route on a schematic) simply isn't in its groups — there
+    /// is no disabled state and no applicability check anywhere else. Only tools
+    /// that exist today are listed; future tools join their group when they land.
+    pub(crate) fn strip_groups(self) -> &'static [&'static [Tool]] {
+        match self {
+            ViewKind::Board => &[&[Tool::Select, Tool::Measure], &[Tool::Route]],
+            ViewKind::Schematic => &[&[Tool::Select, Tool::Measure]],
+        }
+    }
+
+    /// Whether `tool` exists in this kind's strip — the structural-applicability
+    /// predicate (a strip click for a tool the kind doesn't offer is ignored, so a
+    /// synthesized event can never smuggle Route into the schematic slot).
+    pub(crate) fn offers_tool(self, tool: Tool) -> bool {
+        self.strip_groups().iter().any(|g| g.contains(&tool))
     }
 }
 
@@ -89,6 +114,47 @@ impl PaneId {
             PaneId::B => "pane:b:max",
         }
     }
+
+    /// This pane's short key tag (`"a"` / `"b"`), for composed route keys.
+    fn tag(self) -> &'static str {
+        match self {
+            PaneId::A => "a",
+            PaneId::B => "b",
+        }
+    }
+
+    /// The route key of this pane's tool-strip button for `tool`
+    /// (`"strip:a:tool:route"`). Public (crate-wide) vocabulary so tests drive
+    /// tools exactly the way a user does — through a pane's strip.
+    pub fn strip_key(self, tool: Tool) -> String {
+        format!("strip:{}:{}", self.tag(), tool.key())
+    }
+
+    /// The route key of this pane's strip panel itself. Keyed so the panel's
+    /// background swallows pointer events within its own rect (a click between
+    /// buttons must not fall through to the canvas below); `on_event` routes it
+    /// nowhere, so it is inert chrome. Events outside the panel rect hit the
+    /// canvas as usual — the strip never intercepts pan/zoom beyond itself.
+    pub(crate) fn strip_panel_key(self) -> &'static str {
+        match self {
+            PaneId::A => "strip:a:panel",
+            PaneId::B => "strip:b:panel",
+        }
+    }
+}
+
+/// Parse a strip-button route key back to its `(pane, tool)` target, if `route`
+/// is one (`"strip:a:tool:route"` → `(A, Route)`).
+pub(crate) fn strip_target_of_key(route: &str) -> Option<(PaneId, Tool)> {
+    let rest = route.strip_prefix("strip:")?;
+    let (tag, tool_key) = rest.split_once(':')?;
+    let pane = match tag {
+        "a" => PaneId::A,
+        "b" => PaneId::B,
+        _ => return None,
+    };
+    let tool = Tool::all().into_iter().find(|t| t.key() == tool_key)?;
+    Some((pane, tool))
 }
 
 /// Per-pane view state: the *view-dependent* half of through-line 3. A pane is one view

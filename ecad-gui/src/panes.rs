@@ -1,9 +1,12 @@
 //! The pane-tree region — the two-pane split and everything composed inside it:
 //! `viewer_body` (the whole viewer composition), the split + pane headers, the
-//! board / schematic canvas pane wrappers, the per-frame board overlay builder,
-//! the shared cross-view highlight projection, and the conflict banner. Moved out
-//! of `app/panels.rs` as pure code motion (gui-module-split); this is the region a
-//! future split-tree rework will own.
+//! board / schematic canvas pane wrappers with their floating tool strips
+//! ([`strip`]), the per-frame board overlay builder, the shared cross-view
+//! highlight projection, and the conflict banner. Moved out of `app/panels.rs`
+//! as pure code motion (gui-module-split); this is the region a future
+//! split-tree rework will own.
+
+pub(crate) mod strip;
 
 use crate::app::domain::BoardView;
 use crate::app::pane::{
@@ -135,15 +138,22 @@ impl EcadApp {
     }
 
     /// One pane: a header row (view-kind label + switcher + maximize toggle) over the
-    /// pane's canvas (board or schematic). Fill in both axes so the split weights govern
-    /// its size.
+    /// pane's canvas (board or schematic) with the floating per-pane tool strip
+    /// overlaid top-left inside the canvas (UI-oracle anatomy). Fill in both axes so
+    /// the split weights govern its size.
     fn pane_el(&self, cx: &BuildCx, pane: PaneId, sets: &HighlightSets) -> El {
         let view = self.panes.borrow()[pane_index(pane)].view;
         let canvas = match view {
             ViewKind::Board => self.board_canvas(cx, pane, sets),
             ViewKind::Schematic => self.schematic_canvas(cx, pane, sets),
         };
-        column([self.pane_header(pane, view), canvas])
+        // Stack the strip over the canvas: the strip layer hugs its own rect at
+        // the stack's top-left, so pointer events outside it fall through to the
+        // canvas viewport below (pan/zoom is never intercepted beyond the strip).
+        let body = stack([canvas, strip::tool_strip(pane, view, self.tool_for(view))])
+            .width(Size::Fill(1.0))
+            .height(Size::Fill(1.0));
+        column([self.pane_header(pane, view), body])
             .gap(tokens::SPACE_1)
             .width(Size::Fill(1.0))
             .height(Size::Fill(1.0))
@@ -265,11 +275,12 @@ impl EcadApp {
                 highlights.push((c.shape.clone(), hovered));
             }
         }
-        let measure = if self.tool.get() == Tool::Measure && self.measure_pane.get() == pane {
-            self.measure.get().segment()
-        } else {
-            None
-        };
+        let measure =
+            if self.tool_for(ViewKind::Board) == Tool::Measure && self.measure_pane.get() == pane {
+                self.measure.get().segment()
+            } else {
+                None
+            };
         // The drag ghost + live ratsnest (m6): only in the pane the drag is
         // happening in, and only once the drag has crossed the click slop (an
         // un-moved press shows nothing). Both are pure vector math over state
@@ -309,7 +320,7 @@ impl EcadApp {
             let drag = self.trace_drag.borrow();
             if let Some(d) = drag.as_ref() {
                 (Some((d.path.clone(), d.width)), d.path.clone())
-            } else if self.tool.get() == Tool::Select
+            } else if self.tool_for(ViewKind::Board) == Tool::Select
                 && let Ok(doc) = &self.domain.doc
                 && let Some(SemanticId::Trace(tid)) = self.domain.selection.borrow().single()
                 && let Some(t) = doc.traces.get(tid)

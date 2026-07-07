@@ -1,11 +1,16 @@
-//! The tool mode state machine (structural commitment 4, `docs/gui-architecture.md`).
+//! The tool mode state machine (structural commitment 4, `docs/gui-architecture.md`,
+//! as revised 2026-07-07).
 //!
-//! One active tool app-wide (a global mode, not per-pane). Milestone 3 stubs the
-//! machine with two tools — [`Tool::Select`] (the default; picks entities) and
-//! [`Tool::Measure`] (a two-click distance readout). The active tool owns its
-//! *uncommitted* preview state, which renders **only** to the dynamic overlay (the
-//! preview-channel pattern) — nothing is written to the doc. Switching tools or
-//! pressing Esc cancels any in-progress preview cleanly.
+//! The active tool is keyed **per view kind** (Blender semantics): every board pane
+//! shares one tool slot, every schematic pane another, and the live tool at any
+//! moment is the focused pane's kind's entry (`EcadApp::tool_for` /
+//! `EcadApp::set_tool` / `EcadApp::live_tool`). A kind with no entry defaults to
+//! [`Tool::Select`]. Tools render as per-pane overlay strips inside each canvas
+//! pane (see `crate::panes::strip`), never as an app-edge rail. The machine itself
+//! is unchanged by the re-keying: the active tool owns its *uncommitted* preview
+//! state, which renders **only** to the dynamic overlay (the preview-channel
+//! pattern) — nothing is written to the doc. Switching a kind's tool or pressing
+//! Esc cancels any in-progress preview cleanly.
 //!
 //! Milestone 6 slice A adds the first commit-capable interaction: [`DragState`], the
 //! Select tool's in-flight component drag. The drag owns a **ghost** preview (the
@@ -22,9 +27,12 @@ use ecad_core::geom::kernel::Region;
 use ecad_core::geom::{Path, Seg, Shape2D};
 use ecad_core::id::{EntityId, NetId, TraceId};
 
-/// The global active tool. `Select` is the default mode; `Measure` is the first
-/// non-select tool, proving the machine + preview channel; `Route` (m6 slice B)
-/// is manual trace drawing at routing-ladder level 1 (board panes only).
+/// The active tool of one view kind's slot. `Select` is the default mode (and the
+/// default entry of any view kind without one); `Measure` is the first non-select
+/// tool, proving the machine + preview channel; `Route` (m6 slice B) is manual
+/// trace drawing at routing-ladder level 1. Which tools a kind offers is
+/// structural — `ViewKind::strip_groups` lists them, and Route simply doesn't
+/// exist in the schematic kind's strip.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Tool {
     /// Pick / select entities (the default). Clicks hit-test into the selection model.
@@ -32,7 +40,7 @@ pub enum Tool {
     Select,
     /// Manual point-to-point trace drawing (routing ladder level 1): click a pin or
     /// known-net copper to start, click waypoints, click a pin to commit — permissive,
-    /// never legality-gated. Board panes only.
+    /// never legality-gated. Offered by the board kind's strip only.
     Route,
     /// Measure distance: first click anchors, second click (and the live pointer where
     /// events arrive) reports dx / dy / euclidean distance.
@@ -40,7 +48,8 @@ pub enum Tool {
 }
 
 impl Tool {
-    /// The route key of this tool's toolbar toggle button.
+    /// This tool's stable route-key suffix — a pane prefix is composed on by
+    /// [`PaneId::strip_key`](crate::app::PaneId) for the per-pane strip buttons.
     pub fn key(self) -> &'static str {
         match self {
             Tool::Select => "tool:select",
@@ -49,7 +58,7 @@ impl Tool {
         }
     }
 
-    /// The button label.
+    /// The human label (strip tooltips, the status-bar tool readout).
     pub fn label(self) -> &'static str {
         match self {
             Tool::Select => "Select",
@@ -58,7 +67,8 @@ impl Tool {
         }
     }
 
-    /// Every tool, in palette order — for building the toolbar toggle strip.
+    /// Every tool, in a stable order — the key-parse vocabulary. Which tools a
+    /// view kind actually offers is `ViewKind::strip_groups`, not this list.
     pub fn all() -> [Tool; 3] {
         [Tool::Select, Tool::Route, Tool::Measure]
     }

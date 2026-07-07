@@ -78,7 +78,9 @@ impl EcadApp {
             (p, pick::tolerance_nm(PICK_TOL_PX, vv.zoom))
         };
 
-        match (self.tool.get(), event.kind) {
+        // The tool in force over a board pane is the BOARD kind's slot (per-view-
+        // kind tool memory) — the pane being handled here is a board pane.
+        match (self.tool_for(crate::app::ViewKind::Board), event.kind) {
             (Tool::Select, UiEventKind::PointerDown) => {
                 // A fresh press can never inherit a stale eaten-click flag.
                 self.suppress_click.set(false);
