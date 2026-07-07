@@ -296,6 +296,60 @@ pub(crate) fn translate_shape(shape: &Shape2D, d: Point) -> Shape2D {
 }
 
 // ----------------------------------------------------------------------------
+// The Select tool's camera pan (the non-component drag gesture).
+// ----------------------------------------------------------------------------
+
+/// The screen-px click slop for the camera pan: a press-release that never
+/// moves past this stays a plain click (select / deselect); crossing it
+/// latches the gesture as a pan and eats the trailing Click. Screen-space
+/// (not board-space) because the gesture is a camera move, not a board edit.
+pub const CAMERA_PAN_SLOP_PX: f32 = 4.0;
+
+/// An in-flight Select-tool **camera pan** (the counterpart of [`DragState`]
+/// for everything that is *not* a component): armed on pointer-down over a
+/// board pane when the press picks no draggable component and no selected
+/// trace vertex — pour, trace, empty board, grid furniture alike.
+///
+/// Why the app owns this at all: damascene's native viewport pan (default
+/// primary-button trigger) only engages when the press hits **nothing or the
+/// viewport's own node** (`runtime.rs`, "Viewport pan"). Every canvas child —
+/// the layer / grid / overlay vector Els — is a keyed hit-test target whose
+/// rect spans the full content viewBox, so any press inside the content rect
+/// suppresses the native gesture and the pointer events flow to the app
+/// instead. This state turns those events back into a pan: per drag event the
+/// desired pan is `start_pan + (pointer − start_px)`, realised as a
+/// `ViewportRequest::CenterOn` (the one request that can place the pan
+/// anywhere at the current zoom); damascene's layout applies it next frame
+/// under the same `PanBounds` clamp the native pan gets. Pure per-event
+/// arithmetic — no kernel, no tessellation (event-path discipline).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CameraPanState {
+    /// The board pane whose camera is being panned.
+    pub pane: PaneId,
+    /// The pointer-down position in screen (logical) px.
+    pub start_px: (f32, f32),
+    /// The pane camera's pan at pointer-down (`ViewportView::pan`).
+    pub start_pan: (f32, f32),
+    /// Latched once the drag exceeds [`CAMERA_PAN_SLOP_PX`] — only a moved
+    /// gesture pans and eats the trailing Click; an un-moved press-release
+    /// stays a plain click-select (pours stay selectable).
+    pub moved: bool,
+}
+
+impl CameraPanState {
+    /// Fold a live pointer position in: the screen-px delta since the press,
+    /// latching `moved` past the slop (never unlatches — wobbling back over
+    /// the start point mid-pan is still a pan).
+    pub fn update(&mut self, px: (f32, f32)) -> (f32, f32) {
+        let d = (px.0 - self.start_px.0, px.1 - self.start_px.1);
+        if !self.moved && d.0 * d.0 + d.1 * d.1 > CAMERA_PAN_SLOP_PX * CAMERA_PAN_SLOP_PX {
+            self.moved = true;
+        }
+        d
+    }
+}
+
+// ----------------------------------------------------------------------------
 // The Route tool's pending route (m6 slice B, routing ladder level 1).
 // ----------------------------------------------------------------------------
 

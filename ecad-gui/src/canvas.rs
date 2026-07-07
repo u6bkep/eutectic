@@ -505,6 +505,28 @@ impl Canvas {
         )
     }
 
+    /// The pane's **visible window in view-mm** (the shared viewBox frame, y
+    /// already flipped): the viewport rect's corners unprojected through the
+    /// live camera, then mapped from content px to viewBox mm. Because the
+    /// vector children are laid out at natural size anchored at the viewport's
+    /// inner top-left (see [`content_rect`](Self::content_rect)), content px
+    /// and view mm differ only by the rect origin and the viewBox min — no
+    /// scale. This is what [`grid_el`](Self::grid_el) must cover.
+    pub fn visible_view_mm(
+        &self,
+        viewport_rect: (f32, f32, f32, f32),
+        vv: damascene_core::viewport::ViewportView,
+    ) -> (f32, f32, f32, f32) {
+        let (rx, ry, rw, rh) = viewport_rect;
+        let [vx, vy, ..] = self.view_box();
+        let origin = (rx, ry);
+        let a = vv.unproject((rx, ry), origin);
+        let b = vv.unproject((rx + rw, ry + rh), origin);
+        let to_mm = |p: (f32, f32)| (vx + p.0 - rx, vy + p.1 - ry);
+        let (a, b) = (to_mm(a), to_mm(b));
+        (a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1))
+    }
+
     /// The **canvas furniture** layer (UI oracle): a subtle background dot grid and
     /// the origin axes, drawn UNDER every board layer. Shares the layers' viewBox so
     /// it registers pixel-exact, and is `Painted` like the layers. `None` for a
@@ -517,39 +539,117 @@ impl Canvas {
     /// (`pitch_mm · zoom`, since 1 mm = 1 px at zoom 1) is at least [`GRID_MIN_PX`]. That
     /// keeps spacing in `[GRID_MIN_PX, GRID_MIN_PX · 2.5)` ≈ `[8, 20)` px — comfortably
     /// inside the ~8–40 px target. Dot and axis stroke sizes are a fixed fraction of the
-    /// pitch, so the whole asset depends only on the pitch **bucket** (not the continuous
-    /// zoom, and never the pan): panning re-emits a byte-identical asset (`content_hash`
-    /// dedupes the upload) and only a pitch change re-tessellates. This is the "static
-    /// layer stack" discipline — the grid is doc-independent but pitch-cached, not a
-    /// per-frame dynamic overlay.
+    /// pitch, so the tessellated window depends only on the pitch **bucket** and the
+    /// lattice index window — never the continuous zoom or pan.
     ///
-    /// # Coverage
+    /// # Coverage: a viewport-anchored window (grid is effectively unbounded)
     ///
-    /// Dots are laid at board multiples of the pitch (so a dot lands on the origin, where
-    /// the axes cross) across the content bounds inflated by [`GRID_OVERSCAN`] — enough to
-    /// fill the fit padding and modest pans. Zoomed out far below the fit (content smaller
-    /// than the pane) the overscan runs out and the gutters beyond it show no grid; this is
-    /// the honest consequence of a pan-independent static layer and is acceptable furniture.
-    pub fn grid_el(&self, zoom: f32) -> Option<El> {
+    /// Dots are laid at board multiples of the pitch (so a dot lands on the origin,
+    /// where the axes cross), but only across a **window** of the infinite lattice
+    /// that covers `visible_view_mm` — the pane's live visible rect — inflated by
+    /// half a window per side ([`GRID_WINDOW_MARGIN`]). The user can never out-pan
+    /// or out-zoom the grid: whatever rect the camera exposes, the window is
+    /// re-anchored to it. The origin axes span the same window, so they cover at
+    /// least the visible rect whenever they are in view. `visible` is `None` on the
+    /// first frame (no laid-out rect yet); the fallback window is the content
+    /// bounds inflated by [`GRID_OVERSCAN`], corrected one frame later.
+    ///
+    /// # Cost model (derived-state discipline)
+    ///
+    /// The pitch rule bounds the on-screen dot spacing below by [`GRID_MIN_PX`], so
+    /// the **visible** lattice is at most `(pane_w / 8 px) × (pane_h / 8 px)` dots
+    /// at any zoom, and the built window at most `(1 + 2·margin)² = 4×` that.
+    /// Per build: a **cache hit** — pitch, viewBox, and a visible window still
+    /// inside `cache`'s built window — clones the cached asset (the unchanged
+    /// `content_hash` dedupes the GPU upload, so re-emitting is free past the
+    /// first frame); a miss (pan escaped the margin, pitch bucket changed, or a
+    /// reload moved the viewBox) re-tessellates O(window) = O(visible dots) once.
+    /// Worst-case per-frame cost is therefore O(visible dots), typical cost an
+    /// asset clone — and the old per-build O(board-extent dots) rebuild is gone.
+    pub fn grid_el(
+        &self,
+        zoom: f32,
+        visible: Option<(f32, f32, f32, f32)>,
+        cache: &mut Option<GridCache>,
+    ) -> Option<El> {
         let pitch = grid_pitch_mm(zoom);
         // `grid_pitch_mm` returns a positive finite pitch (guarded zoom → step·decade);
         // this is a defensive floor, not a reachable branch on a committed doc.
         if pitch <= 0.0 {
             return None;
         }
-        let (x0, y0, x1, y1) = self.bounds;
-        let flip_sum = y0 + y1;
-        let flip_sum_mm = nm_to_mm(flip_sum);
-        let (bx0, by0, bx1, by1) = (nm_to_mm(x0), nm_to_mm(y0), nm_to_mm(x1), nm_to_mm(y1));
-        let (ox, oy) = ((bx1 - bx0) * GRID_OVERSCAN, (by1 - by0) * GRID_OVERSCAN);
-        let (gx0, gy0, gx1, gy1) = (bx0 - ox, by0 - oy, bx1 + ox, by1 + oy);
+        let view_box = self.view_box();
+        let (_, y0, _, y1) = self.bounds;
+        let flip_sum_mm = nm_to_mm(y0 + y1);
 
+        // The view-mm rect the grid must cover: the live visible window, or the
+        // overscanned content bounds before the first layout.
+        let (wx0, wy0, wx1, wy1) = visible.unwrap_or_else(|| {
+            let [vx, vy, vw, vh] = view_box;
+            let (ox, oy) = (vw * GRID_OVERSCAN, vh * GRID_OVERSCAN);
+            (vx - ox, vy - oy, vx + vw + ox, vy + vh + oy)
+        });
+        if !(wx0.is_finite() && wy0.is_finite() && wx1.is_finite() && wy1.is_finite()) {
+            return None;
+        }
+
+        // The visible lattice-index window: dots sit at view x = i·pitch and
+        // view y = flip_sum − j·pitch (board multiples — a dot on the origin).
+        let (vi0, vi1) = (
+            grid_index(wx0 / pitch, false),
+            grid_index(wx1 / pitch, true),
+        );
+        let (vj0, vj1) = (
+            grid_index((flip_sum_mm - wy1) / pitch, false),
+            grid_index((flip_sum_mm - wy0) / pitch, true),
+        );
+
+        // Cache hit: same pitch bucket + viewBox, and the visible window still
+        // inside the built window → the clone is the whole per-frame cost.
+        let hit = cache.as_ref().is_some_and(|c| {
+            c.pitch == pitch
+                && c.view_box == view_box
+                && c.window.0 <= vi0
+                && vi1 <= c.window.1
+                && c.window.2 <= vj0
+                && vj1 <= c.window.3
+        });
+        if !hit {
+            // Rebuild: the visible window inflated by half a window per side
+            // (the pan hysteresis), spans defensively clamped so a pathological
+            // rect can never explode the tessellation.
+            let mi = (((vi1 - vi0) as f32 * GRID_WINDOW_MARGIN).ceil() as i64).max(1);
+            let mj = (((vj1 - vj0) as f32 * GRID_WINDOW_MARGIN).ceil() as i64).max(1);
+            let window = clamp_window((vi0 - mi, vi1 + mi, vj0 - mj, vj1 + mj));
+            let asset = self.build_grid_asset(pitch, flip_sum_mm, window);
+            *cache = Some(GridCache {
+                pitch,
+                view_box,
+                window,
+                asset,
+            });
+        }
+        let asset = cache.as_ref().expect("filled above").asset.clone();
+        Some(
+            vector(asset)
+                .vector_render_mode(VectorRenderMode::Painted)
+                .key("grid:static"),
+        )
+    }
+
+    /// Tessellate one grid window: the dot field (one filled path — a small
+    /// square per lattice point) plus the origin axes where they cross it.
+    /// O(window) — called only on a [`GridCache`] miss.
+    fn build_grid_asset(
+        &self,
+        pitch: f32,
+        flip_sum_mm: f32,
+        window: (i64, i64, i64, i64),
+    ) -> VectorAsset {
+        let (i0, i1, j0, j1) = window;
         let mut paths: Vec<VectorPath> = Vec::new();
 
-        // Dot field: a small square per lattice point, all one even-odd-free fill path.
         let r = (pitch * GRID_DOT_FRAC).max(GRID_DOT_MIN_MM);
-        let (i0, i1) = ((gx0 / pitch).floor() as i64, (gx1 / pitch).ceil() as i64);
-        let (j0, j1) = ((gy0 / pitch).floor() as i64, (gy1 / pitch).ceil() as i64);
         let mut dots = PathBuilder::new();
         for i in i0..=i1 {
             let vx = i as f32 * pitch; // board x == view x
@@ -572,21 +672,25 @@ impl Canvas {
             .build(),
         );
 
-        // Origin axes: board x = 0 (view x = 0) and board y = 0 (view y = flip_sum_mm),
-        // each spanning the grid region, in the faint accent. Only drawn when the axis
-        // falls within the (overscanned) region.
+        // Origin axes: board x = 0 (view x = 0) and board y = 0 (view y =
+        // flip_sum_mm), each spanning the window, in the faint accent. Only
+        // drawn when the axis crosses the window.
         let axis_w = (pitch * GRID_AXIS_FRAC).max(MIN_STROKE_MM);
-        if gx0 <= 0.0 && 0.0 <= gx1 {
-            let (ay0, ay1) = (flip_sum_mm - gy0, flip_sum_mm - gy1);
+        let (gx0, gx1) = (i0 as f32 * pitch, i1 as f32 * pitch);
+        let (gy_top, gy_bot) = (
+            flip_sum_mm - j1 as f32 * pitch,
+            flip_sum_mm - j0 as f32 * pitch,
+        );
+        if i0 <= 0 && 0 <= i1 {
             paths.push(
                 PathBuilder::new()
-                    .move_to(0.0, ay0)
-                    .line_to(0.0, ay1)
+                    .move_to(0.0, gy_top)
+                    .line_to(0.0, gy_bot)
                     .stroke_solid(grid_axis_color(), axis_w)
                     .build(),
             );
         }
-        if gy0 <= 0.0 && 0.0 <= gy1 {
+        if j0 <= 0 && 0 <= j1 {
             paths.push(
                 PathBuilder::new()
                     .move_to(gx0, flip_sum_mm)
@@ -595,22 +699,67 @@ impl Canvas {
                     .build(),
             );
         }
-
-        let asset = VectorAsset::from_paths(self.view_box(), paths);
-        Some(
-            vector(asset)
-                .vector_render_mode(VectorRenderMode::Painted)
-                .key("grid:static"),
-        )
+        VectorAsset::from_paths(self.view_box(), paths)
     }
 }
+
+/// One cached grid window (see [`Canvas::grid_el`]): the tessellated asset plus
+/// the exact inputs it was built from, so a build can decide hit/miss with three
+/// cheap comparisons. Owned per pane by the app (`EcadApp::grid_caches`) — the
+/// two panes have independent cameras, hence independent windows.
+#[derive(Clone, Debug)]
+pub struct GridCache {
+    /// The pitch bucket (mm) the window was tessellated at.
+    pitch: f32,
+    /// The shared viewBox at build time — a doc reload can move it, which
+    /// re-anchors the flip and must invalidate the window.
+    view_box: [f32; 4],
+    /// The built lattice-index window `(i0, i1, j0, j1)`, inclusive.
+    window: (i64, i64, i64, i64),
+    /// The tessellated dot field + axes for that window.
+    asset: VectorAsset,
+}
+
+/// A lattice index from a fractional coordinate (floor / ceil), saturated into
+/// the clampable range so a huge-but-finite window can't overflow.
+fn grid_index(v: f32, up: bool) -> i64 {
+    let v = if up { v.ceil() } else { v.floor() };
+    v.clamp(-1e15, 1e15) as i64
+}
+
+/// Clamp a window's per-axis span to [`GRID_MAX_SPAN`] indices around its
+/// center — a pure defensive bound (a real pane at the minimum 8 px spacing
+/// needs ~pane_px/8 ≈ hundreds per axis; this only bites on garbage rects).
+fn clamp_window(w: (i64, i64, i64, i64)) -> (i64, i64, i64, i64) {
+    let clamp_axis = |lo: i64, hi: i64| {
+        if hi - lo <= GRID_MAX_SPAN {
+            return (lo, hi);
+        }
+        let mid = lo + (hi - lo) / 2;
+        (mid - GRID_MAX_SPAN / 2, mid + GRID_MAX_SPAN / 2)
+    };
+    let (i0, i1) = clamp_axis(w.0, w.1);
+    let (j0, j1) = clamp_axis(w.2, w.3);
+    (i0, i1, j0, j1)
+}
+
+/// Defensive per-axis cap on a grid window's index span (≈ an 8k-px pane at
+/// the tightest 8 px spacing, doubled by the margin).
+const GRID_MAX_SPAN: i64 = 2048;
+
+/// How far past the visible window the built window extends, as a fraction of
+/// the visible span per side — the pan hysteresis: a pan must cross half a
+/// viewport before the grid re-tessellates.
+const GRID_WINDOW_MARGIN: f32 = 0.5;
 
 /// Smallest on-screen dot spacing (logical px) the adaptive grid pitch targets — the
 /// lower bound of the ~8–40 px band the UI oracle's grid lives in.
 const GRID_MIN_PX: f32 = 8.0;
 
-/// How far past the content bounds the dot field extends, as a fraction of the content
-/// extent on each side (fills the fit padding + modest pans without tracking the camera).
+/// The **pre-layout fallback** window: how far past the content bounds the dot
+/// field extends, as a fraction of the content extent per side, on the one frame
+/// where no laid-out pane rect exists yet (so [`Canvas::grid_el`] has no visible
+/// window to anchor to). From the second frame on the window tracks the camera.
 const GRID_OVERSCAN: f32 = 0.5;
 
 /// Grid-dot half-side as a fraction of the pitch. On-screen dot side is

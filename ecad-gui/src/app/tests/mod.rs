@@ -8,6 +8,7 @@
 //! This module holds the shared helpers + imports, reached by each concern
 //! module through `use super::*`.
 
+mod camera;
 mod editing;
 mod libraries;
 mod menubar;

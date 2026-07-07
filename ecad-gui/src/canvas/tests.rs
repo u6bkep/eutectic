@@ -277,7 +277,7 @@ fn grid_never_wins_a_pick() {
     // assertions run against the key the event router actually sees at runtime.
     let prefix = PaneId::A.canvas_key();
     let grid = canvas
-        .grid_el(8.0)
+        .grid_el(8.0, None, &mut None)
         .expect("board canvas has furniture")
         .key(format!("grid:{prefix}"));
     let key = grid.key.as_deref().unwrap();

@@ -57,9 +57,10 @@ pub(crate) use pane::{
     finding_row_key, pane_index,
 };
 
+use crate::canvas::GridCache;
 use crate::findings::Findings;
 use crate::reload::{SourceMailbox, SourceMsg};
-use crate::tool::{DragState, MeasureState, RouteState, Tool, TraceDragState};
+use crate::tool::{CameraPanState, DragState, MeasureState, RouteState, Tool, TraceDragState};
 use damascene_core::prelude::*;
 use ecad_core::coord::Nm;
 use std::cell::{Cell, RefCell};
@@ -179,6 +180,20 @@ pub struct EcadApp {
     /// between pointer-down on a selected trace's vertex/segment and pointer-up
     /// (commit as Remove+Add under the same id) / Esc (cancel).
     pub(crate) trace_drag: RefCell<Option<TraceDragState>>,
+    /// The Select tool's in-flight **camera pan**: armed on pointer-down over a
+    /// board pane when neither a component drag nor a trace-vertex drag armed
+    /// (pour / trace / empty board / grid furniture). Per drag event the camera
+    /// pan is realised as a `ViewportRequest::CenterOn`; pointer-up disarms
+    /// (eating the trailing Click iff the gesture moved). See
+    /// [`CameraPanState`] for why the app owns this gesture at all.
+    pub(crate) camera_pan: RefCell<Option<CameraPanState>>,
+    /// The per-pane viewport-anchored grid-window caches (`[A, B]`): the built
+    /// dot-lattice asset plus the (pitch, viewBox, index-window) key it was
+    /// built from. A build is a cache hit — an asset clone — while the pane's
+    /// visible window stays inside the built window at the same pitch; only
+    /// escaping it (a > half-viewport pan, a pitch-bucket change, a reload)
+    /// re-tessellates. See [`crate::canvas::Canvas::grid_el`].
+    pub(crate) grid_caches: RefCell<[Option<GridCache>; 2]>,
     /// The active routing layer, as a copper slab name. `None` = the default
     /// (top copper). Set from the layer panel's set-active affordance; switching
     /// it while a route is pending drops a via (ladder level 1).
@@ -241,6 +256,8 @@ impl EcadApp {
             suppress_click: Cell::new(false),
             route: RefCell::new(None),
             trace_drag: RefCell::new(None),
+            camera_pan: RefCell::new(None),
+            grid_caches: RefCell::new([None, None]),
             active_layer: RefCell::new(None),
             open_menu: RefCell::new(None),
         }
@@ -386,6 +403,7 @@ impl EcadApp {
             self.measure.set(MeasureState::default());
             *self.route.borrow_mut() = None;
             *self.trace_drag.borrow_mut() = None;
+            *self.camera_pan.borrow_mut() = None;
         }
         self.tools.borrow_mut().insert(kind, tool);
     }

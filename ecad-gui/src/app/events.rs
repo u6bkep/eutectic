@@ -316,6 +316,14 @@ impl App for EcadApp {
         // every preview today is a board-pane preview, so this is the same
         // layering as before the per-kind re-keying.
         if event.kind == UiEventKind::Escape {
+            if self.camera_pan.borrow().is_some() {
+                // Cancel the pan gesture (the camera stays where it is — a pan
+                // has no uncommitted preview to roll back). The in-flight press
+                // ends as a non-select: eat its trailing Click.
+                *self.camera_pan.borrow_mut() = None;
+                self.suppress_click.set(true);
+                return;
+            }
             if self.drag.borrow().is_some() {
                 *self.drag.borrow_mut() = None;
                 return;
@@ -400,6 +408,22 @@ impl App for EcadApp {
         if event.kind == UiEventKind::PointerUp && self.trace_drag.borrow().is_some() {
             self.finish_trace_drag();
             return;
+        }
+        // The Select-tool camera pan is likewise global once armed: Drag events
+        // keep panning even when the pointer leaves the pane rect (matching the
+        // native pan, which is "global once captured"), and PointerUp always
+        // disarms — a release over the chrome must not strand the gesture.
+        if self.camera_pan.borrow().is_some() {
+            if event.kind == UiEventKind::Drag
+                && let Some(pos) = event.pointer_pos()
+            {
+                self.update_camera_pan(cx, pos);
+                return;
+            }
+            if event.kind == UiEventKind::PointerUp {
+                self.finish_camera_pan();
+                return;
+            }
         }
 
         // Canvas pointer interaction. A pointer event over a pane's canvas routes to the

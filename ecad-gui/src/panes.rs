@@ -202,13 +202,26 @@ impl EcadApp {
         let prefix = pane.canvas_key();
         let zoom = cx.viewport_view(pane.canvas_key()).map_or(1.0, |v| v.zoom);
         // Canvas furniture: the dot grid + origin axes, UNDER every board layer (the
-        // first child). Its pitch adapts to the pane's zoom; it shares the layers'
-        // viewBox so it registers, and it is never a pick candidate (picking folds the
-        // geometry kernel, not canvas Els — see `canvas::pick`).
+        // first child). Its pitch adapts to the pane's zoom and its lattice window is
+        // anchored to the pane's visible rect (last frame's camera + rect — the same
+        // one-frame lag the zoom above has), so the grid covers the whole viewport at
+        // every pan/zoom. Per-pane window cache: a typical build is an asset clone
+        // (see `Canvas::grid_el`'s cost model). It shares the layers' viewBox so it
+        // registers, and it is never a pick candidate (picking folds the geometry
+        // kernel, not canvas Els — see `canvas::pick`).
         let mut children: Vec<El> = Vec::new();
-        if let Some(grid) = view.canvas.grid_el(zoom) {
+        let visible = cx
+            .rect_of_key(pane.canvas_key())
+            .zip(cx.viewport_view(pane.canvas_key()))
+            .map(|(r, vv)| view.canvas.visible_view_mm((r.x, r.y, r.w, r.h), vv));
+        let mut caches = self.grid_caches.borrow_mut();
+        if let Some(grid) = view
+            .canvas
+            .grid_el(zoom, visible, &mut caches[pane_index(pane)])
+        {
             children.push(grid.key(format!("grid:{prefix}")));
         }
+        drop(caches);
         children.extend(
             view.canvas
                 .layer_els(&view.layers, |id| self.layer_visible(&id.key()))

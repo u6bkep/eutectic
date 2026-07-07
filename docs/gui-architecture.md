@@ -43,6 +43,22 @@ tessellated by lyon in the backend, cached by `content_hash`.
   highlights never force re-tessellation of the board.
 - **Hit-testing is ours.** `ViewportView::{project, unproject}` maps pointer
   ↔ board coordinates; picking queries the engine's geometry kernel.
+- **Drag-pan on the board is ours too.** Damascene's default (plain
+  primary-button) pan trigger only engages when a press hits nothing or the
+  viewport's own node; every canvas child (layer/grid/overlay vector El) is a
+  keyed hit target spanning the full content viewBox, so presses over the
+  board suppress the native gesture. The Select tool therefore arms an
+  app-side camera pan (`CameraPanState`) for any press that drags no
+  component and no trace vertex — pour, trace, bare board, grid alike —
+  realised per drag event as a `ViewportRequest::CenterOn` (same `PanBounds`
+  clamp as the native gesture). Presses in the gutter beyond the content
+  rect still pan natively. Click (press-release inside the slop) stays a
+  plain select everywhere.
+- **The dot grid is viewport-anchored.** The furniture grid tessellates a
+  window of the infinite lattice covering the pane's visible rect (+50%
+  hysteresis margin per side), cached per (pitch bucket, viewBox, index
+  window) and per pane — a typical build is an asset clone; worst case is
+  O(visible dots). The user can never out-pan or out-zoom the grid.
   Damascene handles chrome hit-testing; the canvas interior is one keyed El.
 - **The swap seam.** The canvas is wrapped behind a small internal interface
   (features in → El out). If boards outgrow the vector path (tessellation or

@@ -7,7 +7,7 @@
 use crate::app::{EcadApp, PaneId};
 use crate::canvas::pick::{self, SemanticId};
 use crate::schematic_view::SchematicView;
-use crate::tool::{self, DragState, RouteState, Tool, TraceDragState};
+use crate::tool::{self, CameraPanState, DragState, RouteState, Tool, TraceDragState};
 use damascene_core::prelude::*;
 use ecad_core::command::{Command, Transaction};
 use ecad_core::coord::{Nm, Point};
@@ -82,8 +82,11 @@ impl EcadApp {
         // kind tool memory) — the pane being handled here is a board pane.
         match (self.tool_for(crate::app::ViewKind::Board), event.kind) {
             (Tool::Select, UiEventKind::PointerDown) => {
-                // A fresh press can never inherit a stale eaten-click flag.
+                // A fresh press can never inherit a stale eaten-click flag —
+                // nor a stale camera pan (a press whose PointerUp never arrived
+                // must not hijack this press's drag through the Drag fast path).
                 self.suppress_click.set(false);
+                *self.camera_pan.borrow_mut() = None;
                 // A press on the SELECTED trace's vertex / segment arms the
                 // vertex-refinement drag (m6 slice B) — it wins over a component
                 // drag (handles render on top of everything).
@@ -91,6 +94,22 @@ impl EcadApp {
                     return;
                 }
                 self.begin_drag(pane, p, tol);
+                // Anything undraggable under the press — pour, unselected trace,
+                // empty board, grid furniture — arms the CAMERA PAN instead: the
+                // Select-tool drag gesture always does something, and damascene's
+                // native pan cannot engage here (the press hit a keyed canvas
+                // child, which gates the default trigger off — see
+                // `CameraPanState`). An un-moved press-release stays a click.
+                if self.drag.borrow().is_none()
+                    && let Some(vv) = cx.viewport_view(pane.canvas_key())
+                {
+                    *self.camera_pan.borrow_mut() = Some(CameraPanState {
+                        pane,
+                        start_px: pos,
+                        start_pan: vv.pan,
+                        moved: false,
+                    });
+                }
             }
             (Tool::Select, UiEventKind::Click) => {
                 // The trailing Click of a just-committed drag: consumed (the drag
@@ -494,6 +513,61 @@ impl EcadApp {
                     .select_only(SemanticId::Part(comp));
             }
             Err(e) => self.domain.edit.error = Some(e),
+        }
+    }
+
+    /// Drive an in-flight camera pan from a live pointer position: fold the
+    /// screen delta in and, once past the click slop, queue the pan as a
+    /// `ViewportRequest::CenterOn` for the pane's viewport. The desired pan is
+    /// `start_pan + delta`; `CenterOn` places content-space `point` at the
+    /// viewport center under the current zoom
+    /// (`pan = center − origin − zoom·(point − origin)`, damascene
+    /// `viewport_center_on`), so inverting for `point` realises exactly that
+    /// pan — before the viewport's own `PanBounds` clamp, which applies to
+    /// this request the same way it applies to the native gesture. Pure
+    /// per-event arithmetic; layout applies the request next frame.
+    pub(crate) fn update_camera_pan(&self, cx: &EventCx, pos: (f32, f32)) {
+        let request = {
+            let mut pan = self.camera_pan.borrow_mut();
+            let Some(cp) = pan.as_mut() else {
+                return;
+            };
+            let d = cp.update(pos);
+            if !cp.moved {
+                return; // still within the click slop — stay a plain click.
+            }
+            let key = cp.pane.canvas_key();
+            let (Some(rect), Some(vv)) = (cx.rect_of_key(key), cx.viewport_view(key)) else {
+                return;
+            };
+            if !(vv.zoom.is_finite() && vv.zoom > 0.0) {
+                return;
+            }
+            let desired = (cp.start_pan.0 + d.0, cp.start_pan.1 + d.1);
+            // Invert viewport_center_on for the content point whose centering
+            // yields `desired` (origin = the viewport's inner top-left; our
+            // canvas viewports have no padding, so that is the keyed rect).
+            let (cx_, cy_) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+            let point = (
+                rect.x + (cx_ - rect.x - desired.0) / vv.zoom,
+                rect.y + (cy_ - rect.y - desired.1) / vv.zoom,
+            );
+            ViewportRequest::CenterOn {
+                key: key.to_string(),
+                point,
+            }
+        };
+        self.pending.borrow_mut().push(request);
+    }
+
+    /// Pointer-up with a camera pan in flight: disarm, and eat the trailing
+    /// Click iff the gesture moved (a pan is not a select); an un-moved
+    /// press-release leaves the Click alone so it stays a plain click-select.
+    pub(crate) fn finish_camera_pan(&self) {
+        if let Some(cp) = self.camera_pan.borrow_mut().take()
+            && cp.moved
+        {
+            self.suppress_click.set(true);
         }
     }
 
