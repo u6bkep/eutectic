@@ -388,8 +388,17 @@ pub(crate) fn active_layer_of_key(route: &str) -> Option<&str> {
 
 /// Is this event target inside a pane canvas? A pointer event routes to a pane viewport
 /// (`canvas:a` / `canvas:b`), a stacked board layer / overlay El (keyed `layer:*` /
-/// `overlay:*`), or a schematic static El (keyed `schematic:*`). All are canvas hits;
-/// chrome (toolbar, sidebar, pane headers) is not.
+/// `overlay:*`), the background dot-grid furniture El (keyed `grid:*`), or a schematic
+/// static El (keyed `schematic:*`). All are canvas hits; chrome (toolbar, sidebar, pane
+/// headers) is not.
+///
+/// The `grid:*` arm is load-bearing, not decorative: the grid is child 0 of the board
+/// viewport, so on a board that projects *no* layer/overlay buckets (no features and no
+/// `board_region` outline) the keyed grid El is the top-most hit-test target. Recognising
+/// it here makes a click there route to the pane as an ordinary bare-canvas hit (the
+/// geometry-only picker finds nothing, so it deselects / pans) instead of being silently
+/// dropped. The pass-through is intentional, not an artefact of layer Els shadowing the
+/// grid with a coincident content rect.
 pub(crate) fn is_canvas_target(target: Option<&str>) -> bool {
     match target {
         Some(k) => {
@@ -397,6 +406,7 @@ pub(crate) fn is_canvas_target(target: Option<&str>) -> bool {
                 || k == PaneId::B.canvas_key()
                 || k.starts_with("layer:")
                 || k.starts_with("overlay:")
+                || k.starts_with("grid:")
                 || k.starts_with("schematic:")
         }
         None => false,

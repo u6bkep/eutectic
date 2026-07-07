@@ -249,31 +249,56 @@ fn grid_pitch_rule_adapts_across_zoom() {
     assert_eq!(grid_pitch_mm(f32::NAN), grid_pitch_mm(1.0));
 }
 
-/// The grid is furniture, not geometry: it renders as its own `grid:static` asset that
-/// shares the layers' viewBox (so it registers) but is **never a pick candidate**. The
-/// picker folds the `world_features` kernel, not canvas Els, so a click on a bare grid
-/// lattice point — the board origin `(0,0)`, a dot, but outside all copper — resolves to
-/// nothing, exactly as bare canvas does. The grid El's key is its own namespace, distinct
-/// from the `layer:` / `overlay:` picked-into prefixes.
+/// The grid is furniture, not geometry, and its pick-safety must be *intentional* — a
+/// click that hit-tests to the grid El routes to the pane as an ordinary bare-canvas hit
+/// (deselect / pan), never a picked feature and never a silently dropped event.
+///
+/// This pins the two mechanisms that make that true, exactly as the pane composes them
+/// (`panes.rs`: `grid_el(zoom).key("grid:{prefix}")`, grid as viewport child 0):
+///
+///  1. **Event routing.** The composed grid key IS a canvas target, so if the grid is the
+///     top-most keyed hit (e.g. a board with no layer/overlay buckets, where nothing
+///     shadows it), the pointer event still reaches `handle_board_pointer` rather than
+///     being dropped by the `is_canvas_target` gate. The grid key is NOT a `layer:` /
+///     `overlay:` key, so that handler's picker treats the hit as bare canvas.
+///  2. **Picking.** The picker folds the `world_features` kernel, not canvas Els, so a
+///     click on a bare grid lattice point — the board origin `(0,0)`, a dot, but outside
+///     all copper — resolves to nothing, exactly as bare canvas does.
 #[test]
 fn grid_never_wins_a_pick() {
+    use crate::app::pane::{PaneId, is_canvas_target};
     use crate::canvas::pick::{candidates, resolve};
 
     let d = board_domain();
     let doc = d.doc.as_ref().expect("fixture elaborates");
     let canvas = Canvas::new(doc, &d.lib).unwrap();
 
-    // The grid El exists, shares the viewBox, and is its own key namespace.
-    let grid = canvas.grid_el(8.0).expect("board canvas has furniture");
+    // Build the grid El and key it the way the pane does (`grid:{prefix}`), so the
+    // assertions run against the key the event router actually sees at runtime.
+    let prefix = PaneId::A.canvas_key();
+    let grid = canvas
+        .grid_el(8.0)
+        .expect("board canvas has furniture")
+        .key(format!("grid:{prefix}"));
     let key = grid.key.as_deref().unwrap();
-    assert_eq!(key, "grid:static");
+    assert_eq!(key, "grid:canvas:a");
+
+    // (1a) The grid key is a recognised canvas target: a click that hit-tests to it is
+    // routed to the pane, not silently dropped by the router's gate.
+    assert!(
+        is_canvas_target(Some(key)),
+        "a click on the grid El must route to the pane, not be dropped (key {key})"
+    );
+    // (1b) But it is NOT a pickable layer/overlay key, so the board pointer handler treats
+    // that hit as bare canvas (deselect / pan) rather than a geometry pick.
     assert!(
         !key.starts_with("layer:") && !key.starts_with("overlay:"),
         "grid must not masquerade as a pickable layer/overlay El (key {key})"
     );
 
-    // The origin (0,0) is a grid dot (every lattice is a multiple of the pitch) but sits
-    // outside the pour outline (1,1)-(19,14) and every pad — so the pick finds nothing.
+    // (2) The origin (0,0) is a grid dot (every lattice point is a multiple of the pitch)
+    // but sits outside the pour outline (1,1)-(19,14) and every pad — so a pick there,
+    // folding only the geometry kernel, finds nothing.
     let su = ecad_core::elaborate::stackup(&doc.source);
     let cands = candidates(doc, &d.lib, &su);
     assert!(
