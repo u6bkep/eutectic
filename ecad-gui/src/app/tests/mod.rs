@@ -15,6 +15,7 @@ mod panes;
 mod reload;
 mod routing;
 mod selection;
+mod sidebar;
 mod tools;
 
 use super::*;
