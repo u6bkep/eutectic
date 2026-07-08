@@ -278,9 +278,13 @@ fn tr(net: &str, layer: &str, path: Vec<Point>, width: Nm, prov: Provenance) -> 
     }
 }
 
-/// The `# routes` state zone round-trips: a doc carrying pinned/free/hint/fixed
-/// traces and a full-span + a blind/buried via reparses to the same `traces`/`vias`
-/// (ids re-minted in the same BTreeMap order, so the maps compare equal).
+/// The `# routes` state zone round-trips **with identity** (Decision 22): a doc carrying
+/// pinned/free/hint/fixed traces and a full-span plus a blind/buried via reparses to the
+/// *same ids*, not just the same routes. The ids are a **gapped** set (traces `1, 3, 7`
+/// and a `fixed` at `12`; vias `4, 9`) precisely because the old id-free format could only
+/// ever reproduce a dense `1..N` on re-mint — a dense fixture would pass even with ids
+/// dropped, so it proved nothing. A surviving gap after a deletion is exactly what a
+/// waiver or an undo needs to keep pointing at the right trace, so the gap is the test.
 #[test]
 fn routes_round_trip() {
     let mut doc = Doc::default();
@@ -295,7 +299,7 @@ fn routes_round_trip() {
         ),
     );
     doc.traces.insert(
-        TraceId(2),
+        TraceId(3),
         tr(
             "GND",
             "B.Cu",
@@ -305,7 +309,7 @@ fn routes_round_trip() {
         ),
     );
     doc.traces.insert(
-        TraceId(3),
+        TraceId(7),
         tr(
             "VCC",
             "F.Cu",
@@ -315,7 +319,7 @@ fn routes_round_trip() {
         ),
     );
     doc.traces.insert(
-        TraceId(4),
+        TraceId(12),
         tr(
             "VCC",
             "F.Cu",
@@ -325,7 +329,7 @@ fn routes_round_trip() {
         ),
     );
     doc.vias.insert(
-        ViaId(1),
+        ViaId(4),
         Via {
             net: NetId::new("GND"),
             at: Point::mm(5, 8),
@@ -336,7 +340,7 @@ fn routes_round_trip() {
         },
     );
     doc.vias.insert(
-        ViaId(2),
+        ViaId(9),
         Via {
             net: NetId::new("VCC"),
             at: Point::mm(3, 0),
@@ -349,8 +353,24 @@ fn routes_round_trip() {
 
     let text = serialize(&doc);
     let parsed = parse(&text).expect("parse routes");
-    assert_eq!(parsed.traces, doc.traces, "traces round-trip:\n{text}");
-    assert_eq!(parsed.vias, doc.vias, "vias round-trip:\n{text}");
+    assert!(
+        parsed.warnings.is_empty(),
+        "distinct explicit ids warn about nothing:\n{text}\n{:?}",
+        parsed.warnings
+    );
+    assert_eq!(
+        parsed.traces, doc.traces,
+        "traces round-trip WITH gapped ids:\n{text}"
+    );
+    assert_eq!(
+        parsed.vias, doc.vias,
+        "vias round-trip WITH gapped ids:\n{text}"
+    );
+    // The gap is visible in the text, not silently densified.
+    assert!(
+        text.contains("route 7 "),
+        "the id token is emitted:\n{text}"
+    );
     // Idempotent: re-serialize the parsed routes byte-equals.
     let doc2 = Doc {
         traces: parsed.traces,
@@ -358,6 +378,113 @@ fn routes_round_trip() {
         ..Default::default()
     };
     assert_eq!(serialize(&doc2), text, "serialize is idempotent");
+}
+
+/// Lenient parse — a hand-authored `route`/`via` line that OMITS its id still loads
+/// (Decision 22, point 2): the id is minted (above every explicit id in the section) and
+/// a `W_ROUTE_ID` warning records the fact. A missing id can never brick a file.
+#[test]
+fn route_missing_id_is_minted_with_warning() {
+    let text = "\
+route GND F.Cu w=0.15mm (0, 0) (1mm, 0)
+via VCC (2mm, 2mm) drill=0.3mm pad=0.6mm
+";
+    let p = parse(text).expect("lenient parse never fails on a missing id");
+    // One id per namespace, minted from 1 (no explicit id to clear).
+    assert_eq!(
+        p.traces.keys().copied().collect::<Vec<_>>(),
+        vec![TraceId(1)]
+    );
+    assert_eq!(p.vias.keys().copied().collect::<Vec<_>>(), vec![ViaId(1)]);
+    let codes: Vec<&str> = p.warnings.iter().map(|w| w.code).collect();
+    assert_eq!(codes, vec!["W_ROUTE_ID", "W_ROUTE_ID"], "one warning each");
+    assert!(
+        p.warnings.iter().all(|w| !w.is_error()),
+        "warnings, not errors"
+    );
+}
+
+/// Lenient parse — a DUPLICATE id keeps the first line and re-mints the second (Decision
+/// 22): trace and via namespaces are independent, so the same integer on a `route` and a
+/// `via` is NOT a collision.
+#[test]
+fn route_duplicate_id_keeps_first_remints_second() {
+    let text = "\
+route 5 GND F.Cu w=0.15mm (0, 0) (1mm, 0)
+route 5 VCC F.Cu w=0.15mm (0, 1mm) (1mm, 1mm)
+via 5 SIG (2mm, 2mm) drill=0.3mm pad=0.6mm
+";
+    let p = parse(text).expect("duplicate id is lenient, not an error");
+    // The first `route 5` keeps id 5; the second is re-minted above the max explicit id
+    // (5) → 6. The `via 5` is a different namespace, so it keeps 5.
+    assert_eq!(
+        p.traces[&TraceId(5)].net.to_string(),
+        "GND",
+        "first keeps the id"
+    );
+    assert_eq!(
+        p.traces[&TraceId(6)].net.to_string(),
+        "VCC",
+        "second re-minted"
+    );
+    assert_eq!(p.traces.len(), 2);
+    assert_eq!(
+        p.vias[&ViaId(5)].net.to_string(),
+        "SIG",
+        "via 5 is a separate namespace"
+    );
+    let codes: Vec<&str> = p.warnings.iter().map(|w| w.code).collect();
+    assert_eq!(codes, vec!["W_ROUTE_ID"], "only the duplicate trace warns");
+}
+
+/// The mint seed clears explicit ids on LATER lines too (Decision 22, point 2): a missing
+/// id on an early line must not steal an id a later line names explicitly, whatever the
+/// file order. This is the property a single-pass `max+1` mint would get wrong.
+#[test]
+fn route_mint_avoids_later_explicit_id_collision() {
+    let text = "\
+route GND F.Cu w=0.15mm (0, 0) (1mm, 0)
+route 1 VCC F.Cu w=0.15mm (0, 1mm) (1mm, 1mm)
+";
+    let p = parse(text).expect("parse");
+    // The explicit `route 1` (VCC, second line) keeps id 1. The id-less first line (GND)
+    // must mint ABOVE 1 → 2, never colliding with the not-yet-seen explicit 1.
+    assert_eq!(
+        p.traces[&TraceId(1)].net.to_string(),
+        "VCC",
+        "explicit id survives"
+    );
+    assert_eq!(
+        p.traces[&TraceId(2)].net.to_string(),
+        "GND",
+        "minted clear of it"
+    );
+    assert_eq!(p.warnings.len(), 1, "only the id-less line warns");
+}
+
+/// Explicit distinct ids parse verbatim with no warning — the serializer's own output,
+/// and the round-trip guarantee (Decision 22).
+#[test]
+fn route_explicit_ids_parse_verbatim() {
+    let p = parse("route 42 GND F.Cu w=0.15mm (0, 0) (1mm, 0)\n").expect("parse");
+    assert_eq!(
+        p.traces.keys().copied().collect::<Vec<_>>(),
+        vec![TraceId(42)]
+    );
+    assert!(p.warnings.is_empty());
+}
+
+/// A non-integer in the id position is a hard `E_PARSE` (a malformed line, not a lenience
+/// case — lenience only covers a *missing* or *duplicate* id). Three bare tokens where the
+/// first is not an integer has no valid reading.
+#[test]
+fn route_non_integer_id_is_a_parse_error() {
+    let e = parse("route foo GND F.Cu w=0.15mm (0, 0) (1mm, 0)\n").expect_err("bad id");
+    assert!(
+        e.iter()
+            .any(|d| d.code == "E_PARSE" && d.message.contains("integer")),
+        "non-integer id rejected: {e:?}"
+    );
 }
 
 /// Provenance keywords (Decision 18): `pinned` is the default and prints nothing;

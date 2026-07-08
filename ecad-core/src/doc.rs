@@ -402,6 +402,14 @@ pub struct ReconReport {
     /// ignores it — it is a deliberate authoring choice, not an error). Empty when no such
     /// collision exists.
     pub schematic_override_warnings: Vec<crate::diagnostic::Diagnostic>,
+    /// Lenient-parse findings on the `# routes` state zone (Decision 22): a `route`/`via`
+    /// line whose id was missing (one was minted) or a duplicate (the first keeps it, the
+    /// second was re-minted). A **degrade**, not a fault — a hand edit can never brick a
+    /// file; the doc loads with every route intact, just with a fresh id where the text
+    /// could not supply a stable one. Each is a `W_ROUTE_ID` warning that leaves the doc
+    /// clean (`is_clean` ignores it). Set by `LoadText` from the parser's warnings; empty
+    /// for a doc whose routes all carried distinct ids (the serializer's own output).
+    pub route_id_warnings: Vec<crate::diagnostic::Diagnostic>,
 }
 
 impl ReconReport {
@@ -423,7 +431,9 @@ impl ReconReport {
         // presentational-wire disagreement with the netlist (Decision 20d) — the netlist
         // is still the truth. `schematic_override_warnings` is likewise excluded (a doc-level
         // sym deliberately superseding a stamped fragment placement, Decision 20 — an
-        // authoring choice, not an error). All are warnings that leave the doc clean.
+        // authoring choice, not an error). `route_id_warnings` is likewise excluded (a
+        // missing/duplicate route id was re-minted, Decision 22 — a hand-edit lenience, not
+        // a fault). All are warnings that leave the doc clean.
     }
 }
 
@@ -572,6 +582,10 @@ impl crate::diagnostic::Diagnose for ReconReport {
         // sym superseded a stamped fragment's placement. Degrade, not fault — a deliberate
         // authoring choice; already `W_SCHEMATIC` diagnostics, and `is_clean` ignores them.
         out.extend(self.schematic_override_warnings.iter().cloned());
+        // Lenient route-id findings (Decision 22): a missing/duplicate id in the `# routes`
+        // zone was re-minted. Degrade, not fault — already `W_ROUTE_ID` diagnostics, and
+        // `is_clean` ignores them.
+        out.extend(self.route_id_warnings.iter().cloned());
         out
     }
 }
@@ -687,5 +701,18 @@ impl Doc {
             InputId::Geometry => self.geom_rev,
             InputId::Routing => self.route_rev,
         }
+    }
+
+    /// A route-id allocator seeded above every trace/via id currently in the doc
+    /// (Decision 22, point 3). The one definition of "next free route id": the
+    /// autorouter and the GUI editing layer mint through this rather than each
+    /// re-deriving `max + 1`. (The parser cannot use it — it must clear explicit
+    /// ids on lines it has not reached yet — so it seeds
+    /// [`RouteIdAlloc::above`](crate::id::RouteIdAlloc::above) from its own scan.)
+    pub fn route_id_alloc(&self) -> crate::id::RouteIdAlloc {
+        crate::id::RouteIdAlloc::above(
+            self.traces.keys().map(|t| t.0),
+            self.vias.keys().map(|v| v.0),
+        )
     }
 }

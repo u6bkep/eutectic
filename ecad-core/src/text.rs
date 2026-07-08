@@ -53,17 +53,21 @@
 //! refdes  <path> <string>          # pin a reference designator (opaque; verbatim)
 //!
 //! # ---- routes state zone (tier-2 materialized, non-derivable — Decision 18) ----
-//! route <net> <slab> w=<width> (x,y) (x,y) ...  [free|hint|fixed]   # a routed polyline
-//! via   <net> (x,y) drill=<d> pad=<p> [<from>..<to>] [free|hint|fixed]  # a plated via
+//! route <id> <net> <slab> w=<width> (x,y) (x,y) ...  [free|hint|fixed]   # a routed polyline
+//! via   <id> <net> (x,y) drill=<d> pad=<p> [<from>..<to>] [free|hint|fixed]  # a plated via
 //! ```
 //!
 //! Routes live in a `# routes` section beside `# overrides`. They are materialized
 //! state the parser fills directly (never re-derived at load — an autorouter is
-//! expensive/stochastic), so re-elaboration cannot wipe them. The layer is a copper
-//! slab **name** (Decision 13); provenance is a trailing keyword (`pinned` is the
-//! default and omitted; `free` = router-owned, `hint`/`fixed` complete the ladder). A
-//! via's span defaults to the full copper extent; an explicit `<from>..<to>` names a
-//! blind/buried span. Trace/via ids are minted at parse (session-local, never written).
+//! expensive/stochastic), so re-elaboration cannot wipe them. The leading `<id>` is the
+//! route's persistent identity (Decision 22 — a small integer, machine-maintained; the
+//! `# routes` zone is written by the router/GUI/agents, never hand-authored in the common
+//! case). The layer is a copper slab **name** (Decision 13); provenance is a trailing
+//! keyword (`pinned` is the default and omitted; `free` = router-owned, `hint`/`fixed`
+//! complete the ladder). A via's span defaults to the full copper extent; an explicit
+//! `<from>..<to>` names a blind/buried span. Parse is lenient (Decision 22): a missing or
+//! duplicate id is re-minted with a `W_ROUTE_ID` warning, so a hand edit never bricks the
+//! file — the guarantee is only that an id nothing disturbed stays put.
 //!
 //! `<len>` and the coordinate components accept `<n>mm` (decimal ok), `<n>nm`, or a
 //! bare integer (interpreted as nm). A `<comp>.<pin>` reference splits at the *last*
@@ -97,8 +101,9 @@ use std::collections::{BTreeMap, BTreeSet};
 /// and the persisted routing state zone (Decision 18 — routes are materialized but
 /// *not derivable*, so they persist rather than re-solve). A named struct (not a
 /// positional tuple) so adding a state section adds a field without churning every
-/// destructuring site. `TraceId`/`ViaId` are minted at parse (session-local, never
-/// serialized), so the maps key by fresh ids.
+/// destructuring site. `TraceId`/`ViaId` come from each `route`/`via` line's id token
+/// (Decision 22); a line missing or duplicating an id is re-minted and records a
+/// `W_ROUTE_ID` diagnostic in [`warnings`](Self::warnings).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Parsed {
     pub source: Source,
@@ -110,6 +115,13 @@ pub struct Parsed {
     /// no `schematic` block — the common case, and what keeps a blockless doc's
     /// serialization byte-identical. The last `schematic` block wins (mirrors `board`).
     pub schematic: Option<crate::schematic::SchematicLayout>,
+    /// Non-fatal findings raised during parse — today only the lenient route-id
+    /// diagnostics (`W_ROUTE_ID`: a missing or duplicate `route`/`via` id was re-minted,
+    /// Decision 22). Empty on a clean parse (every route carried a distinct id, the
+    /// serializer's own output). `LoadText` folds these onto the doc's
+    /// [`ReconReport::route_id_warnings`](crate::doc::ReconReport::route_id_warnings); a
+    /// hard syntax error never reaches here (parse returns `Err` instead).
+    pub warnings: Vec<Diagnostic>,
 }
 
 // ----------------------------------------------------------------------------
@@ -160,17 +172,17 @@ pub fn serialize(doc: &Doc) -> String {
     }
 
     // The routing state zone (Decision 18) — a second state section beside `# overrides`.
-    // Emitted in canonical `BTreeMap` (id) order; the ids themselves are session-local
-    // and never printed (a `route`/`via` line carries no id). Empty ⇒ no section, so a
-    // routeless doc's text is byte-identical to before this feature.
+    // Emitted in canonical `BTreeMap` (id) order; each `route`/`via` line carries its id as
+    // a leading token (Decision 22 — the route's persistent identity, parsed back verbatim).
+    // Empty ⇒ no section, so a routeless doc's text is byte-identical to before this feature.
     if !doc.traces.is_empty() || !doc.vias.is_empty() {
         out.push_str("\n# routes\n");
-        for t in doc.traces.values() {
-            out.push_str(&render_trace(t));
+        for (id, t) in &doc.traces {
+            out.push_str(&render_trace(*id, t));
             out.push('\n');
         }
-        for v in doc.vias.values() {
-            out.push_str(&render_via(v));
+        for (id, v) in &doc.vias {
+            out.push_str(&render_via(*id, v));
             out.push('\n');
         }
     }
@@ -232,21 +244,81 @@ pub fn parse(text: &str) -> Result<Parsed, Vec<Diagnostic>> {
     let blocks = parse_blocks(text)?;
 
     let mut parsed = Parsed::default();
-    // Session-local id mints (Decision 18 — ids are never serialized). File order
-    // becomes the id order, which is stable across a round-trip because serialize emits
-    // in BTreeMap (id) order.
-    let mut next_tid: u64 = 1;
-    let mut next_vid: u64 = 1;
     let mut errors: Vec<Diagnostic> = Vec::new();
+    // Routes/vias are collected with their (optional) explicit ids and resolved in a
+    // second pass (`resolve_route_ids`), so a mint can be seeded above EVERY explicit id
+    // in the section — including ids on lines parsed later — and thus never collide with a
+    // hand-written id, whatever the file order (Decision 22).
+    let mut pending = PendingRoutes::default();
 
     let top: Vec<Node> = blocks.into_iter().map(Node::Block).collect();
-    parse_forest(&top, &mut parsed, &mut next_tid, &mut next_vid, &mut errors);
+    parse_forest(&top, &mut parsed, &mut pending, &mut errors);
+    resolve_route_ids(pending, &mut parsed);
 
     if errors.is_empty() {
         Ok(parsed)
     } else {
         Err(errors)
     }
+}
+
+/// Routes/vias parsed off the flat grammar, each with its explicit id (`None` = the line
+/// omitted one) and source line number for diagnostics. Held until [`resolve_route_ids`]
+/// assigns final `TraceId`/`ViaId`s in a second pass (Decision 22).
+#[derive(Default)]
+struct PendingRoutes {
+    traces: Vec<(Option<u64>, Trace, u32)>,
+    vias: Vec<(Option<u64>, Via, u32)>,
+}
+
+/// Resolve the parsed routes' explicit ids into final `TraceId`/`ViaId`s (Decision 22,
+/// lenient parse). An explicit id that nothing else claims is kept verbatim; a *missing*
+/// id (`None`) or a *duplicate* (an id an earlier line already took) is re-minted with a
+/// `W_ROUTE_ID` warning. The mint allocator is seeded above the max explicit id across the
+/// whole section, so a minted id can never collide with an explicit one that appears on a
+/// later line — the parse is order-independent. Trace and via ids are separate namespaces.
+fn resolve_route_ids(pending: PendingRoutes, parsed: &mut Parsed) {
+    let mut alloc = crate::id::RouteIdAlloc::above(
+        pending.traces.iter().filter_map(|(id, ..)| *id),
+        pending.vias.iter().filter_map(|(id, ..)| *id),
+    );
+    for (id, trace, line) in pending.traces {
+        let tid = match id {
+            Some(n) if !parsed.traces.contains_key(&TraceId(n)) => TraceId(n),
+            explicit => {
+                let minted = alloc.mint_trace();
+                parsed
+                    .warnings
+                    .push(route_id_warning("route", explicit, minted.0, line));
+                minted
+            }
+        };
+        parsed.traces.insert(tid, trace);
+    }
+    for (id, via, line) in pending.vias {
+        let vid = match id {
+            Some(n) if !parsed.vias.contains_key(&ViaId(n)) => ViaId(n),
+            explicit => {
+                let minted = alloc.mint_via();
+                parsed
+                    .warnings
+                    .push(route_id_warning("via", explicit, minted.0, line));
+                minted
+            }
+        };
+        parsed.vias.insert(vid, via);
+    }
+}
+
+/// The `W_ROUTE_ID` diagnostic for a re-minted route/via id (Decision 22). `explicit` is
+/// the id the line carried (`None` = missing → minted; `Some(n)` = a duplicate of an
+/// id already taken → re-minted `new` in its place).
+fn route_id_warning(kind: &str, explicit: Option<u64>, new: u64, line: u32) -> Diagnostic {
+    let msg = match explicit {
+        None => format!("{kind} line has no id; minted `{new}`"),
+        Some(n) => format!("{kind} id `{n}` is already used; re-minted `{new}`"),
+    };
+    Diagnostic::warning("W_ROUTE_ID", msg, Location::Span { line, col: 1 })
 }
 
 /// Walk a block body (a `Node` sequence), lowering each directive into `parsed`. Trivia
@@ -260,8 +332,7 @@ pub fn parse(text: &str) -> Result<Parsed, Vec<Diagnostic>> {
 fn parse_forest(
     nodes: &[Node],
     parsed: &mut Parsed,
-    next_tid: &mut u64,
-    next_vid: &mut u64,
+    pending: &mut PendingRoutes,
     errors: &mut Vec<Diagnostic>,
 ) {
     for node in nodes {
@@ -283,8 +354,8 @@ fn parse_forest(
             // fixing the keyword does not reveal a fresh round of errors. Results are
             // discarded (the block was rejected); only diagnostics are kept.
             let mut scratch = Parsed::default();
-            let (mut t, mut v) = (1u64, 1u64);
-            parse_forest(&b.children, &mut scratch, &mut t, &mut v, errors);
+            let mut scratch_pending = PendingRoutes::default();
+            parse_forest(&b.children, &mut scratch, &mut scratch_pending, errors);
             continue;
         }
         if b.opened_block && b.keyword == "schematic" {
@@ -327,10 +398,10 @@ fn parse_forest(
             // arm parses the header its own way and stores the body; the generic stand-in
             // here just descends into the children (lowered as ordinary directives into
             // `parsed.source`), which exercises the recursion end-to-end.
-            parse_forest(&b.children, parsed, next_tid, next_vid, errors);
+            parse_forest(&b.children, parsed, pending, errors);
         } else {
             // A leaf directive lowers through the flat line grammar, exactly as before.
-            lower_directive(b, parsed, next_tid, next_vid, errors);
+            lower_directive(b, parsed, pending, errors);
         }
     }
 }
@@ -340,8 +411,7 @@ fn parse_forest(
 fn lower_directive(
     b: &Block,
     parsed: &mut Parsed,
-    next_tid: &mut u64,
-    next_vid: &mut u64,
+    pending: &mut PendingRoutes,
     errors: &mut Vec<Diagnostic>,
 ) {
     let lineno = b.line;
@@ -359,16 +429,16 @@ fn lower_directive(
         Ok(Item::RefdesPin(id, refdes)) => {
             parsed.refdes_pins.insert(id, refdes);
         }
-        Ok(Item::Route(t)) => {
+        Ok(Item::Route(id, t)) => {
             let coords = t.path.iter().flat_map(|p| [p.x, p.y]).chain([t.width]);
             check_coord_range(coords.collect(), lineno, errors);
-            parsed.traces.insert(TraceId(*next_tid), t);
-            *next_tid += 1;
+            // Id resolution/minting is deferred to `resolve_route_ids` (a second pass that
+            // has seen every explicit id in the section).
+            pending.traces.push((id, t, lineno));
         }
-        Ok(Item::Via(v)) => {
+        Ok(Item::Via(id, v)) => {
             check_coord_range(vec![v.at.x, v.at.y, v.drill, v.pad], lineno, errors);
-            parsed.vias.insert(ViaId(*next_vid), v);
-            *next_vid += 1;
+            pending.vias.push((id, v, lineno));
         }
         Err(e) => errors.push(Diagnostic::error(
             "E_PARSE",

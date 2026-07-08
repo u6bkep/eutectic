@@ -185,9 +185,9 @@ pub fn autoroute(doc: &Doc, lib: &PartLib, rules: &DesignRules) -> AutorouteResu
     let mut owner = vec![-1i32; grid.cols * grid.rows * nl];
 
     // Id minting: continue past any ids already in the doc (caller-assigned, like KiCad
-    // UUIDs — a hand edit and the autorouter mint the same way).
-    let mut next_tid = doc.traces.keys().map(|t| t.0 + 1).max().unwrap_or(1);
-    let mut next_vid = doc.vias.keys().map(|v| v.0 + 1).max().unwrap_or(1);
+    // UUIDs — a hand edit and the autorouter mint the same way). One shared allocator
+    // (Decision 22) rather than a re-derived `max + 1`.
+    let mut alloc = doc.route_id_alloc();
 
     let mut result = AutorouteResult::default();
 
@@ -259,8 +259,7 @@ pub fn autoroute(doc: &Doc, lib: &PartLib, rules: &DesignRules) -> AutorouteResu
             via_drill,
             via_clear,
             &layer_names,
-            &mut next_tid,
-            &mut next_vid,
+            &mut alloc,
         ) {
             Some(cmds) => {
                 result.commands.extend(cmds);

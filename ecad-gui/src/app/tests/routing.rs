@@ -336,12 +336,105 @@ fn vertex_drag_inserts_moves_and_commits_same_id() {
         Some(&SemanticId::Trace(tid))
     );
 
-    // Undo restores the pre-drag path (ids are re-minted by the snapshot
-    // reload, so compare the path, not the id).
+    // Undo restores the pre-drag path AT THE SAME id: snapshot round-trips now carry
+    // identity (Decision 22), so the trace stays `tid` across the reload rather than
+    // being re-minted.
     app.undo();
     let doc = app.domain.doc.as_ref().unwrap();
     assert_eq!(doc.traces.len(), 1);
-    assert_eq!(doc.traces.values().next().unwrap().path, orig_path);
+    assert_eq!(
+        doc.traces.get(&tid).expect("SAME id after undo").path,
+        orig_path
+    );
+}
+
+/// Issue 0034, end to end: with a **gap** in the trace ids, undo/redo (which snapshot
+/// through serialize→LoadText) preserves both the surviving ids and a selection pinned to
+/// one of them. Before Decision 22 the id-free format re-minted `1..N` on every reload, so
+/// redoing a deletion renumbered the surviving traces and silently dropped the selection.
+#[test]
+fn undo_redo_across_deletion_gap_preserves_trace_id_and_selection() {
+    use ecad_core::id::TraceId;
+    let mut app = edit_app();
+    let _ = settle(&mut app);
+
+    // Three GND traces, ids 1/2/3, in ONE commit (one undo unit).
+    let mk = |n: u64| {
+        Command::AddTrace(
+            TraceId(n),
+            ecad_core::route::Trace {
+                net: ecad_core::id::NetId::new("GND"),
+                layer: "F.Cu".into(),
+                path: vec![Point::mm(1, n as i64), Point::mm(2, n as i64)],
+                width: 150_000,
+                prov: ecad_core::doc::Provenance::Pinned,
+            },
+        )
+    };
+    app.commit_edit(Transaction(vec![mk(1), mk(2), mk(3)]), "add three traces")
+        .expect("adds commit");
+    let path3 = app.domain.doc.as_ref().unwrap().traces[&TraceId(3)]
+        .path
+        .clone();
+    let ids = |app: &EcadApp| {
+        app.domain
+            .doc
+            .as_ref()
+            .unwrap()
+            .traces
+            .keys()
+            .copied()
+            .collect::<Vec<_>>()
+    };
+
+    // Select trace 3, then delete trace 2 → a gap {1, 3}.
+    app.domain
+        .selection
+        .borrow_mut()
+        .select_only(SemanticId::Trace(TraceId(3)));
+    app.commit_edit(
+        Transaction::one(Command::RemoveTrace(TraceId(2))),
+        "delete trace 2",
+    )
+    .expect("delete commits");
+    assert_eq!(ids(&app), vec![TraceId(1), TraceId(3)], "gap after delete");
+    assert_eq!(
+        app.domain.selection.borrow().single(),
+        Some(&SemanticId::Trace(TraceId(3))),
+        "selection survives the delete"
+    );
+
+    // Undo → {1, 2, 3} restored, id 3 still the same trace, selection intact.
+    app.undo();
+    assert_eq!(ids(&app), vec![TraceId(1), TraceId(2), TraceId(3)]);
+    assert_eq!(
+        app.domain.doc.as_ref().unwrap().traces[&TraceId(3)].path,
+        path3,
+        "id 3 maps to the same trace after undo"
+    );
+    assert_eq!(
+        app.domain.selection.borrow().single(),
+        Some(&SemanticId::Trace(TraceId(3)))
+    );
+
+    // Redo → gap {1, 3} again. The 0034 repro: id 3 is NOT renumbered to 2, and the
+    // selection pinned to trace 3 survives the reload.
+    app.redo();
+    assert_eq!(
+        ids(&app),
+        vec![TraceId(1), TraceId(3)],
+        "redo keeps the gap, not a densified 1..N"
+    );
+    assert_eq!(
+        app.domain.doc.as_ref().unwrap().traces[&TraceId(3)].path,
+        path3,
+        "id 3 is still the same trace after redo"
+    );
+    assert_eq!(
+        app.domain.selection.borrow().single(),
+        Some(&SemanticId::Trace(TraceId(3))),
+        "selection of trace 3 survives undo/redo across the gap (0034)"
+    );
 }
 
 /// Pressing a selected trace's VERTEX (not segment) drags that vertex

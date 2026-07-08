@@ -3,7 +3,7 @@
 
 use crate::command::Command;
 use crate::doc::{Nm, Point, Provenance};
-use crate::id::{NetId, TraceId, ViaId};
+use crate::id::NetId;
 use crate::route::{Trace, Via};
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap};
@@ -32,8 +32,7 @@ pub(super) fn route_net(
     via_drill: Nm,
     via_clear: Nm,
     layer_names: &[String],
-    next_tid: &mut u64,
-    next_vid: &mut u64,
+    alloc: &mut crate::id::RouteIdAlloc,
 ) -> Option<Vec<Command>> {
     // Map each pad to the nearest grid node the current net may occupy, on one of the
     // layers the pad exists on (an SMD pad seeds only on its own layer).
@@ -101,7 +100,7 @@ pub(super) fn route_net(
         let seed_world = grid.world(si, sj);
         if seed_world != pads[0].at {
             commands.push(Command::AddTrace(
-                TraceId(mint(next_tid)),
+                alloc.mint_trace(),
                 Trace {
                     net: nid.clone(),
                     layer: layer_names[sl].clone(),
@@ -149,7 +148,7 @@ pub(super) fn route_net(
         let (runs, vias) = path_to_runs(grid, &path);
         for (vi, vj) in vias {
             commands.push(Command::AddVia(
-                ViaId(mint(next_vid)),
+                alloc.mint_via(),
                 Via {
                     net: nid.clone(),
                     at: grid.world(vi, vj),
@@ -171,7 +170,7 @@ pub(super) fn route_net(
             let pts = coalesce(pts);
             if pts.len() >= 2 {
                 commands.push(Command::AddTrace(
-                    TraceId(mint(next_tid)),
+                    alloc.mint_trace(),
                     Trace {
                         net: nid.clone(),
                         layer: layer_names[layer].clone(),
@@ -185,12 +184,6 @@ pub(super) fn route_net(
     }
 
     Some(commands)
-}
-
-fn mint(counter: &mut u64) -> u64 {
-    let v = *counter;
-    *counter += 1;
-    v
 }
 
 /// Nearest grid node to `p.at` that the current net may occupy, on one of the copper

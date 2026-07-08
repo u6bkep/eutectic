@@ -3,6 +3,14 @@
 
 use super::*;
 
+/// Parse a leading route/via id token (Decision 22): a bare non-negative integer. A
+/// non-integer in the id position is a hard `E_PARSE` (the line has the wrong shape — it
+/// is not a lenience case, which only covers a *missing* or *duplicate* id).
+fn parse_route_id(tok: &str, kind: &str) -> Result<u64, String> {
+    tok.parse::<u64>()
+        .map_err(|_| format!("{kind} id must be a non-negative integer, got `{tok}`"))
+}
+
 /// Serialize the provenance keyword of a persisted route: `pinned` is the default and
 /// prints nothing (hand/frozen routing is the common case). `free` marks router-owned
 /// copper (the rip-up-able tier). `hint`/`fixed` complete the ladder
@@ -17,11 +25,19 @@ pub(crate) fn prov_keyword(p: Provenance) -> &'static str {
     }
 }
 
-/// `route <net> <slab> w=<width> (x,y) (x,y) ... [free|hint|fixed]`. The layer is a
-/// copper slab name (Decision 13); the width and points are canonical lengths;
-/// provenance is a trailing keyword (`pinned` is the default and omitted).
-pub(crate) fn render_trace(t: &Trace) -> String {
-    let mut s = format!("route {} {} w={}", t.net, t.layer, fmt_len(t.width));
+/// `route <id> <net> <slab> w=<width> (x,y) (x,y) ... [free|hint|fixed]`. The leading
+/// token is the trace's persistent id (Decision 22 — a bare integer, this route's
+/// identity across a serialize/parse boundary); the layer is a copper slab name
+/// (Decision 13); the width and points are canonical lengths; provenance is a trailing
+/// keyword (`pinned` is the default and omitted).
+pub(crate) fn render_trace(id: TraceId, t: &Trace) -> String {
+    let mut s = format!(
+        "route {} {} {} w={}",
+        id.0,
+        t.net,
+        t.layer,
+        fmt_len(t.width)
+    );
     for p in &t.path {
         s.push(' ');
         s.push_str(&fmt_point(*p));
@@ -30,12 +46,14 @@ pub(crate) fn render_trace(t: &Trace) -> String {
     s
 }
 
-/// `via <net> (x,y) drill=<d> pad=<p> [<from>..<to>] [free|hint|fixed]`. A `None` span
-/// is the full copper extent (the common through-via) and prints no span token; an
-/// explicit blind/buried span prints `<from>..<to>` (Decision 18).
-pub(crate) fn render_via(v: &Via) -> String {
+/// `via <id> <net> (x,y) drill=<d> pad=<p> [<from>..<to>] [free|hint|fixed]`. The leading
+/// token is the via's persistent id (Decision 22). A `None` span is the full copper extent
+/// (the common through-via) and prints no span token; an explicit blind/buried span prints
+/// `<from>..<to>` (Decision 18).
+pub(crate) fn render_via(id: ViaId, v: &Via) -> String {
     let mut s = format!(
-        "via {} {} drill={} pad={}",
+        "via {} {} {} drill={} pad={}",
+        id.0,
         v.net,
         fmt_point(v.at),
         fmt_len(v.drill),
@@ -287,8 +305,11 @@ pub(crate) enum Item {
     Directive(GenDirective),
     Override(EntityId, Override),
     RefdesPin(EntityId, String),
-    Route(Trace),
-    Via(Via),
+    /// A parsed `route` line and its explicit id (`None` when the line omits one — a
+    /// hand edit; the caller mints one with a `W_ROUTE_ID` warning). Decision 22.
+    Route(Option<u64>, Trace),
+    /// A parsed `via` line and its explicit id (see [`Item::Route`]).
+    Via(Option<u64>, Via),
 }
 
 pub(crate) fn parse_line(line: &str) -> Result<Item, String> {
@@ -765,13 +786,17 @@ pub(crate) fn parse_line(line: &str) -> Result<Item, String> {
             )
         }
         "route" => {
-            // `route <net> <slab> w=<width> (x,y) (x,y) ... [free|hint|fixed]`. Net and
-            // slab are the two leading bare tokens; `w=` (required) precedes the points;
-            // an optional trailing provenance keyword (default `pinned`). The net/slab
-            // names are validated at LoadText + commit against the doc (unknown net /
-            // unknown-or-non-copper slab → hard `E_UNKNOWN_*`), not here — the parser only
-            // shapes the line. `TraceId` is minted by the caller.
-            const USAGE: &str = "route <net> <slab> w=<width> (x,y) (x,y) ... [free|hint|fixed]";
+            // `route <id> <net> <slab> w=<width> (x,y) (x,y) ... [free|hint|fixed]`. A
+            // leading bare integer `<id>` (Decision 22) then net and slab are the leading
+            // bare tokens; `w=` (required) precedes the points; an optional trailing
+            // provenance keyword (default `pinned`). The id is *optional* on the way in
+            // (lenient parse — a hand edit may omit it, and the caller mints one); it is
+            // disambiguated by token count, not by integer-parsing net names: two bare
+            // tokens are `<net> <slab>` (no id), three are `<id> <net> <slab>`. The
+            // net/slab names are validated at LoadText + commit against the doc (unknown
+            // net / unknown-or-non-copper slab → hard `E_UNKNOWN_*`), not here.
+            const USAGE: &str =
+                "route [<id>] <net> <slab> w=<width> (x,y) (x,y) ... [free|hint|fixed]";
             let open = rest.find('(').ok_or(USAGE)?;
             let (prefix, ptspart) = rest.split_at(open);
             // The points run up to a trailing provenance keyword, if any.
@@ -780,36 +805,41 @@ pub(crate) fn parse_line(line: &str) -> Result<Item, String> {
             if pts.len() < 2 {
                 return Err("route needs at least two points (a polyline)".into());
             }
-            let toks: Vec<&str> = prefix.split_whitespace().collect();
-            let mut net: Option<String> = None;
-            let mut layer: Option<String> = None;
             let mut width: Option<Nm> = None;
-            for tok in toks {
+            let mut bare: Vec<&str> = Vec::new();
+            for tok in prefix.split_whitespace() {
                 if let Some(w) = tok.strip_prefix("w=") {
                     width = Some(parse_len(w)?);
-                } else if net.is_none() {
-                    net = Some(tok.to_string());
-                } else if layer.is_none() {
-                    layer = Some(tok.to_string());
                 } else {
-                    return Err(format!("route: unexpected token `{tok}` ({USAGE})"));
+                    bare.push(tok);
                 }
             }
-            Item::Route(Trace {
-                net: crate::id::NetId::new(net.ok_or("route needs a net name")?),
-                layer: layer.ok_or("route needs a copper slab name")?,
-                path: pts,
-                width: width.ok_or("route needs w=<width>")?,
-                prov,
-            })
+            let (id, net, layer) = match bare.as_slice() {
+                [net, slab] => (None, *net, *slab),
+                [id, net, slab] => (Some(parse_route_id(id, "route")?), *net, *slab),
+                [] | [_] => return Err(format!("route needs a net and a copper slab ({USAGE})")),
+                _ => return Err(format!("route: too many bare tokens ({USAGE})")),
+            };
+            Item::Route(
+                id,
+                Trace {
+                    net: crate::id::NetId::new(net),
+                    layer: layer.to_string(),
+                    path: pts,
+                    width: width.ok_or("route needs w=<width>")?,
+                    prov,
+                },
+            )
         }
         "via" => {
-            // `via <net> (x,y) drill=<d> pad=<p> [<from>..<to>] [free|hint|fixed]`. Net is
-            // the leading bare token; the single coordinate; then `drill=`/`pad=` and an
-            // optional `<from>..<to>` blind/buried span (default: full copper extent). A
-            // trailing provenance keyword (default `pinned`).
+            // `via <id> <net> (x,y) drill=<d> pad=<p> [<from>..<to>] [free|hint|fixed]`. A
+            // leading bare integer `<id>` (Decision 22, optional in — see `route`) then the
+            // net; the single coordinate; then `drill=`/`pad=` and an optional
+            // `<from>..<to>` blind/buried span (default: full copper extent). A trailing
+            // provenance keyword (default `pinned`). Disambiguated by count: one bare token
+            // before the coordinate is `<net>`, two are `<id> <net>`.
             const USAGE: &str =
-                "via <net> (x,y) drill=<d> pad=<p> [<from>..<to>] [free|hint|fixed]";
+                "via [<id>] <net> (x,y) drill=<d> pad=<p> [<from>..<to>] [free|hint|fixed]";
             let open = rest.find('(').ok_or(USAGE)?;
             let (prefix, after) = rest.split_at(open);
             let close = after.find(')').ok_or("unbalanced '(' in coordinate")?;
@@ -820,10 +850,13 @@ pub(crate) fn parse_line(line: &str) -> Result<Item, String> {
                 }
                 pts[0]
             };
-            let net = prefix
-                .split_whitespace()
-                .next()
-                .ok_or("via needs a net name")?;
+            let bare: Vec<&str> = prefix.split_whitespace().collect();
+            let (id, net) = match bare.as_slice() {
+                [net] => (None, *net),
+                [id, net] => (Some(parse_route_id(id, "via")?), *net),
+                [] => return Err(format!("via needs a net name ({USAGE})")),
+                _ => return Err(format!("via: too many bare tokens ({USAGE})")),
+            };
             let (tail, prov) = split_trailing_prov(&after[close + 1..])?;
             let mut drill: Option<Nm> = None;
             let mut pad: Option<Nm> = None;
@@ -842,14 +875,17 @@ pub(crate) fn parse_line(line: &str) -> Result<Item, String> {
                     return Err(format!("via: unexpected token `{tok}` ({USAGE})"));
                 }
             }
-            Item::Via(Via {
-                net: crate::id::NetId::new(net),
-                at,
-                span,
-                drill: drill.ok_or("via needs drill=<d>")?,
-                pad: pad.ok_or("via needs pad=<p>")?,
-                prov,
-            })
+            Item::Via(
+                id,
+                Via {
+                    net: crate::id::NetId::new(net),
+                    at,
+                    span,
+                    drill: drill.ok_or("via needs drill=<d>")?,
+                    pad: pad.ok_or("via needs pad=<p>")?,
+                    prov,
+                },
+            )
         }
         "refdes" => {
             // `refdes <path> <string>`: two tokens, the value quoted only when it must

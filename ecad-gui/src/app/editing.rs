@@ -376,16 +376,15 @@ impl EcadApp {
     }
 
     /// Commit the pending route (the commit-on-pin click): each run with ≥ 2
-    /// points lowers to an `AddTrace` (fresh ids: max+1 over the doc's traces —
-    /// the same derivation `ecad_core::autoroute` uses; the engine has no id
-    /// allocation helper), each layer-switch via to an `AddVia` (through, span
+    /// points lowers to an `AddTrace` (fresh ids from the doc's shared route-id
+    /// allocator — [`Doc::route_id_alloc`], the same one `ecad_core::autoroute`
+    /// uses, Decision 22), each layer-switch via to an `AddVia` (through, span
     /// `None`), all in ONE `commit_edit` transaction — one undo unit. Width /
     /// drill / pad come from [`route_defaults`]. `Pinned` provenance (a hand
     /// edit). The first committed trace is selected, ready for refinement. A
     /// route with nothing committable is left pending (the click is ignored).
     pub(crate) fn commit_route(&mut self) {
         use ecad_core::command::Command;
-        use ecad_core::id::{TraceId, ViaId};
 
         let committable = self
             .route
@@ -401,16 +400,14 @@ impl EcadApp {
             let Ok(doc) = &self.domain.doc else {
                 return;
             };
-            let mut next_tid = doc.traces.keys().map(|t| t.0 + 1).max().unwrap_or(1);
-            let mut next_vid = doc.vias.keys().map(|v| v.0 + 1).max().unwrap_or(1);
+            let mut alloc = doc.route_id_alloc();
             let mut cmds = Vec::new();
             let mut first_tid = None;
             for run in &route.runs {
                 if run.points.len() < 2 {
                     continue;
                 }
-                let tid = TraceId(next_tid);
-                next_tid += 1;
+                let tid = alloc.mint_trace();
                 first_tid.get_or_insert(tid);
                 cmds.push(Command::AddTrace(
                     tid,
@@ -425,7 +422,7 @@ impl EcadApp {
             }
             for at in &route.vias {
                 cmds.push(Command::AddVia(
-                    ViaId(next_vid),
+                    alloc.mint_via(),
                     ecad_core::route::Via {
                         net: route.net.clone(),
                         at: *at,
@@ -435,7 +432,6 @@ impl EcadApp {
                         prov: ecad_core::doc::Provenance::Pinned,
                     },
                 ));
-                next_vid += 1;
             }
             (cmds, first_tid)
         };

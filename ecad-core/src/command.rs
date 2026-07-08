@@ -133,6 +133,13 @@ pub fn apply(
     // Work on a candidate clone; only the return value is observed by the caller.
     let mut next = doc.clone();
 
+    // Lenient route-id findings from any `LoadText` in this transaction (Decision 22).
+    // Accumulated here because re-elaboration below replaces `next.report` wholesale, so
+    // they are stamped onto the fresh report after that (the `schematic_wire_warnings`
+    // idiom). Empty for a transaction with no `LoadText`, or one whose routes all carried
+    // distinct ids (the serializer's own output — undo/redo snapshots never warn).
+    let mut route_id_warnings: Vec<Diagnostic> = Vec::new();
+
     for cmd in &txn.0 {
         match cmd {
             Command::SetSource(s) => {
@@ -164,6 +171,7 @@ pub fn apply(
             }
             Command::LoadText(text) => {
                 let parsed = crate::text::parse(text)?;
+                route_id_warnings.extend(parsed.warnings);
                 next.source = parsed.source;
                 next.overrides = parsed.overrides;
                 next.refdes_pins = parsed.refdes_pins;
@@ -282,6 +290,10 @@ pub fn apply(
     // and expands, never an unknown-typo error).
     next.def_fragments = elab.def_fragments;
     next.report = elab.report;
+    // Stamp the lenient route-id findings onto the fresh report (Decision 22). A
+    // non-`LoadText` transaction leaves this empty, clearing any stale prior findings —
+    // the report is rebuilt from scratch each commit.
+    next.report.route_id_warnings = route_id_warnings;
 
     // Commit-time route validation (Decision 18 / 13). Traces/vias are tier-2 state, so
     // the tier-1 elaborate gate above never sees them — but the fail-loud `expect()` in

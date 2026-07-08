@@ -241,7 +241,7 @@ schematic {
 }
 
 # routes
-route BOOT_SW F.Cu w=0.15mm (44.51mm, 34mm) (45.3mm, 33.9mm)
-route BOOT_SW F.Cu w=0.15mm (45.3mm, 33.9mm) (45.3mm, 34.8mm) (41.7mm, 34.8mm) (41.7mm, 36.3mm) (41.8mm, 37.275mm)
-route E_SWDIO F.Cu w=0.15mm (4mm, 33mm) (4.8mm, 33mm)
-route E_SWDIO F.Cu w=0.15mm (4.8mm, 33mm) (4.8mm, 27.9mm) (5.4mm, 27.9mm) (5.4mm, 26.7mm) (5.7mm, 26.7mm) (5.7mm, 26.1mm) (23.7mm, 26.1mm) (24.55mm, 26mm)
+route 36 BOOT_SW F.Cu w=0.15mm (44.51mm, 34mm) (45.3mm, 33.9mm)
+route 37 BOOT_SW F.Cu w=0.15mm (45.3mm, 33.9mm) (45.3mm, 34.8mm) (41.7mm, 34.8mm) (41.7mm, 36.3mm) (41.8mm, 37.275mm)
+route 62 E_SWDIO F.Cu w=0.15mm (4mm, 33mm) (4.8mm, 33mm)
+route 63 E_SWDIO F.Cu w=0.15mm (4.8mm, 33mm) (4.8mm, 27.9mm) (5.4mm, 27.9mm) (5.4mm, 26.7mm) (5.7mm, 26.7mm) (5.7mm, 26.1mm) (23.7mm, 26.1mm) (24.55mm, 26mm)
