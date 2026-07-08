@@ -103,8 +103,10 @@ impl EcadApp {
                 self.domain.source = source;
                 self.domain.revision += 1;
                 self.domain.reload_error = None;
-                // Any in-flight previews are anchored to the old candidates /
-                // trace ids (LoadText re-mints them); drop them all.
+                // Any in-flight previews are anchored to the old pick
+                // candidates, which the reload re-derives; drop them all.
+                // (Trace ids themselves survive the reload since Decision 22
+                // — ids round-trip — but candidate indices do not.)
                 *self.drag.borrow_mut() = None;
                 *self.route.borrow_mut() = None;
                 *self.trace_drag.borrow_mut() = None;

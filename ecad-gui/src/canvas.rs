@@ -2,6 +2,13 @@
 //! damascene [`VectorAsset`]s (structural commitment 1, the *layered canvas*; see
 //! `docs/gui-architecture.md`, "Canvas strategy").
 //!
+//! OWNED-CANVAS MIGRATION (decided 2026-07-07): this VectorAsset projection,
+//! the grid-lattice cache, and the viewport-coordinate helpers are scheduled
+//! for **deletion** once the app-rendered surface canvas lands — do NOT
+//! extend them; new canvas work goes to the owned renderer (see
+//! gui-architecture.md, "Canvas strategy"). The feature-binning logic itself
+//! migrates.
+//!
 //! This is milestone 2's read-only board viewer. The projection here is the GUI
 //! twin of `ecad-core`'s SVG backend (`export/svg.rs`): it walks the same unified
 //! [`world_features`](ecad_core::route::world_features) stream, bins each physical

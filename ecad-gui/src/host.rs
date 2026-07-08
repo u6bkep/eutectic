@@ -12,10 +12,12 @@
 // `ECAD:` comments:
 //   - module embedding (this header, `allow(module_inception)` on the inner
 //     `host` module, two `crate::`-path fixes in the submodules);
-//   - the owned-canvas seam hooks on `WinitWgpuApp`: `before_frame`
-//     (per-frame reach into the renderer/`RunnerCore`) and
-//     `raw_window_event` (raw winit event tap). Both default to no-ops and
-//     nothing overrides them yet.
+//   - one owned-canvas seam hook on `WinitWgpuApp`: `raw_window_event`
+//     (raw winit event tap; feeds free hover on the owned canvas). Defaults
+//     to a no-op; nothing overrides it yet. (A `before_frame` renderer-reach
+//     hook shipped with this slice and was removed: its only intended
+//     consumer was the pre-owned-canvas camera plan, which is dead — the
+//     owned canvas never writes a camera into damascene at all.)
 
 //! Optional desktop host for running [`App`]s against a real `wgpu`
 //! surface in a `winit` window.
@@ -318,26 +320,6 @@ pub trait WinitWgpuApp: App {
     /// Default: no-op. App authors who don't touch wgpu directly can
     /// ignore this hook.
     fn gpu_setup(&mut self, _device: &wgpu::Device, _queue: &wgpu::Queue) {}
-
-    /// ECAD seam (owned-canvas campaign, host slice): per-frame mutable
-    /// access to the [`Runner`] — the object that owns the persistent
-    /// `RunnerCore` and its `UiState` — called at the top of every full
-    /// (rebuild + layout) frame, before [`Self::before_paint`] /
-    /// [`App::before_build`]. Paint-only frames skip it, exactly as they
-    /// skip build.
-    ///
-    /// Intended consumer (future slice, deliberately NOT wired yet): the
-    /// per-pane camera slice, which writes app-owned cameras into layout
-    /// state via `UiState::set_viewport_view` before build runs, retiring
-    /// the `ViewportRequest` queue and its one-frame lag. Note that
-    /// upstream `Runner::ui_state()` is `&self`-only today — the camera
-    /// slice will need a mutable accessor upstream (or direct `RunnerCore`
-    /// ownership in this host); this hook is the structural reach point
-    /// either way.
-    ///
-    /// Default: no-op; nothing overrides it in this slice — no camera
-    /// writes happen anywhere.
-    fn before_frame(&mut self, _renderer: &mut Runner) {}
 
     /// ECAD seam (owned-canvas campaign, host slice): raw winit event tap,
     /// called with every [`WindowEvent`] as it arrives, before the host's
@@ -1458,10 +1440,6 @@ impl<A: WinitWgpuApp> ApplicationHandler for Host<A> {
                             self.last_diagnostics = Some(diagnostics.clone());
                             let (tree, palette) = {
                                 damascene_core::profile_span!("frame::build");
-                                // ECAD: between-frames renderer access (see
-                                // `WinitWgpuApp::before_frame`) — a no-op
-                                // until the camera slice overrides it.
-                                self.app.before_frame(&mut gfx.renderer);
                                 self.app.before_paint(&gfx.queue);
                                 WinitWgpuApp::before_build(&mut self.app);
                                 let theme = self.app.theme();

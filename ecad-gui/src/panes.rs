@@ -5,6 +5,11 @@
 //! highlight projection, and the conflict banner. Moved out of `app/panels.rs`
 //! as pure code motion (gui-module-split); this is the region a future
 //! split-tree rework will own.
+//!
+//! OWNED-CANVAS MIGRATION (decided 2026-07-07): the `viewport()` canvas call
+//! sites in here are scheduled for **replacement** by app-rendered
+//! `surface(AppTexture)` panes — do not extend the viewport path (see
+//! gui-architecture.md, "Canvas strategy").
 
 pub(crate) mod strip;
 

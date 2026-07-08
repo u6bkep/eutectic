@@ -151,8 +151,9 @@ philosophy, commit is never legality-gated).
 
 Cheap now, expensive to retrofit. Every roadmap feature reduces to these:
 
-1. **Layered canvas** — cached static layer assets + per-frame dynamic
-   overlay (see above).
+1. **Layered canvas** — static per-layer geometry cached by doc revision +
+   a small per-frame dynamic overlay (see Canvas strategy; under the owned
+   canvas this is persistent vertex buffers + a dynamic overlay buffer).
 2. **Semantic selection model** — selection/hover is one shared set of
    semantic ids (net names, refdes, pins, feature ids) in domain state,
    never per-view geometry. Each pane projects it into its own highlight

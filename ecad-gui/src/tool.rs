@@ -297,6 +297,11 @@ pub(crate) fn translate_shape(shape: &Shape2D, d: Point) -> Shape2D {
 
 // ----------------------------------------------------------------------------
 // The Select tool's camera pan (the non-component drag gesture).
+//
+// OWNED-CANVAS MIGRATION (decided 2026-07-07): CameraPanState exists only to
+// work around the damascene viewport()'s pan-gate and is scheduled for
+// DELETION with the viewport path — do not extend it or copy the pattern to
+// other view kinds (see gui-architecture.md, "Canvas strategy").
 // ----------------------------------------------------------------------------
 
 /// The screen-px click slop for the camera pan: a press-release that never
