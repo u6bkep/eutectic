@@ -7,9 +7,13 @@ Deferred features live as tickets in `issues/gui-wishlist/`.
 
 ## Toolkit and workspace
 
-- **Toolkit: damascene v0.4.5 from crates.io** (`damascene-core` +
-  `damascene-winit-wgpu`). A local clone of the exact release tag lives at
-  `reference/damascene` for source reading. Damascene is a thin GPU UI library
+- **Toolkit: damascene, tracked as a rev-pinned git dependency on upstream
+  main** (`damascene-core` + `damascene-winit-wgpu`; since 2026-07-07 —
+  upstream moves fast and we occasionally request changes, so we bump
+  deliberately and often; the pin may be AHEAD of the latest crates.io
+  release, see the note in `ecad-gui/Cargo.toml`). The local clone at
+  `reference/damascene` is kept on the same rev for source reading.
+  Damascene is a thin GPU UI library
   that renders through the host's wgpu pass; apps implement
   `App { build(&self) -> El, on_event(&mut self), before_build, ... }` — a
   pure projection from app state to a widget tree, which matches the engine's
@@ -26,45 +30,79 @@ Deferred features live as tickets in `issues/gui-wishlist/`.
   canned scenes in a `fixtures.rs`, lint-clean assertions in CI, SVG/tree
   diffs in adversarial review.
 
-## Canvas strategy (decided)
+## Canvas strategy (owned canvas — decided 2026-07-07; supersedes the pure-damascene canvas)
 
-**Pure damascene, no custom GPU pipeline in v1.** The board canvas is a
-`viewport()` widget (first-class pan/zoom: drag-pan, wheel-zoom-to-cursor,
-fit, reset; camera state lives in damascene's `UiState` keyed by the pane's
-El key) containing El nodes that carry `VectorAsset`s — programmatic vector
-paths built with `PathBuilder` (lines/quads/cubics, fill rules, strokes),
-tessellated by lyon in the backend, cached by `content_hash`.
+**The canvas is ours: an app-rendered wgpu surface composited by damascene.**
+This supersedes the v1 "pure damascene, no custom GPU pipeline" ruling, which
+delivered milestones 2–6 but whose interaction model was diagnosed (2026-07-07,
+from the pan/grid/hover evidence) as a structural mismatch, not a bag of bugs:
+`viewport()` is built for **El-shaped content** — discrete widgets whose
+identity drives hit-testing, hover, and pan-on-background — while a board is a
+**dense picture** with app-side semantics. Our full-bleed layer Els suppressed
+the native pan everywhere (patched per view kind with `CameraPanState`), hover
+identity could never change across one monolithic El (so pointer-move never
+fired), the camera was readable only post-layout at a one-frame lag (forcing
+the windowed grid-lattice cache and its first-frame fallback), and the overlay
+re-tessellated every frame. Damascene's own doctrine for this situation —
+its winit host is a quickstart to copy, not a dependency to twist; apps whose
+content isn't El-shaped should own a canvas and write shaders — is the
+documented escape hatch, and we take it.
 
-- **Layered from day one.** Static content (board layers: copper, silk, mask,
-  outline, …) is tessellated into per-layer vector assets cached against a
-  doc revision counter — rebuilt only when the doc changes. Dynamic content
-  (selection/hover highlights, DRC halos, tool previews, ratsnest, measure
-  overlays) is a separate small overlay asset rebuilt every frame. Tools and
-  highlights never force re-tessellation of the board.
-- **Hit-testing is ours.** `ViewportView::{project, unproject}` maps pointer
-  ↔ board coordinates; picking queries the engine's geometry kernel.
-  Damascene handles chrome hit-testing; the canvas interior is one keyed El.
-- **Drag-pan on the board is ours too.** Damascene's default (plain
-  primary-button) pan trigger only engages when a press hits nothing or the
-  viewport's own node; every canvas child (layer/grid/overlay vector El) is a
-  keyed hit target spanning the full content viewBox, so presses over the
-  board suppress the native gesture. The Select tool therefore arms an
-  app-side camera pan (`CameraPanState`) for any press that drags no
-  component and no trace vertex — pour, trace, bare board, grid alike —
-  realised per drag event as a `ViewportRequest::CenterOn` (same `PanBounds`
-  clamp as the native gesture). Presses in the gutter beyond the content
-  rect still pan natively. Click (press-release inside the slop) stays a
-  plain select everywhere.
-- **The dot grid is viewport-anchored.** The furniture grid tessellates a
-  window of the infinite lattice covering the pane's visible rect (+50%
-  hysteresis margin per side), cached per (pitch bucket, viewBox, index
-  window) and per pane — a typical build is an asset clone; worst case is
-  O(visible dots). The user can never out-pan or out-zoom the grid.
-- **The swap seam.** The canvas is wrapped behind a small internal interface
-  (features in → El out). If boards outgrow the vector path (tessellation or
-  draw cost), the escape ladder is: per-El custom WGSL shaders riding
-  damascene's paint stream, then a host-painted region with our own pipeline.
-  Not built preemptively — same ruling as ObstacleField.
+**The load-bearing engine fact that makes this cheap:** `route::world_features`
+is already the single realized-geometry stream (substrate, copper with pours
+boolean-resolved, mask, silk, text, drills — every feature carrying provenance
+and net), and DRC, the autorouter, Excellon, GUI rendering, *and* GUI picking
+are already pure filters over it. The owned renderer is the stream's next
+consumer; only the presentation back-half changes. Picking, selection, tools,
+findings, and the command layer are untouched.
+
+- **Boundary.** Damascene keeps all chrome: split tree, menus, panels, tool
+  strips, dialogs, status bar. Each canvas pane is one keyed
+  `surface(AppTexture)` El — zero-copy composite + clip; pointer events arrive
+  on the wrapper El. Board and schematic view kinds both live on this path
+  (the schematic's pan gap, issue 0035, retires with the old model rather
+  than being patched).
+- **Own winit host**, seeded as a copy of `damascene-winit-wgpu` around one
+  `RunnerCore` (the author's explicitly intended use). This is also the gw-21
+  prerequisite (one Runner per OS window over shared domain state), and it
+  hands us raw cursor motion — **free hover on day one**, no upstream ask.
+- **Renderer.** Tessellate the feature stream once per doc revision (same
+  cadence as today's derived caches) into persistent per-layer vertex
+  buffers. Layer color/visibility/dim are per-layer uniforms — layer toggles
+  and future high-contrast/flip modes are uniform writes, never rebuilds.
+  Selection/hover/DRC-halo/tool-preview geometry is one small dynamic overlay
+  buffer (the layered-canvas commitment, restated in GPU terms). The dot grid
+  is a procedural fragment shader — infinite, pitch-adaptive, zero CPU; the
+  windowed lattice cache is deleted, not fixed.
+- **Camera is app state**, per pane, in `PaneState` — where the domain/pane
+  split always said it belonged. Precision rule: integer-nm coordinates
+  exceed f32's mantissa, so vertex buffers upload anchor-relative f32 and the
+  camera composes in f64 on the CPU; the integer core lets us choose anchors
+  freely. Gesture contract: middle-drag pan (CAD idiom; left stays select),
+  wheel zoom-at-cursor, fit/frame-rect as plain camera math (no request
+  queue, no one-frame lag).
+- **Anti-aliasing is deliberately iterative**: crib from damascene-wgpu and
+  computer-whisperer's other consumers first; MSAA 4× is the acceptable MVP
+  floor; analytic edge AA is the upgrade path if thin traces at low zoom
+  demand it. Not settled in this record on purpose.
+- **Testing.** The headless SVG + lint bundle is unchanged (it is ours, off
+  the same stream). The gesture harness improves: synthetic winit-level
+  events replace reverse-engineered `RunnerCore` routing. GPU image goldens
+  may join later under the gw-25 ruling. Damascene's tree/draw-op dumps stop
+  covering canvas interiors (they covered them only nominally).
+- **Migration.** Board pane first, behind the existing pane interface;
+  schematic second; the viewport-based path is **deleted** when both are
+  across (old code removed, not morphed). Retired with it: `viewport()`
+  usage, the `VectorAsset` layer path, `CameraPanState`, the
+  `ViewportRequest` queue, the grid cache, and the one-frame-lag camera
+  reads.
+- **Engine rider — collapse the export tier onto the stream.** The one known
+  duplication left: `export::role_features` re-runs the per-component
+  graphics/text loop that `world_features` runs, and copper Gerber/SVG
+  re-walk the Doc rather than driving off the stream's provenance. Folding
+  them in makes fab output and on-screen pixels provably the same geometry.
+  Gerber keeps its native aperture/flash form — it just sources from the
+  stream.
 
 ## Editing philosophy: permissive, never a hard "no"
 
@@ -125,8 +163,10 @@ Cheap now, expensive to retrofit. Every roadmap feature reduces to these:
    splitting via `resize_handle`), even while v1 renders one pane. Two panes
    on the same doc get independent cameras by key. This split is also the
    prerequisite for pop-out OS windows later (one damascene Runner per window
-   over shared domain state — requires a custom winit host; explicitly out of
-   scope until needed).
+   over shared domain state). *Updated 2026-07-07:* the custom winit host is
+   no longer deferred — the owned-canvas decision (see Canvas strategy)
+   requires it, so it lands as that campaign's first slice; per-pane cameras
+   move from damascene `UiState` into `PaneState` with it.
 4. **Tools as a mode state machine with a preview channel** — the active tool
    owns uncommitted preview geometry rendered into the overlay; commit writes
    to the source (via the command layer), then re-elaborates.
@@ -146,7 +186,9 @@ Cheap now, expensive to retrofit. Every roadmap feature reduces to these:
 
 Editing is source-first: every mutation is a command against the `.ecad`
 source; re-elaborate derives everything else; undo/redo is source snapshots
-(byte-lossless serializer makes them exact). Background work (file watch,
+(byte-lossless serializer makes them exact — and identity-exact once
+Decision 22 lands: today a snapshot round-trip re-mints route ids, which is
+issue 0034's undo-renumbering gap). Background work (file watch,
 debounced DRC) arrives via the mailbox pattern (`before_build` drain +
 external wakeup).
 
