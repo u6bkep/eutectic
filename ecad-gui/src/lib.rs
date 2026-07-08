@@ -13,6 +13,7 @@ pub mod findings;
 pub mod fixtures;
 pub mod harness;
 pub mod highlight;
+pub mod host;
 pub mod inspector;
 mod panels;
 mod panes;

@@ -20,7 +20,7 @@
 //! (`src/bin/review.rs` and the `fixtures` tests) is what proves the UI in CI.
 
 use damascene_core::prelude::Rect;
-use damascene_winit_wgpu::HostConfig;
+use ecad_gui::host::HostConfig;
 use ecad_gui::{DomainState, EcadApp, LibSource, Registry, SourceMailbox};
 
 /// The per-machine registry file location — computed **only here** (the
@@ -123,5 +123,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    damascene_winit_wgpu::run_with_config("ecad", viewport, app, config)
+    ecad_gui::host::run_with_config("ecad", viewport, app, config)
 }
