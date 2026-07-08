@@ -190,13 +190,9 @@ fn findings_header_never_overlaps_with_long_counts() {
 
     let header = find_by_key(&root, &SidebarSection::Findings.toggle_key())
         .expect("the findings header laid out");
-    // 0.4.5 stores laid-out rects in `UiState`, keyed by each node's public
-    // `computed_id` (unkeyed children included), read back with `UiState::rect`.
-    let cells: Vec<Rect> = header
-        .children
-        .iter()
-        .map(|c| ui.rect(&c.computed_id))
-        .collect();
+    // 0.4.6 moved layout rects in-node: `UiState::rect` only resolves keyed
+    // nodes, so unkeyed header cells are read from `El::computed_rect`.
+    let cells: Vec<Rect> = header.children.iter().map(|c| c.computed_rect).collect();
     // icon + label + err chip + warn chip + chevron.
     assert_eq!(cells.len(), 5, "header cells: {cells:?}");
     // The label (index 1) keeps a positive width — it never collapses to zero.
@@ -215,7 +211,7 @@ fn findings_header_never_overlaps_with_long_counts() {
         );
     }
     // Every cell stays within the 288 px header.
-    let hr = ui.rect(&header.computed_id);
+    let hr = header.computed_rect;
     for c in &cells {
         assert!(
             c.x >= hr.x - 0.5 && c.right() <= hr.right() + 0.5,

@@ -5,5 +5,5 @@ edition = "2024"
 
 [dependencies]
 ecad-core = { path = "../ecad-core" }
-damascene-core = "0.4.5"
-damascene-winit-wgpu = "0.4.5"
+damascene-core = { git = "https://github.com/computer-whisperer/damascene.git", rev = "eef1630a198c9c9160f6dc3568eecbc904d76e46" }
+damascene-winit-wgpu = { git = "https://github.com/computer-whisperer/damascene.git", rev = "eef1630a198c9c9160f6dc3568eecbc904d76e46" }

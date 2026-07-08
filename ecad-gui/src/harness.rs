@@ -227,7 +227,7 @@ pub fn content_bounds_of(r: &Rendered, key: &str) -> Option<damascene_core::prel
 /// Depth-first search for the `computed_id` of the node carrying `key`.
 fn computed_id_for_key(root: &El, key: &str) -> Option<String> {
     if root.key.as_deref() == Some(key) {
-        return Some(root.computed_id.clone());
+        return Some(root.computed_id.to_string());
     }
     for child in &root.children {
         if let Some(id) = computed_id_for_key(child, key) {
