@@ -462,6 +462,53 @@ route 1 VCC F.Cu w=0.15mm (0, 1mm) (1mm, 1mm)
     assert_eq!(p.warnings.len(), 1, "only the id-less line warns");
 }
 
+/// A hand-authored `u64::MAX` id must not brick the file (Decision 22, point 2). The mint
+/// seed is `max + 1`; at `u64::MAX` that overflows. In debug it panics while *constructing*
+/// the allocator — which `resolve_route_ids` always does — so parse aborts even when no
+/// line needs minting at all. The saturating seed makes such a file parse verbatim.
+#[test]
+fn route_max_id_parses_without_panicking() {
+    let text = "\
+route 0 GND F.Cu w=0.15mm (0, 0) (1mm, 0)
+route 18446744073709551615 VCC F.Cu w=0.15mm (0, 1mm) (1mm, 1mm)
+";
+    let p = parse(text).expect("a hand-authored u64::MAX id must never brick the file");
+    assert!(p.warnings.is_empty(), "no minting needed, so no warning");
+    assert_eq!(p.traces[&TraceId(0)].net.to_string(), "GND");
+    assert_eq!(p.traces[&TraceId(u64::MAX)].net.to_string(), "VCC");
+}
+
+/// With a `u64::MAX` id present *and* a mintable line, a release build (pre-fix) wrapped the
+/// cursor to `0`, minted `TraceId(0)`, and its `BTreeMap` insert silently REPLACED the
+/// existing low-id route — wholesale route loss. The saturating seed pins the mint at the
+/// ceiling instead, so low-id routes are never clobbered. (The mint does collide with the
+/// sole hand-authored `u64::MAX` route — the inherent, documented residual of a full `u64`
+/// namespace — but that is bounded to the top, not a renumber from `0`.)
+#[test]
+fn route_max_id_mint_does_not_clobber_low_ids() {
+    let text = "\
+route 0 GND F.Cu w=0.15mm (0, 0) (1mm, 0)
+route 18446744073709551615 VCC F.Cu w=0.15mm (0, 1mm) (1mm, 1mm)
+route SIG F.Cu w=0.15mm (0, 2mm) (1mm, 2mm)
+";
+    let p = parse(text).expect("parse must not panic on a mintable line above a max id");
+    // The crux: the low-id route survives — no wrap-to-0 mint overwrote it.
+    assert_eq!(
+        p.traces[&TraceId(0)].net.to_string(),
+        "GND",
+        "low-id route is never clobbered by a saturating mint"
+    );
+    // The mintable line loaded and was warned about (its minted id saturated at the top).
+    assert_eq!(
+        p.warnings.iter().map(|w| w.code).collect::<Vec<_>>(),
+        vec!["W_ROUTE_ID"],
+    );
+    assert!(
+        p.traces.values().any(|t| t.net.to_string() == "SIG"),
+        "the mintable line still loads"
+    );
+}
+
 /// Explicit distinct ids parse verbatim with no warning — the serializer's own output,
 /// and the round-trip guarantee (Decision 22).
 #[test]

@@ -120,30 +120,78 @@ pub struct RouteIdAlloc {
 impl RouteIdAlloc {
     /// Seed the allocator above the given trace ids and via ids. The first minted id in
     /// each namespace is `max + 1` (or `1` when that namespace is empty), matching the
-    /// former `keys().map(|k| k.0 + 1).max().unwrap_or(1)` derivation exactly. Callers
-    /// pass *every* id they must clear — for the parser this includes explicit ids on
-    /// lines not yet reached, so parse order can never make a mint collide.
+    /// former `keys().map(|k| k.0 + 1).max().unwrap_or(1)` derivation for every id below
+    /// the `u64` ceiling. Callers pass *every* id they must clear — for the parser this
+    /// includes explicit ids on lines not yet reached, so parse order can never make a
+    /// mint collide.
+    ///
+    /// The `+ 1` is **saturating**, so a hand-authored `u64::MAX` id (Decision 22 point 2:
+    /// "hand-editing can never brick a file") seeds the cursor at `u64::MAX` rather than
+    /// overflowing — a debug panic on every parse, or a release wrap to `0` that would let
+    /// a later mint silently clobber low-id routes. At that ceiling the namespace is truly
+    /// full at the top: `mint_*` then hands back `u64::MAX` (see below), which *can* collide
+    /// with the sole hand-authored `u64::MAX` route. That single top-of-namespace collision
+    /// is inherent to a full `u64` and is the only residual — orders of magnitude milder
+    /// than renumbering the whole file from `0`, and unreachable by actual minting.
     pub fn above(
         traces: impl IntoIterator<Item = u64>,
         vias: impl IntoIterator<Item = u64>,
     ) -> Self {
         RouteIdAlloc {
-            next_tid: traces.into_iter().max().map_or(1, |m| m + 1),
-            next_vid: vias.into_iter().max().map_or(1, |m| m + 1),
+            next_tid: traces.into_iter().max().map_or(1, |m| m.saturating_add(1)),
+            next_vid: vias.into_iter().max().map_or(1, |m| m.saturating_add(1)),
         }
     }
 
-    /// Mint the next trace id.
+    /// Mint the next trace id. The cursor advance is saturating: at the `u64::MAX` ceiling
+    /// (only reachable via a hand-authored max-value id — see [`above`](Self::above)) it
+    /// stays pinned rather than overflowing to `0`, so a mint near the top can never wrap
+    /// back to renumber low-id routes.
     pub fn mint_trace(&mut self) -> TraceId {
         let id = TraceId(self.next_tid);
-        self.next_tid += 1;
+        self.next_tid = self.next_tid.saturating_add(1);
         id
     }
 
-    /// Mint the next via id.
+    /// Mint the next via id. Saturating advance, as [`mint_trace`](Self::mint_trace).
     pub fn mint_via(&mut self) -> ViaId {
         let id = ViaId(self.next_vid);
-        self.next_vid += 1;
+        self.next_vid = self.next_vid.saturating_add(1);
         id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seeds_one_above_max() {
+        let mut a = RouteIdAlloc::above([3, 7, 1], [2]);
+        assert_eq!(a.mint_trace(), TraceId(8));
+        assert_eq!(a.mint_via(), ViaId(3));
+    }
+
+    #[test]
+    fn empty_namespace_starts_at_one() {
+        let mut a = RouteIdAlloc::above([], []);
+        assert_eq!(a.mint_trace(), TraceId(1));
+        assert_eq!(a.mint_via(), ViaId(1));
+    }
+
+    /// A hand-authored `u64::MAX` id must not overflow the seed: in debug this would
+    /// panic on *any* parse (bricking a file that needs no minting at all), and in
+    /// release it would wrap the cursor to `0` so a later mint clobbers low-id routes.
+    /// Saturating seed + saturating advance pin the cursor at `u64::MAX` instead — the
+    /// mint stays at the top of the namespace and never wraps back over live ids.
+    #[test]
+    fn max_id_saturates_instead_of_overflowing() {
+        let mut a = RouteIdAlloc::above([u64::MAX], [u64::MAX]);
+        // Seed pinned at the ceiling, not wrapped to 0.
+        assert_eq!(a.mint_trace(), TraceId(u64::MAX));
+        assert_eq!(a.mint_via(), ViaId(u64::MAX));
+        // The advance also saturates: still pinned, never 0.
+        assert_eq!(a.mint_trace(), TraceId(u64::MAX));
+        assert_eq!(a.mint_via(), ViaId(u64::MAX));
     }
 }
