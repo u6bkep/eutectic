@@ -17,7 +17,7 @@
 //!
 //! # The host loop we mirror
 //!
-//! From `damascene-winit-wgpu-0.4.5/src/lib.rs` (`RunnerCore`'s redraw path, the
+//! From the in-tree host copy at `src/host.rs` (`RunnerCore`'s redraw path, the
 //! `frame::build` / `frame::prepare` spans), each frame runs, in order:
 //!
 //! 1. `WinitWgpuApp::before_build(&mut app)` — the app queues per-frame state
