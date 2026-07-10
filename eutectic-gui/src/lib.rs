@@ -19,6 +19,7 @@ mod panels;
 mod panes;
 pub mod registry;
 pub mod reload;
+pub mod render;
 pub mod schematic_view;
 pub mod selection;
 pub mod tool;

@@ -20,10 +20,23 @@ eutectic-core = { path = "../eutectic-core" }
 # pulled in.
 damascene-core = { git = "https://github.com/computer-whisperer/damascene.git", rev = "eef1630a198c9c9160f6dc3568eecbc904d76e46" }
 damascene-wgpu = { git = "https://github.com/computer-whisperer/damascene.git", rev = "eef1630a198c9c9160f6dc3568eecbc904d76e46" }
+# `bytemuck` casts the owned renderer's instance/vertex/uniform structs to GPU
+# bytes (`src/render/`); `lyon_tessellation` is its polygon-with-holes
+# triangulator (renderer-spec §3: earcut-class, CPU-side, unit-testable — lyon
+# was the spec's default candidate; it handles hole rings via fill rules and
+# has no renderer baggage, unlike full lyon / earcutr which lacks a fill-rule
+# story for pre-oriented ring sets).
+bytemuck = { version = "1", features = ["derive"] }
 log = "0.4"
+lyon_tessellation = "1"
 pollster = "0.4"
 wgpu = "29"
 winit = { version = "0.30", features = ["android-native-activity"] }
+
+[dev-dependencies]
+# Golden-image encode/decode for the GPU render snapshots (gw-25) in
+# `tests/render_goldens.rs`.
+png = "0.17"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 # `arboard` backs the native clipboard bridge in the copied host; `open`
