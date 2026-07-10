@@ -57,7 +57,8 @@ net GND U1.GND
 struct Scratch(std::path::PathBuf);
 impl Scratch {
     fn new(tag: &str) -> Scratch {
-        let dir = std::env::temp_dir().join(format!("eutectic-app-test-{tag}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("eutectic-app-test-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create scratch dir");
         Scratch(dir)
     }

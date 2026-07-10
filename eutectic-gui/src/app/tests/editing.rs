@@ -44,7 +44,11 @@ fn commit_serialize_fixpoint_and_bookkeeping() {
             Vec::new()
         });
     let doc2 = d2.doc.as_ref().expect("canonical text elaborates");
-    assert_eq!(eutectic_core::text::serialize(doc2), s, "serialize fixpoint");
+    assert_eq!(
+        eutectic_core::text::serialize(doc2),
+        s,
+        "serialize fixpoint"
+    );
     assert_eq!(
         doc2.components[&EntityId::new("C1")].pos.value,
         doc.components[&EntityId::new("C1")].pos.value,

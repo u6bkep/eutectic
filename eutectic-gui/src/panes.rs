@@ -371,8 +371,10 @@ impl EutecticApp {
                 let (mx, my) = f.board_mm?;
                 Some((
                     eutectic_core::coord::Point {
-                        x: (mx * eutectic_core::coord::MM as f32).round() as eutectic_core::coord::Nm,
-                        y: (my * eutectic_core::coord::MM as f32).round() as eutectic_core::coord::Nm,
+                        x: (mx * eutectic_core::coord::MM as f32).round()
+                            as eutectic_core::coord::Nm,
+                        y: (my * eutectic_core::coord::MM as f32).round()
+                            as eutectic_core::coord::Nm,
                     },
                     f.is_error(),
                 ))

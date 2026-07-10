@@ -430,7 +430,11 @@ fn routed_trace_is_lint_clean_and_committed() {
     );
     let (width, ..) = crate::app::route_defaults();
     assert_eq!(t.width, width, "the DRC/router default width (0.15 mm)");
-    assert_eq!(t.prov, eutectic_core::doc::Provenance::Pinned, "hand-routed");
+    assert_eq!(
+        t.prov,
+        eutectic_core::doc::Provenance::Pinned,
+        "hand-routed"
+    );
     // The commit left the new trace selected, ready for refinement.
     let tid = *doc.traces.keys().next().unwrap();
     assert_eq!(

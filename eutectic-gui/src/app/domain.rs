@@ -185,9 +185,12 @@ impl DomainState {
     /// `History` + `Command::LoadText`). Never panics: an elaboration failure
     /// is captured in [`DomainState::doc`] as `Err` for the UI to display.
     pub fn from_source(source: String, filename: Option<String>) -> Self {
-        Self::from_source_with(source, filename, eutectic_core::part::part_library(), |_| {
-            Vec::new()
-        })
+        Self::from_source_with(
+            source,
+            filename,
+            eutectic_core::part::part_library(),
+            |_| Vec::new(),
+        )
     }
 
     /// Load a document from `.eut` source with an explicit part library and a

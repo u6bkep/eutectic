@@ -120,7 +120,10 @@ fn world_features_footprint_text_honours_ttf_font() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    path.push(format!("eutectic-route-ttf-{}-{stamp}.ttf", std::process::id()));
+    path.push(format!(
+        "eutectic-route-ttf-{}-{stamp}.ttf",
+        std::process::id()
+    ));
     std::fs::write(&path, crate::ttf::build_test_ttf()).unwrap();
 
     // A footprint carrying a single silk text anchor.

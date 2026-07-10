@@ -1056,7 +1056,9 @@ fn main() {
     // fill fragmented by knockouts, leave islands. Honest per-plane status.
     for plane in ["GND", "+3V3"] {
         let islands = un.iter().find_map(|v| match v {
-            eutectic_core::route::Violation::Unrouted { net, islands } if net.to_string() == plane => {
+            eutectic_core::route::Violation::Unrouted { net, islands }
+                if net.to_string() == plane =>
+            {
                 Some(*islands)
             }
             _ => None,

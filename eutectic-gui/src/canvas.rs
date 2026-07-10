@@ -1323,7 +1323,9 @@ fn layer_color(su: &Stackup, name: &str) -> Color {
         Some(Role::Marking) => Color::srgb_token("eutectic.layer.silk", 0xe0, 0xe0, 0xe0, 0xff),
         Some(Role::Mask) => Color::srgb_token("eutectic.layer.mask", 0x1f, 0x6f, 0x43, 0xff),
         Some(Role::Datum) => Color::srgb_token("eutectic.layer.fab", 0xc8, 0x8a, 0x2c, 0xff),
-        Some(Role::Substrate) => Color::srgb_token("eutectic.layer.substrate", 0x2a, 0x2a, 0x2a, 0xff),
+        Some(Role::Substrate) => {
+            Color::srgb_token("eutectic.layer.substrate", 0x2a, 0x2a, 0x2a, 0xff)
+        }
         _ => Color::srgb_token("eutectic.layer.other", 0x88, 0x88, 0x88, 0xff),
     }
 }
