@@ -413,7 +413,10 @@ pub struct Renderer {
     plane_slots: u32,
     state_buf: wgpu::Buffer,
     state_capacity_words: usize,
-    state_uploaded_gen: Option<u64>,
+    /// `(SemanticStates::id, generation)` of the last upload — the pair
+    /// prevents cross-instance aliasing when the caller swaps flag buffers
+    /// (doc switch) whose independent generation counters happen to match.
+    state_uploaded_gen: Option<(u64, u64)>,
 
     cover_bg: wgpu::BindGroup,
     comp_bg: Option<wgpu::BindGroup>,
@@ -802,9 +805,9 @@ impl Renderer {
             });
             self.state_uploaded_gen = None;
         }
-        if self.state_uploaded_gen != Some(state.generation()) {
+        if self.state_uploaded_gen != Some((state.id(), state.generation())) {
             queue.write_buffer(&self.state_buf, 0, bytemuck::cast_slice(words));
-            self.state_uploaded_gen = Some(state.generation());
+            self.state_uploaded_gen = Some((state.id(), state.generation()));
         }
     }
 

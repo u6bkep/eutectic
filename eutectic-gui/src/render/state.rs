@@ -18,10 +18,41 @@ pub const FLAG_SELECTED: u32 = 1 << 1;
 pub const FLAG_EMPHASIS: u32 = 1 << 2;
 
 /// Per-semantic-id flag words + a generation counter for damage tracking.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub struct SemanticStates {
+    /// Process-unique buffer identity (see [`id`](SemanticStates::id)):
+    /// generations from *different* `SemanticStates` are not comparable, so
+    /// the renderer keys its GPU upload on `(id, generation)` — a fresh
+    /// instance (doc swap) or a diverged clone can never alias a previously
+    /// uploaded generation number and skip its upload.
+    id: u64,
     words: Vec<u32>,
     generation: u64,
+}
+
+fn next_states_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// A clone is a *new* flag buffer that happens to start with the same
+/// content — it diverges independently, so it mints a fresh identity.
+impl Clone for SemanticStates {
+    fn clone(&self) -> SemanticStates {
+        SemanticStates {
+            id: next_states_id(),
+            words: self.words.clone(),
+            generation: self.generation,
+        }
+    }
+}
+
+/// Content equality (words + generation); the buffer identity is excluded.
+impl PartialEq for SemanticStates {
+    fn eq(&self, other: &SemanticStates) -> bool {
+        self.words == other.words && self.generation == other.generation
+    }
 }
 
 impl SemanticStates {
@@ -30,9 +61,17 @@ impl SemanticStates {
     /// [`set_word`](SemanticStates::set_word)).
     pub fn new(len: usize) -> SemanticStates {
         SemanticStates {
+            id: next_states_id(),
             words: vec![0; len.max(1)],
             generation: 0,
         }
+    }
+
+    /// The process-unique identity of this flag buffer (fresh per
+    /// construction and per clone). Pair it with
+    /// [`generation`](SemanticStates::generation) when caching uploads.
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     /// Sized for a scene's semantic table.
@@ -136,5 +175,23 @@ mod tests {
         s.clear();
         assert_eq!(s.generation(), g + 1);
         assert!(s.words().iter().all(|&w| w == 0));
+    }
+
+    #[test]
+    fn buffer_identity_is_unique_per_instance_and_per_clone() {
+        // Two fresh buffers at the same generation must not alias in the
+        // renderer's (id, generation) upload key — the doc-swap scenario.
+        let mut a = SemanticStates::new(8);
+        let mut b = SemanticStates::new(8);
+        assert_ne!(a.id(), b.id());
+        a.set_word(1, FLAG_SELECTED);
+        b.set_word(2, FLAG_SELECTED);
+        assert_eq!(a.generation(), b.generation());
+        assert_ne!((a.id(), a.generation()), (b.id(), b.generation()));
+        // A clone diverges independently, so it is a new buffer identity —
+        // equal content, distinct id.
+        let c = a.clone();
+        assert_ne!(c.id(), a.id());
+        assert_eq!(c, a);
     }
 }
