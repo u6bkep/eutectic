@@ -26,16 +26,30 @@
 //! component — anything absent from the tree lands in a derived "unplaced bin" (a plain
 //! grid), so the schematic never silently omits a part.
 //!
-//! This module is a facade over four private submodules — [`model`] (the authored
-//! tree), [`symbol`] (box-with-pins sizing), [`validate`] (tier-1 diagnostics), and
-//! [`reflow`] (the derived-coordinate flexbox engine) — all re-exported so every
-//! `crate::schematic::` consumer path keeps resolving.
+//! On top of the coordinates sits the **realized-geometry tier** (Decision 23):
+//! [`schematic_features`] emits every primitive the drawing consists of — typed shapes +
+//! text runs with semantic provenance and style classes, plus the content bounds — so the
+//! SVG renderer, the GUI projection/pick, and the owned renderer to come are all pure
+//! consumers of one stream (see [`features`] for the contract, and [`symbol_body`] for
+//! the symbol-artwork seam).
+//!
+//! This module is a facade over five private submodules — [`model`] (the authored
+//! tree), [`symbol`] (box-with-pins sizing), [`validate`] (tier-1 diagnostics),
+//! [`reflow`] (the derived-coordinate flexbox engine), and [`features`] (the realized
+//! drawing) — all re-exported so every `crate::schematic::` consumer path keeps
+//! resolving.
 
+mod features;
 mod model;
 mod reflow;
 mod symbol;
 mod validate;
 
+pub use features::{
+    Bounds, HEADER_GAP, HEADER_TEXT_H, LABEL_PAD, MARGIN, PIN_TEXT_H, PinAnchor, Provenance,
+    STUB_LEN, SYMBOL_STROKE, SchematicFeature, SchematicFeatures, Shape, StyleClass, SymbolBody,
+    TAG_TEXT_H, TextJustify, TextRun, WIRE_STROKE, schematic_features, symbol_body,
+};
 pub use model::{Align, Container, Direction, LayoutNode, SchematicLayout, Symbol, Wire, WireEnd};
 pub use reflow::{Placement, reflow};
 pub use symbol::{Extent, PinSide, PinSlot, header_width, pin_slots, symbol_extent};

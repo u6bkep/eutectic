@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-23.270000 -27.400000 92.880000 30.900000">
+  <polyline class="wire" points="8.710000,-21.360000 21.730000,-20.090000" fill="none" stroke="#0a0" stroke-width="0.15"/>
+  <polyline class="wire" points="29.610000,-20.090000 0.000000,-11.900000 47.610000,-20.090000" fill="none" stroke="#0a0" stroke-width="0.15"/>
+  <g class="symbol" data-id="C1">
+    <rect class="body" x="23.000000" y="-22.630000" width="5.340000" height="7.620000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="23.000000" y="-23.130000" font-size="1.500000">Cap1 (Cap)</text>
+    <line class="stub" x1="23.000000" y1="-20.090000" x2="21.730000" y2="-20.090000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="23.317500" y="-19.756667" font-size="1.000000" text-anchor="start">p1</text>
+    <text class="tag" x="21.095000" y="-19.756667" font-size="1.000000" text-anchor="end">VBUS</text>
+    <line class="stub" x1="28.340000" y1="-20.090000" x2="29.610000" y2="-20.090000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="28.022500" y="-19.756667" font-size="1.000000" text-anchor="end">p2</text>
+    <text class="tag" x="30.245000" y="-19.756667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="C2">
+    <rect class="body" x="41.000000" y="-22.630000" width="5.340000" height="7.620000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="41.000000" y="-23.130000" font-size="1.500000">Cap2 (Cap)</text>
+    <line class="stub" x1="41.000000" y1="-20.090000" x2="39.730000" y2="-20.090000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="41.317500" y="-19.756667" font-size="1.000000" text-anchor="start">p1</text>
+    <text class="tag" x="39.095000" y="-19.756667" font-size="1.000000" text-anchor="end">VBUS</text>
+    <line class="stub" x1="46.340000" y1="-20.090000" x2="47.610000" y2="-20.090000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="46.022500" y="-19.756667" font-size="1.000000" text-anchor="end">p2</text>
+    <text class="tag" x="48.245000" y="-19.756667" font-size="1.000000" text-anchor="start">GND</text>
+  </g>
+  <g class="symbol" data-id="U1">
+    <rect class="body" x="0.000000" y="-8.660000" width="6.740000" height="10.160000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="0.000000" y="-9.160000" font-size="1.500000">MCU1 (MCU)</text>
+    <line class="stub" x1="0.000000" y1="-6.120000" x2="-1.270000" y2="-6.120000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="0.317500" y="-5.786667" font-size="1.000000" text-anchor="start">VDD</text>
+    <line class="stub" x1="6.740000" y1="-6.120000" x2="8.010000" y2="-6.120000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="6.422500" y="-5.786667" font-size="1.000000" text-anchor="end">GND</text>
+    <text class="tag" x="8.645000" y="-5.786667" font-size="1.000000" text-anchor="start">GND</text>
+    <line class="stub" x1="0.000000" y1="-3.580000" x2="-1.270000" y2="-3.580000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="0.317500" y="-3.246667" font-size="1.000000" text-anchor="start">rx</text>
+    <line class="stub" x1="6.740000" y1="-3.580000" x2="8.010000" y2="-3.580000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="6.422500" y="-3.246667" font-size="1.000000" text-anchor="end">tx</text>
+  </g>
+  <g class="symbol" data-id="reg">
+    <rect class="body" x="0.000000" y="-23.900000" width="7.440000" height="10.160000" fill="none" stroke="black" stroke-width="0.1"/>
+    <text class="header" x="0.000000" y="-24.400000" font-size="1.500000">LDO1 (LDO)</text>
+    <line class="stub" x1="0.000000" y1="-21.360000" x2="-1.270000" y2="-21.360000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="0.317500" y="-21.026667" font-size="1.000000" text-anchor="start">VIN</text>
+    <line class="stub" x1="7.440000" y1="-21.360000" x2="8.710000" y2="-21.360000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="7.122500" y="-21.026667" font-size="1.000000" text-anchor="end">VOUT</text>
+    <text class="tag" x="9.345000" y="-21.026667" font-size="1.000000" text-anchor="start">VBUS</text>
+    <line class="stub" x1="0.000000" y1="-18.820000" x2="-1.270000" y2="-18.820000" stroke="black" stroke-width="0.1"/>
+    <text class="pin" x="0.317500" y="-18.486667" font-size="1.000000" text-anchor="start">GND</text>
+    <text class="tag" x="-1.905000" y="-18.486667" font-size="1.000000" text-anchor="end">GND</text>
+  </g>
+  <line class="bin-divider" x1="-22.270000" y1="-11.200000" x2="68.610000" y2="-11.200000" stroke="#888" stroke-width="0.1" stroke-dasharray="1,1"/>
+  <text class="bin-label" x="-22.270000" y="-9.700000" font-size="1.500000" fill="#888">unplaced</text>
+</svg>

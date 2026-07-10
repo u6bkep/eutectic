@@ -2,10 +2,15 @@
 
 use super::*;
 use crate::fixtures::schematic_domain;
-use eutectic_core::id::EntityId;
+use eutectic_core::id::{EntityId, NetId};
+use eutectic_core::schematic::symbol_body;
 
 /// The schematic fixture's (doc, lib, view).
-fn fixture() -> (eutectic_core::doc::Doc, eutectic_core::part::PartLib, SchematicView) {
+fn fixture() -> (
+    eutectic_core::doc::Doc,
+    eutectic_core::part::PartLib,
+    SchematicView,
+) {
     let d = schematic_domain();
     let doc = d
         .doc
@@ -17,12 +22,41 @@ fn fixture() -> (eutectic_core::doc::Doc, eutectic_core::part::PartLib, Schemati
 }
 
 /// The placement centre of a component in schematic space.
-fn center_of(doc: &eutectic_core::doc::Doc, lib: &eutectic_core::part::PartLib, path: &str) -> Point {
+fn center_of(
+    doc: &eutectic_core::doc::Doc,
+    lib: &eutectic_core::part::PartLib,
+    path: &str,
+) -> Point {
     let placements = doc.reflow_schematic(lib);
     placements
         .get(&EntityId::new(path))
         .expect("component placed")
         .center
+}
+
+/// The stub-tip point of a pin (by display name) on an identity-rotation symbol centred
+/// at `center` — from the core artwork seam, the same source the view consumes.
+fn pin_tip(lib: &eutectic_core::part::PartLib, part: &str, pin_name: &str, center: Point) -> Point {
+    let def = lib.get(part).expect("part in lib");
+    let anchor = symbol_body(def)
+        .pins
+        .into_iter()
+        .find(|p| p.name == pin_name)
+        .unwrap_or_else(|| panic!("{part} has a {pin_name} pin"));
+    Point {
+        x: center.x + anchor.tip.x,
+        y: center.y + anchor.tip.y,
+    }
+}
+
+/// The stored pin id (pad number / `port.signal`) of a pin, by display name.
+fn pin_id(lib: &eutectic_core::part::PartLib, part: &str, pin_name: &str) -> String {
+    symbol_body(lib.get(part).expect("part in lib"))
+        .pins
+        .into_iter()
+        .find(|p| p.name == pin_name)
+        .unwrap_or_else(|| panic!("{part} has a {pin_name} pin"))
+        .id
 }
 
 /// Clicking the centre of a symbol body (clear of its pins) selects that part.
@@ -39,20 +73,14 @@ fn click_symbol_body_selects_part() {
 fn click_pin_selects_pin() {
     let (doc, lib, view) = fixture();
     let center = center_of(&doc, &lib, "U1");
-    let def = lib.get("MCU").unwrap();
-    let unrot_hw = symbol_extent(def).w / 2;
-    let slot = pin_slots(def)
-        .into_iter()
-        .find(|s| s.name == "VDD")
-        .expect("MCU has a VDD pin");
-    let g = stub_geometry(slot.side, unrot_hw, slot.dy, Orient::IDENTITY);
-    let tip = offset(center, g.tip);
+    let tip = pin_tip(&lib, "MCU", "VDD", center);
     let id = view.resolve(tip, 0).expect("pin hit");
     match id {
         SemanticId::Pin { comp, pin } => {
             assert_eq!(comp, EntityId::new("U1"));
             assert_eq!(
-                pin, slot.id,
+                pin,
+                pin_id(&lib, "MCU", "VDD"),
                 "pin id must be the pad NUMBER (the PinRef join key)"
             );
         }
@@ -65,35 +93,8 @@ fn click_pin_selects_pin() {
 #[test]
 fn click_wire_selects_net() {
     let (doc, lib, view) = fixture();
-    let c1 = center_of(&doc, &lib, "C1");
-    let u1 = center_of(&doc, &lib, "U1");
-    let cap = lib.get("Cap").unwrap();
-    let mcu = lib.get("MCU").unwrap();
-    let cap_slot = pin_slots(cap).into_iter().find(|s| s.id == "p1").unwrap();
-    let mcu_slot = pin_slots(mcu)
-        .into_iter()
-        .find(|s| s.name == "VDD")
-        .unwrap();
-    let a = offset(
-        c1,
-        stub_geometry(
-            cap_slot.side,
-            symbol_extent(cap).w / 2,
-            cap_slot.dy,
-            Orient::IDENTITY,
-        )
-        .tip,
-    );
-    let b = offset(
-        u1,
-        stub_geometry(
-            mcu_slot.side,
-            symbol_extent(mcu).w / 2,
-            mcu_slot.dy,
-            Orient::IDENTITY,
-        )
-        .tip,
-    );
+    let a = pin_tip(&lib, "Cap", "p1", center_of(&doc, &lib, "C1"));
+    let b = pin_tip(&lib, "MCU", "VDD", center_of(&doc, &lib, "U1"));
     let mid = Point {
         x: (a.x + b.x) / 2,
         y: (a.y + b.y) / 2,
@@ -183,5 +184,18 @@ fn pointer_to_schematic_nm_round_trips() {
     assert!(
         (back.x - p.x).abs() <= tol && (back.y - p.y).abs() <= tol,
         "round-trip {back:?} must recover {p:?} within {tol}nm"
+    );
+}
+
+/// The view frames from the stream's shared bounds — the same numbers the SVG viewBox
+/// uses (one home for the extent math, Decision 23).
+#[test]
+fn content_bounds_come_from_the_stream() {
+    let (doc, lib, view) = fixture();
+    let fs = eutectic_core::schematic::schematic_features(&doc, &lib);
+    assert_eq!(
+        view.bounds,
+        (fs.bounds.x0, fs.bounds.y0, fs.bounds.x1, fs.bounds.y1),
+        "view bounds must be the stream's bounds, verbatim"
     );
 }

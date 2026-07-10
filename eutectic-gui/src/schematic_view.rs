@@ -1,26 +1,27 @@
-//! The schematic canvas: a read-only projection from the elaborated schematic
-//! **reflow layout** to damascene [`VectorAsset`]s (milestone 4).
+//! The schematic canvas: a thin projection from the core realized-geometry stream
+//! ([`schematic_features`], Decision 23) to damascene [`VectorAsset`]s.
 //!
 //! This is the schematic twin of [`crate::canvas`]. Where the board canvas walks
-//! `world_features`, the schematic canvas consumes the *same reflow layout the SVG
-//! export does* — [`Doc::reflow_schematic`] (per-component [`Placement`]s: box centre +
-//! extent, schematic-space nm, y-up) plus the authored presentational wires
-//! ([`SchematicLayout::wires`]) — and renders symbol boxes with pin stubs, wires, net
-//! tags, and text labels, matching [`schematic_svg`](eutectic_core::schematic_svg)'s
-//! conventions (§20c/§20d): stubs from `pin_slots` in the part's unrotated frame,
-//! rotated by the authored `rot`; wires meet stub *tips*; tags at the tip, names inside
-//! the edge; the flip-within-bounds so the drawing reads upright.
+//! `world_features`, the schematic canvas consumes `schematic_features` — the same
+//! stream the SVG export serializes — so drawing conventions (stub lengths, text
+//! heights, margins, the bounds math) live in core exactly once and this module holds
+//! **no geometry of its own**: the static asset, the pick candidates, and the content
+//! bounds are all folds over the stream and its provenance. What lives here is pure
+//! realization — style class → color token, nm → viewBox mm, the y-flip, and text runs
+//! → stroked glyphs.
+//!
+//! **Scheduled for DELETION with the viewport path** (owned-canvas pivot,
+//! docs/gui-architecture.md "Canvas strategy"): the owned renderer will ingest the same
+//! stream directly. This rewire makes the module thin, not permanent — do not grow it.
 //!
 //! # Text as stroked glyphs
 //!
 //! A viewport child is a vector asset in content space, so text can't be a damascene
-//! `text()` El (which flows in chrome layout). Like the board silk layer, the schematic
-//! renders every label — the `refdes (part)` header, each pin name, each net tag — as
-//! **stroked glyph polylines** via [`eutectic_core::font::text_strokes`] (the same public
-//! stroke font the board silk uses), so labels register pixel-exact in the same asset.
-//! This differs from `schematic_svg.rs`, which emits `<text>`; see the module deviation
-//! note. The geometry (boxes / stubs / wires / tag positions) is byte-conceptually the
-//! SVG's; only the glyph *rendering* differs (stroked vs `<text>`).
+//! `text()` El (which flows in chrome layout). The stream carries text as *runs*; this
+//! projection realizes each run as stroked glyph polylines via
+//! [`eutectic_core::font::text_strokes`] (the same public stroke font the board silk
+//! uses), honoring the run's baseline anchor and justify. This differs from
+//! `schematic_svg.rs`, which realizes the same runs as `<text>`.
 //!
 //! # Caching + overlay
 //!
@@ -35,35 +36,17 @@ use damascene_core::prelude::{
 };
 use damascene_core::vector::{VectorLineCap, VectorLineJoin};
 use damascene_core::viewport::ViewportView;
-use eutectic_core::annotate;
 use eutectic_core::coord::{MM, Nm, Point};
-use eutectic_core::doc::{Doc, Orient};
+use eutectic_core::doc::Doc;
 use eutectic_core::font::{Justify, text_strokes};
-use eutectic_core::id::{EntityId, NetId};
-use eutectic_core::part::{PartDef, PartLib};
-use eutectic_core::schematic::{PinSide, PinSlot, Placement, Wire, pin_slots, symbol_extent};
-use std::collections::{BTreeMap, BTreeSet};
+use eutectic_core::part::PartLib;
+use eutectic_core::schematic::{
+    Provenance, STUB_LEN, Shape, StyleClass, TextJustify, TextRun, schematic_features,
+};
+use std::collections::BTreeSet;
 
-/// Length of a pin stub out from the box edge — mirrors `schematic_svg::STUB_LEN`
-/// (half a pin pitch). Kept in sync with the SVG so wires meet the stub tips identically.
-const STUB_LEN: Nm = 1_270_000;
-/// Text heights (nm), matching `schematic_svg`'s `PIN_TEXT_H` / `HEADER_TEXT_H` /
-/// `TAG_TEXT_H`, so the drawing's label sizing tracks the SVG convention.
-const PIN_TEXT_H: Nm = 1_000_000;
-const HEADER_TEXT_H: Nm = 1_500_000;
-const TAG_TEXT_H: Nm = 1_000_000;
-/// Drawing margin (nm) — `schematic_svg::MARGIN`.
-const MARGIN: Nm = 2 * MM;
-/// Horizontal label pad for bounds (nm) — `schematic_svg::LABEL_PAD`, so labels stay in
-/// the framed view without measuring glyphs for the viewBox.
-const LABEL_PAD: Nm = 20 * MM;
-
-/// Stroke widths (mm) for the schematic vector paths. The SVG uses 0.1 for boxes/stubs,
-/// 0.15 for wires; a text pen is derived from height. Screen-independent (the viewport
-/// scales with zoom).
-const BOX_STROKE_MM: f32 = 0.1;
-const WIRE_STROKE_MM: f32 = 0.15;
-/// Text pen width (mm): a thin stroke so glyphs read as line art, not filled ink.
+/// Text pen width (mm): a thin stroke so glyphs read as line art, not filled ink. A
+/// realization parameter of *this* consumer (the stream carries runs, not pens).
 const TEXT_PEN_MM: f32 = 0.12;
 /// Overlay highlight stroke (mm) — matches the board overlay accent width.
 const OVERLAY_STROKE_MM: f32 = 0.2;
@@ -74,13 +57,14 @@ const OVERLAY_STROKE_MM: f32 = 0.2;
 /// cloned (`content_hash` dedupes the GPU upload).
 #[derive(Clone, Debug)]
 pub struct SchematicView {
-    /// Content bounds in schematic nm `(x0, y0, x1, y1)`, margin included — the asset
-    /// viewBox in mm (y already flipped to read upright).
+    /// Content bounds in schematic nm `(x0, y0, x1, y1)` — the stream's shared
+    /// [`Bounds`](eutectic_core::schematic::Bounds), margin included; the asset viewBox
+    /// in mm (y already flipped to read upright).
     bounds: (Nm, Nm, Nm, Nm),
     /// The tessellated static drawing (boxes, stubs, wires, labels). Cloned per frame.
     asset: VectorAsset,
-    /// Pickable candidates (pins ▸ wires ▸ symbol bodies), folded from the same reflow the
-    /// asset renders. The schematic hit-test input.
+    /// Pickable candidates (pins ▸ wires ▸ symbol bodies), folded from the stream's
+    /// provenance. The schematic hit-test input.
     candidates: Vec<SchematicCandidate>,
 }
 
@@ -109,101 +93,100 @@ enum PickGeom {
 }
 
 impl SchematicView {
-    /// Project `doc` into a schematic canvas: reflow the layout, build the static drawing
-    /// asset + pick candidates, and hold the content bounds. `None` when the doc has no
-    /// components (an empty schematic — the caller shows an empty pane), so the viewBox is
-    /// never degenerate. Never panics.
+    /// Project `doc` into a schematic canvas: run [`schematic_features`] and fold the
+    /// stream into the static drawing asset + pick candidates, holding the stream's
+    /// content bounds. `None` when the doc has no components (an empty schematic — the
+    /// caller shows an empty pane), so the viewBox is never degenerate. Never panics.
     pub fn build(doc: &Doc, lib: &PartLib) -> Option<SchematicView> {
-        let placements = doc.reflow_schematic(lib);
-        if placements.is_empty() {
+        if doc.components.is_empty() {
             return None;
         }
-        let refdes = annotate::refdes(doc, lib, &annotate::registry(&doc.source));
-        let rots = symbol_rotations(doc);
-        let pin_net = pin_net_map(doc);
-        let wires = wire_polylines(doc, &placements, lib, &rots);
-
-        let bounds = content_bounds(&placements, &wires);
+        let fs = schematic_features(doc, lib);
+        let bounds = (fs.bounds.x0, fs.bounds.y0, fs.bounds.x1, fs.bounds.y1);
         let (_, y0, _, y1) = bounds;
         let flip_sum = y0 + y1;
-        let view_box = view_box(bounds);
 
-        // --- static paths (wires under symbols, §20d) ---
+        // The stream's order is the draw order (wires under symbols, chrome last), so
+        // one pass emits paths; candidates fold from provenance in the same pass.
         let mut paths: Vec<VectorPath> = Vec::new();
-        for w in &wires {
-            if w.poly.len() < 2 {
-                continue;
-            }
-            paths.push(polyline_path(
-                &w.poly,
-                flip_sum,
-                wire_color(),
-                WIRE_STROKE_MM,
-            ));
-        }
-        for (id, pl) in &placements {
-            let comp = &doc.components[id];
-            let def = lib.get(&comp.part);
-            let rot = rots.get(id.as_str()).copied().unwrap_or(Orient::IDENTITY);
-            // Box.
-            let (hw, hh) = (pl.extent.w / 2, pl.extent.h / 2);
-            paths.push(box_path(pl.center, hw, hh, flip_sum, box_color()));
-            // Header: `refdes (part)`, baseline-left above the box top-left.
-            let designator = refdes.get(id).map(String::as_str).unwrap_or(id.as_str());
-            let header = format!("{designator} ({})", comp.part);
-            let (hx, hy) = (pl.center.x - hw, pl.center.y + hh + fmt_gap());
-            paths.extend(text_paths(
-                &header,
-                Point { x: hx, y: hy },
-                HEADER_TEXT_H,
-                Anchor::Start,
-                flip_sum,
-                box_color(),
-            ));
-            // Stubs + pin names + net tags.
-            if let Some(def) = def {
-                let unrot_hw = symbol_extent(def).w / 2;
-                for slot in pin_slots(def) {
-                    let g = stub_geometry(slot.side, unrot_hw, slot.dy, rot);
-                    let base = offset(pl.center, g.base);
-                    let tip = offset(pl.center, g.tip);
-                    paths.push(polyline_path(
-                        &[base, tip],
-                        flip_sum,
-                        box_color(),
-                        BOX_STROKE_MM,
-                    ));
-                    // Pin name inside the edge.
-                    let name_at = offset(pl.center, g.name);
-                    paths.extend(text_paths(
-                        &slot.name,
-                        name_at,
-                        PIN_TEXT_H,
-                        g.name_anchor,
-                        flip_sum,
-                        box_color(),
-                    ));
-                    // Net tag at the tip.
-                    let key = (id.to_string(), slot.id.clone());
-                    if let Some(net) = pin_net.get(&key) {
-                        let tag_at = offset(pl.center, g.tag);
-                        paths.extend(text_paths(
-                            net,
-                            tag_at,
-                            TAG_TEXT_H,
-                            g.tag_anchor,
-                            flip_sum,
-                            tag_color(),
-                        ));
+        let mut candidates: Vec<SchematicCandidate> = Vec::new();
+        for f in &fs.features {
+            let color = class_color(f.class);
+            match &f.shape {
+                Shape::Polyline { pts, width } => {
+                    if pts.len() >= 2 {
+                        paths.push(polyline_path(pts, flip_sum, color, nm_to_mm(*width)));
                     }
                 }
+                Shape::Polygon { pts, width } => {
+                    if pts.len() >= 2 {
+                        paths.push(closed_path(pts, flip_sum, color, nm_to_mm(*width)));
+                    }
+                }
+                Shape::Disc { center, radius } => {
+                    // Reserved (junction dots, gw-26): a zero-length round-cap stroke
+                    // reads as a filled dot when something starts emitting discs.
+                    paths.push(polyline_path(
+                        &[*center, *center],
+                        flip_sum,
+                        color,
+                        nm_to_mm(2 * *radius),
+                    ));
+                }
+                Shape::Text(run) => paths.extend(text_paths(run, flip_sum, color)),
+            }
+
+            // Pick candidates, from provenance (commitment 2: hit-testing and rendering
+            // derive from the same stream and cannot drift).
+            match (&f.provenance, &f.class, &f.shape) {
+                // Symbol body (priority 2 — least specific): the outline's bbox.
+                (
+                    Provenance::Component(id),
+                    StyleClass::SymbolOutline,
+                    Shape::Polygon { pts, .. },
+                ) => {
+                    if let Some(b) = bbox(pts) {
+                        candidates.push(SchematicCandidate {
+                            id: SemanticId::Part(id.clone()),
+                            geom: b,
+                            priority: 2,
+                        });
+                    }
+                }
+                // Pins (priority 0 — most specific): the stub tip, keyed by the stored
+                // pin id (pad number — the `PinRef` join key `SemanticId::Pin` uses).
+                (
+                    Provenance::Pin { comp, pin },
+                    StyleClass::PinStub,
+                    Shape::Polyline { pts, .. },
+                ) => {
+                    if let Some(tip) = pts.last() {
+                        candidates.push(SchematicCandidate {
+                            id: SemanticId::Pin {
+                                comp: comp.clone(),
+                                pin: pin.clone(),
+                            },
+                            geom: PickGeom::Point(*tip),
+                            priority: 0,
+                        });
+                    }
+                }
+                // Wires (priority 1) → net: a wire is presentational; its selectable
+                // identity is the net it draws (the cross-view currency).
+                (Provenance::Wire { net: Some(net), .. }, _, Shape::Polyline { pts, .. }) => {
+                    candidates.push(SchematicCandidate {
+                        id: SemanticId::Net(net.clone()),
+                        geom: PickGeom::Poly(pts.clone()),
+                        priority: 1,
+                    });
+                }
+                _ => {}
             }
         }
 
-        let candidates = build_candidates(doc, lib, &placements, &rots, &wires);
         Some(SchematicView {
             bounds,
-            asset: VectorAsset::from_paths(view_box, paths),
+            asset: VectorAsset::from_paths(view_box(bounds), paths),
             candidates,
         })
     }
@@ -235,7 +218,30 @@ impl SchematicView {
             }
             match &c.geom {
                 PickGeom::Box { c: ctr, hw, hh } => {
-                    paths.push(box_path(*ctr, *hw, *hh, flip_sum, overlay_color()));
+                    let corners = [
+                        Point {
+                            x: ctr.x - hw,
+                            y: ctr.y - hh,
+                        },
+                        Point {
+                            x: ctr.x + hw,
+                            y: ctr.y - hh,
+                        },
+                        Point {
+                            x: ctr.x + hw,
+                            y: ctr.y + hh,
+                        },
+                        Point {
+                            x: ctr.x - hw,
+                            y: ctr.y + hh,
+                        },
+                    ];
+                    paths.push(closed_path(
+                        &corners,
+                        flip_sum,
+                        overlay_color(),
+                        OVERLAY_STROKE_MM,
+                    ));
                 }
                 PickGeom::Point(p) => {
                     // A small halo cross at the pin tip.
@@ -388,313 +394,30 @@ fn point_seg_dist2(p: Point, a: Point, b: Point) -> i128 {
     ex * ex + ey * ey
 }
 
-// ----------------------------------------------------------------------------
-// Candidate building.
-// ----------------------------------------------------------------------------
-
-/// Build the pick candidates from the reflow: one symbol-body box per placed component,
-/// one pin-tip point per pin (keyed by pad number → `SemanticId::Pin`), and one polyline
-/// per wire (→ the wire's net, if both ends agree, via the net map).
-fn build_candidates(
-    doc: &Doc,
-    lib: &PartLib,
-    placements: &BTreeMap<EntityId, Placement>,
-    rots: &BTreeMap<String, Orient>,
-    wires: &[WirePoly],
-) -> Vec<SchematicCandidate> {
-    let mut out: Vec<SchematicCandidate> = Vec::new();
-    for (id, pl) in placements {
-        let comp = &doc.components[id];
-        // Symbol body (priority 2 — least specific).
-        out.push(SchematicCandidate {
-            id: SemanticId::Part(id.clone()),
-            geom: PickGeom::Box {
-                c: pl.center,
-                hw: pl.extent.w / 2,
-                hh: pl.extent.h / 2,
-            },
-            priority: 2,
-        });
-        // Pins (priority 0 — most specific). Keyed by pad NUMBER (the `PinRef` join key).
-        if let Some(def) = lib.get(&comp.part) {
-            let unrot_hw = symbol_extent(def).w / 2;
-            let rot = rots.get(id.as_str()).copied().unwrap_or(Orient::IDENTITY);
-            for slot in pin_slots(def) {
-                let g = stub_geometry(slot.side, unrot_hw, slot.dy, rot);
-                let tip = offset(pl.center, g.tip);
-                out.push(SchematicCandidate {
-                    id: SemanticId::Pin {
-                        comp: id.clone(),
-                        pin: pin_number(def, &slot),
-                    },
-                    geom: PickGeom::Point(tip),
-                    priority: 0,
-                });
-            }
-        }
-    }
-    // Wires (priority 1) → net. A wire is presentational; its selectable identity is the
-    // net it draws (the cross-view currency). Resolve the net from either endpoint pin.
-    for w in wires {
-        if let Some(net) = w.net.clone() {
-            out.push(SchematicCandidate {
-                id: SemanticId::Net(net),
-                geom: PickGeom::Poly(w.poly.clone()),
-                priority: 1,
-            });
-        }
-    }
-    out
-}
-
-/// The stored pin identity (pad number, or `port.signal`) of a slot — the `PinRef` join
-/// key. `PinSlot::id` already carries it; kept as a helper so the intent reads clearly.
-fn pin_number(_def: &PartDef, slot: &PinSlot) -> String {
-    slot.id.clone()
-}
-
-// ----------------------------------------------------------------------------
-// Wires (replicating schematic_svg's wire_polylines / wire_end_point).
-// ----------------------------------------------------------------------------
-
-/// A drawn wire as a schematic-space polyline plus the net it belongs to (for picking +
-/// cross-highlight). The net is the net both endpoint pins agree on, if any.
-struct WirePoly {
-    poly: Vec<Point>,
-    net: Option<NetId>,
-}
-
-/// Each drawn wire as a schematic-space polyline (pin-A tip, waypoints, pin-B tip),
-/// replicating `schematic_svg::wire_polylines` (a wire is dropped only when an endpoint is
-/// genuinely absent / unresolvable). Also resolves the wire's net from its endpoints.
-fn wire_polylines(
-    doc: &Doc,
-    placements: &BTreeMap<EntityId, Placement>,
-    lib: &PartLib,
-    rots: &BTreeMap<String, Orient>,
-) -> Vec<WirePoly> {
-    let mut out = Vec::new();
-    let Some(layout) = &doc.schematic else {
-        return out;
-    };
-    let pin_net = pin_net_map(doc);
-    for w in layout.wires() {
-        let (Some(a), Some(b)) = (
-            wire_end_point(doc, placements, lib, rots, &w.a.comp, &w.a.pin),
-            wire_end_point(doc, placements, lib, rots, &w.b.comp, &w.b.pin),
-        ) else {
-            continue;
-        };
-        let mut poly = vec![a.0];
-        poly.extend(w.waypoints.iter().copied());
-        poly.push(b.0);
-        // The wire's net: the net of endpoint A (matching the tag drawn there); fall back
-        // to B. A wire whose ends disagree earns a core warning; either net is a fine
-        // cross-highlight target.
-        let net = wire_net(&pin_net, w, a.1, b.1);
-        out.push(WirePoly { poly, net });
-    }
-    out
-}
-
-/// The net a wire highlights: the net of endpoint A's pin, else endpoint B's. Each `_pin_id`
-/// is the resolved stored pin id (pad number / `port.signal`) at that end.
-fn wire_net(
-    pin_net: &BTreeMap<(String, String), String>,
-    w: &Wire,
-    a_pin: String,
-    b_pin: String,
-) -> Option<NetId> {
-    let a = pin_net.get(&(w.a.comp.clone(), a_pin));
-    let b = pin_net.get(&(w.b.comp.clone(), b_pin));
-    a.or(b).map(NetId::new)
-}
-
-/// The schematic-space point of a wire endpoint (the pin's stub *tip*), replicating
-/// `schematic_svg::wire_end_point`. Returns the tip point and the resolved stored pin id.
-fn wire_end_point(
-    doc: &Doc,
-    placements: &BTreeMap<EntityId, Placement>,
-    lib: &PartLib,
-    rots: &BTreeMap<String, Orient>,
-    comp: &str,
-    pin: &str,
-) -> Option<(Point, String)> {
-    let cid = EntityId::new(comp);
-    let pl = placements.get(&cid)?;
-    let def = lib.get(&doc.components.get(&cid)?.part)?;
-    let ids = def.resolve_selector(pin);
-    let want = ids.first().map(String::as_str).unwrap_or(pin);
-    let slot = pin_slots(def).into_iter().find(|s| s.id == want)?;
-    let rot = rots.get(comp).copied().unwrap_or(Orient::IDENTITY);
-    let unrot_hw = symbol_extent(def).w / 2;
-    let g = stub_geometry(slot.side, unrot_hw, slot.dy, rot);
-    Some((offset(pl.center, g.tip), slot.id))
-}
-
-// ----------------------------------------------------------------------------
-// Stub geometry (replicating schematic_svg's private stub_geometry).
-// ----------------------------------------------------------------------------
-
-/// The text anchor for a label — start / middle / end relative to the given origin, so
-/// pin names hug the interior and net tags read outward (like the SVG's `text-anchor`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Anchor {
-    Start,
-    End,
-}
-
-/// Geometry of one pin stub in the box frame (offsets from the box centre), replicating
-/// `schematic_svg::stub_geometry`: base on the edge, tip, tag anchor, name anchor, and the
-/// two text anchors — all rotated by the authored cardinal `rot`.
-struct StubGeom {
-    base: Point,
-    tip: Point,
-    tag: Point,
-    name: Point,
-    name_anchor: Anchor,
-    tag_anchor: Anchor,
-}
-
-fn stub_geometry(side: PinSide, hw: Nm, dy: Nm, rot: Orient) -> StubGeom {
-    let sign: Nm = match side {
-        PinSide::Left => -1,
-        PinSide::Right => 1,
-    };
-    let edge = Point {
-        x: sign * hw,
-        y: dy,
-    };
-    let tip = Point {
-        x: sign * (hw + STUB_LEN),
-        y: dy,
-    };
-    let tag = Point {
-        x: sign * (hw + STUB_LEN + STUB_LEN / 2),
-        y: dy,
-    };
-    let name = Point {
-        x: sign * (hw - STUB_LEN / 4),
-        y: dy,
-    };
-    let (name_anchor, tag_anchor) = match side {
-        PinSide::Left => (Anchor::Start, Anchor::End),
-        PinSide::Right => (Anchor::End, Anchor::Start),
-    };
-    StubGeom {
-        base: rot.apply(edge),
-        tip: rot.apply(tip),
-        tag: rot.apply(tag),
-        name: rot.apply(name),
-        name_anchor,
-        tag_anchor,
-    }
-}
-
-/// Add a box-frame offset to a component centre → an absolute schematic point.
-fn offset(center: Point, off: Point) -> Point {
-    Point {
-        x: center.x + off.x,
-        y: center.y + off.y,
-    }
-}
-
-/// A small vertical gap (nm) lifting the header off the box top — `schematic_svg::fmt_gap`.
-fn fmt_gap() -> Nm {
-    500_000
-}
-
-// ----------------------------------------------------------------------------
-// Shared reflow reads (net map, rotations) — the same data schematic_svg derives.
-// ----------------------------------------------------------------------------
-
-/// Pin identity `(comp, pin-id)` → net name, from the materialized netlist — the tag
-/// source (`schematic_svg`'s `pin_net`).
-fn pin_net_map(doc: &Doc) -> BTreeMap<(String, String), String> {
-    doc.nets
-        .values()
-        .flat_map(|net| {
-            net.members
-                .iter()
-                .map(move |m| ((m.comp.to_string(), m.pin.clone()), net.name.clone()))
-        })
-        .collect()
-}
-
-/// Authored schematic rotation per component path (`schematic_svg`'s `symbol_rotations`).
-fn symbol_rotations(doc: &Doc) -> BTreeMap<String, Orient> {
-    let mut out = BTreeMap::new();
-    let Some(layout) = &doc.schematic else {
-        return out;
-    };
-    for s in layout_symbols(layout) {
-        out.insert(s.0, s.1);
-    }
-    out
-}
-
-/// Every `(path, rot)` in the tree — a thin pre-order walk over the public wires/roots API
-/// is not available, so we walk `symbol_paths` paired with rot via the public `symbols`
-/// accessor is `pub(crate)`; instead reconstruct from the layout's public surface.
-fn layout_symbols(layout: &eutectic_core::schematic::SchematicLayout) -> Vec<(String, Orient)> {
-    // `SchematicLayout` exposes `wires()` publicly; symbol rot is read via a pre-order walk
-    // of `roots` (public field). Recurse over LayoutNode.
-    use eutectic_core::schematic::LayoutNode;
-    fn walk(nodes: &[LayoutNode], out: &mut Vec<(String, Orient)>) {
-        for n in nodes {
-            match n {
-                LayoutNode::Symbol(s) => out.push((s.path.clone(), s.rot)),
-                LayoutNode::Container(c) => walk(&c.children, out),
-                _ => {}
-            }
-        }
-    }
-    let mut out = Vec::new();
-    walk(&layout.roots, &mut out);
-    out
+/// The bbox of a polygon's points as a [`PickGeom::Box`] (centre + half-extents), or
+/// `None` for an empty point list.
+fn bbox(pts: &[Point]) -> Option<PickGeom> {
+    let (min_x, max_x) = (
+        pts.iter().map(|p| p.x).min()?,
+        pts.iter().map(|p| p.x).max()?,
+    );
+    let (min_y, max_y) = (
+        pts.iter().map(|p| p.y).min()?,
+        pts.iter().map(|p| p.y).max()?,
+    );
+    Some(PickGeom::Box {
+        c: Point {
+            x: (min_x + max_x) / 2,
+            y: (min_y + max_y) / 2,
+        },
+        hw: (max_x - min_x) / 2,
+        hh: (max_y - min_y) / 2,
+    })
 }
 
 // ----------------------------------------------------------------------------
 // Bounds + coordinate mapping (schematic twin of canvas.rs).
 // ----------------------------------------------------------------------------
-
-/// Content bounds in schematic nm `(x0, y0, x1, y1)` with the margin — replicating
-/// `schematic_svg`'s bounds loop (box corners + stub/label reach + wire points).
-fn content_bounds(
-    placements: &BTreeMap<EntityId, Placement>,
-    wires: &[WirePoly],
-) -> (Nm, Nm, Nm, Nm) {
-    let mut xs: Vec<Nm> = Vec::new();
-    let mut ys: Vec<Nm> = Vec::new();
-    for pl in placements.values() {
-        let (hw, hh) = (pl.extent.w / 2, pl.extent.h / 2);
-        xs.push(pl.center.x - hw - STUB_LEN - LABEL_PAD);
-        ys.push(pl.center.y - hh);
-        xs.push(pl.center.x + hw + STUB_LEN + LABEL_PAD);
-        ys.push(pl.center.y + hh + HEADER_TEXT_H);
-    }
-    for w in wires {
-        for p in &w.poly {
-            xs.push(p.x);
-            ys.push(p.y);
-        }
-    }
-    let (mut x0, mut y0, mut x1, mut y1) = if xs.is_empty() {
-        (0, 0, 10 * MM, 10 * MM)
-    } else {
-        (
-            *xs.iter().min().unwrap(),
-            *ys.iter().min().unwrap(),
-            *xs.iter().max().unwrap(),
-            *ys.iter().max().unwrap(),
-        )
-    };
-    x0 -= MARGIN;
-    y0 -= MARGIN;
-    x1 += MARGIN;
-    y1 += MARGIN;
-    (x0, y0, x1, y1)
-}
 
 /// The asset viewBox `[min_x, min_y, w, h]` in mm from schematic-nm bounds (y-down frame).
 fn view_box(bounds: (Nm, Nm, Nm, Nm)) -> [f32; 4] {
@@ -718,42 +441,10 @@ fn to_view(p: Point, flip_sum: Nm) -> (f32, f32) {
 }
 
 // ----------------------------------------------------------------------------
-// Path builders.
+// Path builders (stream shape → damascene path).
 // ----------------------------------------------------------------------------
 
-/// An unfilled stroked box (the symbol body outline).
-fn box_path(center: Point, hw: Nm, hh: Nm, flip_sum: Nm, color: Color) -> VectorPath {
-    let corners = [
-        Point {
-            x: center.x - hw,
-            y: center.y - hh,
-        },
-        Point {
-            x: center.x + hw,
-            y: center.y - hh,
-        },
-        Point {
-            x: center.x + hw,
-            y: center.y + hh,
-        },
-        Point {
-            x: center.x - hw,
-            y: center.y + hh,
-        },
-    ];
-    let mut b = PathBuilder::new();
-    for (i, p) in corners.iter().enumerate() {
-        let (x, y) = to_view(*p, flip_sum);
-        b = if i == 0 {
-            b.move_to(x, y)
-        } else {
-            b.line_to(x, y)
-        };
-    }
-    b.close().stroke_solid(color, BOX_STROKE_MM).build()
-}
-
-/// A stroked polyline in schematic space (stub / wire / overlay).
+/// A stroked polyline in schematic space (stub / wire / divider / overlay).
 fn polyline_path(pts: &[Point], flip_sum: Nm, color: Color, width_mm: f32) -> VectorPath {
     let mut b = PathBuilder::new();
     for (i, p) in pts.iter().enumerate() {
@@ -770,23 +461,30 @@ fn polyline_path(pts: &[Point], flip_sum: Nm, color: Color, width_mm: f32) -> Ve
         .build()
 }
 
-/// Text as stroked-glyph polylines (the board-silk approach), placed at `origin` (nm, the
-/// baseline-left of the run before anchor adjustment) at `height`, honoring the anchor by
-/// shifting the run's ink width. The glyph strokes are y-up in the local frame (baseline at
-/// y=0, ascending +y), which matches schematic space, so they place directly.
-fn text_paths(
-    s: &str,
-    origin: Point,
-    height: Nm,
-    anchor: Anchor,
-    flip_sum: Nm,
-    color: Color,
-) -> Vec<VectorPath> {
-    if s.is_empty() {
+/// An unfilled closed stroked outline (the symbol body polygon, the overlay halo).
+fn closed_path(pts: &[Point], flip_sum: Nm, color: Color, width_mm: f32) -> VectorPath {
+    let mut b = PathBuilder::new();
+    for (i, p) in pts.iter().enumerate() {
+        let (x, y) = to_view(*p, flip_sum);
+        b = if i == 0 {
+            b.move_to(x, y)
+        } else {
+            b.line_to(x, y)
+        };
+    }
+    b.close().stroke_solid(color, width_mm).build()
+}
+
+/// Realize a stream [`TextRun`] as stroked-glyph polylines (the board-silk approach).
+/// The run's `at` is its **baseline** anchor (y-up, matching the glyph frame of
+/// [`text_strokes`]: baseline at local y=0, ascending +y), so glyphs place directly;
+/// the justify shifts the run's ink horizontally (`End` runs end at the anchor).
+fn text_paths(run: &TextRun, flip_sum: Nm, color: Color) -> Vec<VectorPath> {
+    if run.text.is_empty() {
         return Vec::new();
     }
-    let strokes = text_strokes(s, height, Justify::Left);
-    // Ink width for anchor adjustment: the run's x-extent in the local frame.
+    let strokes = text_strokes(&run.text, run.height, Justify::Left);
+    // Ink width for the justify shift: the run's x-extent in the local frame.
     let mut min_x = Nm::MAX;
     let mut max_x = Nm::MIN;
     for stroke in &strokes {
@@ -796,16 +494,10 @@ fn text_paths(
         }
     }
     let width = if max_x >= min_x { max_x - min_x } else { 0 };
-    // Left-justified: origin.x is the left edge. For an `End` anchor the run should end at
-    // origin.x, so shift left by the full width. (There is no Center anchor use here.)
-    let shift_x = match anchor {
-        Anchor::Start => 0,
-        Anchor::End => -width,
+    let shift_x = match run.justify {
+        TextJustify::Start => 0,
+        TextJustify::End => -width,
     };
-    // Baseline: text_strokes puts the baseline at local y=0; centre the run vertically on
-    // the origin so a tag/name sits centred on its stub line (the SVG nudges by TEXT_H/3;
-    // vertical centring reads equivalently and is anchor-agnostic).
-    let shift_y = -height / 2;
     let mut out = Vec::new();
     for stroke in &strokes {
         if stroke.is_empty() {
@@ -814,8 +506,8 @@ fn text_paths(
         let placed: Vec<Point> = stroke
             .iter()
             .map(|p| Point {
-                x: origin.x + p.x + shift_x,
-                y: origin.y + p.y + shift_y,
+                x: run.at.x + p.x + shift_x,
+                y: run.at.y + p.y,
             })
             .collect();
         out.push(polyline_path(&placed, flip_sum, color, TEXT_PEN_MM));
@@ -824,11 +516,26 @@ fn text_paths(
 }
 
 // ----------------------------------------------------------------------------
-// Palette (schematic is monochrome line art; a light ink on the dark canvas).
+// Palette: style class → color token (the one style decision this consumer owns).
 // ----------------------------------------------------------------------------
 
-/// Symbol boxes, stubs, headers, pin names — a light ink on the dark canvas.
-fn box_color() -> Color {
+/// Map a stream style class to this canvas's color. The stream carries no colors
+/// (Decision 23); this table is the GUI's whole schematic "theme".
+fn class_color(class: StyleClass) -> Color {
+    match class {
+        StyleClass::SymbolOutline
+        | StyleClass::PinStub
+        | StyleClass::Header
+        | StyleClass::PinName
+        | StyleClass::NcMark => ink_color(),
+        StyleClass::Wire => wire_color(),
+        StyleClass::NetTag => tag_color(),
+        StyleClass::BinDivider | StyleClass::BinLabel => chrome_color(),
+    }
+}
+
+/// Symbol boxes, stubs, headers, pin names, nc marks — a light ink on the dark canvas.
+fn ink_color() -> Color {
     Color::srgb_token("eutectic.schematic.ink", 0xd8, 0xd8, 0xd8, 0xff)
 }
 
@@ -840,6 +547,11 @@ fn wire_color() -> Color {
 /// Net tags — a muted cyan so net labels read distinct from the ink.
 fn tag_color() -> Color {
     Color::srgb_token("eutectic.schematic.tag", 0x6f, 0xb7, 0xc9, 0xff)
+}
+
+/// Non-semantic chrome (the unplaced-bin divider + label) — muted, like the SVG's #888.
+fn chrome_color() -> Color {
+    Color::srgb_token("eutectic.schematic.chrome", 0x88, 0x88, 0x88, 0xff)
 }
 
 /// Highlight overlay accent — the same bright cyan the board overlay uses (cross-view
