@@ -1,0 +1,60 @@
+[package]
+name = "eutectic-gui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eutectic-core = { path = "../eutectic-core" }
+# Tracking damascene upstream main by rev pin (bump deliberately, keep the two
+# revs identical). NOTE: this rev is AHEAD of the crates.io 0.4.6 release —
+# "upgrading" to a crates.io version would move backward past text-metric
+# changes the scene artifacts reflect. Keep the reference checkout at
+# ecad/reference/damascene on the same rev.
+#
+# damascene-winit-wgpu is deliberately NOT a dependency: the owned-canvas
+# campaign's host slice copied it into `src/host/` (see the provenance header
+# there) so the app runs through its own winit event loop. The direct winit /
+# wgpu / host-glue dependencies below are pinned at exactly the versions
+# upstream's damascene-winit-wgpu Cargo.toml pins at the same rev, so the
+# dependency graph (and lockfile) stays identical to what the packaged host
+# pulled in.
+damascene-core = { git = "https://github.com/computer-whisperer/damascene.git", rev = "eef1630a198c9c9160f6dc3568eecbc904d76e46" }
+damascene-wgpu = { git = "https://github.com/computer-whisperer/damascene.git", rev = "eef1630a198c9c9160f6dc3568eecbc904d76e46" }
+log = "0.4"
+pollster = "0.4"
+wgpu = "29"
+winit = { version = "0.30", features = ["android-native-activity"] }
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+# `arboard` backs the native clipboard bridge in the copied host; `open`
+# shells out to xdg-open / `start` / `open` for `App::drain_link_opens`.
+arboard = { version = "3", features = ["wayland-data-control"] }
+open = "5"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Side-channel client for `wp_color_management_v1` — see
+# `src/host/wayland_color.rs`. Gated by the `wayland-color-management`
+# feature, exactly as upstream gates it; versions track what winit already
+# pulls in transitively.
+wayland-backend = { version = "0.3", features = ["client_system"], optional = true }
+wayland-client = { version = "0.31", optional = true }
+wayland-protocols = { version = "0.32", features = ["client", "staging"], optional = true }
+wayland-sys = { version = "0.31", features = ["client"], optional = true }
+dlib = { version = "0.5", optional = true }
+raw-window-handle = { version = "0.6", optional = true }
+
+[features]
+# Default-on to match the packaged damascene-winit-wgpu host this module
+# replaced (its default features included wayland-color-management).
+default = ["wayland-color-management"]
+# Build the Wayland `wp_color_management_v1` driver in `src/host/`. On
+# non-Linux targets this feature is a no-op (the deps are
+# `cfg(target_os = "linux")`).
+wayland-color-management = [
+    "dep:wayland-backend",
+    "dep:wayland-client",
+    "dep:wayland-protocols",
+    "dep:wayland-sys",
+    "dep:dlib",
+    "dep:raw-window-handle",
+]

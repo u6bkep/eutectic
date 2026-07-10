@@ -549,34 +549,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
-name = "ecad-core"
-version = "0.1.0"
-dependencies = [
- "ttf-parser",
-]
-
-[[package]]
-name = "ecad-gui"
-version = "0.1.0"
-dependencies = [
- "arboard",
- "damascene-core",
- "damascene-wgpu",
- "dlib",
- "ecad-core",
- "log",
- "open",
- "pollster",
- "raw-window-handle",
- "wayland-backend",
- "wayland-client",
- "wayland-protocols",
- "wayland-sys",
- "wgpu",
- "winit",
-]
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -605,6 +577,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1a05365e3b1c6d1650318537c7460c6923f1abdd272ad6842baa2b509957a06"
 dependencies = [
  "num-traits",
+]
+
+[[package]]
+name = "eutectic-core"
+version = "0.1.0"
+dependencies = [
+ "ttf-parser",
+]
+
+[[package]]
+name = "eutectic-gui"
+version = "0.1.0"
+dependencies = [
+ "arboard",
+ "damascene-core",
+ "damascene-wgpu",
+ "dlib",
+ "eutectic-core",
+ "log",
+ "open",
+ "pollster",
+ "raw-window-handle",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-sys",
+ "wgpu",
+ "winit",
 ]
 
 [[package]]

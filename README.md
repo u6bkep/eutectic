@@ -1,4 +1,4 @@
-# ecad-core
+# eutectic
 
 A from-scratch ECAD (electronic design automation) engine prototype — schematic capture and PCB
 layout — built around one premise: **the agent-driven / programmatic path is a first-class citizen,
@@ -7,6 +7,12 @@ outlines).
 
 This is a research prototype, not a product. It exists to test whether a better *data
 representation* makes a useful ECAD implementation fall out as a consequence.
+
+> **The name.** A eutectic alloy — 63/37 tin-lead, the solder every hardware engineer has
+> smelled — melts and freezes at a single temperature, passing straight between solid and liquid
+> with no plastic phase in between. There is no half-melted state. That is the document model:
+> the only mutation surface is an atomic transaction over an immutable document, and an invalid
+> transaction never commits. No half-applied state, no partially-updated board.
 
 ## Why
 
@@ -28,7 +34,7 @@ The system is easiest to hold as a compiler pipeline: source text → parse → 
 uniform IR → analysis passes over one derived world → fab back ends. With one deliberate break in
 the analogy at the solvers.
 
-**The source language.** A board is authored as `.ecad` text — declarative directives (`part`,
+**The source language.** A board is authored as `.eut` text — declarative directives (`part`,
 `net`, `board`, `hole`, `text`, `class`, parameter overrides) plus a `# routes` state zone.
 Foreign front ends (KiCad footprint/symbol/outline import, SVG import) translate into the same
 directives.
@@ -116,9 +122,9 @@ A full, if prototype-grade, flow:
 - Export: netlist, pick-and-place CSV, SVG, **Gerber (RS-274X)** per slab, and **Excellon** drill
   (plated/non-plated split, slots).
 
-**559 tests (510 lib + 49 integration), one dependency, `cargo clippy --all-targets` clean.**
+**596 engine tests (546 lib + 50 integration), one dependency, `cargo clippy --all-targets` clean.**
 
-## Modules (`ecad-core/src/`)
+## Modules (`eutectic-core/src/`)
 
 Most subsystems are a facade module (`foo.rs`) over a submodule directory (`foo/`);
 the "key submodules" note names the internal split where there is one.
@@ -131,7 +137,7 @@ the "key submodules" note names the internal split where there is one.
 | `command` | The sole mutation surface — atomic transactions; the commit-time re-elaboration gate. |
 | `history` | Version DAG (undo / branch / replay). |
 | `query` | Hand-rolled incremental query engine (Netlist, ERC, DRC); dependency tracking + early cutoff. |
-| `text` | Parser + canonical serializer for the `.ecad` source (the agent/git authoring surface). |
+| `text` | Parser + canonical serializer for the `.eut` source (the agent/git authoring surface). |
 | `elaborate` | Directives → instances; override reconciliation/decay; text/hole/class lowering. Key submodules: `expr` (the expression tier), `features`/`query` (the forward views), `expand` (def-expansion). |
 | `annotate` | Refdes annotation with explicit pinning. |
 | `diagnostic` | The rustc-style diagnostic machinery (`E_` errors, `W_` warnings). |
@@ -151,22 +157,22 @@ the "key submodules" note names the internal split where there is one.
 
 ## Build & run
 
-The repo is a cargo workspace: `ecad-core` (the engine) + `ecad-gui` (the
-damascene GUI). Examples live in `ecad-core`; run them with `-p ecad-core`.
+The repo is a cargo workspace: `eutectic-core` (the engine) + `eutectic-gui` (the
+damascene GUI). Examples live in `eutectic-core`; run them with `-p eutectic-core`.
 
 ```sh
-cargo test --workspace           # 559 ecad-core tests (510 lib + 49 integration) + the ecad-gui fixtures
+cargo test --workspace           # 596 eutectic-core tests (546 lib + 50 integration) + 169 eutectic-gui tests
 cargo clippy --workspace --all-targets
-cargo run -p ecad-core --example m1           # typed interfaces, ERC, incremental recompute, reconciliation
-cargo run -p ecad-core --example m2           # override strength, decay, constraint precedence
-cargo run -p ecad-core --example m3           # least-change placement (mini RP2350-carrier scene)
-cargo run -p ecad-core --example export       # netlist + pick-and-place + SVG from a small board
-cargo run -p ecad-core --example autoroute    # place → autoroute → DRC-clean, end to end
-cargo run -p ecad-core --example gerber       # Gerber/Excellon fab output
-cargo run -p ecad-core --example schematic    # authored schematic layout → rendered schematic SVG
-cargo run -p ecad-core --example svg_outline  # SVG import: outline + cutout → board → rendered SVG
-cargo run -p ecad-core --example poc_multiprobe  # the capstone: 4-layer RP2350A board, full pipeline
-cargo run -p ecad-gui -- board.ecad          # the GUI (opens a window; the .ecad file arg is optional)
+cargo run -p eutectic-core --example m1           # typed interfaces, ERC, incremental recompute, reconciliation
+cargo run -p eutectic-core --example m2           # override strength, decay, constraint precedence
+cargo run -p eutectic-core --example m3           # least-change placement (mini RP2350-carrier scene)
+cargo run -p eutectic-core --example export       # netlist + pick-and-place + SVG from a small board
+cargo run -p eutectic-core --example autoroute    # place → autoroute → DRC-clean, end to end
+cargo run -p eutectic-core --example gerber       # Gerber/Excellon fab output
+cargo run -p eutectic-core --example schematic    # authored schematic layout → rendered schematic SVG
+cargo run -p eutectic-core --example svg_outline  # SVG import: outline + cutout → board → rendered SVG
+cargo run -p eutectic-core --example poc_multiprobe  # the capstone: 4-layer RP2350A board, full pipeline
+cargo run -p eutectic-gui -- board.eut          # the GUI (opens a window; the .eut file arg is optional)
 ```
 
 ## Repository layout
@@ -176,7 +182,7 @@ The working tree lives in a sibling worktree of a bare repository:
 ```
 ecad/
 ├── .git/         bare repository
-├── main/         this worktree — cargo workspace: ecad-core/ (engine), ecad-gui/ (GUI), poc/, docs/
+├── main/         this worktree — cargo workspace: eutectic-core/ (engine), eutectic-gui/ (GUI), poc/, docs/
 ├── issues/       file-based issue tracker (outside the repo; migrates to GitHub Issues on upload)
 └── reference/    KiCad + Horizon EDA source mirrors (untracked, prior-art study)
 ```

@@ -1,7 +1,7 @@
 # Chip-Down Multi-SWD Probe — RP2350A QFN-60 — Implementation Result
 
 End-to-end build of the chip-down RP2350 multi-SWD debug probe board, authored
-entirely through the `ecad-core` framework. This is both the PoC deliverable and
+entirely through the `eutectic-core` framework. This is both the PoC deliverable and
 the framework's end-to-end stress test. The whole flow is one runnable example:
 
     cargo run --example poc_multiprobe

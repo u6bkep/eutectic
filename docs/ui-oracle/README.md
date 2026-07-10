@@ -1,6 +1,6 @@
-# ecad UI oracle
+# eutectic UI oracle
 
-`shell.dc.html` is the authoritative shell/anatomy oracle for **ecad-gui**. It supersedes the
+`shell.dc.html` is the authoritative shell/anatomy oracle for **eutectic-gui**. It supersedes the
 generic "Circuit Studio" mockup it was derived from: every region, menu entry, view kind, and
 interaction affordance in this file is a statement about what the real GUI should eventually
 contain. Implementation slices should be checked against this page, not against memory of it.
@@ -35,7 +35,7 @@ findings, never blocks"); the Libraries dialog semantics (per-machine `use NAME`
 absolute paths never in the document, builtin toy library registered last).
 
 **Decorative**: the STM32/USB demo data, exact pixel positions, the SVG doodles (iso board,
-symbol preview), the invented `.ecad` source text, exact px paddings where damascene has its own
+symbol preview), the invented `.eut` source text, exact px paddings where damascene has its own
 spacing scale.
 
 ## Color tokens
@@ -62,7 +62,7 @@ Outlined ligatures.
 | PCB Layout | `grid_on` | traces colored by layer, vias, ratsnest, DRC halos, selected-trace vertex handles | select, pan, measure, delete · route, via, copper pour, silk, text, dimension · selection filter | — |
 | 3D View | `deployed_code` | extruded board placeholder, orbit hint | orbit/pan | gw-09 |
 | Gerber preview | `layers` | single-layer aperture-flash render of what the fab receives | pan | gw-08 |
-| Source | `code` | read-only `.ecad` text with line numbers (text-first architecture; will follow selection) | none | — |
+| Source | `code` | read-only `.eut` text with line numbers (text-first architecture; will follow selection) | none | — |
 | Diff / Review | `difference` | git-native visual diff: red = removed/old position, green = added/new | pan | gw-20 |
 
 Other oracle ↔ wishlist mappings: command palette gw-12, waivable findings gw-02, net classes in

@@ -1,6 +1,6 @@
 # ECAD-from-scratch: Architecture & Representation
 
-**Status:** design of record, now substantially **implemented** as the `ecad-core` Rust prototype
+**Status:** design of record, now substantially **implemented** as the `eutectic-core` Rust prototype
 (see [`../README.md`](../README.md) and the "Prototype status (...)" sections throughout this
 document). This file captures the architecture converged on in design discussion *including the
 open questions and hard parts* — the prose sections (§1–§6) are the reasoning; each "Prototype
@@ -691,11 +691,11 @@ importer (0017), and the `Cubic`/NURBS curve primitive for MCAD bodies.
 
 ## 9. Library packages: parts as data, names as the dependency key
 
-*(Implemented 2026-07-05, `ecad-core/src/library.rs` — motivated by the GUI: a `.ecad` file must be
+*(Implemented 2026-07-05, `eutectic-core/src/library.rs` — motivated by the GUI: a `.eut` file must be
 openable standalone, and part libraries must not exist only as Rust code.)*
 
-A **library package** is a directory containing a manifest (`ecad.lib`, see `library::MANIFEST_NAME`)
-plus the asset files it references. The manifest is a hand-rolled line grammar in the `.ecad` family:
+A **library package** is a directory containing a manifest (`eutectic.lib`, see `library::MANIFEST_NAME`)
+plus the asset files it references. The manifest is a hand-rolled line grammar in the `.eut` family:
 `part NAME footprint=REL [symbol=REL:SYMBOL_NAME]`, optionally opening a `{ role NUMBER NAME KIND }`
 block — the serialized home for the authored knowledge (pin-role relabeling, symbol↔footprint joins)
 that previously lived in example code. `library::load_library(dir) -> Result<PartLib, String>` is the
@@ -769,7 +769,7 @@ menu), never in the engine and never in committed artifacts.
 
 ## Prototype status (M1)
 
-A zero-dependency Rust crate (`ecad-core`, edition 2024) implements a full vertical slice of the
+A zero-dependency Rust crate (`eutectic-core`, edition 2024) implements a full vertical slice of the
 engine core. Decisions locked in during prototyping: **hand-rolled** incremental query engine (not
 the `salsa` crate); `BTreeMap` for deterministic/canonical serialization (persistent `im` maps are
 the production swap); entity id = hierarchical path string for M1 (opaque-handle + path table is

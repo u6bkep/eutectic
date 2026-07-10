@@ -11,15 +11,15 @@ Deferred features live as tickets in `issues/gui-wishlist/`.
   main** (`damascene-core` + `damascene-winit-wgpu`; since 2026-07-07 —
   upstream moves fast and we occasionally request changes, so we bump
   deliberately and often; the pin may be AHEAD of the latest crates.io
-  release, see the note in `ecad-gui/Cargo.toml`). The local clone at
+  release, see the note in `eutectic-gui/Cargo.toml`). The local clone at
   `reference/damascene` is kept on the same rev for source reading.
   Damascene is a thin GPU UI library
   that renders through the host's wgpu pass; apps implement
   `App { build(&self) -> El, on_event(&mut self), before_build, ... }` — a
   pure projection from app state to a widget tree, which matches the engine's
   source → derived-views shape exactly.
-- **Repo layout: same repo, cargo workspace.** `ecad-core` (the existing
-  crate, untouched, keeps its single ttf-parser dependency) + `ecad-gui`
+- **Repo layout: same repo, cargo workspace.** `eutectic-core` (the existing
+  crate, untouched, keeps its single ttf-parser dependency) + `eutectic-gui`
   (new crate; the only crate that depends on damascene/wgpu). The workspace
   root manifest carries damascene's documented `[profile.dev.package.*]`
   opt-level overrides (MSDF glyph generation is ~500× slower unoptimized;
@@ -185,7 +185,7 @@ Cheap now, expensive to retrofit. Every roadmap feature reduces to these:
    findings panel with click-to-zoom. Toasts only for genuinely transient
    events.
 
-Editing is source-first: every mutation is a command against the `.ecad`
+Editing is source-first: every mutation is a command against the `.eut`
 source; re-elaborate derives everything else; undo/redo is source snapshots
 (byte-lossless serializer makes them exact — and identity-exact once
 Decision 22 lands: today a snapshot round-trip re-mints route ids, which is
@@ -207,9 +207,9 @@ visibility of live editing state) is deferred as gw-24.
 Engine-side design: `architecture.md` §9 (library packages, `use` directive,
 permissive unresolved parts). The GUI's share, delivered 2026-07-05:
 
-- **One per-machine registry** — `$XDG_CONFIG_HOME/ecad/libraries` (fallback
-  `~/.config/ecad/libraries`), plain `NAME <absolute path>` lines, read/written
-  only by `ecad-gui/src/registry.rs` (path-injectable; tests never touch the
+- **One per-machine registry** — `$XDG_CONFIG_HOME/eutectic/libraries` (fallback
+  `~/.config/eutectic/libraries`), plain `NAME <absolute path>` lines, read/written
+  only by `eutectic-gui/src/registry.rs` (path-injectable; tests never touch the
   real config). There is deliberately exactly ONE place paths live — the
   KiCad five-menus failure mode is out of bounds. Absolute paths never
   serialize into a document.
@@ -265,7 +265,7 @@ Binding headlines (details and exact vocabulary live in the oracle):
 
 Delivered as milestones, roughly in order:
 
-1. **Workspace conversion + `ecad-gui` skeleton** — workspace manifest,
+1. **Workspace conversion + `eutectic-gui` skeleton** — workspace manifest,
    dev-profile overrides, damascene 0.4.5, window opens, headless fixture
    test harness in place.
 2. **Read-only board viewer** — layered canvas rendering `world_features`

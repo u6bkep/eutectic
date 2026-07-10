@@ -1,0 +1,187 @@
+//! Schematic-view projection + pick tests.
+
+use super::*;
+use crate::fixtures::schematic_domain;
+use eutectic_core::id::EntityId;
+
+/// The schematic fixture's (doc, lib, view).
+fn fixture() -> (eutectic_core::doc::Doc, eutectic_core::part::PartLib, SchematicView) {
+    let d = schematic_domain();
+    let doc = d
+        .doc
+        .as_ref()
+        .expect("schematic fixture elaborates")
+        .clone();
+    let view = SchematicView::build(&doc, &d.lib).expect("schematic projects");
+    (doc, d.lib, view)
+}
+
+/// The placement centre of a component in schematic space.
+fn center_of(doc: &eutectic_core::doc::Doc, lib: &eutectic_core::part::PartLib, path: &str) -> Point {
+    let placements = doc.reflow_schematic(lib);
+    placements
+        .get(&EntityId::new(path))
+        .expect("component placed")
+        .center
+}
+
+/// Clicking the centre of a symbol body (clear of its pins) selects that part.
+#[test]
+fn click_symbol_body_selects_part() {
+    let (doc, lib, view) = fixture();
+    let c = center_of(&doc, &lib, "C1");
+    let id = view.resolve(c, 0).expect("body hit");
+    assert_eq!(id, SemanticId::Part(EntityId::new("C1")), "got {id:?}");
+}
+
+/// Clicking a pin stub tip selects that pin (by pad number), beating the body underneath.
+#[test]
+fn click_pin_selects_pin() {
+    let (doc, lib, view) = fixture();
+    let center = center_of(&doc, &lib, "U1");
+    let def = lib.get("MCU").unwrap();
+    let unrot_hw = symbol_extent(def).w / 2;
+    let slot = pin_slots(def)
+        .into_iter()
+        .find(|s| s.name == "VDD")
+        .expect("MCU has a VDD pin");
+    let g = stub_geometry(slot.side, unrot_hw, slot.dy, Orient::IDENTITY);
+    let tip = offset(center, g.tip);
+    let id = view.resolve(tip, 0).expect("pin hit");
+    match id {
+        SemanticId::Pin { comp, pin } => {
+            assert_eq!(comp, EntityId::new("U1"));
+            assert_eq!(
+                pin, slot.id,
+                "pin id must be the pad NUMBER (the PinRef join key)"
+            );
+        }
+        other => panic!("expected a pin, got {other:?}"),
+    }
+}
+
+/// Clicking a wire segment selects its net (the cross-view currency for wires). The fixture
+/// draws `wire C1.p1 U1.VDD` on net VDD.
+#[test]
+fn click_wire_selects_net() {
+    let (doc, lib, view) = fixture();
+    let c1 = center_of(&doc, &lib, "C1");
+    let u1 = center_of(&doc, &lib, "U1");
+    let cap = lib.get("Cap").unwrap();
+    let mcu = lib.get("MCU").unwrap();
+    let cap_slot = pin_slots(cap).into_iter().find(|s| s.id == "p1").unwrap();
+    let mcu_slot = pin_slots(mcu)
+        .into_iter()
+        .find(|s| s.name == "VDD")
+        .unwrap();
+    let a = offset(
+        c1,
+        stub_geometry(
+            cap_slot.side,
+            symbol_extent(cap).w / 2,
+            cap_slot.dy,
+            Orient::IDENTITY,
+        )
+        .tip,
+    );
+    let b = offset(
+        u1,
+        stub_geometry(
+            mcu_slot.side,
+            symbol_extent(mcu).w / 2,
+            mcu_slot.dy,
+            Orient::IDENTITY,
+        )
+        .tip,
+    );
+    let mid = Point {
+        x: (a.x + b.x) / 2,
+        y: (a.y + b.y) / 2,
+    };
+    let id = view.resolve(mid, 100_000).expect("wire hit");
+    assert_eq!(id, SemanticId::Net(NetId::new("VDD")), "got {id:?}");
+}
+
+/// A click far outside every feature picks nothing.
+#[test]
+fn empty_spot_picks_nothing() {
+    let (_doc, _lib, view) = fixture();
+    let far = Point {
+        x: -1_000 * MM,
+        y: -1_000 * MM,
+    };
+    assert!(view.resolve(far, 0).is_none());
+}
+
+/// The overlay projects a selected net into wire + pin highlights (the schematic side of
+/// cross-view highlighting): selecting VDD produces a non-empty schematic overlay.
+#[test]
+fn overlay_lights_net_wires_and_pins() {
+    let (_doc, _lib, view) = fixture();
+    let mut ids = std::collections::BTreeSet::new();
+    ids.insert(SemanticId::Net(NetId::new("VDD")));
+    let el = view.overlay_el(&ids, "overlay:test");
+    assert!(
+        el.is_some(),
+        "selecting VDD must produce a non-empty schematic overlay"
+    );
+}
+
+/// The poc smoke: the real 44-symbol schematic projects non-empty symbols/wires without
+/// panic (spec E: poc/out/board.eut's schematic).
+#[test]
+fn poc_schematic_projects_non_empty() {
+    let d = crate::fixtures::poc_board_domain();
+    let doc = d.doc.as_ref().expect("poc board elaborates");
+    let view = SchematicView::build(doc, &d.lib).expect("poc schematic projects");
+    let bodies = view
+        .candidates()
+        .iter()
+        .filter(|c| matches!(c.id, SemanticId::Part(_)))
+        .count();
+    assert!(
+        bodies >= 44,
+        "poc schematic must project all 44 placed symbols, got {bodies}"
+    );
+    let wires = view.candidates().iter().filter(|c| c.priority == 1).count();
+    assert!(wires >= 1, "poc schematic must project its authored wires");
+}
+
+/// `pointer_to_schematic_nm` inverts the forward projection (unproject, viewBox/rect scale,
+/// y-flip). This is exactly the m2 pane-coord bug class the review targets; the board twin
+/// (`pointer_to_board_nm`) is covered, this closes the schematic gap. Forward-map a known
+/// schematic point to a pixel (identity camera ⇒ unproject is the identity), invert it, and
+/// require the recovered point to match within one nm-rounding step.
+#[test]
+fn pointer_to_schematic_nm_round_trips() {
+    use damascene_core::viewport::ViewportView;
+    let (doc, lib, view) = fixture();
+    // A concrete on-screen schematic point: U1's placement centre.
+    let p = center_of(&doc, &lib, "U1");
+
+    let rect = (10.0f32, 20.0f32, 640.0f32, 480.0f32);
+    let cam = ViewportView {
+        pan: (0.0, 0.0),
+        zoom: 1.0,
+    };
+
+    // Forward: schematic-nm → viewBox-mm (with y-flip) → content px within the rect. This
+    // mirrors what pointer_to_schematic_nm inverts; under identity the pointer px == content px.
+    let (rx, ry, rw, rh) = rect;
+    let vb = view_box(view.bounds);
+    let (vx, vy, vw, vh) = (vb[0], vb[1], vb[2], vb[3]);
+    let (_, y0, _, y1) = view.bounds;
+    let flip_sum = y0 + y1;
+    let vmm = to_view(p, flip_sum); // (mm, y-down)
+    let px = (rx + (vmm.0 - vx) * (rw / vw), ry + (vmm.1 - vy) * (rh / vh));
+
+    let back = view
+        .pointer_to_schematic_nm(px, rect, cam)
+        .expect("non-degenerate rect maps");
+    // One nm-rounding step of slack in each axis (f32 mm→nm round-trip).
+    let tol = (MM as f32 / 100.0).max(1.0) as Nm;
+    assert!(
+        (back.x - p.x).abs() <= tol && (back.y - p.y).abs() <= tol,
+        "round-trip {back:?} must recover {p:?} within {tol}nm"
+    );
+}

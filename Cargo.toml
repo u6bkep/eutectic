@@ -1,5 +1,5 @@
 [workspace]
-members = ["ecad-core", "ecad-gui"]
+members = ["eutectic-core", "eutectic-gui"]
 resolver = "3"
 
 # Optimize damascene's text rasterization/shaping stack in dev builds.
