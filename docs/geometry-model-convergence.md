@@ -1070,7 +1070,7 @@ the text pristine but mutates identity exactly when the referenced trace is edit
 a waiver would detach the moment the user nudges the trace it waives, and a moved
 trace diffs as delete+add. Wrong semantics for every consumer that motivated this.
 
-### Decision 23 — the schematic gets its realized-geometry tier: `schematic_features`, artwork as a seam, two library vocabularies (2026-07-09, ruled; awaiting implementation)
+### Decision 23 — the schematic gets its realized-geometry tier: `schematic_features`, artwork as a seam, two library vocabularies (2026-07-09, ruled; items 1–4 implemented same day, main `669b2f7`; item 5 recorded for the library campaign)
 
 Surfaced while designing the owned-canvas renderer (gui-architecture.md "Canvas
 strategy"): the renderer wants to consume both views through one ingest contract,
@@ -1187,11 +1187,14 @@ Then the post-convergence steps proceed on the corrected foundation:
   (incl. a saturating allocator so a hand-authored `u64::MAX` id can't brick a
   file), one engine allocator (`RouteIdAlloc`), gapped round-trip test.
   Resolved 0034; unblocks gw-02/gw-14/gw-20.
-- **Decision 23 (the schematic realized-geometry tier) — ruled 2026-07-09,
-  awaiting implementation**: `schematic_features` core query with semantic
-  provenance, text as runs, style classes; SVG + GUI schematic view + pick
-  become pure consumers; symbol-artwork seam (derived box is the default
-  realization). See the decision entry above §7.
+- ~~Decision 23 (the schematic realized-geometry tier)~~ — **items 1–4 resolved
+  (implemented 2026-07-09, main `669b2f7`)**: `schematic_features` query with
+  semantic provenance, text as runs, style classes, single-homed bounds; SVG
+  rewired as a serializer (byte-identical, golden fixture committed); GUI
+  schematic view + pick fold from the stream (duplicated constants deleted);
+  `symbol_body` artwork seam (derived box is the default realization). Still
+  open from the ruling: item 5 (native footprint/symbol authoring — the
+  library campaign) and gw-26 (junction dots).
 - ~~Precision policy for the angle→quaternion lowering~~ — **resolved**:
   `ORIENT_ANGLE_SCALE = 1e6` (≈1e-6 rad; see `doc::Orient::from_angle_deg`).
 - ~~Real non-copper layers (0020)~~ — **resolved (Decision 13, implemented 2026-07-02)**:

@@ -312,7 +312,7 @@ pub fn schematic_features(doc: &Doc, lib: &PartLib) -> SchematicFeatures {
         .map(|p| (p.comp.to_string(), p.pin.clone()))
         .collect();
 
-    let wires = wire_polylines(doc, &placements, lib, &rots);
+    let wires = wire_polylines(doc, &placements, lib, &rots, &pin_net);
     let bounds = content_bounds(&placements, &wires);
 
     let mut out: Vec<SchematicFeature> = Vec::new();
@@ -664,20 +664,12 @@ fn wire_polylines(
     placements: &BTreeMap<EntityId, Placement>,
     lib: &PartLib,
     rots: &BTreeMap<String, Orient>,
+    pin_net: &BTreeMap<(String, String), String>,
 ) -> Vec<RealizedWire> {
     let mut out = Vec::new();
     let Some(layout) = &doc.schematic else {
         return out;
     };
-    let pin_net: BTreeMap<(String, String), String> = doc
-        .nets
-        .values()
-        .flat_map(|net| {
-            net.members
-                .iter()
-                .map(move |m| ((m.comp.to_string(), m.pin.clone()), net.name.clone()))
-        })
-        .collect();
     for (index, w) in layout.wires().into_iter().enumerate() {
         let (Some((a, a_pin)), Some((b, b_pin))) = (
             wire_end_point(doc, placements, lib, rots, &w.a.comp, &w.a.pin),
