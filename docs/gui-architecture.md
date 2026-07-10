@@ -96,6 +96,18 @@ findings, and the command layer are untouched.
   usage, the `VectorAsset` layer path, `CameraPanState`, the
   `ViewportRequest` queue, the grid cache, and the one-frame-lag camera
   reads.
+- **Two producers, one ingest.** The renderer consumes a shared primitive
+  vocabulary (analytic strokes/discs/arcs, polygons, areas, text runs), each
+  primitive carrying a plane, a semantic id (net/entity — indexes a GPU state
+  buffer so hover/selection/dim are one-integer writes, no rebuilds), and a
+  style class resolved through per-plane tables. The board producer lowers
+  `world_features`; the schematic producer is `schematic_features`
+  (Decision 23, geometry-model-convergence.md) — the core realized-geometry
+  query that also feeds the schematic SVG and pick, so the owned renderer is
+  never a second home for drawing conventions. Annotation text renders via an
+  MSDF glyph atlas (cribbed from damascene-wgpu); fab ink (silk/copper text)
+  arrives as glyph geometry from the stream because there the glyphs are the
+  artifact.
 - **Engine rider — collapse the export tier onto the stream.** The one known
   duplication left: `export::role_features` re-runs the per-component
   graphics/text loop that `world_features` runs, and copper Gerber/SVG
