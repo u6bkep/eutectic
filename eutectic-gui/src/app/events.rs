@@ -477,6 +477,12 @@ impl App for EutecticApp {
     /// (schematic viewport, scrollable chrome) returns `false` so
     /// damascene's native wheel handling proceeds unchanged.
     fn on_wheel_event(&mut self, event: UiEvent, cx: &EventCx) -> bool {
+        // Modal chrome owns the pointer (the same gate free hover applies):
+        // wheel over the Libraries modal or an open menu must scroll the
+        // chrome, never zoom the board pane beneath it.
+        if self.libraries_open.get() || self.open_menu.borrow().is_some() {
+            return false;
+        }
         let Some(pos) = event.pointer_pos() else {
             return false;
         };

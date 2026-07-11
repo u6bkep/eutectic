@@ -359,3 +359,53 @@ fn wheel_over_board_zooms_at_cursor_and_is_consumed() {
         "the board point under the cursor must survive the whole zoom ({err_px:.2} px off)"
     );
 }
+
+/// Wheel over modal chrome (the Libraries modal, an open menu) must not zoom
+/// the board pane beneath it — the same occlusion gate free hover applies.
+/// The old viewport path got this via damascene's overlay occlusion; the
+/// owned wheel handler carries its own gate.
+#[test]
+fn wheel_is_not_consumed_while_modal_chrome_is_open() {
+    let mut app = edit_app();
+    let n = Native::settled(&mut app);
+    let rect = n.rect_a();
+    let pos = (rect.x + rect.w * 0.5, rect.y + rect.h * 0.5);
+    let cx = EventCx::new()
+        .with_ui_state(&n.rt.ui_state)
+        .with_viewport(n.vp.w, n.vp.h);
+    let wheel = || {
+        let mut e = UiEvent::synthetic_click(PaneId::A.canvas_key());
+        e.kind = UiEventKind::PointerWheel;
+        e.pointer = Some(pos);
+        e.wheel_delta = Some((0.0, -50.0));
+        e
+    };
+
+    let cam0 = app.board_camera(PaneId::A);
+    app.set_libraries_open(true);
+    assert!(
+        !app.on_wheel_event(wheel(), &cx),
+        "wheel over the Libraries modal falls through to damascene"
+    );
+    app.set_libraries_open(false);
+
+    app.set_open_menu(Some("file"));
+    assert!(
+        !app.on_wheel_event(wheel(), &cx),
+        "wheel while a menu is open falls through to damascene"
+    );
+    app.set_open_menu(None);
+
+    let cam1 = app.board_camera(PaneId::A);
+    assert_eq!(
+        (cam0.zoom, cam0.center),
+        (cam1.zoom, cam1.center),
+        "the board camera never moved under modal chrome"
+    );
+
+    // Gate lifted: the same wheel is consumed again.
+    assert!(
+        app.on_wheel_event(wheel(), &cx),
+        "wheel works once the chrome closes"
+    );
+}
