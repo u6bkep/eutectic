@@ -15,8 +15,9 @@ use eutectic_core::id::{EntityId, NetId};
 
 /// The pick grab radius in screen (logical) px — converted to a board distance
 /// through the current zoom by [`pick::tolerance_nm`], so the on-screen radius is
-/// zoom-independent.
-const PICK_TOL_PX: f32 = 6.0;
+/// zoom-independent. `pub(crate)`: the raw free-hover path picks with the
+/// same radius.
+pub(crate) const PICK_TOL_PX: f32 = 6.0;
 
 impl EutecticApp {
     /// Which pane's canvas the pointer at `pos` (logical px) is inside, by testing each
@@ -41,8 +42,10 @@ impl EutecticApp {
     }
 
     /// Handle a pointer event over a board pane: cursor readout, pick / hover /
-    /// measure / component drag (m6) — all through THE CLICKED PANE's canvas key +
-    /// rect + viewport view. `&mut self` because a drag commit mutates domain +
+    /// measure / component drag (m6) — all through THE CLICKED PANE's canvas
+    /// rect + its app-owned camera (WP2: `Camera::unproject` replaced the
+    /// viewport-view mapping; the pick candidates and kernel math are
+    /// unchanged). `&mut self` because a drag commit mutates domain +
     /// derived state; the `derived` borrow is scoped so the commit path can
     /// re-borrow.
     pub(crate) fn handle_board_pointer(
@@ -52,30 +55,28 @@ impl EutecticApp {
         pane: PaneId,
         pos: (f32, f32),
     ) {
-        // Scope the derived borrow: map the pointer into board space and pre-resolve
-        // what the drag-capable arms need, then drop the borrow before any commit.
+        // Map the pointer into board space through the pane camera (f64 CPU
+        // math — picking never round-trips through the GPU).
         let (p, tol) = {
-            let derived = self.derived.borrow();
-            let Some(view) = &derived.board else {
+            if self.derived.borrow().board.is_none() {
                 return;
-            };
-            let key = pane.canvas_key();
-            let (Some(rect), Some(vv)) = (cx.rect_of_key(key), cx.viewport_view(key)) else {
-                return;
-            };
-            // The asset's honest stretch rect: the vector child is laid out at
-            // natural (viewBox) size in the viewport, NOT stretched to the pane.
-            let el_rect = view.canvas.content_rect((rect.x, rect.y, rect.w, rect.h));
-
-            let content_px = vv.unproject(pos, (rect.x, rect.y));
-            if let Some(mm) = view.canvas.content_px_to_board_mm(content_px, el_rect) {
-                self.cursor_board_mm.set(Some(mm));
             }
-
-            let Some(p) = pick::pointer_to_board_nm(&view.canvas, pos, el_rect, vv) else {
+            let Some(rect) = cx.rect_of_key(pane.canvas_key()) else {
                 return;
             };
-            (p, pick::tolerance_nm(PICK_TOL_PX, vv.zoom))
+            let cam = self.board_camera(pane);
+            let p = crate::app::board_pane::board_unproject(
+                &cam,
+                (rect.x, rect.y, rect.w, rect.h),
+                pos,
+            );
+            let mm = eutectic_core::coord::MM as f32;
+            self.cursor_board_mm
+                .set(Some((p.x as f32 / mm, p.y as f32 / mm)));
+            (
+                p,
+                pick::tolerance_nm(PICK_TOL_PX, crate::app::board_pane::zoom_px_per_mm(&cam)),
+            )
         };
 
         // The tool in force over a board pane is the BOARD kind's slot (per-view-
@@ -95,18 +96,16 @@ impl EutecticApp {
                 }
                 self.begin_drag(pane, p, tol);
                 // Anything undraggable under the press — pour, unselected trace,
-                // empty board, grid furniture — arms the CAMERA PAN instead: the
-                // Select-tool drag gesture always does something, and damascene's
-                // native pan cannot engage here (the press hit a keyed canvas
-                // child, which gates the default trigger off — see
-                // `CameraPanState`). An un-moved press-release stays a click.
-                if self.drag.borrow().is_none()
-                    && let Some(vv) = cx.viewport_view(pane.canvas_key())
-                {
+                // empty board, bare canvas — arms the CAMERA PAN instead: the
+                // Select-tool drag gesture always does something. The pan now
+                // drives the pane's app-owned camera directly (WP2); an
+                // un-moved press-release stays a click.
+                if self.drag.borrow().is_none() {
+                    let cam = self.board_camera(pane);
                     *self.camera_pan.borrow_mut() = Some(CameraPanState {
                         pane,
                         start_px: pos,
-                        start_pan: vv.pan,
+                        start_center: cam.center,
                         moved: false,
                     });
                 }
@@ -517,17 +516,13 @@ impl EutecticApp {
     }
 
     /// Drive an in-flight camera pan from a live pointer position: fold the
-    /// screen delta in and, once past the click slop, queue the pan as a
-    /// `ViewportRequest::CenterOn` for the pane's viewport. The desired pan is
-    /// `start_pan + delta`; `CenterOn` places content-space `point` at the
-    /// viewport center under the current zoom
-    /// (`pan = center − origin − zoom·(point − origin)`, damascene
-    /// `viewport_center_on`), so inverting for `point` realises exactly that
-    /// pan — before the viewport's own `PanBounds` clamp, which applies to
-    /// this request the same way it applies to the native gesture. Pure
-    /// per-event arithmetic; layout applies the request next frame.
-    pub(crate) fn update_camera_pan(&self, cx: &EventCx, pos: (f32, f32)) {
-        let request = {
+    /// screen delta in and, once past the click slop, snap the pane's
+    /// app-owned camera so the board tracks the pointer exactly — dragging
+    /// the pointer right moves the camera center left by `Δpx / zoom` (and
+    /// the y flip: screen y is down, board y is up). Direct manipulation is
+    /// a snap, never a glide; pure per-event arithmetic.
+    pub(crate) fn update_camera_pan(&self, pos: (f32, f32)) {
+        let (pane, center) = {
             let mut pan = self.camera_pan.borrow_mut();
             let Some(cp) = pan.as_mut() else {
                 return;
@@ -536,28 +531,19 @@ impl EutecticApp {
             if !cp.moved {
                 return; // still within the click slop — stay a plain click.
             }
-            let key = cp.pane.canvas_key();
-            let (Some(rect), Some(vv)) = (cx.rect_of_key(key), cx.viewport_view(key)) else {
-                return;
-            };
-            if !(vv.zoom.is_finite() && vv.zoom > 0.0) {
+            let zoom = self.board_camera(cp.pane).zoom;
+            if !(zoom.is_finite() && zoom > 0.0) {
                 return;
             }
-            let desired = (cp.start_pan.0 + d.0, cp.start_pan.1 + d.1);
-            // Invert viewport_center_on for the content point whose centering
-            // yields `desired` (origin = the viewport's inner top-left; our
-            // canvas viewports have no padding, so that is the keyed rect).
-            let (cx_, cy_) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
-            let point = (
-                rect.x + (cx_ - rect.x - desired.0) / vv.zoom,
-                rect.y + (cy_ - rect.y - desired.1) / vv.zoom,
-            );
-            ViewportRequest::CenterOn {
-                key: key.to_string(),
-                point,
-            }
+            (
+                cp.pane,
+                (
+                    cp.start_center.0 - d.0 as f64 / zoom,
+                    cp.start_center.1 + d.1 as f64 / zoom,
+                ),
+            )
         };
-        self.pending.borrow_mut().push(request);
+        self.board_snap_center(pane, center);
     }
 
     /// Pointer-up with a camera pan in flight: disarm, and eat the trailing

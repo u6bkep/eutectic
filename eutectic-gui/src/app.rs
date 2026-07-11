@@ -29,6 +29,7 @@
 //! concern. Public items keep their old paths through the re-exports below
 //! (`lib.rs` re-exports these unchanged).
 
+pub(crate) mod board_pane;
 pub(crate) mod domain;
 mod editing;
 mod events;
@@ -57,21 +58,19 @@ pub(crate) use pane::{
     finding_row_key, pane_index,
 };
 
-use crate::canvas::GridCache;
 use crate::findings::Findings;
 use crate::reload::{SourceMailbox, SourceMsg};
 use crate::tool::{CameraPanState, DragState, MeasureState, RouteState, Tool, TraceDragState};
+use board_pane::{BoardCam, GpuState, PaneRect, RawInput};
 use damascene_core::prelude::*;
 use eutectic_core::coord::Nm;
 use std::cell::{Cell, RefCell};
 
 // Test-only symbols the `tests` child module reaches through `super::*`; the
 // non-test `EutecticApp` body does not name them (the `#[cfg(test)]` accessors that
-// return `Canvas`/`Explorer` are themselves test-only).
+// return `Explorer` etc. are themselves test-only).
 #[cfg(test)]
-use crate::canvas::Canvas;
-#[cfg(test)]
-use crate::canvas::pick::{self, SemanticId};
+use crate::canvas::pick::SemanticId;
 #[cfg(test)]
 use crate::explorer::Explorer;
 #[cfg(test)]
@@ -81,18 +80,19 @@ use crate::schematic_view::SchematicView;
 #[cfg(test)]
 use eutectic_core::id::NetId;
 
-/// The milestone-2 application: a [`DomainState`], one [`PaneState`], and the
-/// board-view state (the cached layered canvas + per-layer visibility + live
-/// interaction state).
+/// The application shell: a [`DomainState`], the pane/layout state, and the
+/// board-view state (per-pane owned-canvas cameras + per-layer visibility +
+/// live interaction state).
 ///
 /// Implements [`App`] as a pure projection from state to a widget tree — the
 /// shape `gui-architecture.md` calls out as matching the engine's source →
-/// derived-views model. The static layer assets are the *layered canvas*
-/// structural commitment: built **once** when the document loads (in [`new`]) and
-/// held here, so `build` only clones them into `El`s per frame — never
-/// re-tessellates. Interaction state (`RefCell`/`Cell` per the damascene interior-
-/// mutability pattern) is written in `on_event` / `before_build` and read in
-/// `build`.
+/// derived-views model. The derived render inputs are the structural
+/// commitment: built **once** per doc revision (the renderer scene + pick
+/// candidates in [`DerivedCaches`]) and held here, so `build` never
+/// re-tessellates and the per-frame GPU work is governed by the damage
+/// contract ([`board_pane`]). Interaction state (`RefCell`/`Cell` per the
+/// damascene interior-mutability pattern) is written in `on_event` /
+/// `before_build` and read in `build`.
 ///
 /// [`new`]: EutecticApp::new
 pub struct EutecticApp {
@@ -182,18 +182,37 @@ pub struct EutecticApp {
     pub(crate) trace_drag: RefCell<Option<TraceDragState>>,
     /// The Select tool's in-flight **camera pan**: armed on pointer-down over a
     /// board pane when neither a component drag nor a trace-vertex drag armed
-    /// (pour / trace / empty board / grid furniture). Per drag event the camera
-    /// pan is realised as a `ViewportRequest::CenterOn`; pointer-up disarms
-    /// (eating the trailing Click iff the gesture moved). See
-    /// [`CameraPanState`] for why the app owns this gesture at all.
+    /// (pour / trace / empty board / bare canvas). Per drag event the pane's
+    /// app-owned camera snaps to `start_center − Δpx/zoom`; pointer-up disarms
+    /// (eating the trailing Click iff the gesture moved).
     pub(crate) camera_pan: RefCell<Option<CameraPanState>>,
-    /// The per-pane viewport-anchored grid-window caches (`[A, B]`): the built
-    /// dot-lattice asset plus the (pitch, viewBox, index-window) key it was
-    /// built from. A build is a cache hit — an asset clone — while the pane's
-    /// visible window stays inside the built window at the same pitch; only
-    /// escaping it (a > half-viewport pan, a pitch-bucket change, a reload)
-    /// re-tessellates. See [`crate::canvas::Canvas::grid_el`].
-    pub(crate) grid_caches: RefCell<[Option<GridCache>; 2]>,
+    /// The per-board-pane app-owned cameras (`[A, B]`) — WP2's owned-canvas
+    /// camera state (glide filter + pending Fit/Reset request). Two board
+    /// panes = two cameras; the schematic pane stays on the damascene
+    /// viewport until WP3.
+    pub(crate) board_cams: RefCell<[BoardCam; 2]>,
+    /// The GPU bundle (renderer + pane textures + scene buffers), created by
+    /// the host's `gpu_setup` seam. `None` on the CPU harness path — the
+    /// board pane's `build` never requires a device.
+    pub(crate) gpu: RefCell<Option<GpuState>>,
+    /// Per-pane canvas rects (window-logical px), captured each `build` from
+    /// the last layout for the paint pass + raw-event pane resolution.
+    pub(crate) pane_px: Cell<[Option<PaneRect>; 2]>,
+    /// Per-pane floating tool-strip rects, captured each `build` — free
+    /// hover treats a pointer over the strip as chrome, not canvas.
+    pub(crate) strip_px: Cell<[Option<PaneRect>; 2]>,
+    /// Per-pane crosshair cursor (pane-local logical px), written by the raw
+    /// pointer tap; the renderer draws the §4 crosshair from it.
+    pub(crate) cursor_px: Cell<[Option<(f32, f32)>; 2]>,
+    /// The window's scale factor (physical px per logical px; fractional
+    /// DPI), from the host's raw events / build diagnostics.
+    pub(crate) scale_factor: Cell<f32>,
+    /// Style/visibility revision — bumped by layer toggles (and any future
+    /// theme swap); a damage-key input (`board_style_gen`).
+    pub(crate) style_rev: Cell<u64>,
+    /// Raw-pointer bookkeeping (free hover, middle-drag pan) fed by the
+    /// host's `raw_window_event` seam.
+    pub(crate) raw: RefCell<RawInput>,
     /// The active routing layer, as a copper slab name. `None` = the default
     /// (top copper). Set from the layer panel's set-active affordance; switching
     /// it while a route is pending drops a via (ladder level 1).
@@ -257,7 +276,14 @@ impl EutecticApp {
             route: RefCell::new(None),
             trace_drag: RefCell::new(None),
             camera_pan: RefCell::new(None),
-            grid_caches: RefCell::new([None, None]),
+            board_cams: RefCell::new([BoardCam::default(), BoardCam::default()]),
+            gpu: RefCell::new(None),
+            pane_px: Cell::new([None, None]),
+            strip_px: Cell::new([None, None]),
+            cursor_px: Cell::new([None, None]),
+            scale_factor: Cell::new(1.0),
+            style_rev: Cell::new(0),
+            raw: RefCell::new(RawInput::default()),
             active_layer: RefCell::new(None),
             open_menu: RefCell::new(None),
         }
@@ -354,19 +380,6 @@ impl EutecticApp {
     #[cfg(test)]
     fn has_schematic(&self) -> bool {
         self.derived.borrow().schematic.is_some()
-    }
-
-    /// A clone of the board projection's [`Canvas`] — test accessor for the
-    /// coordinate-composition tests.
-    #[cfg(test)]
-    fn board_canvas_clone(&self) -> Canvas {
-        self.derived
-            .borrow()
-            .board
-            .as_ref()
-            .expect("board projects")
-            .canvas
-            .clone()
     }
 
     /// Set both panes' view kinds — for fixtures that want a canned pane arrangement.

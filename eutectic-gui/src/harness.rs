@@ -55,7 +55,7 @@
 use damascene_core::prelude::*;
 use damascene_core::state::UiState;
 
-use crate::app::EutecticApp;
+use crate::app::{EutecticApp, PaneId, ViewKind};
 
 /// Always run at least this many frames: the first queues the fit, the second
 /// renders against it. A single frame would dump the unfitted camera.
@@ -149,7 +149,7 @@ pub const MIN_COVERAGE: f32 = 0.30;
 /// canvas still sitting at this zoom as an outright fit failure.
 const UNFITTED_ZOOM: f32 = 1.0;
 
-/// Assert that every visible canvas viewport in a settled render shows fitted
+/// Assert that every visible canvas pane in a settled render shows fitted
 /// content — the "did the fit machinery actually run" gate on top of damascene's
 /// own lint. For each `key` (a pane's `canvas_key`) we require BOTH:
 ///
@@ -163,40 +163,75 @@ const UNFITTED_ZOOM: f32 = 1.0;
 /// content-extent measurement breaks (bounds collapse) — the two ways the fit
 /// pipeline can rot independently.
 ///
+/// WP2: a **board** pane's camera is app-owned (`app.board_camera`), so its
+/// half of the assertion reads the camera + the renderer scene bounds; a
+/// **schematic** pane still reads the damascene viewport view + measured
+/// content bounds. The behavioral meaning (fitted zoom + real coverage) is
+/// identical on both paths.
+///
 /// `scene` names the fixture for the panic message. `keys` are the visible canvas
-/// viewport keys to check (skip hidden panes and no-document scenes).
-pub fn assert_content_coverage(scene: &str, r: &Rendered, keys: &[&str]) {
+/// pane keys to check (skip hidden panes and no-document scenes).
+pub fn assert_content_coverage(scene: &str, app: &EutecticApp, r: &Rendered, keys: &[&str]) {
     for &key in keys {
-        let view = r
-            .ui
-            .viewport_view_by_key(key)
-            .unwrap_or_else(|| panic!("scene `{scene}`: canvas viewport `{key}` was not laid out"));
-        assert!(
-            (view.zoom - UNFITTED_ZOOM).abs() > 1e-3,
-            "scene `{scene}`: canvas `{key}` is still at the unfitted zoom \
-             {UNFITTED_ZOOM} — the FitContent request never reached layout",
-        );
-
-        // Content bounds are keyed by computed_id, not the app key; map key →
-        // computed_id by walking the built tree for the viewport node.
-        let id = computed_id_for_key(&r.tree, key).unwrap_or_else(|| {
-            panic!("scene `{scene}`: no node carries key `{key}` in the built tree")
-        });
-        let content = r.ui.viewport_content_bounds(&id).unwrap_or_else(|| {
-            panic!(
-                "scene `{scene}`: canvas `{key}` has no measured content bounds \
-                 (empty viewport?)"
-            )
-        });
+        let pane_id = if key == PaneId::A.canvas_key() {
+            PaneId::A
+        } else {
+            PaneId::B
+        };
+        let is_board = {
+            let panes = app.panes.borrow();
+            panes[crate::app::pane::pane_index(pane_id)].view == ViewKind::Board
+        };
         let pane =
             r.ui.rect_of_key(key)
                 .unwrap_or_else(|| panic!("scene `{scene}`: canvas `{key}` has no laid-out rect"));
 
-        // Content extent on screen = zoom * content-space extent (the transform is
-        // origin-anchored uniform scale). Coverage is the larger of the two per-axis
-        // fractions of the pane's inner extent.
-        let cov_x = (content.w * view.zoom) / pane.w.max(f32::EPSILON);
-        let cov_y = (content.h * view.zoom) / pane.h.max(f32::EPSILON);
+        let (zoom, content_w, content_h) = if is_board {
+            // The app-owned camera + the renderer scene's content bounds.
+            let cam = app.board_camera(pane_id);
+            let bounds = app
+                .derived
+                .borrow()
+                .scene
+                .as_ref()
+                .map(|s| s.bounds)
+                .unwrap_or_else(|| {
+                    panic!("scene `{scene}`: board pane `{key}` has no renderer scene")
+                });
+            let zoom = crate::app::board_pane::zoom_px_per_mm(&cam);
+            let mm = eutectic_core::coord::MM as f32;
+            (
+                zoom,
+                (bounds.2 - bounds.0) as f32 / mm,
+                (bounds.3 - bounds.1) as f32 / mm,
+            )
+        } else {
+            let view = r.ui.viewport_view_by_key(key).unwrap_or_else(|| {
+                panic!("scene `{scene}`: canvas viewport `{key}` was not laid out")
+            });
+            // Content bounds are keyed by computed_id, not the app key; map key →
+            // computed_id by walking the built tree for the viewport node.
+            let id = computed_id_for_key(&r.tree, key).unwrap_or_else(|| {
+                panic!("scene `{scene}`: no node carries key `{key}` in the built tree")
+            });
+            let content = r.ui.viewport_content_bounds(&id).unwrap_or_else(|| {
+                panic!(
+                    "scene `{scene}`: canvas `{key}` has no measured content bounds \
+                     (empty viewport?)"
+                )
+            });
+            (view.zoom, content.w, content.h)
+        };
+
+        assert!(
+            (zoom - UNFITTED_ZOOM).abs() > 1e-3,
+            "scene `{scene}`: canvas `{key}` is still at the unfitted zoom \
+             {UNFITTED_ZOOM} — the fit never applied",
+        );
+        // Content extent on screen = zoom * content-space extent. Coverage is
+        // the larger of the two per-axis fractions of the pane's inner extent.
+        let cov_x = (content_w * zoom) / pane.w.max(f32::EPSILON);
+        let cov_y = (content_h * zoom) / pane.h.max(f32::EPSILON);
         let coverage = cov_x.max(cov_y);
         assert!(
             coverage >= MIN_COVERAGE,
@@ -205,9 +240,9 @@ pub fn assert_content_coverage(scene: &str, r: &Rendered, keys: &[&str]) {
              {:.1}×{:.1}, pane {:.1}×{:.1})",
             coverage * 100.0,
             MIN_COVERAGE * 100.0,
-            view.zoom,
-            content.w,
-            content.h,
+            zoom,
+            content_w,
+            content_h,
             pane.w,
             pane.h,
         );
@@ -240,7 +275,6 @@ fn computed_id_for_key(root: &El, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::PaneId;
     use crate::fixtures;
 
     fn viewport() -> Rect {
@@ -248,8 +282,9 @@ mod tests {
     }
 
     /// The board fixture settles in exactly two frames and its canvas ends up
-    /// fitted — zoom moved off the unfitted default, which is the whole point of
-    /// the persistent-UiState loop.
+    /// fitted — the app-owned camera moved off the unfitted reset zoom
+    /// (frame 1 lays the pane out, frame 2's build snaps the fit against the
+    /// known rect — the owned-canvas twin of the persistent-UiState loop).
     #[test]
     fn board_settles_fitted_in_two_frames() {
         let mut app = fixtures::board();
@@ -258,28 +293,26 @@ mod tests {
             r.frames, MIN_FRAMES,
             "the board fixture settles in two frames"
         );
-        let view =
-            r.ui.viewport_view_by_key(PaneId::A.canvas_key())
-                .expect("board pane A laid out");
+        let zoom = crate::app::board_pane::zoom_px_per_mm(&app.board_camera(PaneId::A));
         assert!(
-            (view.zoom - 1.0).abs() > 1e-3,
-            "the board canvas must be fitted (zoom off the unfitted 1.0), got {}",
-            view.zoom
+            (zoom - 1.0).abs() > 1e-3,
+            "the board camera must be fitted (zoom off the unfitted 1.0 px/mm), got {zoom}",
         );
         // The coverage gate agrees on the fitted render.
-        assert_content_coverage("board", &r, &[PaneId::A.canvas_key()]);
+        assert_content_coverage("board", &app, &r, &[PaneId::A.canvas_key()]);
     }
 
-    /// The coverage assertion FAILS LOUDLY on an unfitted render: rendering a single
-    /// raw frame (no persistent UiState carry-over, the exact pre-harness bug) leaves
-    /// the canvas at zoom 1.0, and the assertion must panic rather than pass.
+    /// The coverage assertion FAILS LOUDLY on an unfitted render: a single
+    /// raw frame (the exact pre-harness bug) has no laid-out pane rect yet,
+    /// so the board camera never fits and stays at the reset zoom — the
+    /// assertion must panic rather than pass.
     #[test]
     #[should_panic(expected = "unfitted zoom")]
     fn coverage_rejects_an_unfitted_render() {
         let mut app = fixtures::board();
         let vp = viewport();
-        // One frame only, with a FRESH UiState per the old broken path: build queues
-        // the fit but nothing carries it into a second layout, so zoom stays 1.0.
+        // One frame only, with a FRESH UiState per the old broken path: no
+        // rect from a prior layout, so the camera fit cannot apply.
         app.before_build();
         let theme = app.theme();
         let mut ui = UiState::new();
@@ -298,6 +331,6 @@ mod tests {
             tree,
             frames: 1,
         };
-        assert_content_coverage("board-unfitted", &r, &[PaneId::A.canvas_key()]);
+        assert_content_coverage("board-unfitted", &app, &r, &[PaneId::A.canvas_key()]);
     }
 }

@@ -120,35 +120,21 @@ fn commit_move(app: &mut EutecticApp, dx: i64, dy: i64) {
 }
 
 /// Map a board point to pane-A screen px in a settled render (the exact
-/// inverse composition the pick path applies): board → asset content px
-/// (through the asset's honest natural-size content rect) → screen through
-/// the pane's live camera.
+/// inverse composition the pick path applies): board → screen through the
+/// pane's app-owned camera (WP2 — `Camera::project` is the pick path's
+/// `unproject` inverse).
 fn px_of_board(app: &EutecticApp, r: &crate::harness::Rendered, p: Point) -> (f32, f32) {
-    let canvas = app.board_canvas_clone();
     let rect = r.ui.rect_of_key(PaneId::A.canvas_key()).expect("pane A");
-    let vv =
-        r.ui.viewport_view_by_key(PaneId::A.canvas_key())
-            .expect("pane A view");
-    let mm = (p.x as f32 / NM_PER_MM as f32, p.y as f32 / NM_PER_MM as f32);
-    let content = canvas
-        .board_mm_to_content_px(mm, canvas.content_rect((rect.x, rect.y, rect.w, rect.h)))
-        .expect("maps");
-    vv.project(content, (rect.x, rect.y))
+    let cam = app.board_camera(PaneId::A);
+    crate::app::board_pane::board_project(&cam, (rect.x, rect.y, rect.w, rect.h), p)
 }
 
 /// The screen→board mapping the pointer handler applies, for computing the
 /// exact expected commit target from the synthesized pixel positions.
 fn board_of_px(app: &EutecticApp, r: &crate::harness::Rendered, px: (f32, f32)) -> Point {
-    let canvas = app.board_canvas_clone();
     let rect = r.ui.rect_of_key(PaneId::A.canvas_key()).unwrap();
-    let vv = r.ui.viewport_view_by_key(PaneId::A.canvas_key()).unwrap();
-    pick::pointer_to_board_nm(
-        &canvas,
-        px,
-        canvas.content_rect((rect.x, rect.y, rect.w, rect.h)),
-        vv,
-    )
-    .expect("in view")
+    let cam = app.board_camera(PaneId::A);
+    crate::app::board_pane::board_unproject(&cam, (rect.x, rect.y, rect.w, rect.h), px)
 }
 
 /// A pad-candidate center of `comp` (the grab point for drag tests).

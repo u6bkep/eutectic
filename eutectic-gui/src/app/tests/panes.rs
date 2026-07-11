@@ -30,81 +30,62 @@ fn layout_and_maximize_toggles() {
     assert_eq!(app.maximized.get(), None, "toggling again restores");
 }
 
-/// A pane hidden by maximize on its first frame must NOT be marked fitted — otherwise
-/// its dropped FitContent request (damascene discards requests whose viewport is absent
-/// this frame) would strand it at the default camera forever. On restore, the still
-/// un-fitted pane must re-arm its fit. Regression for the stuck-`fitted` bug.
+/// A pane hidden by maximize on its first frame must NOT be marked fitted —
+/// otherwise on restore it would render with the default camera and never
+/// re-fit. On restore, the still un-fitted pane must fit on its first
+/// visible frame. Regression for the stuck-`fitted` bug — WP2 shape: the
+/// board pane (A)'s fit is app-camera math applied in `build` against its
+/// laid-out rect; the schematic pane (B) still rides the FitContent queue.
 #[test]
 fn hidden_pane_defers_its_fit_until_visible() {
     let mut app = EutecticApp::new(schematic_domain());
-    // Maximize B on the very first frame — A is hidden this frame.
+    // Maximize B on the very first frame — A (board) is hidden.
     app.maximized.set(Some(PaneId::B));
-    app.before_build();
-
-    // Only the visible pane (B) queued a fit; the hidden pane (A) is still un-fitted.
+    let _ = settle(&mut app);
     assert!(app.panes.borrow()[pane_index(PaneId::B)].fitted, "B fits");
     assert!(
         !app.panes.borrow()[pane_index(PaneId::A)].fitted,
-        "hidden A must NOT be marked fitted (its request would be dropped)"
+        "hidden A must NOT be marked fitted (it has no rect to fit against)"
     );
-    let reqs = app.drain_viewport_requests();
+    let unfitted = crate::app::board_pane::zoom_px_per_mm(&app.board_camera(PaneId::A));
     assert!(
-        reqs.iter().any(|r| matches!(
-            r,
-            ViewportRequest::FitContent { key, .. } if key == PaneId::B.canvas_key()
-        )),
-        "B's fit was queued"
-    );
-    assert!(
-        !reqs.iter().any(|r| matches!(
-            r,
-            ViewportRequest::FitContent { key, .. } if key == PaneId::A.canvas_key()
-        )),
-        "A's fit must NOT be queued while hidden"
+        (unfitted - 1.0).abs() < 1e-3,
+        "hidden A's camera stays at the reset zoom, got {unfitted}"
     );
 
-    // Restore the split; A is now visible and must fit on this frame.
+    // Restore the split; A is now visible and must fit on its first visible
+    // build (frame 2 of the settle — the rect exists from frame 1's layout).
     app.maximized.set(None);
-    app.before_build();
+    let _ = settle(&mut app);
     assert!(
         app.panes.borrow()[pane_index(PaneId::A)].fitted,
         "restored A must now fit"
     );
-    let reqs = app.drain_viewport_requests();
+    let fitted = crate::app::board_pane::zoom_px_per_mm(&app.board_camera(PaneId::A));
     assert!(
-        reqs.iter().any(|r| matches!(
-            r,
-            ViewportRequest::FitContent { key, .. } if key == PaneId::A.canvas_key()
-        )),
-        "A's fit is queued once it becomes visible"
+        (fitted - 1.0).abs() > 1e-3,
+        "restored A's camera actually fitted (zoom {fitted})"
     );
 }
 
 /// Per-pane independence: the SAME screen pixel maps to DIFFERENT board points when the
 /// two panes have different cameras — proving the pick composition uses the clicked
-/// pane's own viewport view, not a shared one (the m2 bug class). And the same pixel
+/// pane's own app camera, not a shared one (the m2 bug class). And the same pixel
 /// with the same camera but different pane RECTS also maps differently — proving the
 /// rect is per-pane too.
 #[test]
-fn per_pane_composition_uses_the_clicked_panes_view_and_rect() {
-    use damascene_core::viewport::ViewportView;
-    let app = EutecticApp::new(schematic_domain());
-    let canvas = app.board_canvas_clone();
+fn per_pane_composition_uses_the_clicked_panes_camera_and_rect() {
+    use crate::app::board_pane::board_unproject;
+    use crate::render::Camera;
 
     let rect = (0.0f32, 0.0f32, 400.0f32, 300.0f32);
     let px = (100.0f32, 80.0f32);
 
     // Two different cameras (pane A vs pane B), same rect + pixel.
-    let cam_a = ViewportView {
-        pan: (0.0, 0.0),
-        zoom: 1.0,
-    };
-    let cam_b = ViewportView {
-        pan: (50.0, -30.0),
-        zoom: 2.0,
-    };
-    let pa = pick::pointer_to_board_nm(&canvas, px, rect, cam_a).expect("a maps");
-    let pb = pick::pointer_to_board_nm(&canvas, px, rect, cam_b).expect("b maps");
+    let cam_a = Camera::new((5e6, 5e6), 1e-6);
+    let cam_b = Camera::new((9e6, 2e6), 2e-6);
+    let pa = board_unproject(&cam_a, rect, px);
+    let pb = board_unproject(&cam_b, rect, px);
     assert_ne!(
         pa, pb,
         "same pixel under different pane cameras must map to different board points"
@@ -113,8 +94,8 @@ fn per_pane_composition_uses_the_clicked_panes_view_and_rect() {
     // Same camera, two different pane rects (dual split: A left, B right).
     let rect_a = (0.0f32, 0.0f32, 200.0f32, 300.0f32);
     let rect_b = (210.0f32, 0.0f32, 200.0f32, 300.0f32);
-    let ra = pick::pointer_to_board_nm(&canvas, px, rect_a, cam_a).expect("ra maps");
-    let rb = pick::pointer_to_board_nm(&canvas, px, rect_b, cam_a).expect("rb maps");
+    let ra = board_unproject(&cam_a, rect_a, px);
+    let rb = board_unproject(&cam_a, rect_b, px);
     assert_ne!(
         ra, rb,
         "same pixel under different pane rects must map to different board points"

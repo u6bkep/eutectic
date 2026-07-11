@@ -122,6 +122,33 @@ impl Spring {
     }
 }
 
+/// The fixed board point a zoom-at-cursor glide is anchored to (WP2): the
+/// board point under the cursor, the cursor's pane px, and the pane size the
+/// px are relative to. While anchored, [`CameraGlide::step`] derives the
+/// center from the zoom each frame (`center = anchor ∓ offset/zoom`), so the
+/// anchored board point stays under the cursor **through the whole glide**,
+/// not just at the tick.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ZoomAnchor {
+    /// The anchored board point (nm).
+    pub board: (f64, f64),
+    /// The cursor position in pane px (origin top-left, y down).
+    pub px: (f64, f64),
+    /// The pane viewport (px) the cursor px are relative to.
+    pub viewport: (f64, f64),
+}
+
+impl ZoomAnchor {
+    /// The camera center that puts [`board`](Self::board) under
+    /// [`px`](Self::px) at `zoom` — the inversion of [`Camera::unproject`].
+    fn center_at(&self, zoom: f64) -> (f64, f64) {
+        (
+            self.board.0 - (self.px.0 - self.viewport.0 / 2.0) / zoom,
+            self.board.1 + (self.px.1 - self.viewport.1 / 2.0) / zoom,
+        )
+    }
+}
+
 /// The camera glide filter (renderer-spec §7 motion style): the *current*
 /// camera eases toward a *target* camera through critically-damped springs —
 /// center in nm, zoom in **log space** (so a 2× zoom-in and a 2× zoom-out
@@ -134,6 +161,10 @@ pub struct CameraGlide {
     cy: Spring,
     lz: Spring,
     target: Camera,
+    /// A live zoom-at-cursor constraint (WP2). While set, the center springs
+    /// are slaved to the zoom spring through
+    /// [`ZoomAnchor::center_at`] — cleared by any plain retarget/snap.
+    anchor: Option<ZoomAnchor>,
 }
 
 impl CameraGlide {
@@ -153,6 +184,7 @@ impl CameraGlide {
                 v: 0.0,
             },
             target: cam,
+            anchor: None,
         }
     }
 
@@ -174,10 +206,32 @@ impl CameraGlide {
         self.target
     }
 
-    /// Retarget mid-flight (wheel tick, fit request): position and velocity
-    /// carry over, so consecutive steps feel continuous.
+    /// Retarget mid-flight (pan, fit request): position and velocity carry
+    /// over, so consecutive steps feel continuous. Clears any zoom anchor —
+    /// the new target names its own center.
     pub fn retarget(&mut self, target: Camera) {
         self.target = target;
+        self.anchor = None;
+    }
+
+    /// Retarget a **zoom-at-cursor** glide (WP2 wheel gesture): glide the
+    /// zoom to `zoom` while keeping `anchor`'s board point fixed under its
+    /// cursor px through every intermediate frame. The target center is
+    /// derived from the anchor at the target zoom; successive ticks
+    /// re-anchor at the live cursor and chain continuously (the zoom
+    /// spring's position/velocity carry over).
+    pub fn retarget_zoom_about(&mut self, zoom: f64, anchor: ZoomAnchor) {
+        self.target = Camera {
+            center: anchor.center_at(zoom),
+            zoom,
+        };
+        self.anchor = Some(anchor);
+        // Pin the center springs to the constraint at the CURRENT zoom so the
+        // anchored point is exact from the first frame (a prior pan glide's
+        // center velocity would otherwise fight the constraint).
+        let c = anchor.center_at(self.lz.x.exp());
+        self.cx = Spring { x: c.0, v: 0.0 };
+        self.cy = Spring { x: c.1, v: 0.0 };
     }
 
     /// Jump instantly (initial placement, doc reload): no animation.
@@ -190,9 +244,17 @@ impl CameraGlide {
     /// [`settled`](CameraGlide::settled) goes true and continuous redraw
     /// requests can stop (the §7 damage rule's "glide live" condition).
     pub fn step(&mut self, dt: f64) -> Camera {
-        self.cx = self.cx.step(self.target.center.0, dt, GLIDE_OMEGA);
-        self.cy = self.cy.step(self.target.center.1, dt, GLIDE_OMEGA);
         self.lz = self.lz.step(self.target.zoom.ln(), dt, GLIDE_OMEGA);
+        if let Some(anchor) = self.anchor {
+            // Anchored zoom: the center is a pure function of the zoom, so
+            // the anchored board point never leaves the cursor px.
+            let c = anchor.center_at(self.lz.x.exp());
+            self.cx = Spring { x: c.0, v: 0.0 };
+            self.cy = Spring { x: c.1, v: 0.0 };
+        } else {
+            self.cx = self.cx.step(self.target.center.0, dt, GLIDE_OMEGA);
+            self.cy = self.cy.step(self.target.center.1, dt, GLIDE_OMEGA);
+        }
         if self.near_target() {
             self.snap(self.target);
         }
@@ -365,5 +427,64 @@ mod tests {
             s.step(10.0, 0.016, GLIDE_OMEGA),
             s.step(10.0, 0.016, GLIDE_OMEGA)
         );
+    }
+
+    /// An anchored zoom glide (WP2 wheel gesture) keeps the anchored board
+    /// point exactly under its cursor px through EVERY step, and lands
+    /// bit-exactly on its derived target.
+    #[test]
+    fn anchored_zoom_glide_pins_the_cursor_point() {
+        let cam = Camera::new((10_000_000.0, 7_500_000.0), 2e-6);
+        let mut g = CameraGlide::new(cam);
+        let px = (123.0, 517.0); // deliberately off-center
+        let board = cam.unproject(px, VP);
+        g.retarget_zoom_about(
+            cam.zoom * 4.0,
+            ZoomAnchor {
+                board,
+                px,
+                viewport: VP,
+            },
+        );
+        let mut t = 0.0;
+        while !g.settled() && t < 2.0 {
+            let c = g.step(1.0 / 240.0);
+            let now = c.unproject(px, VP);
+            let err_px = ((now.0 - board.0).abs() + (now.1 - board.1).abs()) * c.zoom;
+            assert!(err_px < 1e-6, "anchor drifted {err_px} px at t={t:.3}");
+            t += 1.0 / 240.0;
+        }
+        assert!(g.settled());
+        let end = g.current();
+        assert_eq!(end, g.target(), "bit-exact settle");
+        assert!((end.zoom - cam.zoom * 4.0).abs() < 1e-18);
+        let now = end.unproject(px, VP);
+        assert!(((now.0 - board.0).abs() + (now.1 - board.1).abs()) * end.zoom < 1e-6);
+    }
+
+    /// A plain retarget (pan/fit) clears the anchor: the follow-up glide
+    /// converges on the new center instead of being slaved to the old
+    /// cursor constraint.
+    #[test]
+    fn plain_retarget_clears_the_zoom_anchor() {
+        let cam = Camera::new((0.0, 0.0), 1e-6);
+        let mut g = CameraGlide::new(cam);
+        g.retarget_zoom_about(
+            2e-6,
+            ZoomAnchor {
+                board: cam.unproject((100.0, 100.0), VP),
+                px: (100.0, 100.0),
+                viewport: VP,
+            },
+        );
+        g.step(1.0 / 120.0);
+        let want = Camera::new((9_000_000.0, -4_000_000.0), 2e-6);
+        g.retarget(want);
+        let mut t = 0.0;
+        while !g.settled() && t < 2.0 {
+            g.step(1.0 / 120.0);
+            t += 1.0 / 120.0;
+        }
+        assert_eq!(g.current(), want, "the pan target wins after retarget");
     }
 }

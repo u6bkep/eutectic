@@ -376,14 +376,20 @@ pub struct RenderArgs<'a> {
     pub state: &'a SemanticStates,
     /// The pane texture view to draw into (an `AppTexture` view in WP2, an
     /// owned readback texture in tests). Must match the `target_format`
-    /// the renderer was built with and be `size` texels.
+    /// the renderer was built with and be **at least** `size` texels (WP2's
+    /// allocation hysteresis over-allocates; rendering is clipped to the
+    /// top-left `size` sub-viewport, and the clear covers the rest).
     pub target: &'a wgpu::TextureView,
+    /// The rendered viewport in texels — the pane's pixel size.
     pub size: (u32, u32),
     /// Pane-local cursor position for the crosshair; `None` hides it.
     pub cursor_px: Option<[f32; 2]>,
 }
 
 struct CoverageTargets {
+    /// Allocated texel size — **grow-only** (two panes of different sizes
+    /// share these targets per frame; each render clips to its own
+    /// sub-viewport instead of reallocating).
     size: (u32, u32),
     /// MSAA render target (`samples` > 1) — resolved into `resolved`.
     msaa: Option<wgpu::TextureView>,
@@ -738,9 +744,14 @@ impl Renderer {
     }
 
     fn ensure_targets(&mut self, device: &wgpu::Device, size: (u32, u32)) {
-        if self.targets.as_ref().is_some_and(|t| t.size == size) {
-            return;
-        }
+        // Grow-only: a request smaller than the allocation renders into its
+        // own sub-viewport of the shared targets (see `render`), so two
+        // panes of different sizes never thrash reallocations per frame.
+        let size = match self.targets.as_ref() {
+            Some(t) if t.size.0 >= size.0 && t.size.1 >= size.1 => return,
+            Some(t) => (t.size.0.max(size.0), t.size.1.max(size.1)),
+            None => size,
+        };
         let extent = wgpu::Extent3d {
             width: size.0.max(1),
             height: size.1.max(1),
@@ -963,6 +974,11 @@ impl Renderer {
             label: Some("render.frame"),
         });
 
+        // Every pass draws into the top-left `size` sub-viewport: the pane
+        // texture (allocation hysteresis) and the shared coverage targets
+        // (grow-only) may both be larger than the rendered pane.
+        let vp_px = (size.0 as f32, size.1 as f32);
+
         // Background + grid (clears the pane).
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -981,6 +997,7 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            pass.set_viewport(0.0, 0.0, vp_px.0, vp_px.1, 0.0, 1.0);
             pass.set_pipeline(&self.chrome_bg);
             pass.set_bind_group(0, &self.cover_bg, &[]);
             pass.draw(0..3, 0..1);
@@ -1015,6 +1032,7 @@ impl Renderer {
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
+                pass.set_viewport(0.0, 0.0, vp_px.0, vp_px.1, 0.0, 1.0);
                 pass.set_bind_group(0, &self.cover_bg, &[]);
                 if let Some((vb, ib, n)) = d.mesh {
                     pass.set_pipeline(&self.cover_mesh);
@@ -1045,6 +1063,7 @@ impl Renderer {
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
+                pass.set_viewport(0.0, 0.0, vp_px.0, vp_px.1, 0.0, 1.0);
                 pass.set_pipeline(&self.composite);
                 pass.set_bind_group(0, comp_bg, &[slot as u32 * PLANE_STRIDE as u32]);
                 pass.draw(0..3, 0..1);
@@ -1069,6 +1088,7 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            pass.set_viewport(0.0, 0.0, vp_px.0, vp_px.1, 0.0, 1.0);
             pass.set_pipeline(&self.chrome_cross);
             pass.set_bind_group(0, &self.cover_bg, &[]);
             pass.draw(0..3, 0..1);

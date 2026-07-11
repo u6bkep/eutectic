@@ -317,33 +317,56 @@ pub trait WinitWgpuApp: App {
     /// [`damascene_core::surface::AppTexture`] / `surface()` widgets)
     /// initialize them here.
     ///
+    /// ECAD: extended from upstream's `(device, queue)` with the adapter
+    /// (the owned renderer negotiates its coverage-target format against
+    /// adapter capabilities) and the negotiated swapchain format (the pane
+    /// textures match the swapchain's sRGB family — renderer-spec §9). May
+    /// run again if the host recreates its GPU context (Android
+    /// suspend/resume); implementations must rebuild from CPU caches.
+    ///
     /// Default: no-op. App authors who don't touch wgpu directly can
     /// ignore this hook.
-    fn gpu_setup(&mut self, _device: &wgpu::Device, _queue: &wgpu::Queue) {}
+    fn gpu_setup(
+        &mut self,
+        _device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        _adapter: &wgpu::Adapter,
+        _surface_format: wgpu::TextureFormat,
+    ) {
+    }
 
     /// ECAD seam (owned-canvas campaign, host slice): raw winit event tap,
     /// called with every [`WindowEvent`] as it arrives, before the host's
     /// own routing / hit-testing (and regardless of whether the GPU surface
     /// exists yet).
     ///
-    /// Intended consumer (future slice, deliberately NOT wired yet): free
-    /// hover on the owned canvas — deriving board-space hover from raw
+    /// Consumer (WP2): free hover + crosshair + middle-drag pan on the
+    /// owned board canvas — board-space hover derived from raw
     /// `CursorMoved` / `CursorLeft` without El-identity changes, which the
     /// El-shaped hover path structurally cannot deliver across one
     /// monolithic canvas El (see docs/gui-architecture.md, "Canvas
     /// strategy").
     ///
-    /// Default: no-op; nothing overrides it in this slice — no hover
-    /// events are delivered anywhere.
-    fn raw_window_event(&mut self, _event: &WindowEvent) {}
+    /// ECAD: carries the window's scale factor (raw positions are physical
+    /// px; `1.0` before the window exists) and returns whether app state
+    /// changed such that a redraw is needed — the host requests one.
+    ///
+    /// Default: no-op, no redraw.
+    fn raw_window_event(&mut self, _event: &WindowEvent, _scale_factor: f64) -> bool {
+        false
+    }
 
     /// Called each frame just before [`App::build`] runs. Apps update
     /// their app-owned GPU textures here — typically by
     /// `queue.write_texture(...)` of the next animation frame so the
     /// composite the runner draws this frame samples fresh pixels.
     ///
+    /// ECAD: extended from upstream's `(queue)` with the device — the
+    /// owned-canvas pane renders record their own command buffers here,
+    /// which needs encoder/texture creation, not just queue writes.
+    ///
     /// Default: no-op.
-    fn before_paint(&mut self, _queue: &wgpu::Queue) {}
+    fn before_paint(&mut self, _device: &wgpu::Device, _queue: &wgpu::Queue) {}
 }
 
 struct BasicApp<A>(A);
@@ -853,8 +876,11 @@ impl<A: WinitWgpuApp> ApplicationHandler for Host<A> {
         // whenever a host GPU context is created; on Android this can
         // happen again after Activity suspend/resume recreates the
         // native window.
+        // ECAD: also pass the adapter + negotiated swapchain format (see
+        // `WinitWgpuApp::gpu_setup`).
         let gfx = self.gfx.as_ref().unwrap();
-        self.app.gpu_setup(&gfx.device, &gfx.queue);
+        self.app
+            .gpu_setup(&gfx.device, &gfx.queue, &adapter, gfx.config.format);
         self.next_periodic_redraw = self
             .config
             .redraw_interval
@@ -895,9 +921,20 @@ impl<A: WinitWgpuApp> ApplicationHandler for Host<A> {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        // ECAD: raw event tap (see `WinitWgpuApp::raw_window_event`) — a
-        // no-op until the free-hover slice overrides it.
-        self.app.raw_window_event(&event);
+        // ECAD: raw event tap (see `WinitWgpuApp::raw_window_event`) — WP2's
+        // free hover / crosshair / middle-drag pan. A `true` return means app
+        // state changed without any El-level event, so request a frame.
+        let raw_scale = self
+            .gfx
+            .as_ref()
+            .map(|g| g.window.scale_factor())
+            .unwrap_or(1.0);
+        if self.app.raw_window_event(&event, raw_scale)
+            && let Some(gfx) = self.gfx.as_ref()
+        {
+            self.next_trigger = FrameTrigger::Pointer;
+            gfx.window.request_redraw();
+        }
         match event {
             WindowEvent::CloseRequested => {
                 self.gfx.take();
@@ -1440,7 +1477,9 @@ impl<A: WinitWgpuApp> ApplicationHandler for Host<A> {
                             self.last_diagnostics = Some(diagnostics.clone());
                             let (tree, palette) = {
                                 damascene_core::profile_span!("frame::build");
-                                self.app.before_paint(&gfx.queue);
+                                // ECAD: before_paint carries the device too
+                                // (owned-canvas pane renders happen here).
+                                self.app.before_paint(&gfx.device, &gfx.queue);
                                 WinitWgpuApp::before_build(&mut self.app);
                                 let theme = self.app.theme();
                                 let palette = theme.palette().clone();

@@ -6,10 +6,11 @@
 //! as pure code motion (gui-module-split); this is the region a future
 //! split-tree rework will own.
 //!
-//! OWNED-CANVAS MIGRATION (decided 2026-07-07): the `viewport()` canvas call
-//! sites in here are scheduled for **replacement** by app-rendered
-//! `surface(AppTexture)` panes — do not extend the viewport path (see
-//! gui-architecture.md, "Canvas strategy").
+//! OWNED-CANVAS MIGRATION (decided 2026-07-07): the **board** pane runs on
+//! the app-rendered `surface(AppTexture)` path as of WP2 (`board_canvas` +
+//! `app::board_pane`); the **schematic** pane's `viewport()` call site below
+//! is the last one standing and is scheduled for replacement in WP3 — do not
+//! extend the viewport path (see gui-architecture.md, "Canvas strategy").
 
 pub(crate) mod strip;
 
@@ -36,7 +37,7 @@ impl EutecticApp {
     pub(crate) fn viewer_body(&self, cx: &BuildCx) -> El {
         // The active board pane's zoom drives the toolbar/status readout (whichever pane A
         // shows a board, else pane B, else 1.0). The cursor readout is set per event.
-        let zoom = self.readout_zoom(cx);
+        let zoom = self.readout_zoom();
 
         // The shared cross-view highlight sets, projected once per frame from the selection.
         let sets = self.highlight_sets();
@@ -92,13 +93,15 @@ impl EutecticApp {
     }
 
     /// The zoom to display in the toolbar / status bar: the active board pane's zoom
-    /// (whichever pane shows a board), else 1.0.
-    fn readout_zoom(&self, cx: &BuildCx) -> f32 {
+    /// (whichever pane shows a board — read off its app-owned camera in the
+    /// legacy px-per-mm scale), else 1.0. Board panes no longer consult
+    /// `cx.viewport_view` (WP2: they left the viewport system).
+    fn readout_zoom(&self) -> f32 {
         let panes = self.panes.borrow();
         for (i, p) in panes.iter().enumerate() {
             if p.view == ViewKind::Board {
                 let id = if i == 0 { PaneId::A } else { PaneId::B };
-                return cx.viewport_view(id.canvas_key()).map_or(1.0, |v| v.zoom);
+                return crate::app::board_pane::zoom_px_per_mm(&self.board_camera(id));
             }
         }
         1.0
@@ -106,7 +109,7 @@ impl EutecticApp {
 
     /// The shared cross-view highlight sets for this frame — the selection + hover ids,
     /// projected through [`HighlightSets`] so both panes expand the same way.
-    fn highlight_sets(&self) -> HighlightSets {
+    pub(crate) fn highlight_sets(&self) -> HighlightSets {
         match &self.domain.doc {
             Ok(doc) => {
                 let sel = self.domain.selection.borrow();
@@ -192,63 +195,80 @@ impl EutecticApp {
         .height(Size::Hug)
     }
 
-    /// A board pane's canvas: the cached layer Els + the per-frame overlay, in a viewport
-    /// keyed to *this pane* (independent camera). Falls back to a placeholder when the
-    /// board projection failed.
-    fn board_canvas(&self, cx: &BuildCx, pane: PaneId, sets: &HighlightSets) -> El {
-        let derived = self.derived.borrow();
-        let Some(view) = &derived.board else {
+    /// A board pane's canvas (WP2 owned canvas): one keyed container holding
+    /// the pane's `surface(AppTexture)` El — the renderer-drawn texture,
+    /// composited opaque and clipped to the pane rect. The old viewport path
+    /// (grid El + layer Els + overlay El inside `viewport()`) is gone from
+    /// board panes: the grid is procedural in the renderer, layer visibility
+    /// is a style-table uniform, and the overlay lowers to renderer
+    /// primitives (`app::board_pane`). Headless (the CPU harness / review
+    /// bin) has no GPU and no texture; the container still owns the key, the
+    /// laid-out rect, and the pointer routing, so every pick/gesture test
+    /// runs without a device. Falls back to a placeholder when the board
+    /// projection failed.
+    fn board_canvas(&self, cx: &BuildCx, pane: PaneId, _sets: &HighlightSets) -> El {
+        if self.derived.borrow().board.is_none() {
             return pane_placeholder("No board to display");
+        }
+        // Capture the pane + strip rects (from the last layout) and the
+        // scale factor: the paint pass sizes the pane texture from them and
+        // the raw-pointer seams (free hover, middle pan) resolve panes
+        // against them. One-frame lag by construction (see
+        // `app::board_pane` module docs).
+        if let Some(d) = cx.diagnostics() {
+            self.scale_factor.set(d.scale_factor);
+        }
+        let i = pane_index(pane);
+        let key = pane.canvas_key();
+        let rect = cx.rect_of_key(key).map(|r| (r.x, r.y, r.w, r.h));
+        let mut rects = self.pane_px.get();
+        rects[i] = rect;
+        self.pane_px.set(rects);
+        let mut strips = self.strip_px.get();
+        strips[i] = cx
+            .rect_of_key(pane.strip_panel_key())
+            .map(|r| (r.x, r.y, r.w, r.h));
+        self.strip_px.set(strips);
+
+        // Settle this pane's camera for the frame: fit-on-first-show plus
+        // any pending Fit/Reset request, against the known rect.
+        let cam = match rect {
+            Some(r) => self.board_build_camera(pane, r),
+            None => self.board_camera(pane),
         };
-        // Per-pane El keys: two board panes render the same layers, so namespace each
-        // layer / overlay El by the pane (keys must be unique in the tree). The event
-        // router still recognises these as canvas targets (the `layer:` / `overlay:`
-        // prefixes survive) and the pane is resolved by pointer rect, not by key.
-        let prefix = pane.canvas_key();
-        let zoom = cx.viewport_view(pane.canvas_key()).map_or(1.0, |v| v.zoom);
-        // Canvas furniture: the dot grid + origin axes, UNDER every board layer (the
-        // first child). Its pitch adapts to the pane's zoom and its lattice window is
-        // anchored to the pane's visible rect (last frame's camera + rect — the same
-        // one-frame lag the zoom above has), so the grid covers the whole viewport at
-        // every pan/zoom. Per-pane window cache: a typical build is an asset clone
-        // (see `Canvas::grid_el`'s cost model). It shares the layers' viewBox so it
-        // registers, and it is never a pick candidate (picking folds the geometry
-        // kernel, not canvas Els — see `canvas::pick`).
+
         let mut children: Vec<El> = Vec::new();
-        let visible = cx
-            .rect_of_key(pane.canvas_key())
-            .zip(cx.viewport_view(pane.canvas_key()))
-            .map(|(r, vv)| view.canvas.visible_view_mm((r.x, r.y, r.w, r.h), vv));
-        let mut caches = self.grid_caches.borrow_mut();
-        if let Some(grid) = view
-            .canvas
-            .grid_el(zoom, visible, &mut caches[pane_index(pane)])
-        {
-            children.push(grid.key(format!("grid:{prefix}")));
+        let mut texture_pending = false;
+        if let Some((tex, alloc)) = self.board_pane_texture(pane) {
+            // Pixel-accurate compositing: the texture is `alloc` device px,
+            // so the El spans `alloc / scale` logical px (the default Fill
+            // fit then maps texels 1:1 onto device px); the container's
+            // clip crops the allocation-hysteresis overscan beyond the pane.
+            let s = self.scale_factor.get().max(0.1);
+            children.push(
+                surface(tex)
+                    .surface_alpha(SurfaceAlpha::Opaque)
+                    .width(Size::Fixed(alloc.0 as f32 / s))
+                    .height(Size::Fixed(alloc.1 as f32 / s)),
+            );
+        } else if self.gpu.borrow().is_some() && rect.is_some() {
+            // The GPU path is live but the first paint hasn't produced a
+            // texture yet — ask for a frame so it appears without input.
+            texture_pending = true;
         }
-        drop(caches);
-        children.extend(
-            view.canvas
-                .layer_els(&view.layers, |id| self.layer_visible(&id.key()))
-                .into_iter()
-                .enumerate()
-                .map(|(i, el)| el.key(format!("layer:{prefix}:{i}"))),
-        );
-        let overlay = self.build_board_overlay(view, pane, sets, &derived.findings);
-        if let Some(el) = view.canvas.overlay_el(&overlay) {
-            // Re-key the overlay per pane (the canvas hardcodes "overlay:dynamic"); wrap it
-            // in a keyed container so two board panes' overlays don't collide.
-            children.push(el.key(format!("overlay:{prefix}")));
-        }
-        let vp = viewport(children)
-            .key(pane.canvas_key())
-            .min_zoom(0.1)
-            .max_zoom(64.0)
-            .pan_bounds(PanBounds::Contain)
+        let mut canvas = stack(children)
+            .key(key)
+            .clip()
             .fill(CANVAS_BG)
             .width(Size::Fill(1.0))
             .height(Size::Fill(1.0));
-        with_zoom_chip(vp, zoom)
+        // Continuous redraw ONLY while motion is live (§7 damage rule): a
+        // mid-flight glide re-renders each frame until its bit-exact settle;
+        // drags ride the host's pointer-driven redraws.
+        if self.board_glide_active() || texture_pending {
+            canvas = canvas.redraw_within(std::time::Duration::ZERO);
+        }
+        with_zoom_chip(canvas, crate::app::board_pane::zoom_px_per_mm(&cam))
     }
 
     /// A schematic pane's canvas: the cached schematic asset + the per-frame highlight

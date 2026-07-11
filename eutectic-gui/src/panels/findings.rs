@@ -91,17 +91,16 @@ impl EutecticApp {
 
     /// Select the finding at `index` (a findings-panel row click): fold ALL of its
     /// semantic refs into the selection (so the panes cross-highlight the offending
-    /// nets / parts / pins), and — if the finding has a derived board point — queue a
-    /// `CenterOn` on the focused board pane so the violation comes into view.
+    /// nets / parts / pins), and — if the finding has a derived board point — glide
+    /// the focused board pane's camera onto it so the violation comes into view.
     ///
-    /// # Click-to-zoom gap (deviation)
+    /// # Click-to-zoom gap (deviation, preserved from the viewport era)
     ///
-    /// damascene 0.4.5 has **no frame-this-rect ViewportRequest** — only `FitContent`,
-    /// `ResetView`, and `CenterOn { key, point }`. So "zoom the focused board pane to the
-    /// violation" is realised as a **`CenterOn`** (pan to the point, keeping the current
-    /// zoom) rather than a true frame-to-rect. The finding's board point is centred; the
-    /// zoom is left as the user set it. Recorded as a deviation in the report.
-    pub(crate) fn select_finding(&self, index: usize, cx: &EventCx) {
+    /// "Zoom the focused board pane to the violation" is realised as a **center-on**
+    /// (glide the camera center to the point, keeping the current zoom) rather than a
+    /// true frame-to-rect. The finding's board point is centred; the zoom is left as
+    /// the user set it.
+    pub(crate) fn select_finding(&self, index: usize, _cx: &EventCx) {
         let derived = self.derived.borrow();
         let Some(f) = derived.findings.items.get(index) else {
             return;
@@ -121,25 +120,14 @@ impl EutecticApp {
                 sel.add(r.clone());
             }
         }
-        // CenterOn the focused board pane, if the finding has a board point. The request
-        // wants a CONTENT-space point (logical px, pre-transform); the canvas maps the
-        // finding's board-mm point through its board→content-px transform using the
-        // pane's live laid-out rect (so the pan is exact regardless of the pane's
-        // aspect ratio / fitted scale).
-        if let (Some((mx, my)), Some(view)) = (f.board_mm, &derived.board)
+        // Center the focused board pane's app-owned camera on the finding's board
+        // point (WP2: plain camera-target math on the glide — no viewport request,
+        // no rect needed; board mm → nm is the only conversion).
+        if let Some((mx, my)) = f.board_mm
             && let Some(pane) = self.focused_board_pane()
-            && let Some(rect) = cx.rect_of_key(pane.canvas_key())
-            && let Some(point) = view.canvas.board_mm_to_content_px(
-                (mx, my),
-                // The asset's honest content rect (natural viewBox size at the
-                // viewport origin) — the frame CenterOn's content point lives in.
-                view.canvas.content_rect((rect.x, rect.y, rect.w, rect.h)),
-            )
         {
-            self.pending.borrow_mut().push(ViewportRequest::CenterOn {
-                key: pane.canvas_key().to_string(),
-                point,
-            });
+            let mm = eutectic_core::coord::MM as f64;
+            self.board_center_on(pane, (mx as f64 * mm, my as f64 * mm));
         }
     }
 

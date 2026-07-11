@@ -297,11 +297,6 @@ pub(crate) fn translate_shape(shape: &Shape2D, d: Point) -> Shape2D {
 
 // ----------------------------------------------------------------------------
 // The Select tool's camera pan (the non-component drag gesture).
-//
-// OWNED-CANVAS MIGRATION (decided 2026-07-07): CameraPanState exists only to
-// work around the damascene viewport()'s pan-gate and is scheduled for
-// DELETION with the viewport path — do not extend it or copy the pattern to
-// other view kinds (see gui-architecture.md, "Canvas strategy").
 // ----------------------------------------------------------------------------
 
 /// The screen-px click slop for the camera pan: a press-release that never
@@ -313,28 +308,24 @@ pub const CAMERA_PAN_SLOP_PX: f32 = 4.0;
 /// An in-flight Select-tool **camera pan** (the counterpart of [`DragState`]
 /// for everything that is *not* a component): armed on pointer-down over a
 /// board pane when the press picks no draggable component and no selected
-/// trace vertex — pour, trace, empty board, grid furniture alike.
+/// trace vertex — pour, trace, empty board, bare canvas alike.
 ///
-/// Why the app owns this at all: damascene's native viewport pan (default
-/// primary-button trigger) only engages when the press hits **nothing or the
-/// viewport's own node** (`runtime.rs`, "Viewport pan"). Every canvas child —
-/// the layer / grid / overlay vector Els — is a keyed hit-test target whose
-/// rect spans the full content viewBox, so any press inside the content rect
-/// suppresses the native gesture and the pointer events flow to the app
-/// instead. This state turns those events back into a pan: per drag event the
-/// desired pan is `start_pan + (pointer − start_px)`, realised as a
-/// `ViewportRequest::CenterOn` (the one request that can place the pan
-/// anywhere at the current zoom); damascene's layout applies it next frame
-/// under the same `PanBounds` clamp the native pan gets. Pure per-event
-/// arithmetic — no kernel, no tessellation (event-path discipline).
+/// WP2 (owned canvas): the gesture drives the pane's **app-owned camera**
+/// directly — per drag event the camera center snaps to
+/// `start_center − (Δpx.x/zoom, −Δpx.y/zoom)` (screen y down, board y up),
+/// so the board tracks the pointer exactly. Pure per-event arithmetic — no
+/// kernel, no tessellation (event-path discipline). The middle-drag pan
+/// (spec §7's primary pan gesture) is its raw-event twin in
+/// `app::board_pane`; this left-drag pan is preserved behavior from the
+/// viewport era.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CameraPanState {
     /// The board pane whose camera is being panned.
     pub pane: PaneId,
     /// The pointer-down position in screen (logical) px.
     pub start_px: (f32, f32),
-    /// The pane camera's pan at pointer-down (`ViewportView::pan`).
-    pub start_pan: (f32, f32),
+    /// The pane camera's center (board nm) at pointer-down.
+    pub start_center: (f64, f64),
     /// Latched once the drag exceeds [`CAMERA_PAN_SLOP_PX`] — only a moved
     /// gesture pans and eats the trailing Click; an un-moved press-release
     /// stays a plain click-select (pours stay selectable).

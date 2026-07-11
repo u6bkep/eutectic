@@ -382,17 +382,21 @@ pub(crate) fn atomic_write(path: &std::path::Path, text: &str) -> Result<(), Str
         .map_err(|e| format!("renaming {} over {}: {e}", tmp.display(), path.display()))
 }
 
-/// The board projection held in app state: the [`Canvas`] (for coordinate
-/// inversion), the tessellated per-layer assets it built once, and the pre-built
-/// pick candidates (folded from the `world_features` stream via each feature's
-/// `FeatureOrigin` — see [`crate::canvas::pick`]). All built once per (doc
-/// revision) load.
+/// The board projection held in app state: the per-layer metadata the layer
+/// panel lists, and the pre-built pick candidates (folded from the
+/// `world_features` stream via each feature's `FeatureOrigin` — see
+/// [`crate::canvas::pick`]). All built once per (doc revision) load.
+///
+/// WP2 (owned canvas): the [`Canvas`] itself is no longer held — board panes
+/// render through `render::board_scene` + the owned renderer, and picking
+/// unprojects through the pane camera, so the old coordinate-inversion
+/// machinery has no board callers. `BoardView` survives as the pick-candidate
+/// producer + the layer panel's row source until WP3 retires `canvas.rs`.
 pub(crate) struct BoardView {
-    pub(crate) canvas: Canvas,
     pub(crate) layers: Vec<BoardLayer>,
     /// Pickable candidates (pins / traces / vias / pours), folded from the same
-    /// `world_features` stream the canvas renders and rebuilt only when the doc
-    /// loads — the hit-test input.
+    /// `world_features` stream the renderer scene lowers and rebuilt only when
+    /// the doc loads — the hit-test input.
     pub(crate) candidates: Vec<Candidate>,
 }
 
@@ -404,6 +408,16 @@ pub(crate) struct DerivedCaches {
     /// The board projection + cached per-layer assets, or `None` when no document is
     /// loaded / the load failed / projection failed.
     pub(crate) board: Option<BoardView>,
+    /// The owned-canvas renderer scene (WP2): the board lowered through
+    /// [`crate::render::board_scene`], rebuilt per doc revision like every
+    /// other derived cache. `None` when the board didn't project. Pure CPU —
+    /// the GPU buffers ([`crate::render::SceneCache`]) key off the revision
+    /// and live in the windowed-only GPU bundle.
+    pub(crate) scene: Option<crate::render::Scene>,
+    /// The semantic state buffer (hover/selection flag words) sized to
+    /// [`scene`](Self::scene)'s semantic table. `RefCell`: mutated per frame
+    /// by one-word diffs under a shared `derived` borrow.
+    pub(crate) states: RefCell<crate::render::SemanticStates>,
     /// The schematic projection + cached asset + pick candidates, or `None` when the
     /// doc has no components.
     pub(crate) schematic: Option<SchematicView>,
@@ -419,6 +433,8 @@ impl DerivedCaches {
     pub(crate) fn empty() -> DerivedCaches {
         DerivedCaches {
             board: None,
+            scene: None,
+            states: RefCell::new(crate::render::SemanticStates::new(1)),
             schematic: None,
             explorer: Explorer::default(),
             findings: Findings::default(),
@@ -434,19 +450,30 @@ impl DerivedCaches {
         lib: &eutectic_core::part::PartLib,
         lib_notes: &[LibNote],
     ) -> DerivedCaches {
-        // The layered canvas + pick candidates, from the one `world_features` stream.
+        // The layer rows + pick candidates, from the one `world_features`
+        // stream. The Canvas is only a build-time intermediate now (WP2) —
+        // its layer projection feeds the panel; nothing renders its assets.
         let board = Canvas::new(doc, lib)
             .and_then(|canvas| {
                 let layers = canvas.build_layers(doc, lib)?;
                 let su = eutectic_core::elaborate::stackup(&doc.source);
                 let candidates = pick::candidates(doc, lib, &su);
-                Ok(BoardView {
-                    canvas,
-                    layers,
-                    candidates,
-                })
+                Ok(BoardView { layers, candidates })
             })
             .ok();
+        // The renderer scene (WP2 owned canvas): same permissive degrade as
+        // the board projection — a lowering failure means no board pane, not
+        // a crash. Built only when the board projected (they share the same
+        // world_features preconditions).
+        let scene = board.as_ref().and_then(|_| {
+            crate::render::board_scene(doc, lib)
+                .inspect_err(|e| log::warn!("board scene lowering failed: {e}"))
+                .ok()
+        });
+        let states = RefCell::new(match &scene {
+            Some(s) => crate::render::SemanticStates::for_scene(s),
+            None => crate::render::SemanticStates::new(1),
+        });
         let schematic = SchematicView::build(doc, lib);
         let explorer = Explorer::project(doc, lib);
         // Findings are derived from the board pick candidates (the halo-location
@@ -456,6 +483,8 @@ impl DerivedCaches {
         let findings = Findings::compute(doc, lib, candidates, lib_notes);
         DerivedCaches {
             board,
+            scene,
+            states,
             schematic,
             explorer,
             findings,

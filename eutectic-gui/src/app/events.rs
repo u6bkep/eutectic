@@ -7,6 +7,8 @@
 
 mod pointer;
 
+pub(crate) use pointer::PICK_TOL_PX;
+
 use crate::app::libraries::LIBRARIES_TOGGLE_KEY;
 use crate::app::pane::{
     CONFLICT_KEEP_KEY, CONFLICT_RELOAD_KEY, LAYOUT_TOGGLE_KEY, REDO_KEY, SAVE_KEY,
@@ -23,6 +25,11 @@ use damascene_core::prelude::*;
 
 impl App for EutecticApp {
     fn build(&self, cx: &BuildCx) -> El {
+        // Reset the captured per-pane rects: only panes actually built this
+        // frame re-register (a maximized-away or view-switched board pane
+        // must not leave a stale rect for the paint pass / raw hover).
+        self.pane_px.set([None, None]);
+        self.strip_px.set([None, None]);
         let main = match &self.domain.doc {
             // A loaded doc renders the two-pane viewer (at least one pane always shows
             // something — board or schematic). Even a board-only or schematic-only doc
@@ -63,10 +70,12 @@ impl App for EutecticApp {
             self.handle_disk_change(source);
         }
 
-        // Queue the initial fit-to-content once per pane, on the first frame after the doc
-        // loaded (or after a view switch reset the flag) — the layout pass resolves each
-        // request against the live per-pane viewport rect + content extents. The split
-        // extent for the resize handler is captured in `on_event` from last frame's layout.
+        // Queue the initial fit-to-content once per SCHEMATIC pane, on the first frame
+        // after the doc loaded (or after a view switch reset the flag) — the layout pass
+        // resolves each request against the live per-pane viewport rect + content extents.
+        // BOARD panes left the viewport system (WP2): their fit-on-first-show is camera
+        // math applied in `build` where the pane rect is known (`board_build_camera`
+        // consumes the same `fitted` flag), so nothing is queued for them here.
         //
         // Reload NEVER re-fits (the user's framing is sacred): `apply_reload` leaves the
         // `fitted` flags alone, so a reload does not re-arm this.
@@ -80,13 +89,10 @@ impl App for EutecticApp {
         let maximized = self.maximized.get();
         // Read the projection state up front so the `derived` borrow doesn't overlap the
         // `panes` mutable borrow below.
-        let (has_board, has_schematic) = {
-            let d = self.derived.borrow();
-            (d.board.is_some(), d.schematic.is_some())
-        };
+        let has_schematic = self.derived.borrow().schematic.is_some();
         let mut panes = self.panes.borrow_mut();
         for (i, p) in panes.iter_mut().enumerate() {
-            if p.fitted {
+            if p.fitted || p.view != ViewKind::Schematic {
                 continue;
             }
             let id = if i == 0 { PaneId::A } else { PaneId::B };
@@ -95,11 +101,7 @@ impl App for EutecticApp {
             if !visible {
                 continue;
             }
-            let projected = match p.view {
-                ViewKind::Board => has_board,
-                ViewKind::Schematic => has_schematic,
-            };
-            if projected {
+            if has_schematic {
                 self.pending.borrow_mut().push(ViewportRequest::FitContent {
                     key: id.canvas_key().to_string(),
                     padding: 24.0,
@@ -351,21 +353,33 @@ impl App for EutecticApp {
         }
 
         // Toolbar framing buttons act on the pane(s) — Fit/Reset every pane's camera so a
-        // single button reframes whatever the user sees.
-        if event.is_click_or_activate("fit") {
+        // single button reframes whatever the user sees. Board panes get an app-camera
+        // request (consumed in `build` where the rect is known — hidden panes apply on
+        // first show, like the old dropped-and-requeued viewport requests); schematic
+        // panes stay on the damascene viewport requests until WP3.
+        if event.is_click_or_activate("fit") || event.is_click_or_activate("reset") {
+            let fit = event.is_click_or_activate("fit");
             for id in [PaneId::A, PaneId::B] {
-                self.pending.borrow_mut().push(ViewportRequest::FitContent {
-                    key: id.canvas_key().to_string(),
-                    padding: 24.0,
-                });
-            }
-            return;
-        }
-        if event.is_click_or_activate("reset") {
-            for id in [PaneId::A, PaneId::B] {
-                self.pending.borrow_mut().push(ViewportRequest::ResetView {
-                    key: id.canvas_key().to_string(),
-                });
+                match self.panes.borrow()[pane_index(id)].view {
+                    ViewKind::Board => self.request_board_cam(
+                        id,
+                        if fit {
+                            crate::app::board_pane::CamRequest::Fit
+                        } else {
+                            crate::app::board_pane::CamRequest::Reset
+                        },
+                    ),
+                    ViewKind::Schematic => self.pending.borrow_mut().push(if fit {
+                        ViewportRequest::FitContent {
+                            key: id.canvas_key().to_string(),
+                            padding: 24.0,
+                        }
+                    } else {
+                        ViewportRequest::ResetView {
+                            key: id.canvas_key().to_string(),
+                        }
+                    }),
+                }
             }
             return;
         }
@@ -391,6 +405,10 @@ impl App for EutecticApp {
                     } else {
                         hidden.insert(key);
                     }
+                    // Layer visibility is a composite-uniform change on the
+                    // owned canvas — bump the style revision so the board
+                    // panes' damage keys move (spec §4: never geometry work).
+                    self.style_rev.set(self.style_rev.get() + 1);
                     return;
                 }
             }
@@ -417,7 +435,7 @@ impl App for EutecticApp {
             if event.kind == UiEventKind::Drag
                 && let Some(pos) = event.pointer_pos()
             {
-                self.update_camera_pan(cx, pos);
+                self.update_camera_pan(pos);
                 return;
             }
             if event.kind == UiEventKind::PointerUp {
@@ -451,6 +469,32 @@ impl App for EutecticApp {
             ViewKind::Board => self.handle_board_pointer(event, cx, pane, pos),
             ViewKind::Schematic => self.handle_schematic_pointer(event, cx, pane, pos),
         }
+    }
+
+    /// Wheel over a BOARD pane is the owned camera's zoom-at-cursor (spec
+    /// §7): consume it and retarget the pane's glide so the board point
+    /// under the cursor stays fixed through the whole glide. Anywhere else
+    /// (schematic viewport, scrollable chrome) returns `false` so
+    /// damascene's native wheel handling proceeds unchanged.
+    fn on_wheel_event(&mut self, event: UiEvent, cx: &EventCx) -> bool {
+        let Some(pos) = event.pointer_pos() else {
+            return false;
+        };
+        let Some(dy) = event.wheel_dy() else {
+            return false;
+        };
+        let Some(pane) = self.pane_under_pointer(cx, pos) else {
+            return false;
+        };
+        if self.panes.borrow()[pane_index(pane)].view != ViewKind::Board {
+            return false;
+        }
+        let Some(r) = cx.rect_of_key(pane.canvas_key()) else {
+            return false;
+        };
+        self.focused_pane.set(pane);
+        self.board_zoom_at(pane, (r.x, r.y, r.w, r.h), pos, dy);
+        true
     }
 
     fn drain_viewport_requests(&mut self) -> Vec<ViewportRequest> {

@@ -15,16 +15,17 @@ fn viewport() -> Rect {
 /// Drive a fixture through the two-frame host-mirroring harness (so the render
 /// reflects the fitted camera, exactly as the `review` binary dumps it) and
 /// assert the lint is clean. Takes the app by value because the harness drains
-/// its queued viewport requests across frames; returns the settled render so
-/// coverage-checking scenes can inspect the post-fit cameras.
-fn render_clean(name: &str, mut app: EutecticApp) -> Rendered {
+/// its queued viewport requests across frames; returns the app + settled
+/// render so coverage-checking scenes can inspect the post-fit cameras (a
+/// board pane's camera is app-owned — WP2).
+fn render_clean(name: &str, mut app: EutecticApp) -> (EutecticApp, Rendered) {
     let r = harness::render_settled(&mut app, viewport());
     assert!(
         r.bundle.lint.findings.is_empty(),
         "fixture `{name}` has lint findings:\n{}",
         r.bundle.lint.text()
     );
-    r
+    (app, r)
 }
 
 /// The two canvas viewport keys, for coverage assertions.
@@ -51,8 +52,8 @@ fn document_loaded_is_lint_clean() {
     );
     // sample.eut has a board (pane A) but no schematic block, so pane B is a
     // placeholder with no viewport — only the board pane is fit-checked.
-    let r = render_clean("document_loaded", app);
-    harness::assert_content_coverage("document_loaded", &r, &[PaneId::A.canvas_key()]);
+    let (app, r) = render_clean("document_loaded", app);
+    harness::assert_content_coverage("document_loaded", &app, &r, &[PaneId::A.canvas_key()]);
 }
 
 /// Library packages, slice 1 + 2: a source whose only fault is an *unknown
@@ -125,35 +126,39 @@ fn board_is_lint_clean() {
         app.domain.doc.as_ref().err()
     );
     // BOARD_ECAD has no schematic block, so only pane A (board) has content.
-    let r = render_clean("board", app);
-    harness::assert_content_coverage("board", &r, &[PaneId::A.canvas_key()]);
+    let (app, r) = render_clean("board", app);
+    harness::assert_content_coverage("board", &app, &r, &[PaneId::A.canvas_key()]);
 }
 
 /// Pins the load-bearing layout assumption behind `Canvas::content_rect` (and
-/// with it every pointer↔board mapping): a `vector()` child lays out at its
-/// NATURAL viewBox size, top-left-anchored at the viewport origin, so the
-/// asset stretch rect is `(rect.x, rect.y, vw, vh)`. The m2/m3 composition
-/// wrongly used the pane rect here and stayed invisible because both pick
-/// directions shared the error — this test fails against the real laid-out
-/// UI state if damascene's layout contract ever changes.
+/// with it the schematic pointer↔sheet mapping): a `vector()` child lays out
+/// at its NATURAL viewBox size, top-left-anchored at the viewport origin, so
+/// the asset stretch rect is `(rect.x, rect.y, vw, vh)`. The m2/m3
+/// composition wrongly used the pane rect here and stayed invisible because
+/// both pick directions shared the error — this test fails against the real
+/// laid-out UI state if damascene's layout contract ever changes.
+///
+/// WP2: the BOARD pane left the viewport path (its picking runs through the
+/// app camera, no content rect involved), so this pins the contract on the
+/// surviving consumer — the SCHEMATIC pane (pane B of the dual fixture),
+/// whose `SchematicView::content_rect` still assumes it until WP3.
 #[test]
 fn canvas_child_lays_out_at_natural_viewbox_size_at_viewport_origin() {
-    let mut app = board();
+    let mut app = dual_cross_highlight();
     let (_, _, vw, vh) = app
         .derived
         .borrow()
-        .board
+        .schematic
         .as_ref()
-        .expect("board scene projects a canvas")
-        .canvas
+        .expect("dual fixture projects a schematic")
         .content_rect((0.0, 0.0, 0.0, 0.0));
     let r = harness::render_settled(&mut app, viewport());
-    let content = harness::content_bounds_of(&r, PaneId::A.canvas_key())
+    let content = harness::content_bounds_of(&r, PaneId::B.canvas_key())
         .expect("canvas viewport has measured content bounds");
     // The bounds carry the viewport's own (untransformed) window origin;
     // "anchored at the viewport origin" pins content.xy == pane.xy.
     let pane =
-        r.ui.rect_of_key(PaneId::A.canvas_key())
+        r.ui.rect_of_key(PaneId::B.canvas_key())
             .expect("canvas viewport has a laid-out rect");
     assert!(
         (content.x - pane.x).abs() < 0.5 && (content.y - pane.y).abs() < 0.5,
@@ -182,8 +187,8 @@ fn menubar_open_is_lint_clean() {
         Some("file"),
         "the scene must have the File menu open"
     );
-    let r = render_clean("menubar_open", app);
-    harness::assert_content_coverage("menubar_open", &r, &[PaneId::A.canvas_key()]);
+    let (app, r) = render_clean("menubar_open", app);
+    harness::assert_content_coverage("menubar_open", &app, &r, &[PaneId::A.canvas_key()]);
 }
 
 #[test]
@@ -195,14 +200,14 @@ fn board_with_selection_is_lint_clean() {
         !app.domain.selection.borrow().is_empty(),
         "board_with_selection has no selection"
     );
-    let r = render_clean("board_with_selection", app);
-    harness::assert_content_coverage("board_with_selection", &r, &[PaneId::A.canvas_key()]);
+    let (app, r) = render_clean("board_with_selection", app);
+    harness::assert_content_coverage("board_with_selection", &app, &r, &[PaneId::A.canvas_key()]);
 }
 
 #[test]
 fn measure_in_progress_is_lint_clean() {
-    let r = render_clean("measure_in_progress", measure_in_progress());
-    harness::assert_content_coverage("measure_in_progress", &r, &[PaneId::A.canvas_key()]);
+    let (app, r) = render_clean("measure_in_progress", measure_in_progress());
+    harness::assert_content_coverage("measure_in_progress", &app, &r, &[PaneId::A.canvas_key()]);
 }
 
 /// The DRC findings fixture: it must actually flag the deliberate clearance short
@@ -223,8 +228,8 @@ fn drc_violation_is_lint_clean_and_flags() {
     );
     assert!(f.errors >= 1, "the chip must show at least one error");
     // The scene has a board (pane A) but no schematic block, so only pane A fits.
-    let r = render_clean("drc_violation", drc_violation());
-    harness::assert_content_coverage("drc_violation", &r, &[PaneId::A.canvas_key()]);
+    let (app, r) = render_clean("drc_violation", drc_violation());
+    harness::assert_content_coverage("drc_violation", &app, &r, &[PaneId::A.canvas_key()]);
 }
 
 #[test]
@@ -255,30 +260,30 @@ fn dual_cross_highlight_is_lint_clean() {
     );
     // The dual scene shows a board (pane A) and a schematic (pane B), both with
     // content — the headline artifact, so both panes must fit.
-    let r = render_clean("dual_cross_highlight", app);
-    harness::assert_content_coverage("dual_cross_highlight", &r, &canvas_keys());
+    let (app, r) = render_clean("dual_cross_highlight", app);
+    harness::assert_content_coverage("dual_cross_highlight", &app, &r, &canvas_keys());
 }
 
 #[test]
 fn stacked_layout_is_lint_clean() {
     // Same board|schematic content as the dual scene, stacked orientation.
-    let r = render_clean("stacked_layout", stacked_layout());
-    harness::assert_content_coverage("stacked_layout", &r, &canvas_keys());
+    let (app, r) = render_clean("stacked_layout", stacked_layout());
+    harness::assert_content_coverage("stacked_layout", &app, &r, &canvas_keys());
 }
 
 #[test]
 fn maximized_pane_is_lint_clean() {
     // Pane B (schematic) is maximized; pane A is hidden (no viewport), so only
     // the visible schematic pane is fit-checked.
-    let r = render_clean("maximized_pane", maximized_pane());
-    harness::assert_content_coverage("maximized_pane", &r, &[PaneId::B.canvas_key()]);
+    let (app, r) = render_clean("maximized_pane", maximized_pane());
+    harness::assert_content_coverage("maximized_pane", &app, &r, &[PaneId::B.canvas_key()]);
 }
 
 #[test]
 fn dual_boards_is_lint_clean() {
     // Two board panes over the same doc — both show board content, both fit.
-    let r = render_clean("dual_boards", dual_boards());
-    harness::assert_content_coverage("dual_boards", &r, &canvas_keys());
+    let (app, r) = render_clean("dual_boards", dual_boards());
+    harness::assert_content_coverage("dual_boards", &app, &r, &canvas_keys());
 }
 
 /// The per-kind-tools scene (revised structural commitment 4): the two kinds
@@ -292,8 +297,8 @@ fn per_kind_tools_is_lint_clean_and_holds_two_tools() {
     let app = per_kind_tools();
     assert_eq!(app.tool_for(ViewKind::Board), Tool::Route);
     assert_eq!(app.tool_for(ViewKind::Schematic), Tool::Measure);
-    let r = render_clean("per_kind_tools", app);
-    harness::assert_content_coverage("per_kind_tools", &r, &canvas_keys());
+    let (app, r) = render_clean("per_kind_tools", app);
+    harness::assert_content_coverage("per_kind_tools", &app, &r, &canvas_keys());
 }
 
 /// The unresolved-libraries scene (slice 2): the doc LOADS degraded (the ghost
@@ -327,8 +332,8 @@ fn unresolved_libs_is_lint_clean_and_carries_library_findings() {
     );
     assert!(f.warnings >= 2, "both count into the chip as warnings");
 
-    let r = render_clean("unresolved_libs", app);
-    harness::assert_content_coverage("unresolved_libs", &r, &[PaneId::A.canvas_key()]);
+    let (app, r) = render_clean("unresolved_libs", app);
+    harness::assert_content_coverage("unresolved_libs", &app, &r, &[PaneId::A.canvas_key()]);
 }
 
 /// The Libraries-menu scene (slice 2): the modal renders lint-clean over the
@@ -337,8 +342,8 @@ fn unresolved_libs_is_lint_clean_and_carries_library_findings() {
 #[test]
 fn libraries_menu_is_lint_clean() {
     let app = libraries_menu();
-    let r = render_clean("libraries_menu", app);
-    harness::assert_content_coverage("libraries_menu", &r, &[PaneId::A.canvas_key()]);
+    let (app, r) = render_clean("libraries_menu", app);
+    harness::assert_content_coverage("libraries_menu", &app, &r, &[PaneId::A.canvas_key()]);
 }
 
 /// The drag-in-progress scene (m6): the drag is actually armed and moved (so
@@ -351,8 +356,8 @@ fn drag_in_progress_is_lint_clean_and_previews() {
     assert!(app.drag_active(), "the scene must have a drag armed");
     assert!(!app.dirty(), "a drag preview commits nothing");
     assert_eq!(app.revision(), 0, "no commit → no revision bump");
-    let r = render_clean("drag_in_progress", app);
-    harness::assert_content_coverage("drag_in_progress", &r, &[PaneId::A.canvas_key()]);
+    let (app, r) = render_clean("drag_in_progress", app);
+    harness::assert_content_coverage("drag_in_progress", &app, &r, &[PaneId::A.canvas_key()]);
 }
 
 /// The dirty-doc scene (m6): the committed move left the doc dirty with one
@@ -368,8 +373,8 @@ fn dirty_doc_is_lint_clean_and_dirty() {
         app.domain.source_path.is_some(),
         "the save affordance needs a source path"
     );
-    let r = render_clean("dirty_doc", app);
-    harness::assert_content_coverage("dirty_doc", &r, &[PaneId::A.canvas_key()]);
+    let (app, r) = render_clean("dirty_doc", app);
+    harness::assert_content_coverage("dirty_doc", &app, &r, &[PaneId::A.canvas_key()]);
 }
 
 /// The conflict-banner scene (m6): after the harness's first frame the
@@ -389,7 +394,7 @@ fn conflict_banner_is_lint_clean_and_pending() {
     assert!(app.conflict().is_some(), "the external change is parked");
     assert!(app.dirty(), "the doc stays dirty");
     assert_eq!(app.revision(), rev0, "the external change was NOT applied");
-    harness::assert_content_coverage("conflict_banner", &r, &[PaneId::A.canvas_key()]);
+    harness::assert_content_coverage("conflict_banner", &app, &r, &[PaneId::A.canvas_key()]);
 }
 
 /// The route-in-progress scene (m6 slice B): a pending route with waypoints
@@ -405,8 +410,13 @@ fn route_in_progress_is_lint_clean_and_pending() {
     assert_eq!(r.runs.len(), 1, "single-layer so far");
     assert_eq!(r.runs[0].points.len(), 3, "anchor + two waypoints");
     assert!(r.rubber().is_some(), "the rubber segment tracks the cursor");
-    let rendered = render_clean("route_in_progress", app);
-    harness::assert_content_coverage("route_in_progress", &rendered, &[PaneId::A.canvas_key()]);
+    let (app, rendered) = render_clean("route_in_progress", app);
+    harness::assert_content_coverage(
+        "route_in_progress",
+        &app,
+        &rendered,
+        &[PaneId::A.canvas_key()],
+    );
 }
 
 /// The committed multi-waypoint trace scene (m6 slice B): one GND trace with
@@ -441,8 +451,8 @@ fn routed_trace_is_lint_clean_and_committed() {
         app.domain.selection.borrow().single(),
         Some(&crate::canvas::pick::SemanticId::Trace(tid))
     );
-    let rendered = render_clean("routed_trace", app);
-    harness::assert_content_coverage("routed_trace", &rendered, &[PaneId::A.canvas_key()]);
+    let (app, rendered) = render_clean("routed_trace", app);
+    harness::assert_content_coverage("routed_trace", &app, &rendered, &[PaneId::A.canvas_key()]);
 }
 
 /// The layer-switch scene (m6 slice B): the pending route carries the via
@@ -467,8 +477,13 @@ fn route_layer_switch_is_lint_clean_and_has_via() {
         Some(&mm_pt(10, 5)),
         "the new run continues from the via point"
     );
-    let rendered = render_clean("route_layer_switch", app);
-    harness::assert_content_coverage("route_layer_switch", &rendered, &[PaneId::A.canvas_key()]);
+    let (app, rendered) = render_clean("route_layer_switch", app);
+    harness::assert_content_coverage(
+        "route_layer_switch",
+        &app,
+        &rendered,
+        &[PaneId::A.canvas_key()],
+    );
 }
 
 /// The vertex-refinement scene (m6 slice B): a trace-vertex drag in flight
@@ -485,8 +500,13 @@ fn trace_vertex_drag_is_lint_clean_and_previews() {
         mm_pt(10, 5),
         "the doc path is untouched until release"
     );
-    let rendered = render_clean("trace_vertex_drag", app);
-    harness::assert_content_coverage("trace_vertex_drag", &rendered, &[PaneId::A.canvas_key()]);
+    let (app, rendered) = render_clean("trace_vertex_drag", app);
+    harness::assert_content_coverage(
+        "trace_vertex_drag",
+        &app,
+        &rendered,
+        &[PaneId::A.canvas_key()],
+    );
 }
 
 /// Inspector value honesty: the selected part's inspector shows the position

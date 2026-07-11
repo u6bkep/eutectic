@@ -286,8 +286,9 @@ fn sem_key(nf: &NetFeature) -> SemanticKey {
 /// analytic capsules / discs / arc strokes (their union *is* the honest
 /// inflated region — same-plane max-blend saturates the joints); a `Polygon`
 /// or `Area` becomes tessellatable rings. `min_r` floors a stroke's radius
-/// (silk hairlines); `0` keeps the authored radius.
-fn fill_prims(out: &mut Vec<Prim>, shape: &Shape2D, sem: u32, min_r: Nm) {
+/// (silk hairlines); `0` keeps the authored radius. `pub(crate)`: WP2's
+/// overlay lowering reuses it for drag-ghost shapes.
+pub(crate) fn fill_prims(out: &mut Vec<Prim>, shape: &Shape2D, sem: u32, min_r: Nm) {
     match shape {
         Shape2D::Stroke { path, radius } => {
             stroke_prims(out, path, (*radius).max(min_r), sem, StyleClass::Fill)

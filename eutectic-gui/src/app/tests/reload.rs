@@ -69,37 +69,36 @@ fn reload_good_to_good_bumps_revision_once_and_preserves_state() {
     assert_eq!(app.revision(), rev0 + 2);
 }
 
-/// Reload preserves cameras: the framing lives in damascene's persistent `UiState`,
-/// which the app never resets on reload. The app-side invariant that guarantees "no
-/// re-fit" is that `apply_reload` leaves the panes' `fitted` flags set, so a
-/// post-reload `before_build` queues NO `FitContent` request — the camera is left
-/// exactly as the user framed it. (The harness recreates `UiState` per call, so a
-/// zoom-comparison across two `settle`s can't test this; the queued-request check
-/// is the faithful app-side assertion.)
+/// Reload preserves cameras: the board pane's camera is app-owned (WP2) and
+/// `apply_reload` leaves both the camera and the `fitted` flag alone, so a
+/// reload leaves the framing exactly as the user set it — even a framing the
+/// user changed away from the fit.
 #[test]
 fn reload_preserves_camera_no_refit() {
     let mut app = board();
-    // First frame: the pane fits (queues + marks fitted).
-    app.before_build();
-    let first = app.drain_viewport_requests();
-    assert!(
-        first
-            .iter()
-            .any(|r| matches!(r, ViewportRequest::FitContent { .. })),
-        "the initial frame fits the board pane"
+    // Settle: the board pane fits (camera snapped, `fitted` set).
+    let _ = settle(&mut app);
+    assert!(app.panes.borrow()[pane_index(PaneId::A)].fitted);
+    // The user reframes: nudge the camera off the fit.
+    let fit = app.board_camera(PaneId::A);
+    let framed = crate::render::Camera::new(
+        (fit.center.0 + 3.0 * NM_PER_MM as f64, fit.center.1),
+        fit.zoom * 2.0,
     );
+    app.board_cams.borrow_mut()[pane_index(PaneId::A)]
+        .glide
+        .snap(framed);
 
-    // Reload with identical good source, then run before_build again.
+    // Reload with identical good source, then run the frame loop again.
     let src = app.domain.source.clone();
     app.mailbox_push(SourceMsg::Changed(src));
-    app.before_build();
-    let after = app.drain_viewport_requests();
-    assert!(
-        !after
-            .iter()
-            .any(|r| matches!(r, ViewportRequest::FitContent { .. })),
-        "a reload must NOT re-fit — no FitContent may be queued after it, got {after:?}"
+    let _ = settle(&mut app);
+    assert_eq!(
+        app.board_camera(PaneId::A),
+        framed,
+        "a reload must NOT re-fit — the user's framing is sacred"
     );
+    assert!(app.panes.borrow()[pane_index(PaneId::A)].fitted);
 }
 
 /// Good → bad reload: the last-good doc STAYS rendered (canvas does not blank), the

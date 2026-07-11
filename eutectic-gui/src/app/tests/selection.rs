@@ -48,13 +48,14 @@ fn explorer_click_selects_part() {
     );
 }
 
-/// Click a findings row → the finding's refs land in the SelectionModel, and a
-/// CenterOn request is queued for the focused board pane (click-to-select-and-zoom).
+/// Click a findings row → the finding's refs land in the SelectionModel, and the
+/// focused board pane's camera glides onto the finding's board point
+/// (click-to-select-and-zoom — WP2: camera-target math, not a viewport request).
 #[test]
 fn click_finding_selects_refs_and_queues_center() {
     let mut app = drc_violation();
     // Find the clearance finding's index (it carries both nets NA + NB).
-    let (index, refs) = {
+    let (index, refs, board_mm) = {
         let f = app.findings();
         let (i, item) = f
             .items
@@ -62,14 +63,15 @@ fn click_finding_selects_refs_and_queues_center() {
             .enumerate()
             .find(|(_, it)| it.code == "E_DRC_CLEARANCE")
             .expect("the fixture has a clearance finding");
-        (i, item.refs.clone())
+        (i, item.refs.clone(), item.board_mm)
     };
     assert!(app.domain.selection.borrow().is_empty());
 
-    // Settle first so a board pane is laid out; the returned UiState carries the
-    // pane rects the CenterOn conversion needs, so drive the event with an EventCx
-    // over that state (matching the host, which routes events against the live UI).
+    // Settle first so a board pane is laid out + fitted, then drive the event
+    // with an EventCx over that state (matching the host, which routes events
+    // against the live UI).
     let r = settle(&mut app);
+    let zoom_before = app.board_camera_target(PaneId::A).zoom;
     let cx = EventCx::new().with_ui_state(&r.ui);
     app.on_event(click(&finding_row_key(index)), &cx);
 
@@ -82,15 +84,18 @@ fn click_finding_selects_refs_and_queues_center() {
         );
     }
     drop(sel);
-    // A CenterOn was queued for the focused (board) pane.
-    let reqs = app.drain_viewport_requests();
+    // The focused (board) pane's camera glide now targets the finding's
+    // board point, at the unchanged zoom.
+    let (mx, my) = board_mm.expect("clearance has a board point");
+    let target = app.board_camera_target(PaneId::A);
+    let mm = NM_PER_MM as f64;
     assert!(
-        reqs.iter().any(|r| matches!(
-            r,
-            ViewportRequest::CenterOn { key, .. } if key == PaneId::A.canvas_key()
-        )),
-        "a clearance finding with a board point must queue a CenterOn on the board pane"
+        (target.center.0 - mx as f64 * mm).abs() < mm / 2.0
+            && (target.center.1 - my as f64 * mm).abs() < mm / 2.0,
+        "the camera must glide onto the finding ({mx}, {my}) mm, got {:?}",
+        target.center
     );
+    assert_eq!(target.zoom, zoom_before, "center-on keeps the user's zoom");
 }
 
 /// The clearance-finding halo is present in the board overlay at the right board mm:

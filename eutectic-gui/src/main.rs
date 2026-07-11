@@ -123,5 +123,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    eutectic_gui::host::run_with_config("eutectic", viewport, app, config)
+    // Run through the WinitWgpuApp path (not the plain-App `run_with_config`
+    // wrapper): `EutecticApp` implements the host's GPU seams — `gpu_setup`
+    // (owned board-pane textures on the runner's device), `before_paint`
+    // (per-frame pane renders behind the damage contract), and
+    // `raw_window_event` (free hover / crosshair / middle-drag pan).
+    eutectic_gui::host::run_host_app_with_config("eutectic", viewport, app, config)
 }
