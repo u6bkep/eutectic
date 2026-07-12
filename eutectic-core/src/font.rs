@@ -1,5 +1,5 @@
 //! A built-in, zero-dependency **stroke font** — the first slice of the text
-//! subsystem (docs/geometry-model-convergence.md, Decision 9).
+//! subsystem (docs/log/d09-text-string-authoritative.md).
 //!
 //! Glyphs are **centreline polylines**, not filled outlines: each glyph is a list of
 //! strokes, and each stroke is a polyline of points on a normalized cell. The

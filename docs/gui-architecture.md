@@ -102,7 +102,7 @@ findings, and the command layer are untouched.
   buffer so hover/selection/dim are one-integer writes, no rebuilds), and a
   style class resolved through per-plane tables. The board producer lowers
   `world_features`; the schematic producer is `schematic_features`
-  (Decision 23, geometry-model-convergence.md) — the core realized-geometry
+  ([d23](log/d23-schematic-features-tier.md)) — the core realized-geometry
   query that also feeds the schematic SVG and pick, so the owned renderer is
   never a second home for drawing conventions. Annotation text renders via an
   MSDF glyph atlas (cribbed from damascene-wgpu); fab ink (silk/copper text)

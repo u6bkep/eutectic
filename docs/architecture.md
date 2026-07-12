@@ -3,9 +3,11 @@
 **Status:** design of record, now substantially **implemented** as the `eutectic-core` Rust prototype
 (see [`../README.md`](../README.md) and the "Prototype status (...)" sections throughout this
 document). This file captures the architecture converged on in design discussion *including the
-open questions and hard parts* — the prose sections (§1–§6) are the reasoning; each "Prototype
-status" section records what the corresponding code actually does and its honest limits. Treat it
-as a living document, not settled dogma.
+open questions and hard parts* — the prose sections are the reasoning; each "Prototype status"
+section records what the corresponding code actually does and its honest limits. Treat it as a
+living document, not settled dogma. This document is current-state only: dated decision records,
+milestone snapshots, and superseded plans live in the project log ([`docs/log/`](log/README.md)),
+cited inline as "\[dNN\]" where a ruling's provenance matters.
 
 ## Motivation
 
@@ -170,7 +172,63 @@ maintained **spatial index** (R-tree/BVH) in tier 3.
   role; connecting two outputs, or swapping a diff pair's P/N individually, becomes a *type error
   at elaboration*. ERC stops being a heuristic pass and becomes "does this typecheck."
 - **Hierarchy = composition with typed ports.** A module is a function with typed I/O; instantiate
-  it N times, parameterized. This is "organize complex designs logically."
+  it N times, parameterized. This is "organize complex designs logically." (The concrete construct
+  is the `def` — see §5.)
+
+### The schematic is a derived view (ruled in [d20](log/d20-schematic-derived-view.md))
+
+The schematic is the **second derived projection** of the generative truth (the flat netlist is the
+first, the board the third). The drawing is never authoritative: a GUI wire-draw gesture is not
+"creating a wire" — it means `ConnectPins`; the command mutates truth, and the drawn wire then
+renders *because the netlist says so*. Consequence, stated as a feature: **forward/back annotation
+ceases to exist** — text, schematic, and board are projections of one document and cannot disagree.
+
+- **No solver on the view path.** Authored: a structural **layout tree** — nested containers with
+  direction, symbols as leaves — persisted as tier-1 native grammar directives (siblings of `inst`)
+  with real diagnostics. Derived: the coordinates, by a pure, deterministic, terminating **reflow**
+  of the tree — the computational class of *elaboration*, not routing; never serialized. The
+  vocabulary is a deliberately tiny flexbox subset with literal CSS names (`row`/`column`, `gap`,
+  `align`, plus a pinned offset within a container as the escape hatch). The tree is the
+  reconciliation unit: adding a part is "insert a child into the row," and the reflow is
+  least-change by construction.
+- **The view is total and honest.** Any symbol not in the layout tree renders in a derived
+  "unplaced" bin; every connection renders at least as a **named net tag at the pin**. The
+  schematic never silently omits a part or a connection — quality is added incrementally by
+  authoring structure, never required up front. Tags remain the default connection rendering even
+  for placed symbols.
+- **Connections stay authored; derived presentation must never lie** (ruled in
+  [d23](log/d23-schematic-features-tier.md)). Drawn wires are authored documentation — straight
+  lines or simple splines pin-to-pin, optionally directed by **waypoints** that are pure
+  presentation, a no-op to the netlist truth. No wire autorouting, ever, on the view path; anything
+  smarter is a future *editing tool* proposing waypoints under [d18](log/d18-routes-persisted.md)
+  semantics. Derived decoration may only restate authored facts — per the ruling: "a junction dot
+  may be derived where authored same-net wires *share an endpoint or waypoint*, never at a mere
+  visual crossing."
+
+### One realized-geometry tier: `schematic_features` (ruled in [d23](log/d23-schematic-features-tier.md))
+
+`schematic_features(doc, lib)` is the single place the schematic drawing is realized — the
+schematic-side twin of the board's `world_features`. It emits typed primitives in schematic space
+(strokes, discs, polygons, text **runs**) covering everything the drawing shows, each carrying
+semantic provenance (component path / pin / net / wire / bin chrome) and a **style class** — no
+colors, no fonts-as-geometry, no view-toolkit types, deterministic order. Views are pure consumers:
+the SVG backend is a dumb serializer of the stream (the headless/agent artifact and test oracle),
+the GUI renders and picks from the same stream, so hit-testing and rendering cannot drift. Text is
+a **run, not glyphs** — each consumer realizes it; stroked-glyph realization is reserved for fab
+ink (board silk via `world_features`), where the glyphs *are* the artifact.
+
+- **Symbol artwork is a seam, not a feature (yet).** A symbol's body is realized by a single
+  function — "body primitives for this part def" — whose only implementation today is the derived
+  box-with-pins. Authored artwork (line art plus **semantic anchors**: pin anchor = point +
+  approach direction, label slots for derived text) later replaces the default *behind the seam*,
+  with no contract change.
+- **Footprints and symbols are the same kind of thing in two vocabularies** (recorded direction,
+  not yet built): both are authored primitive bundles plus semantic anchors. A footprint speaks the
+  *fab* vocabulary — pads/silk/mask/drills with real roles and z ("an instantiated pcb without the
+  FR4"); a symbol speaks the *annotation* vocabulary — line art + anchors, no fab meaning. Native
+  authoring for both belongs in the text grammar (def-style blocks), **not** literal SVG; a symbol
+  or footprint editor is the owned renderer pointed at a def's elaboration.
+- Sheets/hierarchy stay out of the contract (a sheet is a plane/group when it comes).
 
 Prior art for the semantic core: **atopile** (`.ato`), **tscircuit**, **SKiDL**; typed-interface
 ideas from **Chisel/SpinalHDL** bundles and **Amaranth**.
@@ -255,6 +313,50 @@ This is the *same pattern* as the provenance/pin bit in layout and the tier-1↔
 reconciliation: **clean generative truth + ID-keyed override deltas + reconciliation.** It recurs
 at the schematic-authoring level, the placement level, and the routing level. One hard problem to
 solve well, not three.
+
+### The source language: declarative core, hermetic expressions, `def` reuse (ruled in [d21](log/d21-source-language-core.md))
+
+The language question is settled deliberately, not by accretion — the **Onshape trap** is growing
+a janky language one reasonable step at a time. The source of truth is not the netlist; it is the
+**generative description** — the flat netlist is its first derived view, the schematic its second.
+
+- **`def` is the reuse construct.** A named sub-circuit — parts, internal nets, optionally its
+  schematic layout tree — with a typed I/O surface and declared parameters with defaults,
+  instantiable at a hierarchical path through the ordinary `inst` grammar. The mental model is the
+  React component (`def` ≈ component, ports ≈ props). Ports resolve through to the bound pin's
+  **pad identity** (no new namespace), transitively through nested defs. Nesting composes paths;
+  refdes annotation stays board-global flat (industry convention) while paths stay hierarchical;
+  internal nets elaborate path-prefixed. A def body is a pure function of its declared params (the
+  range loop variable is deliberately not visible inside — forward it explicitly); recursion is a
+  hard error; a false `if=` drops the whole stamped subtree, with dangling references degrading to
+  `W_DNP` — never a silent net merge, which is refused as a hard collision error.
+- **The expression tier is hermetic and non-Turing-complete — an architectural invariant, not
+  taste.** Two commitments force it: elaboration is the **commit gate** (it runs on every
+  transaction, eventually at interactive GUI rates, so the document language must be pure,
+  deterministic, terminating, ~O(output size)); and **reconciliation requires stable identity**
+  (ID-keyed overrides address source-analyzable paths; `sense[2].R1` stays stable under `n: 3→4`).
+  The power budget is HCL/Terraform-shaped: parameters + decimal-exact arithmetic + bounded ranges
+  + a conditional for population variants (DNP). Explicitly excluded: user-defined functions,
+  string manipulation, recursion, unbounded loops, I/O.
+- **The Onshape clause.** If in-document scripting is ever truly needed, we embed an existing
+  hermetic language (Starlark is the standing candidate) — **we never grow our own.** General
+  computation stays **at the rim**: agents and Rust programs (the command API, generator programs)
+  are the Turing-complete layer, and the document is the *output* of computation, never the site
+  of it.
+- **Three editing modes, human-first-class.** Flat authored content gets full GUI CRUD through the
+  same command algebra the agent uses (the blank-canvas EE workflow is first-class with zero text
+  contact); parameters bind to direct GUI editing; generated content takes ID-keyed per-instance
+  overrides — *and* the def itself is editable as its own canvas (the Figma component model,
+  including "make component"). Only the expression tier is text-exclusive — progressive
+  disclosure, not relegation.
+- **Two identity strategies, one per zone** (ruled in [d22](log/d22-route-identity-persists.md)).
+  Design-zone entities (parts, nets, pins, overrides) get identity from their *names* —
+  hierarchical paths humans author; no visible id syntax. Routes are the one feature class with no
+  natural name; they live in the machine-written `# routes` state zone and carry small persistent
+  integer ids (see §8, "Routes are persisted state").
+- **Mixed authorship of the text form is a filed design requirement**: comments, ordering, and
+  grouping chosen for readability need a preservation story beyond canonical-serialization
+  determinism (issue 0030 records the current block-interior normalization limit).
 
 ### Who gets what
 
@@ -415,11 +517,11 @@ Extent  = Prism { shape: Shape2D, z: ZRange }   // the 2.5D common case
   *and* via annuli — clearance is uniform: `skeleton_distance(a,b) − rₐ − r_b ≥ clearance`, computed
   in exact i128 (the segment-distance kernel already used for traces). Compound pads (BMP581) are a
   *union of features*; clearance is the min over the union. The third variant, **`Area(Region)`**
-  (Decision 16), is a filled area *with holes* — a set of oriented rings under the non-zero winding
+  (ruled in [d16](log/d16-area-unified-producer.md)), is a filled area *with holes* — a set of oriented rings under the non-zero winding
   rule. It carries what a simple polygon cannot: the board substrate (outline ∖ cutouts), pour fills
   with knockouts, TTF glyphs with counters. Clearance generalizes (ring edge-distance + containment);
   the exact-integer region kernel (`geom/kernel.rs`) provides its booleans and offsets.
-- **Two kinds of negative space, deliberately not interchangeable** (Decision 16b): a hole in an
+- **Two kinds of negative space, deliberately not interchangeable** (ruled in [d16](log/d16-area-unified-producer.md), 16b): a hole in an
   `Area` is *what the entity is* — intrinsic, in-plane, full-z for that feature (board cutouts, glyph
   counters, pour knockouts) — and reaches fab output as a **routed contour** (Edge.Cuts rings). A
   `Role::Void` feature is *what one entity does to the rest of the board* — cross-entity, individually
@@ -427,7 +529,7 @@ Extent  = Prism { shape: Shape2D, z: ZRange }   // the 2.5D common case
   **drill data** (exact center + diameter; plated = copper material → PTH file, else NPTH; capsules =
   G85 slots). Extracting drill data from `Area` holes is banned permanently: the region kernel
   polygonizes at construction, so the diameter is already gone — recovering it would be an inverse
-  projection (Decision 13). The representation *is* the manufacturing intent.
+  projection ([d13](log/d13-slab-name-identity.md)). The representation *is* the manufacturing intent.
 - **Evaluation is two-level 2.5D CSG**: union of solid prisms, minus void prisms, done. No solids
   nested inside voids, no re-additions, no curved z. Every consumer evaluates it the same way
   (filter by role/slab, subtract voids at its own boundary); anything fancier must argue its way in
@@ -449,7 +551,7 @@ sprawling:
 - *board outline* → the boundary of a `Substrate` prism (an arbitrary CAD-imported polygon)
 - *courtyard / mechanical clearance* → `Keepout` (3D extent, for interference detection)
 - *fiducial* → a footprint with `Conductor` + a `Void` mask opening (no new role; mask is
-  positive `Mask` material, openings are ordinary deletion volumes — Decision 13)
+  positive `Mask` material, openings are ordinary deletion volumes — [d13](log/d13-slab-name-identity.md))
 - *mouse-bite* → a footprint with `Void` perforations and **no** `Conductor`
 - *thermal relief* → a `Conductor` pad whose `Shape2D` *is* the spoke-and-gap geometry
 
@@ -458,9 +560,9 @@ the base set, not a new kind.
 
 ### Why this is the right foundation
 
-- **The prismatic-matter assumption is named, justified, and fenced** (Decision 16d). The *spatial*
-  vocabulary is fully 3D — poses are integer quaternions (Decision 6), z is authoritative `Nm`
-  (Decision 2), slabs are z-intervals — but *matter occupancy* is deliberately prismatic (extrusions
+- **The prismatic-matter assumption is named, justified, and fenced** (ruled in [d16](log/d16-area-unified-producer.md), 16d). The *spatial*
+  vocabulary is fully 3D — poses are integer quaternions ([d06](log/d06-integer-quaternion-orient.md)), z is authoritative `Nm`
+  ([d02](log/d02-z-authoritative.md)), slabs are z-intervals — but *matter occupancy* is deliberately prismatic (extrusions
   along the board normal). Two justifications: (1) the manufacturing process only makes prisms —
   etching, lamination, plating, drilling are extrusions along one axis, and Gerber/Excellon cannot
   express anything else, so prisms are **exact** for everything a fab can build; (2) exact integer
@@ -483,13 +585,14 @@ the base set, not a new kind.
   obstacle model and DRC share honest feature clearance; courtyard/overlap avoidance (0005) is the
   `Keepout` role.
 
-### The convergence — current model (Decisions 13–18, implemented 2026-07-03)
+### The convergence — current model
 
 This section *is* the design of record for geometry; the full decision-by-decision
-narrative (findings, rejected alternatives, staging, review history) lives in
-`docs/geometry-model-convergence.md` (Decisions 1–18). The model as it stands:
+narrative (findings, rejected alternatives, staging, review history) lives in the
+project log ([`docs/log/`](log/README.md), entries [d01](log/d01-feature-single-currency.md)–[d19](log/d19-punchable-planes.md)).
+The model as it stands:
 
-**Identity and vocabulary (Decision 13).** A "layer" is a **slab name** — a named
+**Identity and vocabulary** (ruled in [d13](log/d13-slab-name-identity.md)). A "layer" is a **slab name** — a named
 z-interval in the authored `Stackup`, carrying a `Role`. Slab names are the universal
 layer vocabulary: regions, text, footprint graphics, and routed copper all reference
 slabs by name; the name is a reference, the role is the meaning (a slab named
@@ -499,7 +602,7 @@ never inputs**; there are no inverse projections. Unknown/mis-roled slab referen
 are hard commit diagnostics (`E_UNKNOWN_SLAB` family) — `command::apply`
 re-elaborates on every transaction, so a committed doc always resolves.
 
-**One producer, two consumers (Decision 16c).** `route::world_features` is the single
+**One producer, two consumers** (ruled in [d16](log/d16-area-unified-producer.md), 16c). `route::world_features` is the single
 producer of world-frame features — substrate, mask solids, voids, keepouts, graphics,
 text, and *all* copper (pads, traces, vias, pours). DRC and every exporter are
 filters over that one stream by role/net/slab. Pours are ordinary `NetFeature`s with
@@ -515,9 +618,9 @@ Materialization failures are **fail-loud** (`expect`, never empty-clean).
 proxies: exact-integer SAT (edge normals + vertex-vertex axes, rounded margins folded
 in as `g² ≥ r²·|n|²`) drives `NoOverlap`, and an **honest verify** re-checks final
 placements against the true polygons, reporting residuals > 3 µm as
-`E_COURTYARD_OVERLAP` (Decision 10's third leg; resolves 0019).
+`E_COURTYARD_OVERLAP` ([d10](log/d10-courtyard-polygonal-truth.md)'s third leg; resolves 0019).
 
-**Routes are persisted state; the autorouter is an editing tool (Decision 18).**
+**Routes are persisted state; the autorouter is an editing tool** (ruled in [d18](log/d18-routes-persisted.md), route ids in [d22](log/d22-route-identity-persists.md)).
 `Trace.layer` is a slab name; `Via.span` is `Option<(String,String)>` (None = full
 copper extent). All routes serialize in the text file's **state zone** (`# routes`,
 beside `# overrides`): `pinned` is the keyword-less default, `free`/`hint`/`fixed`
@@ -531,6 +634,33 @@ selection with pinned copper as obstacles (machinery future). `route::Layer` ord
 survive **only inside the router grid**; commit-time `validate_routes` gates
 slab/net references on every mutation path. Resolves 0011.
 
+Route **identity** persists too (ruled in [d22](log/d22-route-identity-persists.md)):
+every `route`/`via` line carries a small integer id, emitted by the serializer and
+parsed back verbatim, so serialize→parse preserves `TraceId`/`ViaId` including gapped
+sets — undo is identity-exact, and waivers/length-tuning/diff may key on route ids.
+Ids are **advisory-but-stable, never load-bearing for correctness**: a line missing
+an id gets one minted, a duplicate is re-minted (warnings, never a parse failure —
+hand-editing cannot brick a file), and one engine-side allocator (`RouteIdAlloc`)
+mints above the current max. The design zone is untouched — named entities need no
+id syntax (§5, "two identity strategies, one per zone").
+
+**Planes are punchable** (ruled in [d19](log/d19-punchable-planes.md)). A pour fill
+is derived and self-knocking-out (`fill = outline − ⋃(foreign_copper ⊕ clearance)`),
+so a **foreign pour's fill is via-permeable**: a via may land within it, and the
+knockout carves the anti-pad on re-derivation — the via still needs clearance from
+*authored/routed* copper on every layer; only the derived fill yields. Verification
+judges proposed copper against pours *re-derived with that copper included* (the fill
+that will actually exist), never the stale pre-route fill. **Same-net fills are
+stitching targets**: cells over a net's own fill islands count as already-connected
+tree membership, so routing a pad to its plane is a via drop the ordinary search
+discovers. **Pad↔plane incidence is layer-honest**: a pin joins a pour island only
+where its pad copper actually exists on that island's slab (SMD pad → its own slab;
+drilled pad → every slab its barrel spans). Consequence, stated as a feature: **plane
+health is a first-class, checkable property** — the per-layer pour-island ratsnest
+honestly reports whether a perforated plane survived as one island. Inner-layer
+*traces* through foreign planes stay blocked (legal in principle; a cost-model
+question for the fenced router-research cycle).
+
 **Coordinate exactness has a named ceiling (issue 0018).** Two constants:
 `geom::MAX_COORD` = 1e9 nm (±1 m) is the inclusive **ingest** bound — `E_COORD_RANGE`
 diagnostics at text/command boundaries, `Err` at the import boundaries — and
@@ -540,7 +670,7 @@ world-frame composition. The diagnostics split follows rustc: **panic/ICE when t
 caller is our code; `E_` diagnostic when the cause is the user's input; `W_`
 warnings degrade without gating `is_clean()`** (first instances: `W_FONT_LOAD`).
 
-**Annotation and text (Decisions 14, 17).** Part identity = (part, effective
+**Annotation and text** (ruled in [d14](log/d14-refdes-derived-class-registry.md), [d17](log/d17-ttf-outline-text.md)). Part identity = (part, effective
 params); params are authored *strings* at rest, parsed by consumers at their own
 boundary (`quantity.rs` decimal-exact SI/IEC first). Refdes is **derived** (a query
 with per-prefix counters), pinnable via EntityId-keyed `refdes` override lines;
@@ -561,137 +691,29 @@ so the convention lives in one constructor.
 **Still open here:** multilayer *routing* (stackup-driven layer count, via-span
 selection — 0004-remainder/0008, a deliberate future design cycle); the placement
 solver's approximation (0007); `Solid`/true-3D per the fenced assumption above;
-copper-without-mask lint (0024); Gerber viewer validation (0009).
+whether component bodies get a dedicated role/material or reuse `Keepout`; Gerber
+viewer validation (0009).
 
-### Copper pours / solder mask: the region kernel (0004) — historical record
+### The region kernel and arc support
 
-> The staged narrative below is retained as the *record of how the region kernel was
-> built and proven*; names it mentions have since moved under Decision 16 (pours flow
-> as `NetFeature` `Area`s from `route::world_features`; `route::pours` is the view;
-> mask export iterates `Role::Mask` slabs by name via `gerber_mask(&Slab)`; region
-> declarations reference slab *names*, not `Layer` ordinals). The kernel itself —
-> `Region`, the exact-integer booleans, the dilation offset — is unchanged and is now
-> also the backbone of `Shape2D::Area`.
-
-A copper pour, a solder-mask layer, a paste stencil, and a keep-out-aware fill are **one operation**:
-*offset some shapes, then boolean-combine regions*. A pour is `zone − ⋃(foreign_copper ⊕ clearance)`
-(with same-net thermal spokes); a mask is `⋃(pad ⊕ mask_expansion)`; paste is the same with a
-reduction. So instead of a one-off "pour" feature we build the shared **offset + polygon-boolean
-kernel** once (`src/geom/kernel.rs`) and let every consumer fall out of it.
-
-- **`Region` = a set of oriented rings** (CCW outer, CW holes) under the non-zero winding rule — so a
-  pour with knockouts (area + holes), disjoint copper islands, and nested cut-outs are one type. It is
-  the result of every boolean.
-- **Boolean** (`union`/`intersection`/`difference`) subdivides the two inputs' edges at their shared
-  crossings (each crossing rounded to nm **once** and used to split *both* edges, so no cracks open),
-  classifies each fragment by a midpoint inside/on-boundary/outside test, selects per the operation
-  (with explicit coincident-edge rules), and stitches survivors back into rings. Predicates
-  (orientation, winding, on-segment) are exact `i128`; only the shared rounding is approximate, and it
-  is deterministic.
-- **Offset is a radius bump, not a new algorithm.** A `Shape2D` is already a skeleton ⊕ a disc of
-  `radius`; inflating by clearance `c` is `radius += c` (disc Minkowski sums add radii — exact).
-  `region::shape_to_region` then realises any inflated shape as a filled `Region` by the **dilation
-  decomposition** (core area ∪ one rect per skeleton edge ∪ one disc per vertex) — which reuses
-  `union`, so there is exactly one boolean engine. The radius-disc is tessellated at a fixed fine
-  resolution (integer direction table; the only float is the correctly-rounded IEEE `sqrt` for an
-  edge normal, matching the `closest_on_segment` precedent). **Skeleton arcs** (a `Seg::Arc` edge,
-  3-point start/mid/end) are flattened at the geometry seam (`Path::flatten`, chord tolerance
-  `DEFAULT_CHORD_TOL`) so the boolean only ever sees straight edges (**strategy A**); the
-  authoritative model carries the arc, the flattening is a transient the kernel/derived-fill consume,
-  never stored — so an arc-exact boolean could replace the tessellation later with no change to the
-  representation or to export. The fill is itself a **derived (tier-3)** result, doubly transient.
-
-**Stage 1 done:** the `region` kernel — `Region`, `union`/`intersection`/`difference`,
-`shape_to_region` (offset via dilation), and exact-integer predicates — landed standalone with a
-degenerate-case test suite (shared edges, corner-touch, concave dilation, multi-knockout pours,
-containment edge cases, determinism). **Stage 2 done:** the region *primitive* — an authored
-`elaborate::RegionDecl` (`Shape2D` + `Role` + optional `net` + copper `Layer`), exposed as a
-`GenDirective::Region`, assembled by the shared `elaborate::regions(&Source)` reader (mirroring
-`board_shape`), and round-tripped by the text front-end (`region <role> [net=..] layer=.. <pts>`, with
-keep-out kinds and inner layers). It is tier-1 authoritative; the knockout fill stays derived.
-**Stage 3 done:** the **derived pour-fill query** — `route::pours(...)` (a view over the unified
-`route::world_features`, Decision 16) computes, for each
-`Conductor` region, `fill = outline − ⋃(foreign_copper ⊕ clearance)` via the stage-1 kernel
-(`Shape2D::inflated` is the exact Minkowski offset = a radius bump; foreign = different-net copper on
-the pour's layer; same-net copper is *not* knocked out — it is what the pour connects to). The fill is
-a `region::Region` (outer boundary minus a hole per obstacle), bound to its net + layer, recomputed
-not stored. Net-reference validation moved into elaboration: a pour on a typo'd / unconnected net
-(`E_UNKNOWN_NET`) or with no net (`E_POUR_NO_NET`) is a hard fault, same no-silent-dangle guarantee as
-pins. Tests: foreign-pad knocked out *with clearance*, same-net pad kept, other-layer copper ignored,
-determinism, both validation faults. **Scoping note:** the DRC *consumption* of the fill —
-clearance (incl. pour-vs-pour shorts) and connectivity-through-the-fill — is folded into the next
-stage, because both need the same "region-incidence-with-copper" primitive (is a pad inside / within
-clearance of the fill); building it once avoids duplicate machinery, and the knockout's
-clearance-correctness is already proven by the stage-3 tests. (At stage 3 pours had no consumer yet,
-so deferring the wiring regressed nothing.) **Stage 4 done:** pours are now real copper in DRC. Two new region primitives:
-`region::regions_within(a, b, thr)` (do two regions overlap or come within `thr` edge-to-edge — exact
-i128 segment distance) and `Region::islands()` (split a fill into connected filled components — each
-CCW ring an island, holes attached by containment). DRC wiring: (1) **clearance** — pour-vs-pour: two
-different-net pours overlapping/within clearance on a layer is a short (foreign-copper-vs-pour is clean
-by construction, so only pour-vs-pour is new); (2) **connectivity** — `pin_islands` gains a node per
-pour island, and a pad/trace/via landing on an island joins it, so a pour **collapses the ratsnest**
-(the PoC's 54-pin GND problem); a pour *fragmented* by its knockouts leaves pads on different islands
-disconnected — surfaced honestly as remaining `Unrouted` islands. A region-only edit now bumps
-`geom_rev` (regions diffed in `command.rs`) so the incremental `Drc` query recomputes — no latent
-staleness. Tests: pour connects two GND pads (vs unrouted without it), a full-width foreign trace
-splits the pour into two islands (pads stay unrouted), overlapping GND/PWR pours short. **0004's
-copper-pour half is now functional end-to-end for DRC** (planes for GND/power on 2 layers); the
-multilayer-routing half stays in 0008's orbit. **Stage 5 done:** pours reach fab output. Each pour
-fill is emitted per layer as an RS-274X `G36`/`G37` **region fill** — the outer ring(s) and hole rings
-as contours in one region statement, so the knockouts come out as voids (a fill is already a
-tessellated polygon, so no arcs needed). `copper_layers` includes pour layers (an inner-layer pour
-gets its own Gerber). SVG draws each pour as a translucent layer-coloured `<path>` with even-odd fill
-(holes read as voids), under the components/traces. The shared `export::pours_of` builds the
-membership netlist and calls `route::pours`, so DRC and fab see identical fills. Tests: Gerber
-emits `G36`/`G37` with outer + knockout-hole contours (bottom layer has none); SVG draws the pour
-path; fab output deterministic with a pour. **Scope note:** the custom-pad / rounded-outline
-bounding-box-collapse fidelity debt was not repaid by the pour work itself — it was repaid
-afterwards by the **arc-capable `Shape2D`** (see "Arc support" below): custom pads now import as
-compound copper including `gr_arc` edges, and arc-bearing outlines export as true `G02`/`G03`.
-Routing complex *pads* through region fills (vs. the aperture-flash path) is still a focused
-follow-up. **Stage 6 done (the family is complete):**
-solder mask is the **dual** of the pour, and falls out of the same offset. `export::gerber_mask(side)`
-emits the `F.Mask`/`B.Mask` layer as the **openings** — every component pad on that side flashed as
-its copper aperture inflated by `DesignRules::mask_expansion` (the fab inverts to coverage); through-
-hole pads open on both sides, vias are tented. The fab fileset (`gerber_set`) now ships
-`board-F_Mask.gbr` / `board-B_Mask.gbr` alongside the copper, edge-cuts, and drill. So the one
-offset+boolean kernel now serves pours (offset + difference) **and** mask (offset only) — exactly the
-"getting this right gives us both" the design aimed for; paste stencil is the same with a *reduction*
-when wanted. **0004's copper-pour / plane / mask family is now complete end-to-end** (author → DRC
-connect+clearance → Gerber/SVG fab output) for 2-layer boards; the separate **multilayer-routing** half
-of 0004 (a router that lays inner-layer copper, the stackup driving real layer count) stays in 0008's
-orbit. The DRC pass is `O(N²)` (broadphase spatial index deferred — see performance notes); an
-arc-*exact* boolean (vs. the current flatten-at-the-seam) and the 3D-`Solid` boolean are deferred but
-representable. (Noted limits: floating/unnetted pads not yet knocked out of a pour; SMD-pad↔pour
-incidence is all-layer like the rest of the pin model; Gerber not yet viewer-validated — 0009.)
-
-### Arc support — `Shape2D` carries circular arcs (5 stages, done) — historical record
-
-The `Shape2D` skeleton became a `Path { start, segs: Vec<Seg> }` where `Seg = Line | Arc{mid,end}` —
-a **3-point** circular arc (three lattice points: no over-determination, centre/radius derived as
-exact rationals at export). The enum is open so a `Cubic` Bézier slots in later as one tessellation
-arm + export arms, with no kernel churn (non-circular curves are roadmapped for MCAD, deferred). The
-design choice — **"strategy A"**: arcs are authoritative, the exact-integer clearance/boolean kernel
-never sees a curve (it consumes a transient flattening at one seam, `Path::flatten`), and export
-reads arcs directly — keeps the proven integer kernel untouched and the door open to an arc-exact
-kernel later. Tessellation is trig-free (perpendicular-bisector bisection, correctly-rounded `sqrt`
-only; turn-sign-aware so a ≥180° sub-arc tessellates the intended side). Stages: (1) representation +
-kernel seam; (2) tolerance policy + clearance/region regressions (flattening is *inscribed* ⇒ DRC
-optimistic by ≤ one sagitta, ~1µm); (3) export — `G02`/`G03` + `G75` (I/J from the exact-rational
-circumcentre, computed start-relative so it can't overflow far from origin) and SVG `A` arcs (flags
-exact-integer), straight shapes byte-identical; (4-text) `arc <mid> <end>` in the text grammar, so an
-authored half-disc board flows author → DRC → fab end-to-end; (4-import) KiCad `custom` pads import as
-compound copper including `gr_arc` (3-point **and** legacy centre/angle), validated against real
-footprints (MCP_48QFN: 144 arcs). Two adversarial reviews caught real bugs (≥180° wrong-side
-tessellation; a `hypot` determinism leak; the far-from-origin overflow margin) — all fixed with
-regressions. Deferred follow-ups: footprint *graphics* import (0016), a `.kicad_pcb` Edge.Cuts
-importer (0017), and the `Cubic`/NURBS curve primitive for MCAD bodies.
+The exact-integer **offset + polygon-boolean kernel** (`geom/kernel.rs`) is the one
+boolean engine behind pours, mask, the substrate, and every `Shape2D::Area`: a
+`Region` is a set of oriented rings under the non-zero winding rule; booleans use
+exact `i128` predicates with one shared deterministic rounding; offsetting a shape is
+a radius bump realised by the dilation decomposition. Skeleton **arcs** are
+authoritative 3-point circular arcs on the `Path` skeleton ("strategy A"): the kernel
+only ever sees a transient flattening (`Path::flatten`, inscribed ⇒ DRC optimistic by
+≤ one sagitta, ~1 µm), while export reads arcs directly (`G02`/`G03`, SVG `A`). How
+both were built and proven, stage by stage — including the pour/mask/DRC wiring that
+has since moved under [d16](log/d16-area-unified-producer.md)'s unified producer — is
+recorded in the log: [n05](log/n05-region-kernel-record.md) (the region kernel),
+[n06](log/n06-arc-support-record.md) (arc support).
 
 ---
 
 ## 9. Library packages: parts as data, names as the dependency key
 
-*(Implemented 2026-07-05, `eutectic-core/src/library.rs` — motivated by the GUI: a `.eut` file must be
+*(Implemented in `eutectic-core/src/library.rs` — motivated by the GUI: a `.eut` file must be
 openable standalone, and part libraries must not exist only as Rust code.)*
 
 A **library package** is a directory containing a manifest (`eutectic.lib`, see `library::MANIFEST_NAME`)
@@ -734,7 +756,7 @@ menu), never in the engine and never in committed artifacts.
   levels.
 - **Constraint-solver UX at board scale** — over/under-constrained diagnostics, locality (solve
   regions independently), no-solution explanations.
-- **Routing** — the genuinely unsolved part; interactive-first, autoroute aspirational. Decision 18
+- **Routing** — the genuinely unsolved part; interactive-first, autoroute aspirational. [d18](log/d18-routes-persisted.md)
   cleared the ground: routes persist (load never re-solves), so the router is free to be stochastic
   and anytime-improving; the open design is the router *itself* — stackup-driven multilayer
   (0004/0008), via-span selection, rip-up/partial-reroute machinery.
@@ -753,417 +775,199 @@ menu), never in the engine and never in committed artifacts.
 - **TopoR / FreeRouting** — topological routing.
 - **Onshape/Fusion sketch solvers** — geometric constraint solving, DOF analysis, least-change.
 
-## Roadmap (historical)
+## Prototype status (engine core & reconciliation)
 
-> This was the original build order. It has since been overtaken by events: the engine core, the
-> placement solver, KiCad import, routing + DRC + a basic autorouter, and fab export are all built.
-> See the "Prototype status (...)" sections below and [`../README.md`](../README.md) for the current
-> state; the items here are kept to show the sequence the work actually followed.
+*Status audited 2026-07-11.* The milestone snapshots that built this layer — the M1
+vertical slice, M2 override decay, M3's first solver — are preserved in the log
+([m1](log/m1-engine-core.md), [m2](log/m2-override-decay.md),
+[m3](log/m3-placement-solver.md)), along with the original roadmap
+([n07](log/n07-original-roadmap.md)). What exists now:
 
-1. **This document** — the synced design of record. ✅ done
-2. **Prototype the engine core only** — fact store + command algebra + Salsa-style query layer +
-   the reconciliation/override engine. Not the GUI, not the router (large but architecturally
-   conventional). The novel, load-bearing risk is the data engine; prove or break the central bet
-   first. ✅ done — see "Prototype status (M1)" below.
-3. **Prior-art pass on Horizon EDA's data model** specifically. (Sources cloned in `reference/`.)
-
-## Prototype status (M1)
-
-A zero-dependency Rust crate (`eutectic-core`, edition 2024) implements a full vertical slice of the
-engine core. Decisions locked in during prototyping: **hand-rolled** incremental query engine (not
-the `salsa` crate); `BTreeMap` for deterministic/canonical serialization (persistent `im` maps are
-the production swap); entity id = hierarchical path string for M1 (opaque-handle + path table is
-the production refinement).
-
-Modules: `id`, `part` (typed pins/interfaces), `doc` (three-tier immutable model + provenance
-DOFs), `elaborate` (generative source → instances + ID-keyed override reconciliation), `command`
-(atomic transactions, the sole mutation surface), `history` (version DAG), `query` (hand-rolled
-memoized engine with dependency tracking + early cutoff), `project` (deterministic text view).
-
-Demonstrated & tested (6 passing tests + `cargo run --example m1`):
-- Typed interface connection auto-crosses UART tx↔rx — the serial swap is unrepresentable.
-- ERC as a query over pin roles (catches multi-driver contention).
-- Incremental engine: a geometry nudge skips Netlist+ERC entirely (dependency-skip); adding an
-  unconnected component recomputes Netlist but skips ERC via **early cutoff** (value unchanged).
-- Generative reconciliation: a pinned override survives the generator growing 3→5 caps (minimal
-  perturbation); shrinking 5→1 surfaces the orphaned override as a conflict, never silently dropped.
-- Atomic transactions (a bad source leaves head untouched); version-DAG undo.
-
-## Prototype status (M2)
-
-M2 attacked the load-bearing risk directly: **override decay and reconciliation precedence.**
-"Decay" is defined concretely, not as intent-guessing — an override is *ineffective* iff removing
-it yields the same final position (this generalises to "doesn't change the solved result" once a
-real solver exists).
-
-Model added:
-- **Override strength** (`doc::Strength`): a `Nudge` records a weak **Hint**; an explicit `Pin` is
-  strong. ("Don't pin over-enthusiastically.")
-- **Hard constraint** (`GenDirective::Fix`): mechanical-domain placement (a connector mated to a
-  datum). **Precedence: Fix > Pin > Hint > generated default.** Provenance ladder
-  `Free < Hint < Pinned < Fixed`.
-- **Decay / reconciliation rules**, emitted as a structured `doc::ReconReport` (no more ad-hoc
-  strings): an ineffective Hint is **garbage-collected** at commit; an ineffective Pin is **flagged
-  but kept**; a Pin contradicted by a Fix raises a **loud conflict** (kept until resolved); a Hint
-  contradicted by a Fix **yields silently** and decays. Strength = how loudly an override objects.
-
-Tested (10 passing tests total) + `cargo run --example m2`: redundant-hint decay+GC,
-hint-yields-to-constraint, pin-conflicts-loudly-and-kept, redundant-pin-flagged-not-dropped, plus
-the M1 suite still green under the new semantics (a nudge is now a Hint that survives while
-effective).
-
-## Prototype status (M3)
-
-M3 added a **deterministic least-change placement solver** (`solve` module), turning M2's decay
-definition from a row-layout hack into the principled one: an override is *ineffective* iff freeing
-it and re-solving lands it in the same place (within `PLACE_TOL` = 0.1 mm).
-
-- Solver: relaxation / constraint-projection. Nodes start at their anchor and only move to satisfy
-  constraints (unconstrained parts stay put — least change). Provenance sets movability:
-  `Fixed`/`Pinned` are immovable anchors, `Hint` is a movable soft anchor, `Free` anchors at the
-  generated default. Deterministic (no RNG, fixed iterations, f64 math rounded to integer nm).
-- Constraints (`solve::Constraint` + `GenDirective`): `Board` (containment), `Near` (proximity),
-  `MinSep` (clearance/non-overlap), `AlignX`/`AlignY`. Matches the doc's constraint stratification.
-- Decay now generalizes: a hint the constraints would satisfy anyway decays (new `DecayReason`
-  case folded into `RedundantWithDefault`); the whole M2 classification rides on top unchanged.
-- Reconciliation re-solves per non-fixed override to test effectiveness, then does a final solve
-  with decayed hints freed — so the committed placement is exactly what a post-GC re-elaboration
-  produces (idempotent, stable diffs).
-
-Tested (15 passing tests total) + `cargo run --example m3` (a mini RP2350-Zero-carrier placement:
-module fixed at a datum, decouplers clustered near it, JST-SH headers in an aligned top-edge row,
-all inside the outline; moving the datum perturbs only the decouplers — locality demonstrated).
-
-**Note (M3 → M5):** M3's solver was a *fixed-iteration* relaxation — it satisfied a set of mutually
-constraining relations only to within ~0.1–0.2 mm, with no convergence or feasibility guarantee
-(300 sweeps, then stop and hope). **This has been replaced** by a convergence-based solver — see
-"Prototype status (real solver)" below. The remaining honest limit is that it is still not a
-research-grade general constraint solver (no DOF analysis / decomposition); it converges, satisfies
-feasible sets tightly, and *reports* infeasibility rather than proving global optimality.
-
-**Open limitations / next prototype targets (M4 candidates):**
-- **Resolution UX** for conflicts/orphans now exists (see "Prototype status (resolution UX)"
-  below); what remains is presenting it in a GUI and richer multi-issue batching.
-- Solver now converges to a tight tolerance and reports infeasibility (see "Prototype status (real
-  solver)" below), but still does no DOF analysis / subsystem decomposition and makes no
-  global-optimum claim; no keepouts. (`Near`-to-a-*pin* and a settable rotation/orientation
-  attribute now exist — see "Prototype status (physical parts)" below; the solver still does not
-  *optimise* over orientation.)
-- Query dependencies are recorded explicitly, not auto-tracked; inputs are coarse
-  (`conn_rev`/`geom_rev`/`route_rev`).
-- **Routing representation + DRC now exist** (see "Prototype status (routing core)" below):
-  provenance-tagged trace/via/layer facts live in the `Doc` (tier 2), routing commands
-  mutate them atomically, and DRC is a tier-3 query (clearance, min-width, ratsnest). A
-  **basic deterministic grid/maze autorouter now exists** (see "Prototype status (autorouter)"
-  below): it writes `Free` trace DOFs as a *proposed transaction* on top of this representation,
-  treats `Pinned` traces as fixed obstacles, and verifies clean against the DRC query. Still
-  missing: rip-up/retry, topological/push-and-shove, and length/impedance matching.
-- The end-to-end PoC target (a single-PCB chip-down rework of the RP2350-Zero SWD-probe carrier)
-  needs: real parts/footprints with pin geometry, a netlist→placement→route flow, and fab output.
-  **Footprint *geometry* import now exists** (see "Prototype status (footprint import)" below): real
-  KiCad `.kicad_mod` files (incl. the PoC's JST-SH headers and the QFN ICs) parse into `PartDef`s
-  with per-pad pin offsets. **Electrical roles now exist too** (see "Prototype status (symbol/role
-  layer)" below): a `.kicad_sym` *symbol* supplies the functional pin names + electrical types that a
-  footprint lacks, and the two are joined by pad number into a real `PartDef` with mapped `PinRole`s.
-  **Netlist and placement export now exist too** (see "Prototype status (export)" below): the
-  connectivity and pick-and-place artifacts a board is checked/assembled against are emitted
-  deterministically from a `Doc`. The **router** now exists (see "Prototype status (autorouter)"),
-  and **Gerber/drill output now exists too** (see "Prototype status (Gerber/fab output)"): RS-274X
-  per copper layer + `Edge.Cuts` + an Excellon drill program, emitted deterministically from routed
-  copper, with footprint pads flashing as copper, plus copper-pour region fills and solder mask. (Pad
-  copper is now *real* geometry that DRC checks edge-to-edge — see §8 — not a render-only point; only a
-  roundrect/custom pad's Gerber *aperture* is still a conservative bounding box.) It is **not yet
-  validated against a real Gerber viewer**. What's still missing for the PoC:
-  typed `InterfaceDef`s inferred from symbols (the join produces discrete roled pins, not interfaces
-  yet), and serializing routes in the canonical text projection.
+- **Sole mutation surface.** `command::apply` (`command.rs`) — atomic, collect-all
+  validated transactions over the immutable `Doc`; the `Command` algebra covers
+  source replacement, overrides (`Nudge`/`Pin`/`ClearOverride`), whole-file
+  `LoadText`, routing edits, report resolution (`Resolve`), and route promotion
+  (`PromoteRoutes`). `history.rs` is the version DAG (commit / undo / checkout).
+- **Incremental query engine.** A hand-rolled memoized engine (`query.rs`) with
+  dependency tracking and early cutoff over four keys: `Netlist`, `Erc`, `Floating`,
+  `Drc`. Honest limits: dependencies are recorded explicitly, not auto-tracked, and
+  inputs are coarse revision counters (`conn_rev`/`geom_rev`/`route_rev`) —
+  issue 0012.
+- **Reconciliation & override decay.** The strength ladder is
+  `Fixed > Pinned > Hint > Free` (`doc::Provenance`, `doc::Strength`): an
+  ineffective Hint is garbage-collected at commit, an ineffective Pin is
+  flagged-but-kept, a Pin contradicted by a Fix raises a loud conflict, a Hint
+  contradicted by a Fix yields silently. Outcomes surface as a structured
+  `ReconReport` (`doc.rs`) and are acted on through `Command::Resolve` (see
+  "Prototype status (resolution UX)"). "Ineffective" is defined by re-solving:
+  an override is ineffective iff freeing it lands the entity in the same place.
+- Honest limits: the document store is `BTreeMap`-based with full clones per
+  version (not persistent `im` maps) and entity id = hierarchical path string
+  (issue 0015); an orientation-only change does not bump `geom_rev` (issue 0013).
 
 ## Prototype status (text front-end)
 
-The `text` module makes §5's "text as a projection" concrete: a **canonical serializer + parser**
-for the *authoritative* tier-1 state (the generative `source` directives **and** the ID-keyed
-`overrides` map). This is the agent/git-facing authoring surface — *not* a synced second artifact.
-`serialize` and `parse` are the two halves of one projection; materialized positions/nets are
-deliberately **not** serialized (they are derived and re-elaborated on load — `project` renders
-those for viewing).
+*Status audited 2026-07-11.* The `text` module (facade plus
+`scan`/`blocks`/`directive`/`def`/`schematic`/`emit`) makes §5's "text as a
+projection" concrete: one **canonical serializer + parser** covering tier-1 source
+(flat directives and nested blocks), the ID-keyed `# overrides` zone, and the
+machine-written `# routes` state zone ([d18](log/d18-routes-persisted.md),
+[d22](log/d22-route-identity-persists.md)).
 
-**Grammar** — one directive per line, `#` line comments, whitespace-tokenized, coordinates `(x, y)`:
+**Grammar.** One directive per line, `#` line comments, whitespace-tokenized;
+`def` and `schematic` (with nested `row`/`column` containers) open `{ … }` block
+bodies whose interior trivia round-trips (`text/blocks.rs`; the whitespace
+normalization limit is issue 0030). The directive set (`text/directive.rs`):
+`inst` (with `[lo..hi]` ranges, `if=` conditionals, `p:` params, `label=`),
+`param`, `place`/`fix` and the override lines `hint`/`pin`,
+`board`/`boardrect`/`cutout`/`hole`, `region`, `slab` (the authorable stackup),
+`class`, `near`/`minsep`/`alignx`/`aligny`, `rotate` (any angle — non-cardinals
+serialize as `quat=(…)`), `nearpin`, `text`, `font`, `use`, `connect`/`net`/`nc`,
+`refdes`, and the state zone's `route`/`via` lines (persistent id + slab name +
+provenance keyword, `pinned` the keyword-less default).
 
-```text
-inst    <path> <part>                 place  <path> (<x>, <y>)
-fix     <path> (<x>, <y>)             board  (<x>, <y>) (<x>, <y>)
-near    <a> <b> <len>                 minsep <a> <b> <len>
-alignx  <node> ...                    aligny <node> ...
-connect <compA>.<port> <compB>.<port> net    <name> <comp>.<pin> ...
-hint    <path> (<x>, <y>)             pin    <path> (<x>, <y>)   # ID-keyed overrides
-```
-
-It covers every `GenDirective` variant and both override strengths (`hint` = weak/`Hint`,
-`pin` = strong/`Pin`). Lengths accept `30mm` (decimal ok), `30000000nm`, or a bare integer (nm);
-a `<comp>.<pin>` reference splits at the last dot so hierarchical paths (`psu.dec[0].p1`) survive.
-
-**Guarantees (tested — 14 new unit tests, 29 total):**
-- *Deterministic / canonical:* `serialize` is a pure function with stable output — source
-  directives in source order (instance order is itself tier-1 truth, driving default placement),
-  overrides in `BTreeMap` id order, every coordinate in one canonical mm form.
-- *Idempotent:* `serialize(parse(serialize(doc)))` byte-equals `serialize(doc)`.
-- *Round-trips:* `parse(serialize(doc))` reproduces `(source, overrides)` exactly; re-elaborating
-  it reproduces the same `components`/`nets`/`report` (verified on `psu_module`, the UART-link
-  design, and a Board/Near/MinSep/AlignY/Fix scene).
-- *Tolerant in, canonical out:* mm/nm/bare units, comments, and extra whitespace all parse; output
-  is always the one canonical form. Parse errors return `Err(String)` naming the offending line —
-  never a panic.
-
-`Command::LoadText(String)` lowers the text front-end onto the sole mutation surface: it parses and
-replaces source+overrides in one atomic transaction (a malformed document aborts the commit, so the
-file is never a back door to an inconsistent state). Zero new dependencies — the parser is
-hand-rolled (line-based).
+**Guarantees (tested).** Serialization is deterministic and canonical;
+`serialize(parse(serialize(doc)))` is byte-identical; parsing is tolerant in,
+canonical out. Parse errors are collect-all `Err(Vec<Diagnostic>)` naming every
+offending line (`text.rs::parse`) — never a panic — and `Command::LoadText` lowers
+the whole file onto the sole mutation surface in one atomic transaction. Route ids
+round-trip verbatim including gapped sets; def bodies and schematic blocks
+round-trip with interior comments preserved; def-free docs are byte-identical to
+their pre-block serialization.
 
 ## Prototype status (physical parts)
 
-Gives parts real planar geometry so proximity constraints can target an actual pin, not just a
-component centroid. Still zero-dependency.
+*Status audited 2026-07-11.* Parts carry real planar geometry, and orientation is
+the full [d06](log/d06-integer-quaternion-orient.md) transform:
 
-- **Pin offsets.** Every discrete pin (`part::PinDef.offset`) and every interface signal
-  (`part::InterfaceDef.offsets`, keyed by signal name) carries a local 2D offset (`doc::Point`, nm)
-  from the component origin. `PartDef::pin_offset(pin)` resolves a reference (`VOUT`, or
-  `uart.tx` for interface signals, mirroring `pin_role`) to its local offset. `part_library` gives
-  the LDO / Cap / MCU / Sensor plausible pin geometry.
-- **Component orientation.** `doc::Orient` is a cardinal-only rotation enum (`Deg0/90/180/270`,
-  default `Deg0`), kept exact/integer so rotated coordinates compare deterministically — no trig,
-  no float drift. `Component.orient` holds it; `Orient::rotate(Point)` is exact integer rotation;
-  `Orient::from_deg` normalises any multiple of 90 (so `-90 → 270`) and rejects off-axis angles.
-  It is a *settable attribute*, **not** a solver DOF (optimising over rotation is nonlinear; out of
-  scope). Set from the source via `GenDirective::Rotate { path, deg }` (off-axis aborts the
-  transaction).
-- **Pin world positions.** `part::pin_world(comp, def, pin)` returns
-  `comp.pos + rotate(local offset, comp.orient)` — exact for the four cardinal rotations.
-- **Near-to-a-pin.** `GenDirective::NearPin { a, b_comp, b_pin, within }` (and `solve::Constraint::
-  NearPin { a, b, b_off, within }`) pulls component `a` to within `within` of a specific pin on
-  `b`. Elaboration pre-rotates the target pin's local offset by `b`'s orientation into a constant
-  `b_off`; the solver tracks the pin's world position as `pos[b] + b_off` each iteration (moving
-  `b` carries its pin rigidly). Component-level `Near` is unchanged and still works.
+- **Orientation is an integer quaternion** (`doc::Orient`) — no cardinal enum, no
+  mirror flag. `apply` is an integer matrix·point plus one rounding division (no
+  trig, no sqrt); cardinals and flips are exact tiny quaternions; `rotate <p> <deg>`
+  lowers *any* angle to the best integer planar quaternion once, at parse
+  (`Orient::from_angle_deg`, `ORIENT_ANGLE_SCALE = 1e6`). Bottom-side placement is
+  `Orient::flipped()` = Ry(180); "which side" is derived (`Orient::is_bottom`), and
+  pad layers/silk swap sides from that with no flag to keep in sync.
+- **Pin offsets & world positions.** Every discrete pin and interface signal
+  carries a local offset; `part::pin_world` maps it through the quaternion — exact
+  for cardinal rotations, correctly-rounded otherwise
+  ([d07](log/d07-derived-geometry-rounded.md)).
+- **Pads are real copper + drill geometry.** `PinDef.pad: Option<PadGeo>` holds
+  `PadCopper` pieces (compound pads supported) plus an optional round/slot `Drill`;
+  `PinDef::pad_features` derives world-frame features from it (the
+  [d12](log/d12-phase0-foundation.md) fold) for DRC, export, and the autorouter.
+- **Near-to-a-pin** (`nearpin`) placement constraints work against a specific pad's
+  world position; orientation remains a settable attribute, **not** a solver DOF.
 
-**Text front-end:** extended (no breakage). `rotate <path> <deg>` and
-`nearpin <a> <bComp>.<bPin> <len>` serialize/parse and round-trip; the `<bComp>.<bPin>` reference
-splits at the last dot so hierarchical comp paths survive. `project::render` shows ` rot=<deg>` for
-non-default orientations.
-
-**Tested (38 passing total, +9 new):** `pin_offset` for discrete + interface pins; `pin_world`
-exact under each cardinal rotation (plus rotation reversibility and `from_deg` normalisation);
-Near-to-pin drags a component onto a *rotated* pin's world position; orientation round-trips through
-elaboration; off-axis rotation is rejected atomically; `rotate`/`nearpin` parse and round-trip
-through text + re-elaboration.
-
-**Limitations / follow-ups:** orientation is not optimised by the solver (settable only); interface
-signal offsets live on the shared `InterfaceDef`, so the same interface type places its pins at the
-same local spot on every part that uses it (fine for the demo, would be per-instance in production);
-`MinSep`-to-pin is not implemented (only `Near`); a component-orientation *change* does not yet bump
-`geom_rev` (no geometry query consumes it today, so unobservable — left for when one does).
+Honest limits: the solver does not optimize over orientation; interface-signal
+offsets live on the shared `InterfaceDef` (`part.rs`), so one interface type places
+its pins identically on every part that uses it; an orientation-only change does
+not bump `geom_rev` (issue 0013).
 
 ## Prototype status (resolution UX)
 
-M2/M3 made reconciliation *surface* outcomes in a structured `ReconReport` (decayed hints,
-`pin_conflicts`, `redundant_pins`, `orphaned`) but gave no way to **act** on them — the top open
-limitation. This milestone closes that gap, keeping the architectural rule that the command algebra
-is the **sole** mutation surface: every resolution is an ordinary atomic transaction down the same
-`command::apply` path, not a side channel.
-
-- **`Command::Resolve(EntityId, Resolution)`** — one new command variant plus a `Resolution` enum,
-  rather than several discrete commands. Chosen because the resolution vocabulary is a closed set
-  keyed by report-entry kind: a single command keeps the `Command` surface from sprawling, lets the
-  discoverability helper return `(EntityId, Resolution)` pairs uniformly, and groups all
-  report-acting intent in one place. Variants:
-  - `DropOrphan` — drop an override whose target entity no longer exists (`orphaned`).
-  - `AcceptConstraint` — clear a pin contradicted by a hard `Fix` (`pin_conflicts`), so the part
-    sits at the Fix position with no lingering conflict.
-  - `RePin(Point)` — keep the pin but move it (`pin_conflicts`); the Fix still wins physically, so
-    this may remain a conflict (or go redundant if re-pinned onto the Fix) — deliberately the
-    user's call. Equivalent to a fresh `Pin`, but validated as a conflict response.
-  - `DropRedundant` — un-pin a pin the solver would satisfy anyway (`redundant_pins`).
-- **Validated against the live report.** A `Resolve` aborts the transaction unless the entity is
-  actually flagged in the matching category. This is what distinguishes a resolution from the raw
-  `ClearOverride`/`Pin` primitives it shares a mutation with: it must target a genuinely outstanding
-  issue. After the mutation, the normal re-elaborate/re-reconcile pass produces a fresh report — so
-  a successfully resolved entry simply isn't flagged again (no bookkeeping of "resolved" state).
-- **Discoverability:** `command::suggested_resolutions(&ReconReport) -> Vec<Suggestion>` enumerates,
-  per actionable entry, the ready-to-apply command(s) plus a short rationale — so a GUI/agent can
-  list "here's what you can do about each issue." A `pin_conflicts` entry yields two suggestions
-  (accept-constraint, ready; re-pin, `command: None` because it needs a user-supplied position).
-  `decayed` entries are omitted: a decayed hint is already GC'd at commit, so nothing remains to act
-  on.
-
-Tested (6 new unit tests, 35 total): each report condition (orphan, pin-vs-`Fix` conflict, redundant
-pin) constructed, resolved, and asserted gone with the resulting state correct (e.g. accept-constraint
-leaves the part `Fixed` at the Fix position, no override, clean report); re-pin shown to be the user's
-call (persists or goes redundant); invalid resolves rejected atomically; and the suggested command
-applied end-to-end to clear the report. Zero new dependencies.
+*Status audited 2026-07-11; the shape is unchanged and the description verified.*
+Reconciliation outcomes are actionable through the sole mutation surface:
+`Command::Resolve(EntityId, Resolution)` (`command.rs`) pairs an entity with one of
+a closed resolution vocabulary — `DropOrphan` (dead override), `AcceptConstraint`
+(clear a pin a hard `Fix` contradicts), `RePin(Point)` (keep the pin, move it —
+deliberately the user's call whether the conflict persists), `DropRedundant`
+(un-pin what the solver satisfies anyway). A `Resolve` aborts the transaction
+unless the entity is actually flagged in the matching `ReconReport` category, and a
+successful resolution simply is not flagged again on the next re-reconcile — no
+"resolved" bookkeeping. `command::suggested_resolutions(&ReconReport)` enumerates
+ready-to-apply commands with rationales for a GUI/agent. Remaining gap: GUI
+presentation and richer multi-issue batching.
 
 ## Prototype status (real solver)
 
-Replaces M3's fixed-iteration relaxation with a **convergence-based** solver that offers explicit
-guarantees instead of "300 sweeps then stop." Still zero-dependency.
+*Status audited 2026-07-11.* The placement solver (`solve.rs`) is **projected
+Gauss-Seidel with a convergence loop** — sequential constraint projection with an
+implicit active set for the one-sided distance constraints, no anchor-spring
+penalty term, so a part touched by no violated constraint never moves and
+least-change falls out for free.
 
-**Method — projected Gauss-Seidel with a convergence loop.** Each *sweep* projects the current
-positions onto every constraint's feasible set in turn (Gauss-Seidel: later projections see earlier
-ones' updates within the same sweep), then clamps movable nodes into the board. The inequality
-constraints (`Near`, `MinSep`, `NearPin`) use an implicit **active set** — a projection is a no-op
-while the constraint has slack and fires only when violated, which is exactly active-set handling
-for one-sided distance constraints. Crucially there is **no anchor-spring penalty term** (M3 had
-one): a node is moved only by a constraint that is actually violated, and only by the minimal
-displacement that satisfies it. So feasible sets are satisfied *exactly* (to tolerance) rather than
-approximately, and least-change falls out for free — a part touched by no violated constraint never
-moves.
+- **Convergence, not a fixed count.** Sweeps run until the max residual is below
+  `RES_TOL` (1 µm), per-sweep movement stalls below `MOVE_TOL`, or the `MAX_ITERS`
+  safety cap (5000) is hit; `solve::Solution { positions, converged, iters,
+  unsatisfied }` records which. Infeasibility is **reported, not hidden**:
+  `unsatisfied` lists exactly which constraints remain violated and by how much.
+  Deterministic: no RNG, stable ordering, fixed tie-breaks, f64 working math
+  rounded to integer nm on output.
+- **Constraints**: board containment (clamped), `Near`, `MinSep`, `NearPin`,
+  `AlignX`/`AlignY`, and `NoOverlap` — exact-integer convex **SAT over polygonal
+  courtyards** (edge normals + vertex-vertex axes, rounded margins folded in as
+  `g² ≥ r²·|n|²`; [d10](log/d10-courtyard-polygonal-truth.md), resolves 0019).
+  Elaboration then **honestly verifies** final placements against the true
+  polygons, reporting residuals above `COURTYARD_VERIFY_TOL` (3 µm) as
+  `E_COURTYARD_OVERLAP`.
 
-**Guarantees:**
-- *Iterate to convergence, not a fixed count.* The loop runs until the max constraint residual is
-  below `RES_TOL` (**1 µm** — ~100–200× tighter than M3's ~0.1–0.2 mm), or the max per-sweep node
-  movement falls below `MOVE_TOL` (a geometric stall: projections can no longer make progress), or a
-  `MAX_ITERS` safety cap is hit. The new return type `solve::Solution { positions, converged, iters,
-  unsatisfied }` records *which* happened (`converged` = residual tolerance actually met; `iters` =
-  sweeps taken).
-- *Feasible sets satisfied tightly.* The motivating case M3 got wrong — three decouplers each `Near`
-  a regulator within 6 mm **and** pairwise `MinSep` 3 mm — converges with every relation satisfied
-  to within `RES_TOL` (test asserts ≤ 0.01 mm).
-- *Infeasibility reported, not hidden.* When the residual tolerance is not met (cap hit, or stall on
-  an unsatisfiable set — a `MinSep` larger than the board can fit, contradictory `Fix`es, etc.),
-  `converged` is `false` and `unsatisfied: Vec<Unsatisfied { constraint, residual }>` lists exactly
-  which constraints remain violated and by how much — instead of returning a wrong-but-plausible
-  placement. (Board containment of *movable* nodes is always achievable by clamping, so it is never
-  itself listed; an unsatisfiable board manifests as the relational constraint it defeats.)
-- *Deterministic.* No RNG; stable `BTreeMap`/`Vec` order; coincident points break ties on a fixed
-  axis; f64 working math rounded to integer nm on output. Same `Problem` → identical `Solution`,
-  bit for bit.
-
-**Callers (`elaborate.rs`).** The three solves (full, per-override solve-without effectiveness
-check, final decayed solve) now read `solve(...).positions`; reconciliation/decay semantics are
-unchanged because they are defined purely by *where* nodes are placed. `converged`/`unsatisfied`
-(placement infeasibility) is available for the engine to surface in a future milestone but is not
-yet threaded into `ReconReport`.
-
-**Honest limits.** Not a research-grade general geometric constraint solver: no DOF analysis, no
-graph decomposition into independently-solvable subsystems, no global-optimality claim for the
-least-change objective (projection finds a feasible point via minimal *local* corrections, not the
-global minimum-movement solution). `MinSep` makes the feasible region non-convex, so a pathological
-start could settle into a poor local configuration; for the prototype's well-separated scenes it
-does not bite. Convergence of projected Gauss-Seidel on coupled inequality systems is reliable in
-practice but not formally guaranteed for every input — which is *why* feasibility is checked and
-reported rather than assumed.
-
-**Tested (5 new unit tests, 49 total):** the 3-decoupler `Near`+`MinSep` case satisfied to ≤ 0.01 mm;
-an infeasible set (two `Fix`ed nodes a `Near` cannot reconcile) reported `!converged` with the right
-residual; a `MinSep` larger than the board reported; an unconstrained node staying bit-exactly at its
-anchor; determinism (same `Problem` twice → identical positions/flag/iters). The full M1–M4 suite
-(44 tests) stays green under the tighter solver. Zero new dependencies.
+Honest limits (issue 0007): not a research-grade geometric constraint solver — no
+DOF analysis, no decomposition into independent subsystems, no global-optimality
+claim for least-change; `MinSep`/`NoOverlap` make the feasible region non-convex,
+so a pathological start can settle poorly. `Solution.converged`/`unsatisfied` is
+not yet threaded into `ReconReport` (noted at the call sites in `elaborate.rs`).
 
 ## Prototype status (footprint import)
 
-The `kicad` module imports real KiCad footprints (`.kicad_mod`) into the part model, so the
-built-in toy library is no longer the only source of parts with pin geometry. A `.kicad_mod` is a
-single S-expression; we hand-roll a tiny tokenizer + recursive reader (zero dependencies — no
-serde/sexp crates) and lift out the bits we model.
+*Status audited 2026-07-11.* The `kicad` module (one hand-rolled S-expression
+reader in `kicad/sexp.rs` feeding `footprint`/`symbol`/`outline`/`iface_infer`)
+imports real KiCad data. Everything stays zero-dependency; malformed input returns
+`Err(String)` (the one import surface still on strings — a noted §7 follow-up),
+never a panic.
 
-- **API:** `import_footprint(text: &str) -> Result<PartDef, String>` and the file wrapper
-  `import_footprint_file(path: &str)`. Both modern `(footprint "name" ...)` and legacy
-  `(module name ...)` headers are accepted; pad names may be quoted or bare.
-- **What is imported is geometry, not electrics.** One `PinDef` per `pad`, named by the pad's
-  number/name, positioned at the pad's `(at x y [angle])` converted mm→nm (decimal mm parsed by
-  hand into integer nm, half-away-from-zero rounding — no float, preserving the fixed-point
-  invariant; the rotation angle is ignored for the offset). The pad's **shape + `(size w h)`** are
-  also captured into `PinDef.pad: Option<PadGeo>` — **real** copper geometry (§8): DRC checks it
-  edge-to-edge, it flashes to Gerber and is knocked out of pours, and the placement solver derives a
-  part's courtyard from it. Everything else (silkscreen, 3D models, explicit zones in the source
-  footprint) is ignored on import.
-- **Role-less by design (footprint alone).** A footprint carries **no electrical roles** —
-  whether a pad is power, input, or passive comes from the *schematic symbol*, not the footprint.
-  So an imported footprint *on its own* gives every pin `PinRole::Passive` and an empty `interfaces`.
-  **This gap is now closed by the symbol/role layer** (see "Prototype status (symbol/role layer)"
-  below): a `.kicad_sym` symbol is parsed for electrical types + functional names and joined to the
-  footprint by pad number, yielding real `PinRole`s. Typed `InterfaceDef` inference from symbols
-  remains future work.
-- **Mapping decisions:** pads that **share a pad id** (e.g. two `MP` mounting pads, or a split
-  thermal pad reusing one number) keep the **first** occurrence — they are the *same electrical
-  pad*, and pad id is the stable identity (see "Prototype status (pin identity)"). **Unnamed pads**
-  (`name == ""`, used for thermal/exposed pads and mechanical features) are **skipped** (no
-  electrical identity). Note this dedup is by pad *id*; distinct pads that later share a *functional
-  name* via a symbol join (six `IOVDD` pads, numbers `1/11/…`) are all kept — names may collide,
-  ids may not.
-
-**Verified on real PoC footprints** (from the Orbiter_Ultra.pretty library): the JST-SH headers and
-the QFN ICs parse correctly — e.g. `JST_SH_BM03B-SRSS-TB_1x03-1MP_P1.00mm_Vertical` → 4 pins
-(`1,2,3,MP`; the two `MP` pads dedupe, the exposed pad is skipped) with pad 1 at
-`(-1000000, 1325000)` nm; `Texas_X2QFN-12` → 12 pins; `QFN-80-1EP` → 81 pins (80 + the named EP;
-its unnamed thermal sub-pads skipped).
-
-Tested (8 new unit tests, 52 total): an embedded JST-SH-like fixture (name, pad count, specific
-offsets in nm, all-`Passive`/no-interface); shared-pad dedup; unnamed-pad skipping; legacy
-`(module ...)` + bare pad names + ignored rotation angle; quoted name with spaces/parens; sub-nm
-fractional rounding; a battery of malformed inputs that return `Err` without panicking; and an
-existence-guarded smoke test against a real on-disk footprint. Zero new dependencies.
+- **`import_footprint(text) -> Result<PartDef, String>`** (+ file wrapper): one
+  `PinDef` per pad, offsets hand-parsed from decimal mm to integer nm
+  (half-away-from-zero, no float). Pads carry **real copper + drill geometry**
+  (`PadGeo`): circle/rect/roundrect/oval shapes, `custom` pads as compound copper
+  including `gr_arc` edges (3-point and legacy centre/angle), round drills and
+  slots. Pads sharing a pad id dedupe to the first (same electrical pad); unnamed
+  pads are skipped (no electrical identity).
+- **Footprint graphics** (`fp_line`/`fp_arc`/`fp_circle`/`fp_poly`/`fp_rect`) land
+  as `PartDef.graphics` (`FpGraphic { shape, layer }`) with **side-relative** slab
+  references ([d13](log/d13-slab-name-identity.md)); a closed courtyard outline
+  becomes the authoritative polygonal `PartDef.courtyard`
+  ([d10](log/d10-courtyard-polygonal-truth.md)). `fp_text`
+  (reference/value/user, incl. the v7 `property` form and
+  `${REFERENCE}`/`${VALUE}` variables) imports as live `FpText` anchors
+  ([d14](log/d14-refdes-derived-class-registry.md)) — never frozen strings.
+- **`import_board_outline`** reads a `.kicad_pcb`'s Edge.Cuts into a board outline
+  + cutouts (issue 0017).
+- **Roles**: a footprint alone is electrically role-less by design;
+  `apply_role_map` overlays `(pad_number, name, role)` without authoring a symbol,
+  and the symbol join below supplies the real roles.
 
 ## Prototype status (symbol/role layer)
 
-Closes the footprint importer's headline gap: a footprint is pure geometry (every pad lands as a
-`Passive` pin), but the *electrical* truth — which pad is power, which is an output, what each pad is
-functionally called — lives in the schematic **symbol** (`.kicad_sym`). This layer parses a symbol
-and **joins it to a footprint by pad number** into a real, roled `PartDef`. Lives in `kicad.rs`
-(it reuses that module's S-expression tokenizer/reader — a `.kicad_sym` is the same S-expr dialect as
-a `.kicad_mod`, so there is exactly one parser). Still zero-dependency.
+*Status audited 2026-07-11.* The electrical truth a footprint lacks comes from the
+schematic symbol, joined by pad number:
 
-- **Symbol import.** `import_symbol(text) -> Result<Symbol, String>` (first symbol) and
-  `import_symbol_named(text, name)` (a named symbol out of a multi-symbol library) parse a bare
-  `(symbol ...)` or a `(kicad_symbol_lib ...)`. Pins are gathered by **recursing into nested child
-  unit symbols** (`(symbol "Name_0_1" ...)`, `_1_1`, …) so multi-unit parts yield all their pins;
-  pins are deduped by `number` (first wins). Each `Symbol` pin is `(number, name, ElecType)`; the
-  symbol's `(property "Footprint" "Lib:Name")` is captured (it names the mating footprint).
-- **Electrical type → `PinRole` mapping** (`ElecType::role`). The KiCad pin-type vocabulary is a
-  closed enum (`ElecType`); an unknown token is a parse **error**, never a silent default. Mapping:
-  `power_in → PowerIn`, `power_out → PowerOut`, `output → Output`, `input → Input`,
-  `bidirectional → Bidir`. Everything else — `passive`, `free`, `unspecified`, `no_connect`,
-  `tri_state`, `open_collector`, `open_emitter` — maps to **`Passive`**. This is a *deliberate
-  conservative default*: `free`/`unspecified`/`no_connect` have no driving role, and
-  `tri_state`/`open_collector`/`open_emitter` only drive under bus/wired-OR semantics this
-  prototype's ERC doesn't model yet — calling them `Passive` never invents a spurious
-  driver-vs-driver conflict. This is the one documented place to refine when ERC grows wired-OR rules.
-- **Name vs number on `PinDef`.** `PinDef` gained an additive `number: String` field. The functional
-  `name` (`GPIO0`, `VDD`) is what nets/humans reference and what `pin_role`/`pin_offset` resolve by;
-  `number` (`12`, `MP`) is the geometry/manufacturing key and the symbol↔footprint **join key**. For
-  parts with no distinct numbering (the toy `part_library`, a raw footprint import) `number` defaults
-  to `name`, so all prior callers and the existing footprint/`pin_offset`/`pin_role` behaviour are
-  unchanged.
-- **The join.** `join_symbol_footprint(&Symbol, &PartDef) -> JoinReport` is the tolerant core: the
-  footprint is the geometry source of truth, so the result has **one pin per footprint pad**; where a
-  symbol pin shares the pad's `number`, that pin takes the symbol's functional **name** + mapped
-  **role**, while the **offset** always comes from the footprint pad. Pads with no symbol match stay
-  `Passive` with `name = number`. **Mismatches are reported, never silently dropped:**
-  `JoinReport.symbol_only` lists `(number, name, role)` for symbol pins with no pad (so a dropped
-  *power* pin is visible) and `footprint_only` lists pads with no symbol pin. `import_part(symbol_text,
-  footprint_text) -> Result<PartDef, String>` is the **strict** convenience wrapper: any mismatch is
-  an `Err` naming the offending pads, so a missing power pin can't pass unnoticed; callers wanting to
-  tolerate mismatches use `join_symbol_footprint` and inspect the report.
+- **Symbol import.** `import_symbol` / `import_symbol_named` parse a `.kicad_sym`
+  (same S-expr reader), recursing into child unit symbols so multi-unit parts yield
+  all pins; pins dedupe by number. The KiCad electrical-type vocabulary is a closed
+  enum — an unknown token is a parse **error** — mapped conservatively to
+  `PinRole` (`power_in → PowerIn`, …; `tri_state`/`open_collector`/`open_emitter`
+  and friends map to `Passive` so ERC never invents a spurious driver conflict;
+  refine when ERC grows wired-OR rules — issue 0014).
+- **The join.** `join_symbol_footprint` is tolerant: one pin per footprint pad
+  (geometry source of truth), symbol matches supply functional **name** + mapped
+  **role**; mismatches are *reported, never dropped* (`JoinReport.symbol_only` /
+  `footprint_only`). `import_part` is the strict wrapper — any mismatch errors,
+  so a dropped power pin cannot pass unnoticed.
+- **Typed-interface inference now exists** (`kicad/iface_infer.rs`; resolves
+  issue 0010). `infer_interfaces` matches joined pin names against a built-in
+  pattern registry (UART/SWD/I²C/…) and attaches `InterfaceDef`s
+  **identity-unified on pad numbers**. It **never guesses**: an interface attaches
+  only for a complete, unambiguous signal set per instance (`UART0_TX`/`UART0_RX`
+  → `uart0`), and inference never overwrites an explicit port. `apply_interface`
+  is the explicit overlay for what inference cannot see.
 
-**Verified on a real symbol+footprint pair.** TI `TPS25981x` eFuse symbol (from
-`Power_Management_TI.kicad_sym`, whose own `Footprint` property names
-`eFuse_TI:Texas_RPW9919A_VQFN-HR-10`) joined to that `.kicad_mod`: a clean **10/10** join, no
-orphans. Sample joined pins (number, name, role, offset nm): `5, IN, PowerIn, (-250000, 0)`;
-`6, OUT, PowerOut, (250000, 0)`; `8, GND, PowerIn, (900000, 225000)`; `3, PG, Passive,
-(-900000, 225000)` (`open_collector → Passive`); `7, DVDT, Output, (725000, 875000)`.
-
-**Tested (5 new unit tests, 62 total):** an embedded multi-unit symbol fixture (pins gathered across
-child units, footprint property captured); the full electrical-type→role table including the
-unknown-type error; a hermetic symbol+footprint join asserting functional names, mapped roles, pad
-numbers, and offsets (nm); the pin-mismatch path (a symbol-only power pin and a footprint-only pad
-both surfaced, nothing dropped, strict `import_part` erroring); and an existence-guarded real-data
-join (the `TPS25981x` ↔ `Texas_RPW9919A_VQFN-HR-10` pair above). The existing 57 tests stay green.
-Zero new dependencies.
-
-**Limitations / follow-ups:** the join produces discrete roled pins only — it does **not** yet infer
-typed `InterfaceDef`s (UART/SWD/…) from symbol pin-name patterns, so the "serial-swap-unrepresentable"
-interface story still relies on the hand-authored library. Pin `number` dedup keeps the first
-definition across units; a symbol that legitimately repeats a number with a different role would lose
-the later one (not seen in practice). Alternate-function pin names (KiCad `(alternate ...)`) are
-ignored — only the primary `(name ...)` is used.
+Honest limits: alternate-function pin names (`(alternate …)`) are ignored — only
+the primary name is used; symbol body graphics are not imported (the
+[d23](log/d23-schematic-features-tier.md) artwork seam is where they will land).
 
 ## Prototype status (pin identity)
+
+*Status audited 2026-07-11; verified accurate as written.*
 
 Closes issues 0001 + 0002 (the PoC's scariest finding: a real MCU reuses power-pin
 *names* — the RP2350A has six pads named `IOVDD`, three `DVDD` — and the original
@@ -1205,230 +1009,136 @@ out (`NearPin` takes the first match).
 
 ## Prototype status (export)
 
-The `export` module turns a `Doc` (+ the `PartLib` for geometry) into deterministic, diffable
-output artifacts. Each exporter is a **pure function** of its inputs — no wall-clock, no
-randomness, all iteration over `BTreeMap`/`BTreeSet` — so output is byte-stable run to run, and a
-one-thing change yields a one-line diff. This is the same "render is a pure function of the model"
-discipline as the text projection, applied to fab/check artifacts.
+*Status audited 2026-07-11.* The `export` module
+(`netlist`/`placement`/`svg`/`svg_writer`/`features` + the Gerber/Excellon
+backends below) turns a `Doc` (+ `PartLib`) into deterministic, diffable
+artifacts. Every exporter is a **pure function** — no wall-clock, no randomness,
+stable `BTreeMap` iteration, integer-arithmetic coordinate formatting — so output
+is byte-stable and a one-thing change yields a one-line diff.
 
-- **`netlist(doc) -> String`** — the connectivity artifact. One net per line,
-  `name: comp.pin comp.pin ...`, nets in `NetId` order and pins in `PinRef` order. This is what a
-  fabricated/assembled board is checked against.
-- **`placement_csv(doc) -> String`** — a pick-and-place CSV, `ref,part,x_mm,y_mm,rotation_deg`, one
-  row per component in `EntityId` order. Coordinates are six-decimal millimetres formatted by pure
-  integer arithmetic (no float — the fixed-point determinism invariant holds end to end); rotation
-  is the component's cardinal orientation.
-- **`svg(doc, lib) -> String`** — a board sketch for visual sanity-checking: the board outline (the
-  source `Board` directive if present, else the bounding box of placed geometry), each component
-  drawn at its position with its pin pads (via `pin_world`) and an id label, **and the routed copper**
-  (trace polylines coloured/classed per layer, vias as circles). The model's y axis points up (ECAD
-  convention) and SVG's points down, so y is flipped within the content bounds to keep the sketch
-  upright. Element order follows `EntityId`/`TraceId`/`ViaId` order; no timestamps.
-
-**Gerber/drill output now exists** (see "Prototype status (Gerber/fab output)" below): now that
-routing writes real copper into the `Doc` and footprint pads carry render geometry, the fab
-artifacts describe genuine copper. `gerber_set` emits an RS-274X Gerber per copper layer + an
-`Edge.Cuts` outline and an Excellon drill program.
-
-`cargo run --example export` elaborates a small power-supply board on a 60×40 mm outline and prints
-the netlist / P&P / SVG; `cargo run --example gerber` autoroutes a board and dumps the full fab
-fileset + SVG. Tested (netlist nets/pins for `psu_module(2)`; P&P header + exact rows + row count +
-a rotated component's rotation column; SVG outline (explicit board *and* bbox fallback), component
-ids, labels, pads, and now trace/via elements; `fmt_mm` sign/fraction handling; determinism — each
-exporter called twice yields identical strings). Zero new dependencies.
+- **`netlist(doc)`** — one net per line, nets in `NetId` order, pins in `PinRef`
+  order: the artifact a fabricated/assembled board is checked against.
+- **`placement_csv(doc)`** — pick-and-place, six-decimal mm by pure integer
+  arithmetic; bottom-side parts report the **authored** angle with the Ry(180)
+  flip decomposed out (KiCad `.pos` style, `side=B`).
+- **`svg(doc, lib)`** — the board sketch: the real board region (outline ∖
+  cutouts; curved edges polylined), components with **real pad copper**, routed
+  traces/vias classed per slab, translucent pour fills (even-odd, knockouts read
+  as voids), and silk/marking surface geometry classed by z-derived side. Y is
+  flipped once so the ECAD y-up model renders upright.
+- **`svg_fab` / `fab_svg_set`** — one fab drawing per `Role::Datum` slab
+  ([d15](log/d15-paste-derived-fab-slab.md)).
+- **`schematic_svg(doc, lib)`** — the schematic view, serialized from the
+  `schematic_features` stream ([d23](log/d23-schematic-features-tier.md)); the
+  headless/agent artifact and test oracle (golden fixture committed).
+- **Gerber + Excellon** — see "Prototype status (Gerber/fab output)".
 
 ## Prototype status (routing core)
 
-Lays the **foundation of the routing subsystem**: a provenance-tagged trace/via representation
-(tier-2 materialized state) plus a DRC checker (tier-3 query). The **autorouter is deliberately
-deferred** to a later milestone — this milestone is the representation it will write onto and the
-DRC query it will validate against. Still zero-dependency; all geometry is integer nm.
+*Status audited 2026-07-11.* Routed copper is tier-2 document state
+(`route/model.rs`), fully serialized and identity-stable:
 
-**Representation (`route` module, stored in `Doc`).** Routed copper lives in the document alongside
-component placement, in the same tier and with the same `Provenance` ladder:
-- **`Layer`** — `Top` / `Bottom` outer copper plus `Inner(u8)` so the model extends to multilayer
-  without a rework; ordered by physical stack-up depth (which is what via spans test).
-- **`Trace`** — a `NetId`, a `Layer`, a centreline polyline (`Vec<Point>`), a `width` (nm), and a
-  `Provenance`. **`Pinned`** = hand/agent-routed (the autorouter will treat it as a fixed obstacle);
-  **`Free`** = reserved for the future autorouter's regen-able output. One provenance bit, exactly as
-  §1 prescribes — not a separate "auto vs manual" subsystem.
-- **`Via`** — a centre `Point`, the `from`/`to` layers it spans, its `NetId`, `drill`/`pad` sizes,
-  and a `Provenance`.
-- Both live in `Doc` as `traces: BTreeMap<TraceId, Trace>` and `vias: BTreeMap<ViaId, Via>`, mirroring
-  how placement lives in the doc. New id newtypes `id::TraceId(u64)` / `id::ViaId(u64)` — a trace has
-  no natural hierarchical name, so ids are caller-minted monotone integers (KiCad-UUID style), assigned
-  the same way by a hand edit or a future autorouter.
+- **Representation.** `Trace { net, layer: <slab name>, polyline, width,
+  provenance }`; `Via { net, at, drill, pad, span: Option<(slab, slab)> }` (`None`
+  = full copper extent). Both are id-keyed maps in `Doc`; ids are persistent
+  ([d22](log/d22-route-identity-persists.md); one `RouteIdAlloc` in `id.rs` mints
+  above the current max, saturating). Layer identity is the slab **name**;
+  `route::Layer` ordinals are router-internal working forms only (documented on
+  the enum). All four provenance values (`Pinned` default, `Free`, `Hint`,
+  `Fixed`) round-trip through the `# routes` state zone
+  ([d18](log/d18-routes-persisted.md)).
+- **Commands.** `AddTrace`/`RemoveTrace`/`AddVia`/`RemoveVia` validate atomically;
+  commit-time `validate_routes` (`command.rs`) gates **every** mutation path on
+  slab/net references (`E_UNKNOWN_SLAB`/`E_NON_COPPER_SLAB`/`E_UNKNOWN_NET`) — so
+  a source edit that deletes a net still carrying copper is refused at commit, not
+  silently orphaned. `PromoteRoutes { nets }` flips Free→Pinned (the lockfile
+  move). A route edit bumps only `route_rev`.
+- **DRC** (`route/drc.rs`, the `Key::Drc` query) runs over the unified
+  `world_features` stream: **min width**; **clearance** edge-to-edge between
+  different-net copper via the z-aware exact-integer feature kernel — pads are
+  their true copper extents on their true slabs, via barrels span layers;
+  **keepout intrusion** (`Role::Keepout`, Copper/Route kinds — issue 0023);
+  **board-edge clearance**; and **ratsnest connectivity** — union-find over each
+  net's pins, traces, vias, and **pour islands**, with layer-honest pad↔island
+  incidence ([d19](log/d19-punchable-planes.md)c, `route/connect.rs`: an SMD pad
+  joins only an island on its own slab, a drilled pad every slab its barrel
+  spans). The violation set is canonical and de-duped (clearance keyed by
+  `(net, net, layer)`; location-bearing variants remain a refinement).
 
-**Commands (sole mutation surface).** `Command::{AddTrace, RemoveTrace, AddVia, RemoveVia}` carry a
-caller-supplied stable id and (for adds) the fact itself; the hand/agent-routing API passes
-`Provenance::Pinned`. Validation is atomic (unknown net, degenerate polyline `<2` points, non-positive
-width/drill/pad, duplicate or missing id all abort the whole transaction). A new coarse input revision
-**`route_rev`** (with `InputId::Routing`) is bumped by `apply` when `traces`/`vias` change, parallel to
-`conn_rev`/`geom_rev` — so a route edit bumps *only* `route_rev`, and a placement nudge that touches no
-copper does not bump it.
-
-**DRC (`Key::Drc` query, modelled on ERC).** `query::QueryValue::Drc(Vec<route::Violation>)` returns a
-canonical (sorted, de-duped) violation set from `route::check_drc`. Three checks:
-- **Min width** — every `Trace.width >= rules.min_trace_width`.
-- **Clearance** — copper of *different* nets must be `>= min_clearance`, **edge to edge** (the
-  threshold adds the traces' half-widths / via pad radii). Covers trace-vs-trace (same layer),
-  trace-vs-pad, and (bonus) via-vs-trace / via-vs-pad / via-vs-via with layer-span tests. Comparisons
-  are exact `i128` against *squared* thresholds (a point↔segment distance kept as a rational
-  `num/den`, and an integer segment-intersection test) — no floats, so the violation set is
-  byte-stable.
-- **Connectivity completeness (ratsnest)** — a **union-find** over each net's pins + traces + vias,
-  joined by geometric **incidence** within `DesignRules.touch_tol` (default 0.01 mm): a pin touches a
-  trace whose polyline passes within tol of the pad point, a pin touches a coincident via, same-layer
-  traces that touch fuse, and a via fuses copper across the layers it spans. A net is fully routed iff
-  all its pins land in one component; otherwise an `Unrouted { net, islands }` flags how many
-  disconnected groups remain.
-- **Design rules** — `route::DesignRules { min_clearance, min_trace_width, touch_tol }` with generic
-  2-layer defaults (0.15 mm clearance/width). The DRC query uses `DesignRules::default()`; wiring these
-  to a per-board/source process definition is the documented one-line follow-up.
-
-**Wired into the incremental engine.** `Drc` records three dependencies: the `Routing` input and the
-`Geometry` input (pads move with components) directly, and the **`Netlist` query** (not raw
-`Connectivity`) for the ratsnest pin set. Recording Netlist as a *query* dep is the firewall: a
-connectivity edit whose resolved netlist is unchanged is cut off and does **not** recompute DRC.
-`Engine::query` now folds `route_rev` into the current revision.
-
-**Modelling decisions / simplifications (documented honestly):**
-- **Pads are points.** A pad is its `pin_world` centre (radius 0) for both clearance and incidence;
-  pads are treated as present on **all layers** (through-hole assumption). (Footprint pads now carry
-  size/shape — `PinDef.pad` — but that is **render-only** for Gerber; DRC deliberately still ignores
-  it.) Trace/via copper *does* carry width/pad size in the clearance threshold.
-- **A "touch" is incidence within `touch_tol`**, not an overlap area; hand-placed integer coordinates
-  make exact-coincident endpoints distance 0, and the tolerance absorbs deliberate near-misses.
-- **Clearance violations are keyed by `(net, net, layer)`** (de-duped), not by location — multiple
-  breaches of the same pair on the same layer collapse to one entry (keeps the set small and stable for
-  early cutoff; a location-bearing variant is a future refinement).
-- **Unassigned copper is ignored for clearance** (only net-member pads and net-bearing traces/vias are
-  checked); orphaning of traces when their net disappears under a source edit is **not** handled yet.
-
-**Tested (9 new unit tests, 78 total):** a clean hand-routed two-pin net passes; an unrouted net flags
-`Unrouted{islands:2}`; a different-net same-layer clearance breach is caught (exact violation asserted);
-a too-narrow trace is caught; a two-layer route joined by a via passes the ratsnest (and fails without
-the via); adding a trace bumps **only** `route_rev` and re-runs DRC (turning the net clean); a routing
-edit does **not** re-run ERC/Netlist (input isolation); a non-routing edit whose netlist value is
-unchanged does **not** recompute DRC (early-cutoff firewall, like the ERC test); and routing commands
-validate atomically. The existing 69 tests stay green. Zero new dependencies.
-
-**Explicitly deferred (next agent / later work):** ~~the **autorouter**~~ — now built, see
-"Prototype status (autorouter)" below; **serializing routes** in the text
-front-end (`text` module — routes are not yet part of the canonical tier-1/tier-2 text projection);
-and ~~**rendering traces** in the export SVG / Gerber~~ — now done, see "Prototype status
-(Gerber/fab output)" below (the SVG draws traces/vias and a Gerber/Excellon fab fileset is emitted).
+Honest limits: the `Drc` query still uses `DesignRules::default()` (`query.rs`) —
+wiring rules to a per-board process definition is the documented follow-up.
 
 ## Prototype status (autorouter)
 
-A **basic deterministic grid/maze autorouter** (`autoroute` module), built as the
-transaction-proposer §1 prescribes: `autoroute(doc, lib, rules) -> AutorouteResult` is a pure
-function that **reads** facts (netlist, placement, pinned routes) and **returns** a proposed
-`Vec<Command>` (`AddTrace` + `AddVia`, all `Provenance::Free`) plus `routed`/`unrouted` net lists.
-It never mutates the `Doc`; applying the commands goes through the ordinary atomic
-`command::apply` path, so the GUI cannot tell an autoroute trace from a hand route except by the
-provenance bit. Zero new dependencies; all geometry is integer nm; same `Doc` → byte-identical
-commands.
+*Status audited 2026-07-11.* The `autoroute` module (driver facade +
+`grid`/`obstacles`/`ingest`/`search`) is the transaction-proposer §1 prescribes:
+a pure function returning proposed `AddTrace`/`AddVia` commands (all
+`Provenance::Free`) plus routed/unrouted accounting; applying them goes through
+the ordinary atomic command path.
 
-**Grid + A\*.** The routing area (the source `Board` outline, else the pad bounding box + margin)
-is discretised into a square grid; A\* searches over `(x, y, layer)` with `Top`/`Bottom` copper,
-orthogonal steps costing one pitch and a layer change costing a via penalty (10 pitches, so
-single-layer routes are strongly preferred and vias appear only when needed). Net order is `NetId`
-order; pins within a net are connected MST-style (each remaining pin routed to the net's existing
-connected copper). A grid path is coalesced into collinear segments, with `AddVia` emitted at each
-layer change and a short stub onto the *exact* pad world point at each pin end (so the trace
-literally touches the pad — the ratsnest unions it).
+- **Honest obstacles.** Blocked cells derive from `route::world_features` — the
+  same unified stream DRC reads: real pad **extents** (not points), other-net
+  traces/vias on their true slabs, copper **pours** (`Area` conductors), and hard
+  `Role::Keepout` copper/route regions; inner-layer copper is not dropped. A
+  padless terminal (toy library) still stamps a point obstacle for other nets.
+- **Genuinely N-layer.** The grid spans **all** copper slabs of the stackup; A*
+  searches `(i, j, layer)` with via moves between adjacent layers at a
+  per-crossed-layer cost; a through via needs room on every copper layer at its
+  site. The board mask carves the grid to the real outline ∖ cutouts and pulls
+  back by the edge clearance.
+- **Trace/via pitch split.** Grid pitch is `min_trace_width + min_clearance` —
+  fine enough for 0.4 mm pad pitch; via legality is a separate per-cell mask plus
+  an owner-ring check (a via must keep `via_pad/2 + width/2 + clearance` from
+  other nets' same-run copper).
+- **Plane semantics** ([d19](log/d19-punchable-planes.md)): foreign derived pour
+  fills are via-permeable; a net's **own** pour fill (and its committed copper)
+  seeds the connected tree, so pad→plane stitching vias fall out of the ordinary
+  search; `verify_and_prune` re-checks every proposed net against the real DRC
+  **with pours re-derived including the proposal** — construction invariants are
+  not trusted, and `routed` means DRC-clean. A failing net is reported, its
+  claims rolled back; it never emits partial or overlapping copper.
 
-**Grid pitch (clearance falls out).** `pitch = via_pad + min_clearance` with
-`via_pad = 2·min_trace_width`, `via_drill = min_trace_width`. Because all routed copper lies on grid
-nodes / axis-aligned edges and **distinct nets never share a node** (node ownership), the minimum
-distance between different-net copper is exactly `pitch` — chosen so *every* adjacent-node pairing
-(track↔track, track↔via, via↔via) meets the edge-to-edge clearance rule. So routed-vs-routed
-clearance is guaranteed by construction; only **off-grid** obstacles need radius-based cell
-blocking. Obstacles → blocked cells: the board exterior (off-grid), other-net **pads**
-(`pin_world`, points, all layers), other-net **pre-existing traces/vias** (`Pinned` hand routes are
-fixed obstacles, blocked on their layer/span), and copper **already routed this run** for other nets
-(node ownership). Same-net copper is never blocked. Block radii are sized to keep both a node and
-the half-edges leaving it clear; correctness is **verified against the real DRC query**, not assumed.
-
-**Failure is reported, not fatal.** A net whose pins cannot all be connected (e.g. walled off on
-both layers) is added to `unrouted` and contributes **no** commands — its partial claims are rolled
-back, so it never emits dangling/overlapping copper and never blocks later nets with phantom
-ownership. Routing then continues with the remaining nets.
-
-**Honest limits (by design).** Greedy net-by-net maze routing only: **no rip-up-and-retry, no
-topological/push-and-shove, no length/impedance matching.** Consequently **net ordering matters** —
-a net that fails may be routable in a different order (an earlier net can wall off a later one).
-Pads are points (the model carries no pad size). Existing *same-net* copper is treated as a
-non-obstacle but is not used as a routing seed (a net is re-routed from its pins). Only `Top`/`Bottom`
-are routed (the grid is 2-layer); inner layers in the representation are ignored by the router.
-
-**Tested (5 new unit tests, 83 total) — all verified through `Key::Drc`:** a two-net board routes
-from all-`Unrouted` to fully DRC-clean (no clearance/width violations introduced); a 3-pin net
-connects MST-style and passes the ratsnest; a `Pinned` other-net wall on `Top` is avoided (the route
-drops to `Bottom` via a via and stays clearance-clean); an impossible net (walled on both layers) is
-reported `unrouted` with **no** commands emitted, leaving DRC flagging it unrouted but introducing no
-spurious violations; and determinism (autoroute twice → identical commands). The existing 78 tests
-stay green. `cargo run --example autoroute` shows the end-to-end pass: DRC violations (unrouted)
-before, autoroute + apply, DRC clean after.
+**Honest limits (issue 0008 owns the next design cycle):** greedy net-by-net —
+no rip-up/negotiation, no topological/push-and-shove, no length/impedance
+matching, no net-ordering optimization, no per-layer H/V directionality bias;
+net ordering therefore matters. Vias are always through-span (blind/buried out
+of scope). Honesty over count: on the dense PoC board the conservative whole-net
+verification keeps 2/44 nets (the search itself finds 21/44) — the measurement
+that scopes the router-research cycle (see
+[`poc-rp2350-result.md`](poc-rp2350-result.md)).
 
 ## Prototype status (Gerber/fab output)
 
-The last missing PoC piece: **fab output**. Now that routing writes real copper into the `Doc`
-(traces with width, vias with pad + drill) and footprint pads carry render geometry, the `export`
-module emits the manufacturing fileset — **RS-274X Gerber** per copper layer + an `Edge.Cuts`
-outline, and an **Excellon drill** program. Same discipline as the other exporters: each is a pure
-function of the `Doc` (+ `PartLib`), all coordinates flow from integer nanometres into each format
-by **integer arithmetic** (no float, no timestamps, stable ordering) → byte-stable, diffable output.
+*Status audited 2026-07-11.* `export::gerber_set(doc, lib)` emits the fab
+fileset — deterministic, byte-stable, every coordinate flowing from integer nm
+into `%FSLAX46Y46*%` mm (the integer written *is* the nanometre value):
 
-**Pad geometry capture (render-only, additive).** A footprint pad has a position but the model
-carried no pad *size/shape*, so a pad could not flash as copper. `import_footprint` now also reads
-each pad's **shape** token (`circle`/`rect`/`roundrect`/`oval`; unknown/complex shapes fall back to
-their bounding `rect`) and `(size w h)`, stored as `PinDef.pad: Option<part::Pad { size: (Nm, Nm),
-shape: PadShape }>`. It rides through the symbol↔footprint join (the footprint is the geometry
-source). This is **fab-render metadata only**: DRC and the autorouter still treat a pad as its
-`pin_world` *point* (radius 0) and never read it. Toy `part_library` pins carry no footprint, so
-`pad` is `None` and they contribute no copper flashes.
+- **Copper** — `gerber_layer` per copper slab, stack-up order
+  (`board-F_Cu.gbr`, `board-In<n>_Cu.gbr`, `board-B_Cu.gbr`): trace centrelines
+  as round-aperture draws, via pads flashed on every slab their span covers,
+  component pads flashed from their **real pad copper** by shape, and pour fills
+  as `G36`/`G37` region blocks whose knockout holes come out as voids.
+- **Mask** — `gerber_mask` per `Role::Mask` slab, a **forward query** drawing the
+  openings (the export-format convention stays outside the model): the pad
+  `Void`s at that mask slab's z (pad copper inflated by `MASK_EXPANSION`;
+  through-hole pads open both sides, vias are tented) plus board cutouts as
+  region fills.
+- **Silk / fab** — `gerber_silk` per `Role::Marking` slab and `gerber_fab` per
+  `Role::Datum` slab ([d15](log/d15-paste-derived-fab-slab.md)), over the same
+  role-surface derivation as the SVG renders.
+- **Edge.Cuts** — the real board region (outline ∖ cutouts): every ring drawn as
+  a closed thin-pen contour. Curved edges and round cutouts are polylined —
+  per the hole/void rule ([d16](log/d16-area-unified-producer.md)b), an `Area`
+  hole *is* a routed contour; its diameter is gone by design.
+- **Drill** — `excellon_drill` is a **forward query over through-cut `Void`
+  features**: pad *and* via drills (issue 0022), split by plating into
+  `board-PTH.drl` / `board-NPTH.drl`, round holes as coordinates, slots as `G85`.
 
-**Coordinate format.** Gerber uses `%FSLAX46Y46*%` (absolute, leading-zeros-omitted, 4 integer + 6
-fractional digits of mm) with `%MOMM*%`. Because 1 mm = 1_000_000 nm, the integer the file carries
-**is exactly the nanometre value** — so a coordinate is just `nm.to_string()`, no float. Aperture
-definitions and Excellon coordinates/tool sizes use the same six-decimal-mm `fmt_mm` formatter.
-
-**API (`export` module).**
-- **`gerber_layer(doc, lib, layer) -> String`** — one copper layer as RS-274X: format spec, mm
-  units, the layer's **aperture table** (distinct apertures, codes 10.. in a canonical `Ord`), then
-  objects. **Traces → draws:** each trace's centreline is a `D02` move + `D01` draws with a round
-  aperture sized to its `width`. **Vias/pads → flashes:** a via pad (`D03`) on each layer it
-  `spans`, with a round aperture sized to its `pad`; a component pad (`D03`) by **shape** —
-  `circle→C`, `rect`/`roundrect→R` (bounding box; basic Gerber has no rounded-rect), `oval→O`.
-  Component pads flash on **every** copper layer (the all-layer point model). Object order is
-  `TraceId`, then `ViaId`, then `(EntityId, pin)` — deterministic. Ends `M02*`.
-- **`gerber_edge_cuts(doc, lib) -> String`** — the board outline as a closed rectangle drawn with a
-  thin 0.1 mm pen, from the source `Board` rect, else the placement/route bounding box.
-- **`excellon_drill(doc, lib) -> Vec<(String, String)>`** — a forward query over the through-cut
-  `Role::Void` features of `route::world_features` (pad **and** via drills; issue 0022), split by
-  plating into `board-PTH.drl` / `board-NPTH.drl` (only the non-empty file(s) emitted). Each file:
-  `M48` header, `METRIC`, one **tool** per distinct drill diameter (`T1..`, sorted), then each tool's
-  hits in canonical order (round holes as a coordinate, slots as a `G85` routed hole), `M30`.
-  Decimal-point coordinates so zero-suppression mode is moot.
-- **`gerber_set(doc, lib) -> Vec<(String, String)>`** — the convenient fileset: `board-F_Cu.gbr` /
-  `board-B_Cu.gbr` / `board-In<n>_Cu.gbr` (stack-up order) + `board-Edge_Cuts.gbr` + the split drill
-  file(s) (`board-PTH.drl` / `board-NPTH.drl`).
-
-**Honest limits.** **Not validated against a real Gerber viewer** — assertions here are
-syntactic/structural (format directives, aperture defs, draw/flash counts, exact coordinates). **DRC
-still treats pads as points** (radius 0, all layers); the pad size/shape captured here feeds *only*
-the copper flash, not clearance/connectivity. Component pads flash on all copper layers (the model
-has no per-pad layer), `roundrect`/`custom` pads flash as their bounding rectangle, and the board
-base filename is the fixed `board` (the `Doc` carries no board name). Through-holes are vias only.
-
-**Tested (10 new unit tests, 93 total):** footprint import captures pad shape + size (fixture, and a
-size-less pad → `None`) and it survives the symbol/footprint join; a hand-routed two-layer fixture
-produces the F_Cu/B_Cu Gerbers with the expected format spec, aperture defs, exact trace draws
-(`D01` counts + coordinates) and via/pad flashes (`D03`); the Excellon lists the via drill + its
-coordinate; `Edge.Cuts` traces the outline rectangle; a part with real pad geometry flashes `R`/`C`
-apertures at the right world positions; the SVG now contains `trace`/`via` elements; `gerber_set`
-filenames + layer order; and determinism (every fab exporter twice → byte-identical, incl. on an
-autorouted board). The existing 83 tests stay green. `cargo run --example gerber` autoroutes a board
-and dumps the whole fileset + SVG. Zero new dependencies.
+**Honest limits.** Still **not validated against a real Gerber viewer**
+(issue 0009). Basic Gerber apertures cannot express rounded/rotated/custom pad
+shapes, so those pads **flash as their bounding rectangle** (`export/gerber.rs`)
+— a conservative stand-in at flash fidelity, while DRC checks the exact shapes;
+routing complex pads through region fills instead is a focused follow-up. Copper
+Gerber/SVG still re-walk the `Doc` rather than filtering `world_features` by
+provenance (the one known producer duplication — see gui-architecture.md's
+engine rider). The output base filename is the fixed `board`.

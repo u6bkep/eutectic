@@ -176,7 +176,7 @@ pub enum FeatureOrigin {
 /// copper-piece type): the net is an
 /// *annotation alongside* the geometry, **never a field on [`Feature`]** —
 /// connectivity is authoritative and lives separately (see
-/// docs/geometry-model-convergence.md, Decision 12). `net == None` means no
+/// docs/log/d12-phase0-foundation.md). `net == None` means no
 /// electrical identity: board substrate, a silk marking, a void, or a floating pad.
 ///
 /// `origin` is the orthogonal *structural* provenance (issue 0031): which authored /

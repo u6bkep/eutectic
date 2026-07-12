@@ -66,7 +66,7 @@ impl PinDef {
     /// the stackup (a missing accessor) are skipped.
     ///
     /// This is the [`PadGeo`](crate::part::PadGeo)-derives-`Feature`s fold of the
-    /// geometry-model convergence (docs/geometry-model-convergence.md, Decision 12): the
+    /// geometry-model convergence (docs/log/d12-phase0-foundation.md): the
     /// compact `PadGeo` stays stored on the pin; the features are the derived view. Purely
     /// additive — it does not alter or replace any existing geometry.
     pub fn pad_features(&self, comp: &Component, stackup: &geom::Stackup) -> Vec<geom::Feature> {

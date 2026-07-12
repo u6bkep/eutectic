@@ -298,7 +298,7 @@ pub enum GenDirective {
         within: Nm,
     },
     /// Authored **board text** — a mutable string lowered to silkscreen (per
-    /// Decision 9 in docs/geometry-model-convergence.md). The **authoritative** form
+    /// docs/log/d09-text-string-authoritative.md). The **authoritative** form
     /// is exactly these fields (string + placement + `height` + `layer` + `orient`);
     /// the `Shape2D` strokes are *derived* by [`features`](crate::elaborate::features) through the built-in
     /// stroke [`crate::font`] — never stored, so a rename re-derives. `orient`

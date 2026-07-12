@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub use crate::coord::{MM, Nm, Point};
 
 /// A component's orientation: an **integer quaternion** rotation (see
-/// docs/geometry-model-convergence.md, Decision 6). Storing the quaternion — rather
+/// docs/log/d06-integer-quaternion-orient.md). Storing the quaternion — rather
 /// than a cardinal enum or a float angle — keeps orientation exact and deterministic
 /// while generalising cleanly to 3D: a planar rotation about z is `(w,0,0,z)`, a
 /// flip-to-bottom is a 180° rotation about an in-plane axis, an off-axis tilt is any

@@ -3,7 +3,7 @@
 > Status: **agreed design, 2026-07-09** — the implementation spec for the
 > owned-canvas decision (gui-architecture.md "Canvas strategy") and its
 > "Two producers, one ingest" contract. Companion rulings: Decision 23
-> (geometry-model-convergence.md — the schematic producer) and gw-25
+> (docs/log/d23-schematic-features-tier.md — the schematic producer) and gw-25
 > (golden render snapshots). This document is the work-package source for
 > the fan-out; it becomes module-doc material once the code exists.
 

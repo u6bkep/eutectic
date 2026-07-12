@@ -3,8 +3,9 @@
 //! Everything physical — copper, the board body, holes, keep-outs — is a
 //! [`Feature`]: a `(role, material?, extent)`. This module is the **2.5D core**:
 //! the shape vocabulary, the z-stackup, and an exact-integer clearance kernel. As of
-//! the geometry-model convergence (docs/geometry-model-convergence.md, Phases 0–2)
-//! this **is** the live clearance model: DRC, pours, Gerber, and the autorouter all
+//! the geometry-model convergence (docs/architecture.md §8 is the current model;
+//! docs/log/n02-convergence-plan.md records the Phases 0–2 execution) this **is** the
+//! live clearance model: DRC, pours, Gerber, and the autorouter all
 //! reduce copper to [`Feature`]s and gate on [`Feature::clears`]; the former
 //! `route::Layer`-based copper-piece model has been retired. `route::Layer` survives
 //! only as the routing/trace/via tier and the violation-report granularity.

@@ -193,11 +193,12 @@ implementation was built this way by focused sub-agents, each adversarially revi
 
 ## Documentation
 
-- [`docs/architecture.md`](docs/architecture.md) — the design of record: the reasoning (§1–§6)
+- [`docs/architecture.md`](docs/architecture.md) — the design of record: the reasoning (§1–§9)
   plus a "Prototype status" section per implemented subsystem, with honest limits for each.
-- [`docs/geometry-model-convergence.md`](docs/geometry-model-convergence.md) — the decision record
-  (Decisions 1–19) of the geometry/representation convergence: how pads, pours, masks, text, and
-  holes all became one Feature primitive, and why routes are persisted state.
+- [`docs/log/`](docs/log/README.md) — the project log: dated decision records (d01–d23 — how
+  pads, pours, masks, text, and holes all became one Feature primitive; why routes are persisted
+  state; the schematic and source-language rulings), milestone snapshots, and superseded plans,
+  one entry per file with an index.
 - [`docs/poc-rp2350-spec.md`](docs/poc-rp2350-spec.md) — design spec for the capstone proof of
   concept: a chip-down rework of a multi-SWD debug probe (bare RP2350A + JST-SH headers), used to
   drive the whole flow end-to-end on a real board.
