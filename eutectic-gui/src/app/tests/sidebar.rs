@@ -219,3 +219,50 @@ fn findings_header_never_overlaps_with_long_counts() {
         );
     }
 }
+
+/// WP3 successor to the deleted `canvas/tests.rs::enumerates_board_layers`:
+/// layer-panel rows now derive from the board scene's plane list
+/// (`domain::layer_rows`). Pins the row set — outline first (painted under
+/// everything), every stackup slab with copper/mask/silk on both sides — and
+/// that the copper swatches keep the warm-top / cool-bottom split. The old
+/// `core` (dielectric) and `Drills` rows are gone BY DESIGN: neither toggle
+/// has been functional since WP2 (no scene plane maps to them). Whether
+/// drills deserve a live toggle again is an open product ruling — if it is
+/// made, this test is the one to update.
+#[test]
+fn layer_panel_rows_pin_scene_planes_and_copper_swatches() {
+    let app = edit_app();
+    let derived = app.derived.borrow();
+    let layers = &derived.board.as_ref().expect("board projects").layers;
+    assert_eq!(
+        layers.first().expect("rows non-empty").name,
+        "Board outline",
+        "outline row stays first (painted under everything)"
+    );
+    let names: Vec<&str> = layers.iter().map(|l| l.name.as_str()).collect();
+    for expected in ["B.SilkS", "B.Mask", "B.Cu", "F.Cu", "F.Mask", "F.SilkS"] {
+        assert!(
+            names.contains(&expected),
+            "missing layer row `{expected}` in {names:?}"
+        );
+    }
+    for gone in ["core", "Drills"] {
+        assert!(
+            !names.contains(&gone),
+            "dead-toggle row `{gone}` must stay retired (its toggle mapped to \
+             no plane since WP2); revisit deliberately, not by drift"
+        );
+    }
+    let color_of = |n: &str| {
+        layers
+            .iter()
+            .find(|l| l.name == n)
+            .unwrap_or_else(|| panic!("row `{n}`"))
+            .color
+    };
+    assert_ne!(
+        color_of("F.Cu"),
+        color_of("B.Cu"),
+        "copper swatches keep the warm-top / cool-bottom split"
+    );
+}
