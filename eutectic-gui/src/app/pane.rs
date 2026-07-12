@@ -44,7 +44,11 @@ impl ViewKind {
     pub(crate) fn strip_groups(self) -> &'static [&'static [Tool]] {
         match self {
             ViewKind::Board => &[&[Tool::Select, Tool::Measure], &[Tool::Route]],
-            ViewKind::Schematic => &[&[Tool::Select, Tool::Measure]],
+            // Select only (user ruling 2026-07-11): schematic Measure was a
+            // structural no-op (the preview is board-space geometry), and
+            // schematics are expected to grow their OWN tool vocabulary
+            // rather than borrow the board's.
+            ViewKind::Schematic => &[&[Tool::Select]],
         }
     }
 

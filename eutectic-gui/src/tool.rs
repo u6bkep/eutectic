@@ -31,8 +31,9 @@ use eutectic_core::id::{EntityId, NetId, TraceId};
 /// default entry of any view kind without one); `Measure` is the first non-select
 /// tool, proving the machine + preview channel; `Route` (m6 slice B) is manual
 /// trace drawing at routing-ladder level 1. Which tools a kind offers is
-/// structural — `ViewKind::strip_groups` lists them, and Route simply doesn't
-/// exist in the schematic kind's strip.
+/// structural — `ViewKind::strip_groups` lists them; the schematic strip
+/// offers Select only (its future editing tools will be their own vocabulary,
+/// not borrowed board tools — user ruling 2026-07-11).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Tool {
     /// Pick / select entities (the default). Clicks hit-test into the selection model.

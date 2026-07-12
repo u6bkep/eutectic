@@ -242,15 +242,15 @@ fn dual_boards_is_lint_clean() {
 
 /// The per-kind-tools scene (revised structural commitment 4): the two kinds
 /// hold DIFFERENT active tools simultaneously — the board slot Route, the
-/// schematic slot Measure — and the scene renders lint-clean with both panes
-/// fitted (each pane's strip shows its own kind's active tool).
+/// schematic slot its lone Select — and the scene renders lint-clean with both
+/// panes fitted (each pane's strip shows its own kind's active tool).
 #[test]
 fn per_kind_tools_is_lint_clean_and_holds_two_tools() {
     use crate::app::ViewKind;
     use crate::tool::Tool;
     let app = per_kind_tools();
     assert_eq!(app.tool_for(ViewKind::Board), Tool::Route);
-    assert_eq!(app.tool_for(ViewKind::Schematic), Tool::Measure);
+    assert_eq!(app.tool_for(ViewKind::Schematic), Tool::Select);
     let (app, r) = render_clean("per_kind_tools", app);
     harness::assert_content_coverage("per_kind_tools", &app, &r, &canvas_keys());
 }

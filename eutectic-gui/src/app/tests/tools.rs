@@ -1,8 +1,8 @@
 //! Per-view-kind tool state + per-pane strip tests (revised structural
 //! commitment 4): strip clicks land in the clicked pane's KIND's slot, both
 //! kinds' tools persist simultaneously, pane focus swaps the live tool, and
-//! applicability is structural (no Route button in a schematic strip; a
-//! synthesized Route click on a schematic pane is ignored).
+//! applicability is structural (the schematic strip offers Select ONLY —
+//! forged board-tool clicks aimed at a schematic pane are ignored).
 
 use super::*;
 
@@ -33,8 +33,9 @@ fn tree_has_key(root: &El, key: &str) -> bool {
 }
 
 /// Per-kind tool memory through the strips: pane A's (board) strip sets the
-/// BOARD slot, pane B's (schematic) strip sets the SCHEMATIC slot, and both
-/// persist simultaneously — setting one never touches the other.
+/// BOARD slot and the schematic slot is untouched by it. The schematic kind
+/// offers Select only, so its slot never moves — a forged board-tool click
+/// aimed at the schematic pane is ignored (structural applicability).
 #[test]
 fn strip_clicks_set_per_kind_slots_that_persist() {
     let mut app = split_app();
@@ -54,9 +55,10 @@ fn strip_clicks_set_per_kind_slots_that_persist() {
         "the schematic slot is untouched by a board-strip click"
     );
 
-    // Measure via the SCHEMATIC pane's strip.
+    // A forged Measure click aimed at the SCHEMATIC pane's strip is ignored
+    // (the schematic kind does not offer Measure).
     app.on_event(click(&PaneId::B.strip_key(Tool::Measure)), &cx);
-    assert_eq!(app.tool_for(ViewKind::Schematic), Tool::Measure);
+    assert_eq!(app.tool_for(ViewKind::Schematic), Tool::Select);
     assert_eq!(
         app.tool_for(ViewKind::Board),
         Tool::Route,
@@ -65,18 +67,18 @@ fn strip_clicks_set_per_kind_slots_that_persist() {
 }
 
 /// The live tool is the FOCUSED pane's kind's slot: pointer focus over the board
-/// pane reads Route, over the schematic pane reads Measure — swapping focus
-/// swaps the live tool without touching either kind's memory. A strip click
-/// also focuses its pane.
+/// pane reads Route, over the schematic pane its Select — swapping focus swaps
+/// the live tool without touching either kind's memory. A strip click also
+/// focuses its pane.
 #[test]
 fn pane_focus_swaps_the_live_tool() {
     let mut app = split_app();
     let r = settle(&mut app);
     let cx = EventCx::new().with_ui_state(&r.ui);
     app.on_event(click(&PaneId::A.strip_key(Tool::Route)), &cx);
-    app.on_event(click(&PaneId::B.strip_key(Tool::Measure)), &cx);
+    app.on_event(click(&PaneId::B.strip_key(Tool::Select)), &cx);
     // The last strip click focused pane B (schematic).
-    assert_eq!(app.live_tool(), Tool::Measure);
+    assert_eq!(app.live_tool(), Tool::Select);
 
     // Pointer over the board pane focuses it: live tool = the board slot.
     app.on_event(
@@ -98,11 +100,11 @@ fn pane_focus_swaps_the_live_tool() {
         ),
         &cx,
     );
-    assert_eq!(app.live_tool(), Tool::Measure);
+    assert_eq!(app.live_tool(), Tool::Select);
 
     // Focus swapping never wrote either slot.
     assert_eq!(app.tool_for(ViewKind::Board), Tool::Route);
-    assert_eq!(app.tool_for(ViewKind::Schematic), Tool::Measure);
+    assert_eq!(app.tool_for(ViewKind::Schematic), Tool::Select);
 }
 
 /// A strip click routes to the clicked pane's KIND, not the pane itself: with
@@ -128,46 +130,51 @@ fn strip_click_routes_to_the_kind_not_the_pane() {
     );
 }
 
-/// Applicability is structural: the schematic pane's strip renders NO Route
-/// button (while the board pane's strip has one), and a synthesized Route click
-/// aimed at the schematic pane is ignored — Route can never enter the schematic
-/// slot.
+/// Applicability is structural: the schematic pane's strip renders Select ONLY
+/// (while the board pane's strip has all three tools), and synthesized Route /
+/// Measure clicks aimed at the schematic pane are ignored — board tools can
+/// never enter the schematic slot (user ruling 2026-07-11: schematic editing
+/// tools will be their own vocabulary).
 #[test]
-fn schematic_strip_has_no_route_and_ignores_a_forged_one() {
+fn schematic_strip_offers_select_only_and_ignores_forged_board_tools() {
     let mut app = split_app();
     let r = settle(&mut app);
 
-    // Board strip: all three tools. Schematic strip: Select + Measure only.
+    // Board strip: all three tools. Schematic strip: Select only.
     for tool in [Tool::Select, Tool::Measure, Tool::Route] {
         assert!(
             tree_has_key(&r.tree, &PaneId::A.strip_key(tool)),
             "board strip renders {tool:?}"
         );
     }
-    for tool in [Tool::Select, Tool::Measure] {
+    for tool in [Tool::Select] {
         assert!(
             tree_has_key(&r.tree, &PaneId::B.strip_key(tool)),
             "schematic strip renders {tool:?}"
         );
     }
-    assert!(
-        !tree_has_key(&r.tree, &PaneId::B.strip_key(Tool::Route)),
-        "the schematic strip must not render a Route button"
-    );
+    for absent in [Tool::Route, Tool::Measure] {
+        assert!(
+            !tree_has_key(&r.tree, &PaneId::B.strip_key(absent)),
+            "the schematic strip must not render a {absent:?} button"
+        );
+    }
 
-    // A forged Route click on the schematic pane's strip slot is ignored.
+    // Forged board-tool clicks on the schematic pane's strip slots are ignored.
     let cx = EventCx::new().with_ui_state(&r.ui);
-    app.on_event(click(&PaneId::B.strip_key(Tool::Route)), &cx);
-    assert_eq!(
-        app.tool_for(ViewKind::Schematic),
-        Tool::Select,
-        "Route can never enter the schematic kind's slot"
-    );
+    for forged in [Tool::Route, Tool::Measure] {
+        app.on_event(click(&PaneId::B.strip_key(forged)), &cx);
+        assert_eq!(
+            app.tool_for(ViewKind::Schematic),
+            Tool::Select,
+            "{forged:?} can never enter the schematic kind's slot"
+        );
+    }
 }
 
 /// Switching the BOARD kind's tool through a strip cancels the board previews
-/// (a measure in progress here); switching the SCHEMATIC kind's tool leaves
-/// board previews alone — cancellation follows the kind whose slot changed.
+/// (a measure in progress here); a SCHEMATIC-strip click leaves board previews
+/// alone — cancellation follows the kind whose slot changed.
 #[test]
 fn board_tool_switch_cancels_board_previews_schematic_switch_does_not() {
     let mut app = split_app();
@@ -184,11 +191,11 @@ fn board_tool_switch_cancels_board_previews_schematic_switch_does_not() {
     app.set_measure(m);
     assert!(app.measure.get().segment().is_some());
 
-    // A SCHEMATIC-kind switch leaves the board preview alone.
-    app.on_event(click(&PaneId::B.strip_key(Tool::Measure)), &cx);
+    // A SCHEMATIC-strip click (its lone Select) leaves the board preview alone.
+    app.on_event(click(&PaneId::B.strip_key(Tool::Select)), &cx);
     assert!(
         app.measure.get().segment().is_some(),
-        "a schematic-slot change cancels nothing on the board"
+        "a schematic-strip click cancels nothing on the board"
     );
 
     // A BOARD-kind switch cancels it.

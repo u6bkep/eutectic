@@ -623,9 +623,9 @@ impl EutecticApp {
             (Tool::Select, UiEventKind::PointerLeave) => {
                 self.domain.selection.borrow_mut().clear_hover();
             }
-            // The schematic strip offers Measure, but the measure preview is
-            // board-space geometry — a schematic measure is a no-op today
-            // (unchanged from the old pane).
+            // The schematic kind offers Select only (strip_groups), so no
+            // other tool's events can arrive here; the arm stays as the
+            // structural catch-all.
             _ => {}
         }
     }
