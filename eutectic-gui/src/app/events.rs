@@ -70,45 +70,14 @@ impl App for EutecticApp {
             self.handle_disk_change(source);
         }
 
-        // Queue the initial fit-to-content once per SCHEMATIC pane, on the first frame
-        // after the doc loaded (or after a view switch reset the flag) — the layout pass
-        // resolves each request against the live per-pane viewport rect + content extents.
-        // BOARD panes left the viewport system (WP2): their fit-on-first-show is camera
-        // math applied in `build` where the pane rect is known (`board_build_camera`
-        // consumes the same `fitted` flag), so nothing is queued for them here.
-        //
-        // Reload NEVER re-fits (the user's framing is sacred): `apply_reload` leaves the
-        // `fitted` flags alone, so a reload does not re-arm this.
-        //
-        // Only fit (and mark `fitted`) a pane that is actually built into the tree THIS
-        // frame. When a pane is hidden (the other pane is maximized), its viewport El is
-        // absent, so damascene drops the unmatched FitContent request at end of layout
-        // (clear_pending_viewport_requests). Marking such a pane fitted anyway would strand
-        // it: on restore it would render with the default camera and never re-fit. So a
-        // hidden pane is left un-fitted and gets its fit on the first frame it is visible.
-        let maximized = self.maximized.get();
-        // Read the projection state up front so the `derived` borrow doesn't overlap the
-        // `panes` mutable borrow below.
-        let has_schematic = self.derived.borrow().schematic.is_some();
-        let mut panes = self.panes.borrow_mut();
-        for (i, p) in panes.iter_mut().enumerate() {
-            if p.fitted || p.view != ViewKind::Schematic {
-                continue;
-            }
-            let id = if i == 0 { PaneId::A } else { PaneId::B };
-            // A pane is hidden this frame iff some OTHER pane is maximized.
-            let visible = maximized.map(|m| m == id).unwrap_or(true);
-            if !visible {
-                continue;
-            }
-            if has_schematic {
-                self.pending.borrow_mut().push(ViewportRequest::FitContent {
-                    key: id.canvas_key().to_string(),
-                    padding: 24.0,
-                });
-                p.fitted = true;
-            }
-        }
+        // Camera settlement note (WP3, owned canvas everywhere): the initial
+        // fit-to-content for BOTH view kinds is app-camera math applied in
+        // `build` where each pane's laid-out rect is known
+        // (`pane_build_camera` consumes the per-pane `fitted` flag; hidden
+        // panes stay un-fitted and fit on their first visible frame). The
+        // old damascene viewport-request queue is gone. Reload NEVER re-fits
+        // (the user's framing is sacred): `apply_reload` leaves the `fitted`
+        // flags alone.
     }
 
     fn on_event(&mut self, event: UiEvent, cx: &EventCx) {
@@ -352,34 +321,21 @@ impl App for EutecticApp {
             return;
         }
 
-        // Toolbar framing buttons act on the pane(s) — Fit/Reset every pane's camera so a
-        // single button reframes whatever the user sees. Board panes get an app-camera
-        // request (consumed in `build` where the rect is known — hidden panes apply on
-        // first show, like the old dropped-and-requeued viewport requests); schematic
-        // panes stay on the damascene viewport requests until WP3.
+        // Toolbar framing buttons act on the pane(s) — Fit/Reset every pane's
+        // camera so a single button reframes whatever the user sees. Both
+        // view kinds get an app-camera request (consumed in `build` where the
+        // rect is known — hidden panes apply on first show).
         if event.is_click_or_activate("fit") || event.is_click_or_activate("reset") {
             let fit = event.is_click_or_activate("fit");
             for id in [PaneId::A, PaneId::B] {
-                match self.panes.borrow()[pane_index(id)].view {
-                    ViewKind::Board => self.request_board_cam(
-                        id,
-                        if fit {
-                            crate::app::board_pane::CamRequest::Fit
-                        } else {
-                            crate::app::board_pane::CamRequest::Reset
-                        },
-                    ),
-                    ViewKind::Schematic => self.pending.borrow_mut().push(if fit {
-                        ViewportRequest::FitContent {
-                            key: id.canvas_key().to_string(),
-                            padding: 24.0,
-                        }
+                self.request_pane_cam(
+                    id,
+                    if fit {
+                        crate::app::canvas_pane::CamRequest::Fit
                     } else {
-                        ViewportRequest::ResetView {
-                            key: id.canvas_key().to_string(),
-                        }
-                    }),
-                }
+                        crate::app::canvas_pane::CamRequest::Reset
+                    },
+                );
             }
             return;
         }
@@ -471,15 +427,15 @@ impl App for EutecticApp {
         }
     }
 
-    /// Wheel over a BOARD pane is the owned camera's zoom-at-cursor (spec
-    /// §7): consume it and retarget the pane's glide so the board point
-    /// under the cursor stays fixed through the whole glide. Anywhere else
-    /// (schematic viewport, scrollable chrome) returns `false` so
-    /// damascene's native wheel handling proceeds unchanged.
+    /// Wheel over ANY canvas pane is the owned camera's zoom-at-cursor
+    /// (spec §7): consume it and retarget the pane's glide so the content
+    /// point under the cursor stays fixed through the whole glide. Anywhere
+    /// else (scrollable chrome) returns `false` so damascene's native wheel
+    /// handling proceeds unchanged.
     fn on_wheel_event(&mut self, event: UiEvent, cx: &EventCx) -> bool {
         // Modal chrome owns the pointer (the same gate free hover applies):
         // wheel over the Libraries modal or an open menu must scroll the
-        // chrome, never zoom the board pane beneath it.
+        // chrome, never zoom the pane beneath it.
         if self.libraries_open.get() || self.open_menu.borrow().is_some() {
             return false;
         }
@@ -492,19 +448,12 @@ impl App for EutecticApp {
         let Some(pane) = self.pane_under_pointer(cx, pos) else {
             return false;
         };
-        if self.panes.borrow()[pane_index(pane)].view != ViewKind::Board {
-            return false;
-        }
         let Some(r) = cx.rect_of_key(pane.canvas_key()) else {
             return false;
         };
         self.focused_pane.set(pane);
-        self.board_zoom_at(pane, (r.x, r.y, r.w, r.h), pos, dy);
+        self.pane_zoom_at(pane, (r.x, r.y, r.w, r.h), pos, dy);
         true
-    }
-
-    fn drain_viewport_requests(&mut self) -> Vec<ViewportRequest> {
-        std::mem::take(&mut self.pending.borrow_mut())
     }
 
     /// The app-wide keyboard chords (m6): Save / Undo / Redo, delivered by

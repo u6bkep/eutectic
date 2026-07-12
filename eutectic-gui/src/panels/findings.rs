@@ -127,7 +127,7 @@ impl EutecticApp {
             && let Some(pane) = self.focused_board_pane()
         {
             let mm = eutectic_core::coord::MM as f64;
-            self.board_center_on(pane, (mx as f64 * mm, my as f64 * mm));
+            self.pane_center_on(pane, (mx as f64 * mm, my as f64 * mm));
         }
     }
 

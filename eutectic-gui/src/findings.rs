@@ -44,7 +44,7 @@
 //! the result across frames and rebuilds it only when the doc revision changes (the
 //! same discipline as the layer assets). `build` never recomputes findings.
 
-use crate::canvas::pick::{Candidate, SemanticId};
+use crate::pick::{Candidate, SemanticId};
 use crate::registry::LibNote;
 use eutectic_core::coord::{MM, Nm, Point};
 use eutectic_core::diagnostic::{Diagnose, Diagnostic, Location, Severity};

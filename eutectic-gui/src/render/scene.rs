@@ -40,9 +40,9 @@ pub const SEM_CHROME: u32 = 0;
 /// for hover/selection/emphasis purposes. Net where the feature carries one,
 /// owning entity otherwise, [`Chrome`](SemanticKey::Chrome) as the sentinel
 /// for identity-free geometry (renderer-spec §2). This deliberately mirrors
-/// the picker's id vocabulary (`canvas::pick::SemanticId`) without importing
-/// it — the old canvas is scheduled for deletion (WP3); WP2 maps between the
-/// two at the selection seam.
+/// the picker's id vocabulary ([`crate::pick::SemanticId`]) without importing
+/// it — the renderer stays app-type-free; the app maps between the two at
+/// the selection seam.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SemanticKey {
     /// No domain identity (sentinel, always index [`SEM_CHROME`]).
@@ -93,6 +93,20 @@ pub enum PlaneKey {
     /// color** (absence-through-everything, matching fab semantics;
     /// renderer-spec §4). Coverage max-blend never needs subtraction.
     Drills,
+    /// Schematic drawn wires (WP3) — composited first of the schematic tiers
+    /// so wires read *under* symbols, matching the stream's §20d draw order.
+    SchematicWire,
+    /// Schematic line-art ink (symbol outlines, pin stubs) **and** its
+    /// same-color annotation text (headers, pin names, nc marks) — one plane
+    /// because they share one appearance; the schematic drawing has no
+    /// translucency, so binning by *color role* rather than by shape kind
+    /// keeps compositing trivial (see `render::schematic` module docs).
+    SchematicInk,
+    /// Schematic net tags (annotation text in the tag accent).
+    SchematicTag,
+    /// Schematic non-semantic chrome: the unplaced-bin divider (dashed) and
+    /// its label — composited last, like the stream emits it.
+    SchematicChrome,
     /// The dynamic overlay (previews, halos) — not part of a produced scene;
     /// the renderer composites the overlay buffer under this key's style.
     Overlay,

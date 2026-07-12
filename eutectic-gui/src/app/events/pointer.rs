@@ -5,8 +5,8 @@
 //! table stays in [`events`](crate::app::events).
 
 use crate::app::{EutecticApp, PaneId};
-use crate::canvas::pick::{self, SemanticId};
-use crate::schematic_view::SchematicView;
+use crate::pick::{self, SemanticId};
+use crate::schematic_pick;
 use crate::tool::{self, CameraPanState, DragState, RouteState, Tool, TraceDragState};
 use damascene_core::prelude::*;
 use eutectic_core::command::{Command, Transaction};
@@ -64,8 +64,8 @@ impl EutecticApp {
             let Some(rect) = cx.rect_of_key(pane.canvas_key()) else {
                 return;
             };
-            let cam = self.board_camera(pane);
-            let p = crate::app::board_pane::board_unproject(
+            let cam = self.pane_camera(pane);
+            let p = crate::app::canvas_pane::pane_unproject(
                 &cam,
                 (rect.x, rect.y, rect.w, rect.h),
                 pos,
@@ -75,7 +75,7 @@ impl EutecticApp {
                 .set(Some((p.x as f32 / mm, p.y as f32 / mm)));
             (
                 p,
-                pick::tolerance_nm(PICK_TOL_PX, crate::app::board_pane::zoom_px_per_mm(&cam)),
+                pick::tolerance_nm(PICK_TOL_PX, crate::app::canvas_pane::zoom_px_per_mm(&cam)),
             )
         };
 
@@ -101,7 +101,7 @@ impl EutecticApp {
                 // drives the pane's app-owned camera directly (WP2); an
                 // un-moved press-release stays a click.
                 if self.drag.borrow().is_none() {
-                    let cam = self.board_camera(pane);
+                    let cam = self.pane_camera(pane);
                     *self.camera_pan.borrow_mut() = Some(CameraPanState {
                         pane,
                         start_px: pos,
@@ -531,7 +531,7 @@ impl EutecticApp {
             if !cp.moved {
                 return; // still within the click slop — stay a plain click.
             }
-            let zoom = self.board_camera(cp.pane).zoom;
+            let zoom = self.pane_camera(cp.pane).zoom;
             if !(zoom.is_finite() && zoom > 0.0) {
                 return;
             }
@@ -543,7 +543,7 @@ impl EutecticApp {
                 ),
             )
         };
-        self.board_snap_center(pane, center);
+        self.pane_snap_center(pane, center);
     }
 
     /// Pointer-up with a camera pan in flight: disarm, and eat the trailing
@@ -557,8 +557,16 @@ impl EutecticApp {
         }
     }
 
-    /// Handle a pointer event over a schematic pane: pick symbol/pin/wire → the schematic
-    /// selection (pin > wire > symbol). Uses THE CLICKED PANE's canvas key + rect + view.
+    /// Handle a pointer event over a schematic pane (WP3, owned canvas):
+    /// pointer → the pane camera's `unproject` → the schematic pick
+    /// (pin ▸ wire ▸ symbol) → the shared selection. Uses THE CLICKED PANE's
+    /// rect + its app-owned camera. The Select-tool press arms the camera
+    /// pan when it lands on anything or nothing alike — the schematic has no
+    /// drag gestures, so a moved primary drag ALWAYS pans (issue 0035
+    /// residual 1 dissolves: panning works over content, not just the
+    /// gutter), while an un-moved press-release stays a plain click — select
+    /// on a hit, deselect on empty space (residual 2 dissolves: every click
+    /// reaches the app; there is no native pan capture to eat it).
     pub(crate) fn handle_schematic_pointer(
         &self,
         event: UiEvent,
@@ -566,40 +574,58 @@ impl EutecticApp {
         pane: PaneId,
         pos: (f32, f32),
     ) {
-        let derived = self.derived.borrow();
-        let Some(view) = &derived.schematic else {
+        let Some(rect) = cx.rect_of_key(pane.canvas_key()) else {
             return;
         };
-        let key = pane.canvas_key();
-        let (Some(rect), Some(vv)) = (cx.rect_of_key(key), cx.viewport_view(key)) else {
-            return;
+        let rect = (rect.x, rect.y, rect.w, rect.h);
+        let cam = self.pane_camera(pane);
+        let p = crate::app::canvas_pane::pane_unproject(&cam, rect, pos);
+        let tol = pick::tolerance_nm(PICK_TOL_PX, crate::app::canvas_pane::zoom_px_per_mm(&cam));
+        let hit = |p, tol| {
+            let derived = self.derived.borrow();
+            schematic_pick::resolve(&derived.schematic_picks, p, tol)
         };
-        // Same natural-size layout fact as the board path: map through the
-        // asset's honest content rect, not the pane's viewport rect.
-        let el_rect = view.content_rect((rect.x, rect.y, rect.w, rect.h));
-        let Some(p) = view.pointer_to_schematic_nm(pos, el_rect, vv) else {
-            return;
-        };
-        let tol = SchematicView::tolerance_nm(PICK_TOL_PX, vv.zoom);
 
-        match event.kind {
-            UiEventKind::Click => {
+        match (self.tool_for(crate::app::ViewKind::Schematic), event.kind) {
+            (Tool::Select, UiEventKind::PointerDown) => {
+                // A fresh press can never inherit a stale eaten-click flag —
+                // nor a stale camera pan.
+                self.suppress_click.set(false);
+                *self.camera_pan.borrow_mut() = None;
+                // The schematic has no drag gestures, so every Select press
+                // arms the camera pan (the drag gesture always does
+                // something); an un-moved press-release stays a click.
+                *self.camera_pan.borrow_mut() = Some(CameraPanState {
+                    pane,
+                    start_px: pos,
+                    start_center: cam.center,
+                    moved: false,
+                });
+            }
+            (Tool::Select, UiEventKind::Click) => {
+                // The trailing Click of a just-finished pan: consumed.
+                if self.suppress_click.replace(false) {
+                    return;
+                }
                 let mut sel = self.domain.selection.borrow_mut();
-                match view.resolve(p, tol) {
+                match hit(p, tol) {
                     Some(id) => sel.select_only(id),
                     None => sel.clear(),
                 }
             }
-            UiEventKind::PointerEnter | UiEventKind::Drag => {
+            (Tool::Select, UiEventKind::PointerEnter | UiEventKind::Drag) => {
                 let mut sel = self.domain.selection.borrow_mut();
-                match view.resolve(p, tol) {
+                match hit(p, tol) {
                     Some(id) => sel.hover_only(id),
                     None => sel.clear_hover(),
                 }
             }
-            UiEventKind::PointerLeave => {
+            (Tool::Select, UiEventKind::PointerLeave) => {
                 self.domain.selection.borrow_mut().clear_hover();
             }
+            // The schematic strip offers Measure, but the measure preview is
+            // board-space geometry — a schematic measure is a no-op today
+            // (unchanged from the old pane).
             _ => {}
         }
     }

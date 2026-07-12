@@ -1,14 +1,15 @@
-//! Board hit-testing: the pure pointer-to-entity pick path (milestone 3).
+//! Board hit-testing: the pure pointer-to-entity pick path (milestone 3;
+//! relocated verbatim from `canvas/pick.rs` when the viewport-era canvas
+//! module was deleted in WP3 — the pick kernel itself is unchanged, and the
+//! [`LayerId`] / netlist helpers it shared with that module now live here).
 //!
 //! This is the "hit-testing is ours" half of the canvas strategy
 //! (`docs/gui-architecture.md`, "Canvas strategy"): damascene hit-tests chrome,
-//! but the canvas *interior* is one keyed viewport `El`, so mapping a pointer to a
-//! board entity is our job. The composition is:
+//! but the canvas *interior* is one owned-texture `El`, so mapping a pointer
+//! to a board entity is our job. The composition is:
 //!
-//! 1. pointer logical-px → board mm via the m2 coordinate machinery
-//!    ([`Canvas::content_px_to_board_mm`](super::Canvas::content_px_to_board_mm) —
-//!    undoes pan/zoom, the viewBox min offset, the (possibly non-square) rect scale,
-//!    and the y-flip), then mm → nm for the exact-integer geometry kernel;
+//! 1. pointer logical-px → board nm through the pane's app-owned camera
+//!    (`Camera::unproject`, f64 CPU math — see `app::canvas_pane`);
 //! 2. a **screen-px pick tolerance** converted to a board distance through the
 //!    current zoom, so a 6-px grab radius stays 6 px on screen at every zoom (picking
 //!    does not get harder as you zoom out — the tolerance grows in board space);
@@ -47,15 +48,70 @@
 //! contribute no candidate. This deletes the former doc-rebuild walk: render and pick
 //! can no longer silently diverge because they consume one producer.
 
-use super::LayerId;
-use damascene_core::viewport::ViewportView;
 use eutectic_core::coord::{MM, Nm, Point};
-use eutectic_core::doc::Doc;
+use eutectic_core::doc::{Doc, PinRef};
 use eutectic_core::geom::kernel::{DEFAULT_CIRCLE_SEGS, Region, shape_to_region};
-use eutectic_core::geom::{Extent, FeatureOrigin, NetFeature, Role, Shape2D, Stackup};
+use eutectic_core::geom::{
+    Extent, FeatureOrigin, NetFeature, Role, Shape2D, Slab, Stackup, ZRange,
+};
 use eutectic_core::id::{EntityId, NetId, TraceId, ViaId};
-use eutectic_core::part::PartLib;
+use eutectic_core::part::{PartLib, PinRole};
 use eutectic_core::route::{DesignRules, world_features};
+use std::collections::BTreeMap;
+
+/// A stable identifier for one visual board layer (relocated from the old
+/// canvas module — the layer panel and the pick visibility predicate key on
+/// it). Distinct from a copper [`Layer`](eutectic_core::route::Layer)
+/// ordinal: this enumerates *every* visual layer the viewer shows, keyed on
+/// the slab name (or a synthetic name for the derived outline layer).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum LayerId {
+    /// The board substrate outline (∖ cutouts) — the derived board-edge
+    /// layer, not a stackup slab.
+    Outline,
+    /// A stackup slab, keyed by its authored name (`"F.Cu"`, `"B.SilkS"`, …).
+    Slab(String),
+}
+
+impl LayerId {
+    /// The key visibility toggles / lookups use for this layer.
+    pub fn key(&self) -> String {
+        match self {
+            LayerId::Outline => "layer:outline".to_string(),
+            LayerId::Slab(name) => format!("layer:{name}"),
+        }
+    }
+}
+
+/// The stackup slab whose z-range contains the midpoint of a feature's z (a
+/// zero-thickness feature matches the slab whose range touches its plane;
+/// strict containment preferred). Relocated from the old canvas module.
+pub(crate) fn slab_of_z<'a>(su: &'a Stackup, z: &ZRange) -> Option<&'a Slab> {
+    let mid = z.lo + (z.hi - z.lo) / 2;
+    su.slabs
+        .iter()
+        .find(|s| s.z.lo <= mid && mid < s.z.hi)
+        .or_else(|| su.slabs.iter().find(|s| s.z.lo <= mid && mid <= s.z.hi))
+}
+
+/// The membership netlist `world_features` needs, rebuilt from `doc.nets`
+/// (the crate-internal `route::doc_netlist` is not public). Roles are
+/// irrelevant to the geometry consumers, so every member is `Passive`.
+/// Relocated from the old canvas module.
+pub(crate) fn doc_netlist(doc: &Doc) -> BTreeMap<NetId, Vec<(PinRef, PinRole)>> {
+    doc.nets
+        .iter()
+        .map(|(nid, net)| {
+            (
+                nid.clone(),
+                net.members
+                    .iter()
+                    .map(|pr| (pr.clone(), PinRole::Passive))
+                    .collect(),
+            )
+        })
+        .collect()
+}
 
 /// A stable, geometry-free semantic identity — the currency of the selection model
 /// (structural commitment 2). Every variant is an id (or a small id tuple), **never**
@@ -172,28 +228,6 @@ pub fn tolerance_nm(tol_px: f32, zoom: f32) -> Nm {
     (tol_mm * MM as f32).round() as Nm
 }
 
-/// Map a viewport pointer (logical px, window-relative) to a board point in **nm**
-/// (y-up), composing the m2 screen→board machinery: unproject through the viewport
-/// (pan/zoom removed) then [`Canvas::content_px_to_board_mm`] (viewBox offset + rect
-/// scale + y-flip), then mm→nm. `None` for a degenerate rect (matches the renderer,
-/// which draws nothing there).
-///
-/// [`Canvas::content_px_to_board_mm`]: super::Canvas::content_px_to_board_mm
-pub fn pointer_to_board_nm(
-    canvas: &super::Canvas,
-    pointer_px: (f32, f32),
-    el_rect: (f32, f32, f32, f32),
-    vv: ViewportView,
-) -> Option<Point> {
-    let (rx, ry, ..) = el_rect;
-    let content_px = vv.unproject(pointer_px, (rx, ry));
-    let (mx, my) = canvas.content_px_to_board_mm(content_px, el_rect)?;
-    Some(Point {
-        x: (mx * MM as f32).round() as Nm,
-        y: (my * MM as f32).round() as Nm,
-    })
-}
-
 /// Build every pickable [`Candidate`] for a doc by folding the **same
 /// [`world_features`] stream the canvas renders** (issue 0031): each derived feature's
 /// [`FeatureOrigin`] maps to a [`SemanticId`], and the feature's own [`Shape2D`] + z is
@@ -263,7 +297,7 @@ pub fn candidates(doc: &Doc, lib: &PartLib, su: &Stackup) -> Vec<Candidate> {
         // barrel fans to one Conductor feature per spanned copper slab, so a via yields
         // one candidate per slab, keeping it pickable on any visible layer). A pour's
         // z is its copper slab; a trace/pad's z is its slab.
-        let Some(slab) = super::slab_of_z(su, z) else {
+        let Some(slab) = slab_of_z(su, z) else {
             continue;
         };
         // Hoist ALL geometry-kernel work here (per-revision, cached in DerivedCaches):
@@ -300,16 +334,10 @@ pub fn candidates(doc: &Doc, lib: &PartLib, su: &Stackup) -> Vec<Candidate> {
 }
 
 /// Build the `world_features` stream for a doc with default design rules — the one
-/// producer the canvas renders and the picker folds, so render and pick always agree
-/// (issue 0031). The GUI-side twin of `canvas::doc_world_features`.
+/// producer the renderer scene lowers and the picker folds, so render and
+/// pick always agree (issue 0031).
 fn doc_world_features(doc: &Doc, lib: &PartLib, su: &Stackup) -> Result<Vec<NetFeature>, String> {
-    world_features(
-        doc,
-        lib,
-        &super::doc_netlist(doc),
-        &DesignRules::default(),
-        su,
-    )
+    world_features(doc, lib, &doc_netlist(doc), &DesignRules::default(), su)
 }
 
 /// Resolve a board-space query point (nm) to the winning [`Pick`], honoring the

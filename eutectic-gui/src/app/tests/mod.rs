@@ -15,6 +15,7 @@ mod menubar;
 mod panes;
 mod reload;
 mod routing;
+mod schematic_pane;
 mod selection;
 mod sidebar;
 mod tools;
@@ -125,16 +126,16 @@ fn commit_move(app: &mut EutecticApp, dx: i64, dy: i64) {
 /// `unproject` inverse).
 fn px_of_board(app: &EutecticApp, r: &crate::harness::Rendered, p: Point) -> (f32, f32) {
     let rect = r.ui.rect_of_key(PaneId::A.canvas_key()).expect("pane A");
-    let cam = app.board_camera(PaneId::A);
-    crate::app::board_pane::board_project(&cam, (rect.x, rect.y, rect.w, rect.h), p)
+    let cam = app.pane_camera(PaneId::A);
+    crate::app::canvas_pane::pane_project(&cam, (rect.x, rect.y, rect.w, rect.h), p)
 }
 
 /// The screen→board mapping the pointer handler applies, for computing the
 /// exact expected commit target from the synthesized pixel positions.
 fn board_of_px(app: &EutecticApp, r: &crate::harness::Rendered, px: (f32, f32)) -> Point {
     let rect = r.ui.rect_of_key(PaneId::A.canvas_key()).unwrap();
-    let cam = app.board_camera(PaneId::A);
-    crate::app::board_pane::board_unproject(&cam, (rect.x, rect.y, rect.w, rect.h), px)
+    let cam = app.pane_camera(PaneId::A);
+    crate::app::canvas_pane::pane_unproject(&cam, (rect.x, rect.y, rect.w, rect.h), px)
 }
 
 /// A pad-candidate center of `comp` (the grab point for drag tests).

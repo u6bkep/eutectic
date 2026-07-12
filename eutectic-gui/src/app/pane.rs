@@ -84,14 +84,6 @@ impl PaneId {
         }
     }
 
-    /// The dynamic-overlay El key for this pane (stacked over its canvas).
-    pub(crate) fn overlay_key(self) -> &'static str {
-        match self {
-            PaneId::A => "overlay:a",
-            PaneId::B => "overlay:b",
-        }
-    }
-
     /// The view-switcher button key for a target view kind in this pane.
     pub(crate) fn switch_key(self, v: ViewKind) -> String {
         let p = match self {
@@ -371,7 +363,7 @@ pub(crate) fn switch_key(layer_key: &str) -> String {
 }
 
 /// The route-key prefix of a layer row's set-active affordance (m6 slice B). The
-/// full key is `active:` + the slab's [`LayerId::key`](crate::canvas::LayerId::key)
+/// full key is `active:` + the slab's [`LayerId::key`](crate::pick::LayerId::key)
 /// (`"active:layer:F.Cu"`), so it can never collide with the `switch:`-prefixed
 /// visibility toggle or a canvas target.
 const ACTIVE_LAYER_PREFIX: &str = "active:layer:";
@@ -386,29 +378,15 @@ pub(crate) fn active_layer_of_key(route: &str) -> Option<&str> {
     route.strip_prefix(ACTIVE_LAYER_PREFIX)
 }
 
-/// Is this event target inside a pane canvas? A pointer event routes to a pane viewport
-/// (`canvas:a` / `canvas:b`), a stacked board layer / overlay El (keyed `layer:*` /
-/// `overlay:*`), the background dot-grid furniture El (keyed `grid:*`), or a schematic
-/// static El (keyed `schematic:*`). All are canvas hits; chrome (toolbar, sidebar, pane
-/// headers) is not.
-///
-/// The `grid:*` arm is load-bearing, not decorative: the grid is child 0 of the board
-/// viewport, so on a board that projects *no* layer/overlay buckets (no features and no
-/// `board_region` outline) the keyed grid El is the top-most hit-test target. Recognising
-/// it here makes a click there route to the pane as an ordinary bare-canvas hit (the
-/// geometry-only picker finds nothing, so it deselects / pans) instead of being silently
-/// dropped. The pass-through is intentional, not an artefact of layer Els shadowing the
-/// grid with a coincident content rect.
+/// Is this event target inside a pane canvas? On the owned canvas every
+/// pane's interior is ONE keyed container (`canvas:a` / `canvas:b`) — the
+/// viewport-era child Els (`layer:*` / `overlay:*` / `grid:*` /
+/// `schematic:*`) died with the viewport path (WP3), so those keys no longer
+/// occur in the tree. Chrome (toolbar, sidebar, pane headers) is not a
+/// canvas hit.
 pub(crate) fn is_canvas_target(target: Option<&str>) -> bool {
     match target {
-        Some(k) => {
-            k == PaneId::A.canvas_key()
-                || k == PaneId::B.canvas_key()
-                || k.starts_with("layer:")
-                || k.starts_with("overlay:")
-                || k.starts_with("grid:")
-                || k.starts_with("schematic:")
-        }
+        Some(k) => k == PaneId::A.canvas_key() || k == PaneId::B.canvas_key(),
         None => false,
     }
 }

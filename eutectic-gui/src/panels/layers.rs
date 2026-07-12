@@ -4,8 +4,8 @@
 //! `app/panels.rs` as pure code motion (gui-module-split).
 
 use crate::app::EutecticApp;
+use crate::app::domain::BoardLayer;
 use crate::app::pane::switch_key;
-use crate::canvas::BoardLayer;
 use damascene_core::prelude::*;
 
 impl EutecticApp {
@@ -22,7 +22,7 @@ impl EutecticApp {
     /// `self.layer_visible(&id.key())` but off the hot allocation path (the profiler's
     /// incidental: `resolve`'s visibility closure was allocating a `LayerId` key per
     /// candidate every event — 192× on the poc board).
-    pub(crate) fn layer_id_visible(&self, id: &crate::canvas::LayerId) -> bool {
+    pub(crate) fn layer_id_visible(&self, id: &crate::pick::LayerId) -> bool {
         let hidden = self.hidden.borrow();
         hidden.is_empty() || !hidden.contains(&id.key())
     }
@@ -63,7 +63,7 @@ impl EutecticApp {
             .width(Size::Fixed(14.0))
             .height(Size::Fixed(14.0));
         let mut cells: Vec<El> = Vec::new();
-        if let crate::canvas::LayerId::Slab(name) = &l.id
+        if let crate::pick::LayerId::Slab(name) = &l.id
             && copper.iter().any(|n| n == name)
         {
             let is_active = active == Some(name.as_str());

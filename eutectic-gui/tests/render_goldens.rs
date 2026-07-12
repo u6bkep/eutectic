@@ -124,7 +124,7 @@ fn render_scene(
         view_formats: &[],
     });
     let view = target.create_view(&Default::default());
-    let buffers = SceneBuffers::build(&gpu.device, s);
+    let buffers = SceneBuffers::build(&gpu.device, s, renderer.text_mut());
     renderer.render(
         &gpu.device,
         &gpu.queue,
@@ -137,11 +137,16 @@ fn render_scene(
             target: &view,
             size: (W, H),
             cursor_px: cursor,
+            grid: true,
         },
     );
-    // Read back.
+    readback(gpu, &target)
+}
+
+/// Read a W×H RGBA8 render target back to CPU bytes (row-major).
+fn readback(gpu: &Gpu, target: &wgpu::Texture) -> Vec<u8> {
     let bytes_per_row = W * 4; // 1024, already 256-aligned
-    let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+    let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("golden.readback"),
         size: (bytes_per_row * H) as u64,
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
@@ -152,13 +157,13 @@ fn render_scene(
         .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
     enc.copy_texture_to_buffer(
         wgpu::TexelCopyTextureInfo {
-            texture: &target,
+            texture: target,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
         },
         wgpu::TexelCopyBufferInfo {
-            buffer: &readback,
+            buffer: &buf,
             layout: wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(bytes_per_row),
@@ -172,7 +177,7 @@ fn render_scene(
         },
     );
     gpu.queue.submit([enc.finish()]);
-    let slice = readback.slice(..);
+    let slice = buf.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |r| {
         tx.send(r).ok();
@@ -182,7 +187,7 @@ fn render_scene(
         .expect("device poll");
     rx.recv().expect("map callback").expect("map readback");
     let data = slice.get_mapped_range().to_vec();
-    drop(readback);
+    drop(buf);
     data
 }
 
@@ -471,4 +476,130 @@ fn crosshair_hairlines_at_cursor() {
     let on_h = px(&data, 30, 80);
     assert!(on_h[0] > off[0], "horizontal hairline: {on_h:?}");
     check_golden("crosshair", &data, &gpu.label);
+}
+
+// ---------------------------------------------------------------------------
+// WP3 goldens: MSDF annotation text + the schematic producer end-to-end.
+// ---------------------------------------------------------------------------
+
+/// MSDF text coverage renders through the plane composite: an ink-plane
+/// header run and a tag-plane net tag, with the tag's net SELECTED so the
+/// emphasis mix applies to text exactly like geometry. Structural asserts
+/// (ink present, colored per plane) + a tolerance golden.
+#[test]
+fn msdf_text_renders_and_takes_emphasis() {
+    use eutectic_gui::render::scene::Justify;
+    let Some(gpu) = gpu("text_msdf") else { return };
+    let s = scene(
+        vec![
+            Plane {
+                key: PlaneKey::SchematicInk,
+                prims: vec![Prim::fill(
+                    0,
+                    PrimShape::TextRun {
+                        pos: mm_pt(2.0, 8.0),
+                        height: (3.0 * MM as f64) as i64,
+                        justify: Justify::Left,
+                        content: "C3 (Cap)".into(),
+                    },
+                )],
+            },
+            Plane {
+                key: PlaneKey::SchematicTag,
+                prims: vec![Prim::fill(
+                    1,
+                    PrimShape::TextRun {
+                        pos: mm_pt(18.0, 3.0),
+                        height: (3.0 * MM as f64) as i64,
+                        justify: Justify::Right,
+                        content: "VDD".into(),
+                    },
+                )],
+            },
+        ],
+        1,
+    );
+    let mut state = SemanticStates::for_scene(&s);
+    state.set_flags(1, FLAG_SELECTED, true);
+    let cam = fit_camera(&s);
+    let data = render_scene(&gpu, &s, &state, &styles_for(&s), &cam, None);
+    // Ink exists: some pixels along the header's baseline band differ from
+    // the background (MSDF coverage composited in the ink color).
+    let bg = px(&data, 2, 2);
+    let mut ink_px = 0usize;
+    for y in 0..H {
+        for x in 0..W {
+            if px(&data, x, y) != bg {
+                ink_px += 1;
+            }
+        }
+    }
+    assert!(ink_px > 200, "text ink must cover real pixels: {ink_px}");
+    check_golden("text_msdf", &data, &gpu.label);
+}
+
+/// The schematic producer end-to-end: a real doc (symbols, stubs, wire, net
+/// tags, an unplaced bin with its DASHED divider) lowered through
+/// `schematic_scene` and rendered with grid furniture OFF (the schematic
+/// pane's config). Guards how the schematic drawing rasterizes — planes,
+/// dash, text — against the committed PNG.
+#[test]
+fn schematic_scene_renders() {
+    let Some(gpu) = gpu("schematic_scene") else {
+        return;
+    };
+    let d = eutectic_gui::DomainState::from_source(
+        "inst U1 MCU\ninst C1 Cap\ninst C2 Cap\nnet VDD U1.VDD C1.p1\nnc C1.p2\n\
+         schematic {\n  row gap=8mm {\n    sym C1\n    sym U1\n    wire C1.p1 U1.VDD\n  }\n}\n"
+            .to_string(),
+        None,
+    );
+    let doc = d.doc.as_ref().expect("schematic source elaborates");
+    let s = eutectic_gui::render::schematic_scene(doc, &d.lib).expect("scene");
+    let state = SemanticStates::for_scene(&s);
+    let cam = Camera::fit(s.bounds, (W as f64, H as f64), 10.0);
+    let styles = styles_for(&s);
+
+    let mut renderer = Renderer::new(&gpu.device, &gpu.adapter, wgpu::TextureFormat::Rgba8Unorm);
+    let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("golden.target"),
+        size: wgpu::Extent3d {
+            width: W,
+            height: H,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&Default::default());
+    let buffers = SceneBuffers::build(&gpu.device, &s, renderer.text_mut());
+    renderer.render(
+        &gpu.device,
+        &gpu.queue,
+        &RenderArgs {
+            scene: &buffers,
+            overlay: None,
+            camera: &cam,
+            styles: &styles,
+            state: &state,
+            target: &view,
+            size: (W, H),
+            cursor_px: None,
+            grid: false, // schematic furniture: no grid, no crosshair
+        },
+    );
+    let data = readback(&gpu, &target);
+    // No grid: the corner region is pure background.
+    let bg = px(&data, 2, 2);
+    assert_eq!(px(&data, 10, 2), bg, "no grid dots with furniture off");
+    // Something schematic-shaped rendered.
+    assert!(
+        (0..H).any(|y| (0..W).any(|x| px(&data, x, y) != bg)),
+        "the schematic drawing must render"
+    );
+    check_golden("schematic_scene", &data, &gpu.label);
 }

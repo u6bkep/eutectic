@@ -48,20 +48,19 @@ fn undo_row_dispatches_and_closes_the_menu() {
     );
 }
 
-/// The View ▸ Fit row (keyed [`FIT_KEY`]) queues a viewport request (fit every
-/// pane) — same route the retired toolbar Fit button used.
+/// The View ▸ Fit row (keyed [`FIT_KEY`]) queues a pane-camera Fit request
+/// (fit every pane) — same route the retired toolbar Fit button used, on the
+/// owned cameras (WP3: the viewport-request queue is gone).
 #[test]
 fn fit_row_dispatches_to_the_fit_action() {
     let mut app = board();
     let cx = EventCx::new();
-    // Clear the startup fit requests so we observe only the row's effect.
-    let _ = app.drain_viewport_requests();
     app.set_open_menu(Some("view"));
 
     app.on_event(click(FIT_KEY), &cx);
     assert!(
-        !app.pending.borrow().is_empty(),
-        "the Fit row queued a viewport request"
+        app.pane_cams.borrow()[0].request == Some(crate::app::canvas_pane::CamRequest::Fit),
+        "the Fit row queued a pane-camera Fit request"
     );
     assert!(app.open_menu.borrow().is_none());
 }

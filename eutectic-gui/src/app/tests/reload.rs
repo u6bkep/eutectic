@@ -80,12 +80,12 @@ fn reload_preserves_camera_no_refit() {
     let _ = settle(&mut app);
     assert!(app.panes.borrow()[pane_index(PaneId::A)].fitted);
     // The user reframes: nudge the camera off the fit.
-    let fit = app.board_camera(PaneId::A);
+    let fit = app.pane_camera(PaneId::A);
     let framed = crate::render::Camera::new(
         (fit.center.0 + 3.0 * NM_PER_MM as f64, fit.center.1),
         fit.zoom * 2.0,
     );
-    app.board_cams.borrow_mut()[pane_index(PaneId::A)]
+    app.pane_cams.borrow_mut()[pane_index(PaneId::A)]
         .glide
         .snap(framed);
 
@@ -94,7 +94,7 @@ fn reload_preserves_camera_no_refit() {
     app.mailbox_push(SourceMsg::Changed(src));
     let _ = settle(&mut app);
     assert_eq!(
-        app.board_camera(PaneId::A),
+        app.pane_camera(PaneId::A),
         framed,
         "a reload must NOT re-fit — the user's framing is sacred"
     );

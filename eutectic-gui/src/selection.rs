@@ -8,17 +8,17 @@
 //! # Geometry-free by construction
 //!
 //! [`SelectionModel`] holds only `BTreeSet<SemanticId>`, and
-//! [`SemanticId`](crate::canvas::pick::SemanticId) is an enum of ids / id-tuples with
+//! [`SemanticId`](crate::pick::SemanticId) is an enum of ids / id-tuples with
 //! no `Point`, `Rect`, `Shape2D`, or layer-index field anywhere in its definition.
 //! This is a compile-time property: there is no way to store geometry in the model.
 //! A pick produces an id; a pane *re-derives* the geometry to highlight from the doc
-//! each frame (see [`crate::canvas::pick::candidates`]). Re-elaboration that changes
+//! each frame (see [`crate::pick::candidates`]). Re-elaboration that changes
 //! geometry never invalidates the selection.
 //!
 //! Single-select on click is enough for milestone 3, but the type is a set so
 //! multi-select (marquee, shift-click) drops in without a model change.
 
-use crate::canvas::pick::SemanticId;
+use crate::pick::SemanticId;
 use std::collections::BTreeSet;
 
 /// The shared selection + hover state: two id sets. Empty ⇒ nothing selected (the
@@ -156,7 +156,7 @@ mod tests {
     /// This is a *compile-time* property. `SemanticId` is `Hash + Ord` (a pure id
     /// key), and the whole model is `size_of`-bounded by two `BTreeSet` handles — it
     /// cannot hold a geometry buffer. The assertion below documents the intent; the
-    /// real guarantee is that `SemanticId`'s definition (see `canvas::pick`) has no
+    /// real guarantee is that `SemanticId`'s definition (see `pick`) has no
     /// geometry variant/field, which the type system enforces.
     #[test]
     fn selection_model_holds_ids_only() {

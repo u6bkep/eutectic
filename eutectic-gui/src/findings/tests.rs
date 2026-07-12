@@ -1,8 +1,8 @@
 //! Findings projection tests (m5).
 
 use super::*;
-use crate::canvas::pick::candidates;
 use crate::fixtures::{board_domain, drc_violation_domain};
+use crate::pick::candidates;
 
 /// Compute the findings over a domain fixture (the doc + its board pick candidates +
 /// the load's library-resolution notes).

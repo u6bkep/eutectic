@@ -6,7 +6,6 @@
 //! the headless fixture-and-lint review loop.
 
 pub mod app;
-pub mod canvas;
 mod chrome;
 pub mod explorer;
 pub mod findings;
@@ -17,10 +16,11 @@ pub mod host;
 pub mod inspector;
 mod panels;
 mod panes;
+pub mod pick;
 pub mod registry;
 pub mod reload;
 pub mod render;
-pub mod schematic_view;
+pub mod schematic_pick;
 pub mod selection;
 pub mod tool;
 

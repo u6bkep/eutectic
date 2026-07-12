@@ -443,7 +443,7 @@ impl EutecticApp {
                     self.domain
                         .selection
                         .borrow_mut()
-                        .select_only(crate::canvas::pick::SemanticId::Trace(tid));
+                        .select_only(crate::pick::SemanticId::Trace(tid));
                 }
             }
             Err(e) => self.domain.edit.error = Some(e),
@@ -463,7 +463,7 @@ impl EutecticApp {
         waypoints: &[eutectic_core::coord::Point],
         cursor: Option<eutectic_core::coord::Point>,
     ) -> bool {
-        use crate::canvas::pick::SemanticId;
+        use crate::pick::SemanticId;
         let id = SemanticId::Pin {
             comp: comp.clone(),
             pin: pin.to_string(),

@@ -20,10 +20,11 @@
 //! view on the runner's device.
 
 use super::camera::Camera;
-use super::instance::{self, InstanceRaw, MeshVertex};
+use super::instance::{self, InstanceRaw, MeshVertex, TextInstRaw};
 use super::scene::{PlaneKey, Prim, Scene};
 use super::state::SemanticStates;
 use super::style::ResolvedStyles;
+use super::text::{TextBuf, TextGpu};
 use eutectic_core::coord::Point;
 use wgpu::util::DeviceExt;
 
@@ -40,6 +41,9 @@ pub struct PlaneGpu {
     pub key: PlaneKey,
     instances: Option<(wgpu::Buffer, u32)>,
     mesh: Option<(wgpu::Buffer, wgpu::Buffer, u32)>,
+    /// MSDF glyph quads (annotation text, §6) — coverage like everything
+    /// else, drawn in this plane's coverage pass.
+    text: Option<TextBuf>,
 }
 
 /// A scene's persistent GPU buffers: one instance buffer + one triangle
@@ -52,8 +56,10 @@ pub struct SceneBuffers {
 
 impl SceneBuffers {
     /// Upload a scene. CPU-side lowering (instances + tessellation) is
-    /// [`instance::build_plane_data`]; this only creates buffers.
-    pub fn build(device: &wgpu::Device, scene: &Scene) -> SceneBuffers {
+    /// [`instance::build_plane_data`]; text runs rasterize any missing
+    /// glyphs into `text`'s atlas and build glyph-quad buffers (§6). This
+    /// only creates buffers.
+    pub fn build(device: &wgpu::Device, scene: &Scene, text: &mut TextGpu) -> SceneBuffers {
         let planes = scene
             .planes
             .iter()
@@ -84,6 +90,7 @@ impl SceneBuffers {
                     key: plane.key.clone(),
                     instances,
                     mesh,
+                    text: text.build_plane(device, &plane.prims, scene.anchor),
                 }
             })
             .collect();
@@ -108,15 +115,17 @@ impl SceneCache {
     }
 
     /// The buffers for `rev`, rebuilding from `scene` iff the revision
-    /// changed.
+    /// changed. `text` receives any glyph rasterization the rebuild needs
+    /// (per doc revision — never per frame, §6).
     pub fn get_or_build(
         &mut self,
         device: &wgpu::Device,
         rev: u64,
         scene: &Scene,
+        text: &mut TextGpu,
     ) -> &SceneBuffers {
         if self.rev != Some(rev) || self.buffers.is_none() {
-            self.buffers = Some(SceneBuffers::build(device, scene));
+            self.buffers = Some(SceneBuffers::build(device, scene, text));
             self.rev = Some(rev);
         }
         self.buffers.as_ref().expect("filled above")
@@ -384,6 +393,10 @@ pub struct RenderArgs<'a> {
     pub size: (u32, u32),
     /// Pane-local cursor position for the crosshair; `None` hides it.
     pub cursor_px: Option<[f32; 2]>,
+    /// Draw the procedural dot grid + origin axes (§4 canvas furniture).
+    /// Board panes pass `true`; schematic panes pass `false` (the old
+    /// schematic pane had no grid — a per-view config seam, not a fork).
+    pub grid: bool,
 }
 
 struct CoverageTargets {
@@ -407,12 +420,18 @@ pub struct Renderer {
 
     cover_inst: wgpu::RenderPipeline,
     cover_mesh: wgpu::RenderPipeline,
+    cover_text: wgpu::RenderPipeline,
     composite: wgpu::RenderPipeline,
     chrome_bg: wgpu::RenderPipeline,
     chrome_cross: wgpu::RenderPipeline,
 
     cover_bgl: wgpu::BindGroupLayout,
     comp_bgl: wgpu::BindGroupLayout,
+    text_bgl: wgpu::BindGroupLayout,
+    text_sampler: wgpu::Sampler,
+    /// The MSDF atlas + its GPU page mirrors (§6) — one per renderer, shared
+    /// by every scene this device renders.
+    text: TextGpu,
 
     frame_buf: wgpu::Buffer,
     plane_buf: wgpu::Buffer,
@@ -460,6 +479,10 @@ impl Renderer {
         let chrome_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("render.chrome"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/chrome.wgsl").into()),
+        });
+        let text_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("render.text"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/text.wgsl").into()),
         });
 
         let cover_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -513,9 +536,47 @@ impl Renderer {
             ],
         });
 
+        // Text (§6): group 0 is the cover pass's frame+state bindings, group
+        // 1 the MSDF atlas page (texture + sampler), rebound between per-page
+        // draw ranges.
+        let text_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("render.text.bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let text_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("render.text.sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
         let cover_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("render.cover.pl"),
             bind_group_layouts: &[Some(&cover_bgl)],
+            immediate_size: 0,
+        });
+        let text_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("render.text.pl"),
+            bind_group_layouts: &[Some(&cover_bgl), Some(&text_bgl)],
             immediate_size: 0,
         });
         let comp_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -598,6 +659,40 @@ impl Renderer {
             fragment: Some(wgpu::FragmentState {
                 module: &cover_mod,
                 entry_point: Some("fs_mesh"),
+                compilation_options: Default::default(),
+                targets: &cover_target,
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        // Text coverage: instanced glyph quads, same max-blended coverage
+        // target as the analytic instances (§6 renders text as coverage).
+        let text_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<TextInstRaw>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &wgpu::vertex_attr_array![
+                0 => Float32x4, 1 => Float32x4, 2 => Uint32, 3 => Float32,
+            ],
+        };
+        let cover_text = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("render.cover.text"),
+            layout: Some(&text_pl),
+            vertex: wgpu::VertexState {
+                module: &text_mod,
+                entry_point: Some("vs_text"),
+                compilation_options: Default::default(),
+                buffers: std::slice::from_ref(&text_layout),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample,
+            fragment: Some(wgpu::FragmentState {
+                module: &text_mod,
+                entry_point: Some("fs_text"),
                 compilation_options: Default::default(),
                 targets: &cover_target,
             }),
@@ -699,11 +794,15 @@ impl Renderer {
             srgb_target: target_format.is_srgb(),
             cover_inst,
             cover_mesh,
+            cover_text,
             composite,
             chrome_bg,
             chrome_cross,
             cover_bgl,
             comp_bgl,
+            text_bgl,
+            text_sampler,
+            text: TextGpu::new(),
             frame_buf,
             plane_buf,
             plane_slots,
@@ -724,6 +823,12 @@ impl Renderer {
     /// The pane-texture format the pipelines were built for.
     pub fn target_format(&self) -> wgpu::TextureFormat {
         self.target_format
+    }
+
+    /// The text tier's atlas + GPU mirrors — scene builds rasterize glyphs
+    /// through this ([`SceneCache::get_or_build`] takes it).
+    pub fn text_mut(&mut self) -> &mut TextGpu {
+        &mut self.text
     }
 
     /// A color component for the shader: linearized iff the target format
@@ -874,6 +979,7 @@ impl Renderer {
         struct Draw<'a> {
             instances: Option<(&'a wgpu::Buffer, u32)>,
             mesh: Option<(&'a wgpu::Buffer, &'a wgpu::Buffer, u32)>,
+            text: Option<&'a TextBuf>,
             uniform: PlaneUniform,
         }
         let mut draws: Vec<Draw> = Vec::new();
@@ -881,12 +987,15 @@ impl Renderer {
             let Some(style) = args.styles.planes.get(i) else {
                 continue; // styles were resolved for a different scene
             };
-            if !style.visible || (plane.instances.is_none() && plane.mesh.is_none()) {
+            if !style.visible
+                || (plane.instances.is_none() && plane.mesh.is_none() && plane.text.is_none())
+            {
                 continue;
             }
             draws.push(Draw {
                 instances: plane.instances.as_ref().map(|(b, n)| (b, *n)),
                 mesh: plane.mesh.as_ref().map(|(v, i, n)| (v, i, *n)),
+                text: plane.text.as_ref(),
                 uniform: PlaneUniform {
                     color: self.shader_color(style.color),
                     emphasis: self.shader_color(style.emphasis),
@@ -909,6 +1018,7 @@ impl Renderer {
                     .as_ref()
                     .filter(|_| overlay.mesh_index_count > 0)
                     .map(|(v, i)| (v, i, overlay.mesh_index_count)),
+                text: None,
                 uniform: PlaneUniform {
                     color: self.shader_color(style.color),
                     emphasis: self.shader_color(style.emphasis),
@@ -926,10 +1036,24 @@ impl Renderer {
             );
         }
 
-        // Frame uniform: camera transform + grid/crosshair parameters.
+        // Frame uniform: camera transform + grid/crosshair parameters. With
+        // `args.grid` off (schematic panes — no grid, no axes, matching the
+        // old pane's furniture) the pitch uploads as 0, which the background
+        // shader's existing `pitch >= 2` gate already draws as nothing — a
+        // pure uniform config seam, no shader change.
         let vp = (size.0 as f32, size.1 as f32);
         let (origin_px, scale) = args.camera.view_transform(args.scene.anchor, vp);
-        let grid = grid_params(args.camera, vp);
+        let grid = if args.grid {
+            grid_params(args.camera, vp)
+        } else {
+            GridParams {
+                pitch_px: 0.0,
+                pitch_nm: 0.0,
+                offset_px: [0.0, 0.0],
+                origin_px: [0.0, 0.0],
+                axis_flags: 0,
+            }
+        };
         let dot_r_minor = (grid.pitch_px * 0.09).clamp(0.75, 2.5) as f32;
         let dot_r_major = (dot_r_minor * 1.8).min(4.0);
         let mut flags = grid.axis_flags;
@@ -969,6 +1093,13 @@ impl Renderer {
             b: bg[2] as f64,
             a: 1.0,
         };
+
+        // Text: mirror any atlas pages a scene build dirtied (per doc
+        // revision — idle frames upload nothing).
+        if draws.iter().any(|d| d.text.is_some()) {
+            self.text
+                .sync(device, queue, &self.text_bgl, &self.text_sampler);
+        }
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("render.frame"),
@@ -1044,6 +1175,17 @@ impl Renderer {
                     pass.set_pipeline(&self.cover_inst);
                     pass.set_vertex_buffer(0, buf.slice(..));
                     pass.draw(0..4, 0..n);
+                }
+                if let Some(text) = d.text {
+                    pass.set_pipeline(&self.cover_text);
+                    pass.set_vertex_buffer(0, text.buf.slice(..));
+                    for (page, range) in &text.ranges {
+                        let Some(bg) = self.text.page_bg(*page) else {
+                            continue; // page mirror missing (unreachable after sync)
+                        };
+                        pass.set_bind_group(1, bg, &[]);
+                        pass.draw(0..4, range.clone());
+                    }
                 }
             }
             {
@@ -1166,5 +1308,6 @@ mod tests {
         assert_eq!(std::mem::size_of::<PlaneUniform>(), 48);
         assert_eq!(std::mem::size_of::<InstanceRaw>(), 40);
         assert_eq!(std::mem::size_of::<MeshVertex>(), 12);
+        assert_eq!(std::mem::size_of::<TextInstRaw>(), 40);
     }
 }

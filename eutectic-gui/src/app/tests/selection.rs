@@ -71,7 +71,7 @@ fn click_finding_selects_refs_and_queues_center() {
     // with an EventCx over that state (matching the host, which routes events
     // against the live UI).
     let r = settle(&mut app);
-    let zoom_before = app.board_camera_target(PaneId::A).zoom;
+    let zoom_before = app.pane_camera_target(PaneId::A).zoom;
     let cx = EventCx::new().with_ui_state(&r.ui);
     app.on_event(click(&finding_row_key(index)), &cx);
 
@@ -87,7 +87,7 @@ fn click_finding_selects_refs_and_queues_center() {
     // The focused (board) pane's camera glide now targets the finding's
     // board point, at the unchanged zoom.
     let (mx, my) = board_mm.expect("clearance has a board point");
-    let target = app.board_camera_target(PaneId::A);
+    let target = app.pane_camera_target(PaneId::A);
     let mm = NM_PER_MM as f64;
     assert!(
         (target.center.0 - mx as f64 * mm).abs() < mm / 2.0
@@ -113,9 +113,8 @@ fn finding_halo_present_in_board_overlay() {
     let (mx, my) = clearance.board_mm.expect("clearance has a board point");
 
     let derived = app.derived.borrow();
-    let view = derived.board.as_ref().expect("board projects");
-    let sets = HighlightSets::default();
-    let overlay = app.build_board_overlay(view, PaneId::A, &sets, &derived.findings);
+    assert!(derived.board.is_some(), "board projects");
+    let overlay = app.build_board_overlay(PaneId::A, &derived.findings);
     assert!(
         !overlay.findings.is_empty(),
         "the overlay must carry finding markers"

@@ -12,7 +12,7 @@
 //! the id to select. Keeping the mapping here (not scattered in `app.rs`) means the click
 //! target and the rendered row can never drift.
 
-use crate::canvas::pick::SemanticId;
+use crate::pick::SemanticId;
 use eutectic_core::annotate;
 use eutectic_core::doc::Doc;
 use eutectic_core::part::PartLib;

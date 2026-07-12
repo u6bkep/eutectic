@@ -47,7 +47,7 @@ fn hidden_pane_defers_its_fit_until_visible() {
         !app.panes.borrow()[pane_index(PaneId::A)].fitted,
         "hidden A must NOT be marked fitted (it has no rect to fit against)"
     );
-    let unfitted = crate::app::board_pane::zoom_px_per_mm(&app.board_camera(PaneId::A));
+    let unfitted = crate::app::canvas_pane::zoom_px_per_mm(&app.pane_camera(PaneId::A));
     assert!(
         (unfitted - 1.0).abs() < 1e-3,
         "hidden A's camera stays at the reset zoom, got {unfitted}"
@@ -61,7 +61,7 @@ fn hidden_pane_defers_its_fit_until_visible() {
         app.panes.borrow()[pane_index(PaneId::A)].fitted,
         "restored A must now fit"
     );
-    let fitted = crate::app::board_pane::zoom_px_per_mm(&app.board_camera(PaneId::A));
+    let fitted = crate::app::canvas_pane::zoom_px_per_mm(&app.pane_camera(PaneId::A));
     assert!(
         (fitted - 1.0).abs() > 1e-3,
         "restored A's camera actually fitted (zoom {fitted})"
@@ -75,7 +75,7 @@ fn hidden_pane_defers_its_fit_until_visible() {
 /// rect is per-pane too.
 #[test]
 fn per_pane_composition_uses_the_clicked_panes_camera_and_rect() {
-    use crate::app::board_pane::board_unproject;
+    use crate::app::canvas_pane::pane_unproject;
     use crate::render::Camera;
 
     let rect = (0.0f32, 0.0f32, 400.0f32, 300.0f32);
@@ -84,8 +84,8 @@ fn per_pane_composition_uses_the_clicked_panes_camera_and_rect() {
     // Two different cameras (pane A vs pane B), same rect + pixel.
     let cam_a = Camera::new((5e6, 5e6), 1e-6);
     let cam_b = Camera::new((9e6, 2e6), 2e-6);
-    let pa = board_unproject(&cam_a, rect, px);
-    let pb = board_unproject(&cam_b, rect, px);
+    let pa = pane_unproject(&cam_a, rect, px);
+    let pb = pane_unproject(&cam_b, rect, px);
     assert_ne!(
         pa, pb,
         "same pixel under different pane cameras must map to different board points"
@@ -94,8 +94,8 @@ fn per_pane_composition_uses_the_clicked_panes_camera_and_rect() {
     // Same camera, two different pane rects (dual split: A left, B right).
     let rect_a = (0.0f32, 0.0f32, 200.0f32, 300.0f32);
     let rect_b = (210.0f32, 0.0f32, 200.0f32, 300.0f32);
-    let ra = board_unproject(&cam_a, rect_a, px);
-    let rb = board_unproject(&cam_a, rect_b, px);
+    let ra = pane_unproject(&cam_a, rect_a, px);
+    let rb = pane_unproject(&cam_a, rect_b, px);
     assert_ne!(
         ra, rb,
         "same pixel under different pane rects must map to different board points"
@@ -140,9 +140,9 @@ fn schematic_pane_renders_for_a_schematic_doc() {
         app.has_schematic(),
         "a doc with components must project a schematic"
     );
-    // The schematic projection has pick candidates (built once per load).
-    let doc = app.domain.doc.as_ref().unwrap();
-    let view = SchematicView::build(doc, &app.domain.lib).expect("schematic projects");
-    assert!(!view.candidates().is_empty());
+    // The schematic projection has a renderer scene + pick candidates
+    // (built once per load — WP3 owned canvas).
+    assert!(app.derived.borrow().schematic_scene.is_some());
+    assert!(!app.derived.borrow().schematic_picks.is_empty());
     let _ = MM; // (kept for symmetry with other tests' unit imports)
 }

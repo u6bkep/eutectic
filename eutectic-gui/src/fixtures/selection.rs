@@ -17,7 +17,7 @@ use crate::app::{DomainState, EutecticApp, PaneId, PaneLayout, ViewKind};
 /// length. The selected id is looked up from the doc so the scene stays honest if the
 /// fixture route changes.
 pub fn board_with_selection() -> EutecticApp {
-    use crate::canvas::pick::SemanticId;
+    use crate::pick::SemanticId;
     let app = EutecticApp::new(board_domain());
     if let Ok(doc) = &app.domain.doc {
         // Select the first routed trace by its real id (not a hardcoded number).
@@ -98,7 +98,7 @@ const CROSS_NET: &str = "VDD";
 
 /// Pre-select the `VDD` net so the cross-highlight is visible in every pane.
 fn select_cross_net(app: &EutecticApp) {
-    use crate::canvas::pick::SemanticId;
+    use crate::pick::SemanticId;
     use eutectic_core::id::NetId;
     if let Ok(doc) = &app.domain.doc
         && doc.nets.contains_key(&NetId::new(CROSS_NET))

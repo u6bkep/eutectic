@@ -7,7 +7,7 @@
 //! El rendering is a thin fold over that, so the projection is unit-testable without a
 //! render pass.
 
-use crate::canvas::pick::SemanticId;
+use crate::pick::SemanticId;
 use eutectic_core::coord::{MM, Nm};
 use eutectic_core::doc::{Doc, PinRef};
 use eutectic_core::part::PartLib;

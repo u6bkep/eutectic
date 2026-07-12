@@ -4,13 +4,13 @@
 //! the revision-keyed [`DerivedCaches`] bundle (board / schematic / explorer /
 //! findings). Split out of `app.rs` as pure code motion (facade + submodules).
 
-use crate::canvas::pick::{self, Candidate, SemanticId};
-use crate::canvas::{BoardLayer, Canvas};
 use crate::explorer::Explorer;
 use crate::findings::Findings;
+use crate::pick::{self, Candidate, LayerId, SemanticId};
 use crate::registry::{self, LibNote, Registry};
-use crate::schematic_view::SchematicView;
+use crate::render::scene::PlaneKey;
 use crate::selection::SelectionModel;
+use damascene_core::prelude::Color;
 use eutectic_core::doc::Doc;
 use eutectic_core::history::History;
 use std::cell::RefCell;
@@ -382,16 +382,24 @@ pub(crate) fn atomic_write(path: &std::path::Path, text: &str) -> Result<(), Str
         .map_err(|e| format!("renaming {} over {}: {e}", tmp.display(), path.display()))
 }
 
-/// The board projection held in app state: the per-layer metadata the layer
+/// One board layer-panel row: identity, display name, swatch color. Derived
+/// per doc revision from the renderer scene's plane list + the style tables
+/// (WP3: the old `Canvas::build_layers` tessellation pass is gone — the
+/// panel never needed the assets, only these rows).
+#[derive(Clone, Debug)]
+pub(crate) struct BoardLayer {
+    /// Stable layer identity (also the visibility-toggle key source).
+    pub(crate) id: LayerId,
+    /// Display name for the layer panel (the slab name, or "Board outline").
+    pub(crate) name: String,
+    /// Default swatch colour (the style tables' dark-canvas defaults).
+    pub(crate) color: Color,
+}
+
+/// The board projection held in app state: the per-layer rows the layer
 /// panel lists, and the pre-built pick candidates (folded from the
 /// `world_features` stream via each feature's `FeatureOrigin` — see
-/// [`crate::canvas::pick`]). All built once per (doc revision) load.
-///
-/// WP2 (owned canvas): the [`Canvas`] itself is no longer held — board panes
-/// render through `render::board_scene` + the owned renderer, and picking
-/// unprojects through the pane camera, so the old coordinate-inversion
-/// machinery has no board callers. `BoardView` survives as the pick-candidate
-/// producer + the layer panel's row source until WP3 retires `canvas.rs`.
+/// [`crate::pick`]). All built once per (doc revision) load.
 pub(crate) struct BoardView {
     pub(crate) layers: Vec<BoardLayer>,
     /// Pickable candidates (pins / traces / vias / pours), folded from the same
@@ -400,27 +408,58 @@ pub(crate) struct BoardView {
     pub(crate) candidates: Vec<Candidate>,
 }
 
+/// Derive the layer panel's rows from a board scene's plane list: one row
+/// for the outline (the substrate shares its toggle), one per slab plane
+/// (a slab's pour plane shares its copper row). Scene order is draw order
+/// (bottom-first — the panel reverses for display, like the old canvas
+/// projection).
+fn layer_rows(scene: &crate::render::Scene) -> Vec<BoardLayer> {
+    let tables = crate::render::StyleTables::board_defaults(true);
+    let mut out: Vec<BoardLayer> = Vec::new();
+    for p in &scene.planes {
+        let (id, name) = match &p.key {
+            PlaneKey::Outline => (LayerId::Outline, "Board outline".to_string()),
+            PlaneKey::Copper(n) | PlaneKey::Mask(n) | PlaneKey::Silk(n) | PlaneKey::Fab(n) => {
+                (LayerId::Slab(n.clone()), n.clone())
+            }
+            // Substrate follows the outline row; a pour follows its copper
+            // row; drills/overlay/schematic tiers have no panel row.
+            _ => continue,
+        };
+        let color = tables.plane_appearance(&p.key, scene).color;
+        out.push(BoardLayer { id, name, color });
+    }
+    out
+}
+
 /// Everything derived from the elaborated [`Doc`], rebuilt together on a reload (the
 /// revision-keyed cache). Holding these as one bundle behind a single `RefCell` means
 /// a reload swaps the *whole* derived tier atomically — no half-updated frame where a
 /// new board pairs with old findings.
 pub(crate) struct DerivedCaches {
-    /// The board projection + cached per-layer assets, or `None` when no document is
-    /// loaded / the load failed / projection failed.
+    /// The board projection (layer-panel rows + pick candidates), or `None`
+    /// when no document is loaded / the load failed / projection failed.
     pub(crate) board: Option<BoardView>,
-    /// The owned-canvas renderer scene (WP2): the board lowered through
+    /// The owned-canvas board scene: the board lowered through
     /// [`crate::render::board_scene`], rebuilt per doc revision like every
     /// other derived cache. `None` when the board didn't project. Pure CPU —
     /// the GPU buffers ([`crate::render::SceneCache`]) key off the revision
     /// and live in the windowed-only GPU bundle.
     pub(crate) scene: Option<crate::render::Scene>,
-    /// The semantic state buffer (hover/selection flag words) sized to
+    /// The board semantic state buffer (hover/selection flag words) sized to
     /// [`scene`](Self::scene)'s semantic table. `RefCell`: mutated per frame
     /// by one-word diffs under a shared `derived` borrow.
     pub(crate) states: RefCell<crate::render::SemanticStates>,
-    /// The schematic projection + cached asset + pick candidates, or `None` when the
-    /// doc has no components.
-    pub(crate) schematic: Option<SchematicView>,
+    /// The owned-canvas schematic scene (WP3): the drawing lowered through
+    /// [`crate::render::schematic_scene`] over `schematic_features`. `None`
+    /// when the doc has no components (the pane shows a placeholder).
+    pub(crate) schematic_scene: Option<crate::render::Scene>,
+    /// The schematic semantic state buffer, sized to
+    /// [`schematic_scene`](Self::schematic_scene)'s table.
+    pub(crate) schematic_states: RefCell<crate::render::SemanticStates>,
+    /// Schematic pick candidates, folded from the same `schematic_features`
+    /// stream the scene lowers ([`crate::schematic_pick`]).
+    pub(crate) schematic_picks: Vec<crate::schematic_pick::Candidate>,
     /// The projected explorer rows (components / nets).
     pub(crate) explorer: Explorer,
     /// The per-revision findings (DRC + ERC + connectivity), computed once here and
@@ -435,7 +474,9 @@ impl DerivedCaches {
             board: None,
             scene: None,
             states: RefCell::new(crate::render::SemanticStates::new(1)),
-            schematic: None,
+            schematic_scene: None,
+            schematic_states: RefCell::new(crate::render::SemanticStates::new(1)),
+            schematic_picks: Vec::new(),
             explorer: Explorer::default(),
             findings: Findings::default(),
         }
@@ -450,31 +491,38 @@ impl DerivedCaches {
         lib: &eutectic_core::part::PartLib,
         lib_notes: &[LibNote],
     ) -> DerivedCaches {
-        // The layer rows + pick candidates, from the one `world_features`
-        // stream. The Canvas is only a build-time intermediate now (WP2) —
-        // its layer projection feeds the panel; nothing renders its assets.
-        let board = Canvas::new(doc, lib)
-            .and_then(|canvas| {
-                let layers = canvas.build_layers(doc, lib)?;
-                let su = eutectic_core::elaborate::stackup(&doc.source);
-                let candidates = pick::candidates(doc, lib, &su);
-                Ok(BoardView { layers, candidates })
-            })
+        // The board scene (owned canvas): a lowering failure means no board
+        // pane, not a crash. The layer rows derive from its plane list and
+        // the pick candidates from the same `world_features` stream it
+        // lowered — one producer, no drift.
+        let scene = crate::render::board_scene(doc, lib)
+            .inspect_err(|e| log::warn!("board scene lowering failed: {e}"))
             .ok();
-        // The renderer scene (WP2 owned canvas): same permissive degrade as
-        // the board projection — a lowering failure means no board pane, not
-        // a crash. Built only when the board projected (they share the same
-        // world_features preconditions).
-        let scene = board.as_ref().and_then(|_| {
-            crate::render::board_scene(doc, lib)
-                .inspect_err(|e| log::warn!("board scene lowering failed: {e}"))
-                .ok()
+        let board = scene.as_ref().map(|s| {
+            let su = eutectic_core::elaborate::stackup(&doc.source);
+            BoardView {
+                layers: layer_rows(s),
+                candidates: pick::candidates(doc, lib, &su),
+            }
         });
         let states = RefCell::new(match &scene {
             Some(s) => crate::render::SemanticStates::for_scene(s),
             None => crate::render::SemanticStates::new(1),
         });
-        let schematic = SchematicView::build(doc, lib);
+        // The schematic scene + pick candidates, both over the one
+        // `schematic_features` stream (Decision 23).
+        let schematic_scene = crate::render::schematic_scene(doc, lib);
+        let schematic_states = RefCell::new(match &schematic_scene {
+            Some(s) => crate::render::SemanticStates::for_scene(s),
+            None => crate::render::SemanticStates::new(1),
+        });
+        let schematic_picks = if doc.components.is_empty() {
+            Vec::new()
+        } else {
+            crate::schematic_pick::candidates(&eutectic_core::schematic::schematic_features(
+                doc, lib,
+            ))
+        };
         let explorer = Explorer::project(doc, lib);
         // Findings are derived from the board pick candidates (the halo-location
         // source) — empty candidate list when the board didn't project, which is fine
@@ -485,7 +533,9 @@ impl DerivedCaches {
             board,
             scene,
             states,
-            schematic,
+            schematic_scene,
+            schematic_states,
+            schematic_picks,
             explorer,
             findings,
         }
@@ -511,10 +561,7 @@ pub(crate) fn resolves_in(id: &SemanticId, doc: &Doc, derived: &DerivedCaches) -
                 .board
                 .as_ref()
                 .is_some_and(|b| b.candidates.iter().any(|c| &c.id == id));
-            let on_schem = derived
-                .schematic
-                .as_ref()
-                .is_some_and(|s| s.candidates().iter().any(|c| &c.id == id));
+            let on_schem = derived.schematic_picks.iter().any(|c| &c.id == id);
             on_board || on_schem
         }
     }

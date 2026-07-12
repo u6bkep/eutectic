@@ -20,6 +20,14 @@ eutectic-core = { path = "../eutectic-core" }
 # pulled in.
 damascene-core = { git = "https://github.com/computer-whisperer/damascene.git", rev = "eef1630a198c9c9160f6dc3568eecbc904d76e46" }
 damascene-wgpu = { git = "https://github.com/computer-whisperer/damascene.git", rev = "eef1630a198c9c9160f6dc3568eecbc904d76e46" }
+# The MSDF annotation-text tier (renderer-spec §6, WP3) rasterizes glyphs
+# through damascene-core's public `text::msdf{,_atlas}` machinery. The font is
+# damascene's own Inter (same rev pin — annotation text matches the chrome's
+# face); `ttf-parser` + `cosmic-text` are pinned at the versions damascene-core
+# resolves so the `Face` / `fontdb::ID` types unify to the same crates.
+damascene-fonts = { git = "https://github.com/computer-whisperer/damascene.git", rev = "eef1630a198c9c9160f6dc3568eecbc904d76e46", default-features = false, features = ["inter"] }
+ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
+cosmic-text = "0.19"
 # `bytemuck` casts the owned renderer's instance/vertex/uniform structs to GPU
 # bytes (`src/render/`); `lyon_tessellation` is its polygon-with-holes
 # triangulator (renderer-spec §3: earcut-class, CPU-side, unit-testable — lyon

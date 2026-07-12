@@ -7,9 +7,8 @@
 //!   [`SAVE_KEY`] and enabled only with a source path (accent-tinted while dirty).
 //! - `[undo, redo]` — wired to [`UNDO_KEY`] / [`REDO_KEY`].
 //! - `[zoom in, zoom out, fit]` — only Fit is wired ([`FIT_KEY`]); zoom in/out
-//!   ship disabled because damascene 0.4.5 exposes no relative-zoom
-//!   `ViewportRequest` (only Fit / Reset / CenterOn), so there is no action to
-//!   dispatch without inventing one.
+//!   ship disabled (no relative-zoom camera request is defined yet — the
+//!   owned cameras' Fit / Reset / CenterOn are the wired vocabulary).
 //! - `[findings jump, command palette]` — findings jump toggles the findings
 //!   panel (the Findings accordion header key, same toggle the chips use); the palette is disabled
 //!   (gw-12, unimplemented).

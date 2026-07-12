@@ -16,7 +16,10 @@
 //! - [`scene`] — the ingest contract (§2): planes, primitives, semantic ids,
 //!   style classes, deterministic ordering.
 //! - [`board`] — the board producer: `route::world_features` → [`Scene`].
-//!   The schematic producer (WP3) is the second producer on the same ingest.
+//! - [`schematic`] — the schematic producer (WP3): `schematic_features` →
+//!   [`Scene`], the second producer on the same ingest.
+//! - [`text`] — the MSDF annotation-text tier (§6, WP3): run layout, the
+//!   glyph atlas (damascene machinery), glyph-quad instances.
 //! - [`tess`] — polygon-with-holes triangulation (§3, CPU-side, lyon).
 //! - [`instance`] — analytic-primitive instance building (§3, CPU-side).
 //! - [`gpu`] — buffers, coverage + composite passes, procedural grid /
@@ -32,14 +35,17 @@ pub mod damage;
 pub mod gpu;
 pub mod instance;
 pub mod scene;
+pub mod schematic;
 pub mod state;
 pub mod style;
 pub mod tess;
+pub mod text;
 
 pub use board::board_scene;
 pub use camera::{Camera, CameraGlide};
 pub use damage::{DamageKey, needs_render};
 pub use gpu::{OverlayGpu, RenderArgs, Renderer, SceneBuffers, SceneCache};
 pub use scene::{Plane, PlaneKey, Prim, PrimShape, Scene, SemanticKey, StyleClass};
+pub use schematic::schematic_scene;
 pub use state::SemanticStates;
 pub use style::{ResolvedStyles, StyleTables};

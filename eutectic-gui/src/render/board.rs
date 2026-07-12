@@ -423,8 +423,8 @@ fn dist(a: Point, b: Point) -> f64 {
 /// (a forward query — the z was assigned from a slab at lowering). Midpoint
 /// disambiguates the shared faces of contiguous slabs; a zero-thickness
 /// feature prefers an **exact zero-thickness slab** at its plane, then falls
-/// back to a touching slab. Local twin of the old canvas's helper (that
-/// module is scheduled for deletion; no imports from it) — with one
+/// back to a touching slab. Local twin of the pick module's helper (the
+/// renderer stays app-module-free; no imports from it) — with one
 /// deliberate fix: the old fallback bound zero-thickness fab-datum slabs
 /// (`F.Fab 1.635..1.635 mm`) to the *silk* slab whose face they touch, so
 /// fab ink rendered in the silk bucket; the exact-match step here puts fab

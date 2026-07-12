@@ -6,27 +6,24 @@
 //! as pure code motion (gui-module-split); this is the region a future
 //! split-tree rework will own.
 //!
-//! OWNED-CANVAS MIGRATION (decided 2026-07-07): the **board** pane runs on
-//! the app-rendered `surface(AppTexture)` path as of WP2 (`board_canvas` +
-//! `app::board_pane`); the **schematic** pane's `viewport()` call site below
-//! is the last one standing and is scheduled for replacement in WP3 — do not
-//! extend the viewport path (see gui-architecture.md, "Canvas strategy").
+//! OWNED CANVAS (WP2 board, WP3 schematic): every pane runs on the
+//! app-rendered `surface(AppTexture)` path — one view-generic builder
+//! ([`EutecticApp::canvas_pane_el`]) parameterized by the pane's view kind;
+//! the damascene `viewport()` path is deleted (gui-architecture.md, "Canvas
+//! strategy").
 
 pub(crate) mod strip;
 
-use crate::app::domain::BoardView;
+use crate::app::canvas_pane::Overlay;
 use crate::app::pane::{
     CANVAS_BG, CONFLICT_KEEP_KEY, CONFLICT_RELOAD_KEY, SPLIT_HANDLE_KEY, SPLIT_ROW_KEY, pane_index,
     pane_placeholder,
 };
 use crate::app::{EutecticApp, PaneId, PaneLayout, ViewKind};
-use crate::canvas::Overlay;
-use crate::canvas::pick::SemanticId;
 use crate::findings::Findings;
-use crate::highlight::HighlightSets;
+use crate::pick::SemanticId;
 use crate::tool::Tool;
 use damascene_core::prelude::*;
-use eutectic_core::geom::Shape2D;
 use eutectic_core::id::NetId;
 
 impl EutecticApp {
@@ -39,10 +36,7 @@ impl EutecticApp {
         // shows a board, else pane B, else 1.0). The cursor readout is set per event.
         let zoom = self.readout_zoom();
 
-        // The shared cross-view highlight sets, projected once per frame from the selection.
-        let sets = self.highlight_sets();
-
-        let split = self.pane_split(cx, &sets);
+        let split = self.pane_split(cx);
 
         // The two top chrome strips (oracle regions 1 + 2): the menu bar over the
         // icon toolbar. The open menu itself renders as a root overlay in `build`.
@@ -101,33 +95,20 @@ impl EutecticApp {
         for (i, p) in panes.iter().enumerate() {
             if p.view == ViewKind::Board {
                 let id = if i == 0 { PaneId::A } else { PaneId::B };
-                return crate::app::board_pane::zoom_px_per_mm(&self.board_camera(id));
+                return crate::app::canvas_pane::zoom_px_per_mm(&self.pane_camera(id));
             }
         }
         1.0
     }
 
-    /// The shared cross-view highlight sets for this frame — the selection + hover ids,
-    /// projected through [`HighlightSets`] so both panes expand the same way.
-    pub(crate) fn highlight_sets(&self) -> HighlightSets {
-        match &self.domain.doc {
-            Ok(doc) => {
-                let sel = self.domain.selection.borrow();
-                // Selection + hover both cross-highlight (hover is the pre-select cue).
-                HighlightSets::project(sel.selected().chain(sel.hovered()), doc, &self.domain.lib)
-            }
-            Err(_) => HighlightSets::default(),
-        }
-    }
-
     /// The two-pane split (dual = row, stacked = column), with a draggable resize handle
     /// between the panes — or, when a pane is maximized, that one pane full-bleed.
-    fn pane_split(&self, cx: &BuildCx, sets: &HighlightSets) -> El {
+    fn pane_split(&self, cx: &BuildCx) -> El {
         if let Some(max) = self.maximized.get() {
-            return self.pane_el(cx, max, sets);
+            return self.pane_el(cx, max);
         }
-        let a = self.pane_el(cx, PaneId::A, sets);
-        let b = self.pane_el(cx, PaneId::B, sets);
+        let a = self.pane_el(cx, PaneId::A);
+        let b = self.pane_el(cx, PaneId::B);
         let axis = match self.layout.get() {
             PaneLayout::Dual => Axis::Row,
             PaneLayout::Stacked => Axis::Column,
@@ -151,12 +132,9 @@ impl EutecticApp {
     /// pane's canvas (board or schematic) with the floating per-pane tool strip
     /// overlaid top-left inside the canvas (UI-oracle anatomy). Fill in both axes so
     /// the split weights govern its size.
-    fn pane_el(&self, cx: &BuildCx, pane: PaneId, sets: &HighlightSets) -> El {
+    fn pane_el(&self, cx: &BuildCx, pane: PaneId) -> El {
         let view = self.panes.borrow()[pane_index(pane)].view;
-        let canvas = match view {
-            ViewKind::Board => self.board_canvas(cx, pane, sets),
-            ViewKind::Schematic => self.schematic_canvas(cx, pane, sets),
-        };
+        let canvas = self.canvas_pane_el(cx, pane, view);
         // Stack the strip over the canvas: the strip layer hugs its own rect at
         // the stack's top-left, so pointer events outside it fall through to the
         // canvas viewport below (pan/zoom is never intercepted beyond the strip).
@@ -195,26 +173,34 @@ impl EutecticApp {
         .height(Size::Hug)
     }
 
-    /// A board pane's canvas (WP2 owned canvas): one keyed container holding
+    /// A pane's canvas (owned canvas, WP2+WP3): one keyed container holding
     /// the pane's `surface(AppTexture)` El — the renderer-drawn texture,
-    /// composited opaque and clipped to the pane rect. The old viewport path
-    /// (grid El + layer Els + overlay El inside `viewport()`) is gone from
-    /// board panes: the grid is procedural in the renderer, layer visibility
-    /// is a style-table uniform, and the overlay lowers to renderer
-    /// primitives (`app::board_pane`). Headless (the CPU harness / review
-    /// bin) has no GPU and no texture; the container still owns the key, the
+    /// composited opaque and clipped to the pane rect — for BOTH view kinds.
+    /// The old viewport path (grid El + layer/schematic Els + overlay El
+    /// inside `viewport()`) is gone: the grid is procedural in the renderer
+    /// (board panes only), layer visibility is a style-table uniform, the
+    /// overlay lowers to renderer primitives, and highlight emphasis rides
+    /// the semantic state buffer. Headless (the CPU harness / review bin)
+    /// has no GPU and no texture; the container still owns the key, the
     /// laid-out rect, and the pointer routing, so every pick/gesture test
-    /// runs without a device. Falls back to a placeholder when the board
-    /// projection failed.
-    fn board_canvas(&self, cx: &BuildCx, pane: PaneId, _sets: &HighlightSets) -> El {
-        if self.derived.borrow().board.is_none() {
-            return pane_placeholder("No board to display");
+    /// runs without a device. Falls back to a placeholder when the view has
+    /// no content (no board projection / no schematic components).
+    fn canvas_pane_el(&self, cx: &BuildCx, pane: PaneId, view: ViewKind) -> El {
+        let has_content = match view {
+            ViewKind::Board => self.derived.borrow().board.is_some(),
+            ViewKind::Schematic => self.derived.borrow().schematic_scene.is_some(),
+        };
+        if !has_content {
+            return pane_placeholder(match view {
+                ViewKind::Board => "No board to display",
+                ViewKind::Schematic => "No schematic to display",
+            });
         }
         // Capture the pane + strip rects (from the last layout) and the
         // scale factor: the paint pass sizes the pane texture from them and
         // the raw-pointer seams (free hover, middle pan) resolve panes
         // against them. One-frame lag by construction (see
-        // `app::board_pane` module docs).
+        // `app::canvas_pane` module docs).
         if let Some(d) = cx.diagnostics() {
             self.scale_factor.set(d.scale_factor);
         }
@@ -233,13 +219,13 @@ impl EutecticApp {
         // Settle this pane's camera for the frame: fit-on-first-show plus
         // any pending Fit/Reset request, against the known rect.
         let cam = match rect {
-            Some(r) => self.board_build_camera(pane, r),
-            None => self.board_camera(pane),
+            Some(r) => self.pane_build_camera(pane, r),
+            None => self.pane_camera(pane),
         };
 
         let mut children: Vec<El> = Vec::new();
         let mut texture_pending = false;
-        if let Some((tex, alloc)) = self.board_pane_texture(pane) {
+        if let Some((tex, alloc)) = self.pane_texture(pane) {
             // Pixel-accurate compositing: the texture is `alloc` device px,
             // so the El spans `alloc / scale` logical px (the default Fill
             // fit then maps texels 1:1 onto device px); the container's
@@ -265,68 +251,18 @@ impl EutecticApp {
         // Continuous redraw ONLY while motion is live (§7 damage rule): a
         // mid-flight glide re-renders each frame until its bit-exact settle;
         // drags ride the host's pointer-driven redraws.
-        if self.board_glide_active() || texture_pending {
+        if self.glide_active() || texture_pending {
             canvas = canvas.redraw_within(std::time::Duration::ZERO);
         }
-        with_zoom_chip(canvas, crate::app::board_pane::zoom_px_per_mm(&cam))
+        with_zoom_chip(canvas, crate::app::canvas_pane::zoom_px_per_mm(&cam))
     }
 
-    /// A schematic pane's canvas: the cached schematic asset + the per-frame highlight
-    /// overlay, in a viewport keyed to this pane. Falls back to a placeholder when the doc
-    /// has no components.
-    fn schematic_canvas(&self, cx: &BuildCx, pane: PaneId, sets: &HighlightSets) -> El {
-        let derived = self.derived.borrow();
-        let Some(view) = &derived.schematic else {
-            return pane_placeholder("No schematic to display");
-        };
-        let zoom = cx.viewport_view(pane.canvas_key()).map_or(1.0, |v| v.zoom);
-        let static_key = format!("schematic:{}", pane.canvas_key());
-        let mut children = vec![view.static_el(&static_key)];
-        // Schematic-side findings (ERC / floating-pad with entity refs) halo the symbol:
-        // union their entity/net refs into the overlay id set so the affected symbol +
-        // net wires ring in the finding accent alongside any selection highlight.
-        let finding_ids = self.schematic_finding_ids(&derived.findings);
-        let overlay_ids: std::collections::BTreeSet<SemanticId> =
-            sets.schematic_ids().union(&finding_ids).cloned().collect();
-        if let Some(el) = view.overlay_el(&overlay_ids, pane.overlay_key()) {
-            children.push(el);
-        }
-        let vp = viewport(children)
-            .key(pane.canvas_key())
-            .min_zoom(0.02)
-            .max_zoom(64.0)
-            .pan_bounds(PanBounds::Contain)
-            .fill(CANVAS_BG)
-            .width(Size::Fill(1.0))
-            .height(Size::Fill(1.0));
-        with_zoom_chip(vp, zoom)
-    }
-
-    /// Build a board pane's dynamic overlay from the cross-view highlight sets + the
-    /// measure preview (measure only draws in the pane it is happening in). Highlight
-    /// geometry is re-derived from the pick candidates by id (commitment 2). A candidate
-    /// lights up when its id — or its net — is in the board highlight set.
-    pub(crate) fn build_board_overlay(
-        &self,
-        view: &BoardView,
-        pane: PaneId,
-        sets: &HighlightSets,
-        findings: &Findings,
-    ) -> Overlay {
-        let mut highlights: Vec<(Shape2D, bool)> = Vec::new();
-        for c in &view.candidates {
-            if !self.layer_visible(&c.layer.key()) {
-                continue;
-            }
-            let net = self.candidate_net(&c.id);
-            if sets.board_matches(&c.id, net.as_ref()) {
-                // Committed selection reads bright; a hover-only match reads dim. A
-                // candidate is a hover if its id is hovered and not selected.
-                let sel = self.domain.selection.borrow();
-                let hovered = sel.is_hovered(&c.id) && !sel.is_selected(&c.id);
-                highlights.push((c.shape.clone(), hovered));
-            }
-        }
+    /// Build a board pane's dynamic overlay: the preview channels (measure /
+    /// drag ghost / pending route / vertex refinement) + finding markers.
+    /// Selection/hover highlight geometry is deliberately absent — emphasis
+    /// rides the semantic state buffer (spec §5), so the per-frame candidate
+    /// walk the old `highlights` field ran is gone.
+    pub(crate) fn build_board_overlay(&self, pane: PaneId, findings: &Findings) -> Overlay {
         let measure =
             if self.tool_for(ViewKind::Board) == Tool::Measure && self.measure_pane.get() == pane {
                 self.measure.get().segment()
@@ -401,7 +337,6 @@ impl EutecticApp {
             })
             .collect();
         Overlay {
-            highlights,
             measure,
             findings: finding_markers,
             ghost,
@@ -418,7 +353,10 @@ impl EutecticApp {
     /// pin / net refs of every finding (ERC multiple-drivers on a net, a floating pad
     /// on a part). The schematic candidates key on Part / Pin / Net, so these light up
     /// the affected symbol + net wires.
-    fn schematic_finding_ids(&self, findings: &Findings) -> std::collections::BTreeSet<SemanticId> {
+    pub(crate) fn schematic_finding_ids(
+        &self,
+        findings: &Findings,
+    ) -> std::collections::BTreeSet<SemanticId> {
         findings
             .items
             .iter()

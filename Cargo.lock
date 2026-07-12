@@ -592,7 +592,9 @@ version = "0.1.0"
 dependencies = [
  "arboard",
  "bytemuck",
+ "cosmic-text",
  "damascene-core",
+ "damascene-fonts",
  "damascene-wgpu",
  "dlib",
  "eutectic-core",
@@ -602,6 +604,7 @@ dependencies = [
  "png 0.17.16",
  "pollster",
  "raw-window-handle",
+ "ttf-parser",
  "wayland-backend",
  "wayland-client",
  "wayland-protocols",

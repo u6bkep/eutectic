@@ -1,78 +1,69 @@
-//! Two-frame headless render harness — the faithful stand-in for the winit host.
+//! Multi-frame headless render harness — the faithful stand-in for the winit
+//! host.
 //!
 //! # Why a harness at all
 //!
-//! [`render_bundle_themed`](damascene_core::render_bundle_themed) builds a bundle
-//! from a *fresh* [`UiState`], so any pan/zoom the app queues through
-//! [`App::drain_viewport_requests`] is dropped on the floor: the app's initial
-//! [`FitContent`](damascene_core::viewport::ViewportRequest::FitContent) never
-//! reaches layout, and the canvas renders at the unfitted reset framing (`zoom =
-//! 1.0`) — content draws as a ~30 px speck in the pane corner. The live winit host
-//! avoids this by carrying **one persistent `UiState` across frames** and applying
-//! each frame's requests during the *next* layout; the fit only becomes visible on
-//! the frame after it was queued.
-//!
-//! This harness reproduces that loop exactly, CPU-only, so the dumped fixture
-//! artifacts show the same fitted canvas a user sees.
+//! The app's pane cameras settle across frames: `build` captures each pane's
+//! laid-out rect (via `cx.rect_of_key`, one frame stale by construction) and
+//! applies the pending camera work — the initial fit-on-first-show and any
+//! queued Fit/Reset request — against it (`pane_build_camera`). A single
+//! fresh-state frame therefore renders the *unfitted* reset framing (content
+//! as a ~30 px speck): frame 1 lays the panes out, frame 2's build fits
+//! against the now-known rects. The live winit host gets this for free by
+//! carrying one persistent `UiState` across frames; this harness reproduces
+//! that loop exactly, CPU-only, so the dumped fixture artifacts show the same
+//! fitted canvas a user sees.
 //!
 //! # The host loop we mirror
 //!
-//! From the in-tree host copy at `src/host.rs` (`RunnerCore`'s redraw path, the
-//! `frame::build` / `frame::prepare` spans), each frame runs, in order:
+//! From the in-tree host copy at `src/host.rs` (`RunnerCore`'s redraw path),
+//! each frame runs, in order:
 //!
-//! 1. `WinitWgpuApp::before_build(&mut app)` — the app queues per-frame state
-//!    (our fixtures queue the initial `FitContent` here).
-//! 2. `let cx = BuildCx::new(&theme).with_ui_state(gfx.renderer.ui_state())…
-//!    .with_viewport(w, h)` — **build reads the persistent `UiState`**, so
-//!    `cx.viewport_view(key)` returns the camera *as of the last layout*.
+//! 1. `WinitWgpuApp::before_build(&mut app)` — per-frame app state (mailbox
+//!    drain: reloads / conflicts).
+//! 2. `let cx = BuildCx::new(&theme).with_ui_state(…)` — **build reads the
+//!    persistent `UiState`**, so `cx.rect_of_key(key)` returns each pane's
+//!    rect *as of the last layout*; `pane_build_camera` consumes it.
 //! 3. `let tree = app.build(&cx)`.
-//! 4. `gfx.renderer.push_viewport_requests(app.drain_viewport_requests())` — the
-//!    frame's requests are handed to the same `UiState`, still **pending**.
-//! 5. `gfx.renderer.prepare(…, &mut tree, viewport, scale)` — layout runs and
-//!    **consumes** the pending requests against the live per-pane rect + content
-//!    extents, writing the resulting pan/zoom into `UiState`.
+//! 4. layout runs (inside `render_bundle_with_theme` here; `prepare` in the
+//!    host), writing this frame's rects into the `UiState` for the next
+//!    build.
 //!
-//! [`render_bundle_with_theme`](damascene_core::render_bundle_with_theme) is the
-//! CPU analogue of step 5: it calls `layout(root, ui_state, viewport)`, which is
-//! where pending viewport requests are applied. So per frame the harness does:
-//! `before_build` → build with `with_ui_state(&ui)` → `push_viewport_requests(
-//! drain)` → `render_bundle_with_theme(&mut tree, &mut ui, …)`. Pushing *before*
-//! the render matches the host's push-before-prepare ordering.
+//! # Frame count — the settle signal
 //!
-//! # Frame count
-//!
-//! We loop until [`App::drain_viewport_requests`] comes back empty, capped at
-//! [`MAX_FRAMES`], and always run at least [`MIN_FRAMES`] (= 2). This is more
-//! faithful than a hard-coded two frames: the host runs frames until the app
-//! stops requesting redraws, and a scene that queues a follow-up request (a pane
-//! that becomes visible only after a first-frame layout, say) needs the extra
-//! pass. For the current fixtures it settles in exactly two frames — frame 1
-//! queues + applies the fit (build still saw `zoom = 1.0`), frame 2 builds against
-//! the fitted camera and queues nothing — and the *final* frame's bundle is the
-//! one returned, so the artifact shows the fitted canvas and the toolbar zoom
-//! readout is the fitted zoom, not `100%`.
+//! We loop until [`EutecticApp::cameras_pending`] reports every visible
+//! pane's camera settled (initial fit applied, no queued Fit/Reset), capped
+//! at [`MAX_FRAMES`] and always running at least [`MIN_FRAMES`] (= 2). This
+//! is the owned-camera replacement for the old "viewport-request queue
+//! drained empty" signal (the queue died with the viewport path, WP3): the
+//! camera requests now live in app state, and `cameras_pending` is their
+//! visibility. For the current fixtures it settles in exactly two frames —
+//! frame 1 lays the panes out (cameras still un-fitted), frame 2 builds
+//! against the known rects and fits — and the *final* frame's bundle is the
+//! one returned, so the artifact shows the fitted canvas.
 
 use damascene_core::prelude::*;
 use damascene_core::state::UiState;
 
-use crate::app::{EutecticApp, PaneId, ViewKind};
+use crate::app::{EutecticApp, PaneId};
 
-/// Always run at least this many frames: the first queues the fit, the second
-/// renders against it. A single frame would dump the unfitted camera.
+/// Always run at least this many frames: the first lays out, the second
+/// builds against the laid-out rects (fit applied). A single frame would
+/// dump the unfitted camera.
 pub const MIN_FRAMES: usize = 2;
 
-/// Safety cap on the settle loop, so a fixture that never stops requesting can't
+/// Safety cap on the settle loop, so a fixture that never settles can't
 /// spin forever. Generous relative to the two frames the real fixtures need.
 pub const MAX_FRAMES: usize = 8;
 
 /// The result of driving a scene to its settled frame: the final frame's
-/// [`Bundle`] plus the persistent [`UiState`] and built tree that produced it, so
-/// callers (the coverage assertion) can read post-fit camera + geometry.
+/// [`Bundle`] plus the persistent [`UiState`] and built tree that produced
+/// it, so callers (the coverage assertion) can read post-fit rects.
 pub struct Rendered {
     /// The final frame's render bundle (svg / tree dump / draw ops / lint).
     pub bundle: Bundle,
-    /// The persistent UI state after the final layout — holds the fitted per-pane
-    /// cameras and viewport content metrics.
+    /// The persistent UI state after the final layout — holds the laid-out
+    /// pane rects the app cameras fitted against.
     pub ui: UiState,
     /// The final frame's built + laid-out tree.
     pub tree: El,
@@ -80,22 +71,22 @@ pub struct Rendered {
     pub frames: usize,
 }
 
-/// Drive `app` through the host-mirroring frame loop at `viewport` and return the
-/// settled final frame. See the module docs for the per-frame ordering and its
-/// correspondence to `damascene-winit-wgpu`'s redraw path.
+/// Drive `app` through the host-mirroring frame loop at `viewport` and return
+/// the settled final frame. See the module docs for the per-frame ordering
+/// and its correspondence to the in-tree host's redraw path.
 pub fn render_settled(app: &mut EutecticApp, viewport: Rect) -> Rendered {
     let mut ui = UiState::new();
     let mut last;
     let mut frames = 0;
 
     loop {
-        // (1) Per-frame app state: our fixtures queue the initial FitContent here.
+        // (1) Per-frame app state (mailbox drain — reloads / conflicts).
         app.before_build();
 
-        // (2)+(3) Build against the PERSISTENT UiState, so cx.viewport_view(key)
-        // reads the camera the previous frame's layout wrote (the zoom readout in
-        // build consumes it). The immutable borrow of `ui` ends when `build`
-        // returns, freeing `ui` for the mutable steps below.
+        // (2)+(3) Build against the PERSISTENT UiState, so cx.rect_of_key
+        // reads the rects the previous frame's layout wrote — that is where
+        // pane_build_camera applies the fit-on-first-show + Fit/Reset
+        // requests. The immutable borrow of `ui` ends when `build` returns.
         let theme = app.theme();
         let mut tree = {
             let cx = BuildCx::new(&theme)
@@ -104,26 +95,17 @@ pub fn render_settled(app: &mut EutecticApp, viewport: Rect) -> Rendered {
             app.build(&cx)
         };
 
-        // (4) Hand this frame's requests to the same UiState — still pending until
-        // layout consumes them, exactly as the host pushes before prepare. Whether
-        // this frame emitted any is the settle signal: a frame that queued a fit has
-        // more work for the *next* layout to reflect.
-        let requests = app.drain_viewport_requests();
-        let queued_this_frame = !requests.is_empty();
-        ui.push_viewport_requests(requests);
-
-        // (5) render_bundle_with_theme runs layout(root, &mut ui, viewport), which
-        // applies the pending requests against the live rects + content extents and
-        // writes the fitted cameras back into `ui`.
+        // (4) Layout runs inside the bundle render, writing this frame's
+        // rects into `ui` for the next build.
         let bundle = render_bundle_with_theme(&mut tree, &mut ui, viewport, &theme);
 
         frames += 1;
         last = (bundle, tree);
 
-        // Settle once we've met the minimum AND the frame just rendered queued no
-        // new requests (so a further frame would build + lay out identically), or the
-        // safety cap is hit. One before_build per frame — no double-firing of the fit.
-        if (frames >= MIN_FRAMES && !queued_this_frame) || frames >= MAX_FRAMES {
+        // Settle once we've met the minimum AND no visible pane owes camera
+        // work (initial fit or a queued Fit/Reset) — the app-camera settle
+        // signal — or the safety cap is hit. One before_build per frame.
+        if (frames >= MIN_FRAMES && !app.cameras_pending()) || frames >= MAX_FRAMES {
             break;
         }
     }
@@ -137,40 +119,38 @@ pub fn render_settled(app: &mut EutecticApp, viewport: Rect) -> Rendered {
     }
 }
 
-/// Minimum fraction of a canvas pane's extent (in at least one axis) the fitted
-/// content bounding box must occupy. FitContent frames content into the pane with
-/// a small padding, so on a healthy fit the content fills most of the shorter axis;
-/// 30 % is a loose floor that a broken fit (content left at the unfitted `zoom =
-/// 1.0` speck) fails by a wide margin.
+/// Minimum fraction of a canvas pane's extent (in at least one axis) the
+/// fitted content bounding box must occupy. Fit frames content into the pane
+/// with a small padding, so on a healthy fit the content fills most of the
+/// shorter axis; 30 % is a loose floor that a broken fit (content left at
+/// the unfitted `zoom = 1.0` speck) fails by a wide margin.
 pub const MIN_COVERAGE: f32 = 0.30;
 
-/// The reset/unfitted zoom the canvas renders at before any FitContent is applied.
-/// A fitted board's zoom is nowhere near this; the coverage assertion treats a
-/// canvas still sitting at this zoom as an outright fit failure.
+/// The reset/unfitted zoom (px/mm) a pane camera renders at before any fit
+/// applies. A fitted view's zoom is nowhere near this; the coverage
+/// assertion treats a pane still sitting at this zoom as an outright fit
+/// failure.
 const UNFITTED_ZOOM: f32 = 1.0;
 
 /// Assert that every visible canvas pane in a settled render shows fitted
-/// content — the "did the fit machinery actually run" gate on top of damascene's
-/// own lint. For each `key` (a pane's `canvas_key`) we require BOTH:
+/// content — the "did the fit machinery actually run" gate on top of
+/// damascene's own lint. For each `key` (a pane's `canvas_key`) we require
+/// BOTH:
 ///
-/// - the fitted `zoom` differs from the unfitted default ([`UNFITTED_ZOOM`]), and
+/// - the fitted `zoom` differs from the unfitted default ([`UNFITTED_ZOOM`]),
+///   and
 /// - the content bounding box, projected through that zoom, spans at least
 ///   [`MIN_COVERAGE`] of the pane in one axis.
 ///
-/// Either signal alone would catch the common failure (fit never applied ⇒ `zoom
-/// == 1.0` and a ~30 px speck), but requiring both makes the assertion fail loudly
-/// if *either* the request-application path breaks (zoom frozen) or the
-/// content-extent measurement breaks (bounds collapse) — the two ways the fit
-/// pipeline can rot independently.
+/// Either signal alone would catch the common failure (fit never applied ⇒
+/// `zoom == 1.0` and a ~30 px speck), but requiring both makes the assertion
+/// fail loudly if *either* the request-application path breaks (zoom frozen)
+/// or the content bounds collapse — the two ways the fit pipeline can rot
+/// independently.
 ///
-/// WP2: a **board** pane's camera is app-owned (`app.board_camera`), so its
-/// half of the assertion reads the camera + the renderer scene bounds; a
-/// **schematic** pane still reads the damascene viewport view + measured
-/// content bounds. The behavioral meaning (fitted zoom + real coverage) is
-/// identical on both paths.
-///
-/// `scene` names the fixture for the panic message. `keys` are the visible canvas
-/// pane keys to check (skip hidden panes and no-document scenes).
+/// WP3: BOTH view kinds run on app-owned cameras, so both halves read the
+/// pane camera + its view kind's renderer-scene bounds — the same behavioral
+/// meaning (fitted zoom + real coverage) the viewport-era assertion had.
 pub fn assert_content_coverage(scene: &str, app: &EutecticApp, r: &Rendered, keys: &[&str]) {
     for &key in keys {
         let pane_id = if key == PaneId::A.canvas_key() {
@@ -178,50 +158,24 @@ pub fn assert_content_coverage(scene: &str, app: &EutecticApp, r: &Rendered, key
         } else {
             PaneId::B
         };
-        let is_board = {
-            let panes = app.panes.borrow();
-            panes[crate::app::pane::pane_index(pane_id)].view == ViewKind::Board
-        };
         let pane =
             r.ui.rect_of_key(key)
                 .unwrap_or_else(|| panic!("scene `{scene}`: canvas `{key}` has no laid-out rect"));
 
-        let (zoom, content_w, content_h) = if is_board {
-            // The app-owned camera + the renderer scene's content bounds.
-            let cam = app.board_camera(pane_id);
-            let bounds = app
-                .derived
-                .borrow()
-                .scene
-                .as_ref()
-                .map(|s| s.bounds)
-                .unwrap_or_else(|| {
-                    panic!("scene `{scene}`: board pane `{key}` has no renderer scene")
-                });
-            let zoom = crate::app::board_pane::zoom_px_per_mm(&cam);
-            let mm = eutectic_core::coord::MM as f32;
-            (
-                zoom,
-                (bounds.2 - bounds.0) as f32 / mm,
-                (bounds.3 - bounds.1) as f32 / mm,
-            )
-        } else {
-            let view = r.ui.viewport_view_by_key(key).unwrap_or_else(|| {
-                panic!("scene `{scene}`: canvas viewport `{key}` was not laid out")
-            });
-            // Content bounds are keyed by computed_id, not the app key; map key →
-            // computed_id by walking the built tree for the viewport node.
-            let id = computed_id_for_key(&r.tree, key).unwrap_or_else(|| {
-                panic!("scene `{scene}`: no node carries key `{key}` in the built tree")
-            });
-            let content = r.ui.viewport_content_bounds(&id).unwrap_or_else(|| {
-                panic!(
-                    "scene `{scene}`: canvas `{key}` has no measured content bounds \
-                     (empty viewport?)"
-                )
-            });
-            (view.zoom, content.w, content.h)
+        let cam = app.pane_camera(pane_id);
+        let view = {
+            let panes = app.panes.borrow();
+            panes[crate::app::pane::pane_index(pane_id)].view
         };
+        let bounds = app.pane_scene_bounds(pane_id).unwrap_or_else(|| {
+            panic!("scene `{scene}`: pane `{key}` ({view:?}) has no renderer scene")
+        });
+        let zoom = crate::app::canvas_pane::zoom_px_per_mm(&cam);
+        let mm = eutectic_core::coord::MM as f32;
+        let (content_w, content_h) = (
+            (bounds.2 - bounds.0) as f32 / mm,
+            (bounds.3 - bounds.1) as f32 / mm,
+        );
 
         assert!(
             (zoom - UNFITTED_ZOOM).abs() > 1e-3,
@@ -249,32 +203,10 @@ pub fn assert_content_coverage(scene: &str, app: &EutecticApp, r: &Rendered, key
     }
 }
 
-/// The measured **content-space** bounds of the viewport carrying `key` — the
-/// laid-out extent of its child, pre-transform (damascene's
-/// `viewport_content_bounds`). This is the ground truth the pointer↔board
-/// composition's content-rect assumption is pinned against (see
-/// `Canvas::content_rect`).
-pub fn content_bounds_of(r: &Rendered, key: &str) -> Option<damascene_core::prelude::Rect> {
-    let id = computed_id_for_key(&r.tree, key)?;
-    r.ui.viewport_content_bounds(&id)
-}
-
-/// Depth-first search for the `computed_id` of the node carrying `key`.
-fn computed_id_for_key(root: &El, key: &str) -> Option<String> {
-    if root.key.as_deref() == Some(key) {
-        return Some(root.computed_id.to_string());
-    }
-    for child in &root.children {
-        if let Some(id) = computed_id_for_key(child, key) {
-            return Some(id);
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::ViewKind;
     use crate::fixtures;
 
     fn viewport() -> Rect {
@@ -293,7 +225,7 @@ mod tests {
             r.frames, MIN_FRAMES,
             "the board fixture settles in two frames"
         );
-        let zoom = crate::app::board_pane::zoom_px_per_mm(&app.board_camera(PaneId::A));
+        let zoom = crate::app::canvas_pane::zoom_px_per_mm(&app.pane_camera(PaneId::A));
         assert!(
             (zoom - 1.0).abs() > 1e-3,
             "the board camera must be fitted (zoom off the unfitted 1.0 px/mm), got {zoom}",
@@ -302,10 +234,36 @@ mod tests {
         assert_content_coverage("board", &app, &r, &[PaneId::A.canvas_key()]);
     }
 
+    /// The SCHEMATIC pane settles through the same app-camera loop: the dual
+    /// fixture's pane B (schematic) fits within the settle window, off the
+    /// reset zoom, with real coverage (WP3: no viewport requests anywhere).
+    #[test]
+    fn schematic_settles_fitted() {
+        let mut app = fixtures::dual_cross_highlight();
+        let r = render_settled(&mut app, viewport());
+        assert!(!app.cameras_pending(), "every visible pane settled");
+        assert_eq!(
+            app.panes.borrow()[1].view,
+            ViewKind::Schematic,
+            "pane B is the schematic pane"
+        );
+        let zoom = crate::app::canvas_pane::zoom_px_per_mm(&app.pane_camera(PaneId::B));
+        assert!(
+            (zoom - 1.0).abs() > 1e-3,
+            "the schematic camera must be fitted, got {zoom}"
+        );
+        assert_content_coverage(
+            "dual",
+            &app,
+            &r,
+            &[PaneId::A.canvas_key(), PaneId::B.canvas_key()],
+        );
+    }
+
     /// The coverage assertion FAILS LOUDLY on an unfitted render: a single
     /// raw frame (the exact pre-harness bug) has no laid-out pane rect yet,
-    /// so the board camera never fits and stays at the reset zoom — the
-    /// assertion must panic rather than pass.
+    /// so the camera never fits and stays at the reset zoom — the assertion
+    /// must panic rather than pass.
     #[test]
     #[should_panic(expected = "unfitted zoom")]
     fn coverage_rejects_an_unfitted_render() {
@@ -322,8 +280,6 @@ mod tests {
                 .with_viewport(vp.w, vp.h);
             app.build(&cx)
         };
-        // Deliberately DROP the drained requests (never push them) — the speck bug.
-        let _ = app.drain_viewport_requests();
         let bundle = render_bundle_with_theme(&mut tree, &mut ui, vp, &theme);
         let r = Rendered {
             bundle,

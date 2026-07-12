@@ -130,53 +130,6 @@ fn board_is_lint_clean() {
     harness::assert_content_coverage("board", &app, &r, &[PaneId::A.canvas_key()]);
 }
 
-/// Pins the load-bearing layout assumption behind `Canvas::content_rect` (and
-/// with it the schematic pointer↔sheet mapping): a `vector()` child lays out
-/// at its NATURAL viewBox size, top-left-anchored at the viewport origin, so
-/// the asset stretch rect is `(rect.x, rect.y, vw, vh)`. The m2/m3
-/// composition wrongly used the pane rect here and stayed invisible because
-/// both pick directions shared the error — this test fails against the real
-/// laid-out UI state if damascene's layout contract ever changes.
-///
-/// WP2: the BOARD pane left the viewport path (its picking runs through the
-/// app camera, no content rect involved), so this pins the contract on the
-/// surviving consumer — the SCHEMATIC pane (pane B of the dual fixture),
-/// whose `SchematicView::content_rect` still assumes it until WP3.
-#[test]
-fn canvas_child_lays_out_at_natural_viewbox_size_at_viewport_origin() {
-    let mut app = dual_cross_highlight();
-    let (_, _, vw, vh) = app
-        .derived
-        .borrow()
-        .schematic
-        .as_ref()
-        .expect("dual fixture projects a schematic")
-        .content_rect((0.0, 0.0, 0.0, 0.0));
-    let r = harness::render_settled(&mut app, viewport());
-    let content = harness::content_bounds_of(&r, PaneId::B.canvas_key())
-        .expect("canvas viewport has measured content bounds");
-    // The bounds carry the viewport's own (untransformed) window origin;
-    // "anchored at the viewport origin" pins content.xy == pane.xy.
-    let pane =
-        r.ui.rect_of_key(PaneId::B.canvas_key())
-            .expect("canvas viewport has a laid-out rect");
-    assert!(
-        (content.x - pane.x).abs() < 0.5 && (content.y - pane.y).abs() < 0.5,
-        "canvas content must anchor at the viewport origin ({}, {}), got ({}, {})",
-        pane.x,
-        pane.y,
-        content.x,
-        content.y
-    );
-    assert!(
-        (content.w - vw).abs() < 0.5 && (content.h - vh).abs() < 0.5,
-        "canvas content must lay out at natural viewBox size {vw}×{vh}, \
-         got {}×{}",
-        content.w,
-        content.h
-    );
-}
-
 /// The menu-bar scene (chrome region 1): the File menu is expanded, so the menu
 /// popover is in the tree — it must render lint-clean over the fitted board.
 #[test]
@@ -215,8 +168,8 @@ fn measure_in_progress_is_lint_clean() {
 /// its board pane must fit — the findings panel + halo + chip are all in the tree.
 #[test]
 fn drc_violation_is_lint_clean_and_flags() {
-    use crate::canvas::pick::candidates;
     use crate::findings::Findings;
+    use crate::pick::candidates;
     let d = drc_violation_domain();
     let doc = d.doc.as_ref().expect("drc fixture elaborates");
     let su = eutectic_core::elaborate::stackup(&doc.source);
@@ -242,11 +195,12 @@ fn schematic_fixture_elaborates_and_projects() {
         "schematic.eut failed: {:?}",
         app.domain.doc.as_ref().err()
     );
-    let doc = app.domain.doc.as_ref().unwrap();
-    let view = crate::schematic_view::SchematicView::build(doc, &app.domain.lib)
-        .expect("schematic projects");
     assert!(
-        !view.candidates().is_empty(),
+        app.derived.borrow().schematic_scene.is_some(),
+        "schematic must lower to a renderer scene"
+    );
+    assert!(
+        !app.derived.borrow().schematic_picks.is_empty(),
         "schematic must have pick candidates"
     );
 }
@@ -449,7 +403,7 @@ fn routed_trace_is_lint_clean_and_committed() {
     let tid = *doc.traces.keys().next().unwrap();
     assert_eq!(
         app.domain.selection.borrow().single(),
-        Some(&crate::canvas::pick::SemanticId::Trace(tid))
+        Some(&crate::pick::SemanticId::Trace(tid))
     );
     let (app, rendered) = render_clean("routed_trace", app);
     harness::assert_content_coverage("routed_trace", &app, &rendered, &[PaneId::A.canvas_key()]);
@@ -515,8 +469,8 @@ fn trace_vertex_drag_is_lint_clean_and_previews() {
 /// stored position.
 #[test]
 fn inspector_shows_authored_part_position() {
-    use crate::canvas::pick::SemanticId;
     use crate::inspector::InspectorData;
+    use crate::pick::SemanticId;
     use eutectic_core::doc::MM;
 
     let d = board_domain();
@@ -555,8 +509,8 @@ fn inspector_shows_authored_part_position() {
 /// pad name != number), asserting that a pad which IS on a net projects that net.
 #[test]
 fn picked_pin_projects_its_net() {
-    use crate::canvas::pick::{SemanticId, candidates};
     use crate::inspector::InspectorData;
+    use crate::pick::{SemanticId, candidates};
 
     use eutectic_core::doc::PinRef;
 

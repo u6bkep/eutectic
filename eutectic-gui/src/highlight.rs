@@ -28,7 +28,7 @@
 //! in a view simply matches nothing there (a `Trace` has no schematic candidate; its *net*
 //! does).
 
-use crate::canvas::pick::SemanticId;
+use crate::pick::SemanticId;
 use eutectic_core::doc::{Doc, PinRef};
 use eutectic_core::id::NetId;
 use eutectic_core::part::PartLib;

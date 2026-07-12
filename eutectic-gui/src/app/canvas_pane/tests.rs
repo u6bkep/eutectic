@@ -6,7 +6,7 @@
 use super::*;
 use crate::app::EutecticApp;
 use crate::app::pane::PaneId;
-use crate::canvas::pick::SemanticId;
+use crate::pick::SemanticId;
 use crate::render::state::{FLAG_HOVERED, FLAG_SELECTED};
 use eutectic_core::coord::MM;
 use eutectic_core::id::{EntityId, NetId, TraceId, ViaId};
@@ -25,7 +25,7 @@ fn fitted_app() -> (EutecticApp, (f32, f32, f32, f32)) {
     let app = EutecticApp::new(crate::fixtures::edit_board_domain());
     let rect = (100.0, 50.0, 800.0, 600.0);
     app.pane_px.set([Some(rect), None]);
-    let cam = app.board_build_camera(PaneId::A, rect);
+    let cam = app.pane_build_camera(PaneId::A, rect);
     assert!(cam.zoom > 0.0);
     (app, rect)
 }
@@ -41,11 +41,11 @@ fn unproject_round_trips_and_flips_y() {
     let cam = Camera::new((10.0 * MM as f64, 8.0 * MM as f64), 2e-6);
     let rect = (40.0, 30.0, 800.0, 600.0);
     let center_px = (40.0 + 400.0, 30.0 + 300.0);
-    let p = board_unproject(&cam, rect, center_px);
+    let p = pane_unproject(&cam, rect, center_px);
     assert_eq!((p.x, p.y), (10 * MM, 8 * MM), "pane center = camera center");
-    let below = board_unproject(&cam, rect, (center_px.0, center_px.1 + 100.0));
+    let below = pane_unproject(&cam, rect, (center_px.0, center_px.1 + 100.0));
     assert!(below.y < p.y, "screen y down ⇒ board y down: {below:?}");
-    let back = board_project(&cam, rect, below);
+    let back = pane_project(&cam, rect, below);
     assert!((back.0 - center_px.0).abs() < 0.5 && (back.1 - (center_px.1 + 100.0)).abs() < 0.5);
 }
 
@@ -67,17 +67,17 @@ fn zoom_at_cursor_holds_point_through_whole_glide() {
     // An off-center cursor (the interesting case — center-anchored zooms are
     // trivially fixed).
     let pos = (rect.0 + 137.0, rect.1 + 458.0);
-    let before = app.board_camera(PaneId::A);
-    let anchor = board_unproject(&before, rect, pos);
+    let before = app.pane_camera(PaneId::A);
+    let anchor = pane_unproject(&before, rect, pos);
 
-    app.board_zoom_at(PaneId::A, rect, pos, -50.0); // one tick in
+    app.pane_zoom_at(PaneId::A, rect, pos, -50.0); // one tick in
     // Through the glide: step in small increments and re-check the anchor.
-    let mut cams = app.board_cams.borrow_mut();
+    let mut cams = app.pane_cams.borrow_mut();
     let g = &mut cams[0].glide;
     let mut steps = 0;
     while !g.settled() && steps < 1000 {
         let cam = g.step(1.0 / 240.0);
-        let now = board_unproject(&cam, rect, pos);
+        let now = pane_unproject(&cam, rect, pos);
         let err_px = (((now.x - anchor.x) as f64).hypot((now.y - anchor.y) as f64)) * cam.zoom;
         assert!(
             err_px < 1.0,
@@ -88,7 +88,7 @@ fn zoom_at_cursor_holds_point_through_whole_glide() {
     assert!(g.settled(), "glide settles");
     let after = g.current();
     assert!(after.zoom > before.zoom, "negative dy zooms in");
-    let now = board_unproject(&after, rect, pos);
+    let now = pane_unproject(&after, rect, pos);
     let err_px = (((now.x - anchor.x) as f64).hypot((now.y - anchor.y) as f64)) * after.zoom;
     assert!(err_px < 1.0, "anchor fixed at settle ({err_px:.3} px)");
 }
@@ -99,11 +99,11 @@ fn zoom_at_cursor_holds_point_through_whole_glide() {
 fn wheel_ticks_compound_and_clamp() {
     let (app, rect) = fitted_app();
     let pos = (rect.0 + 400.0, rect.1 + 300.0);
-    let z0 = app.board_camera_target(PaneId::A).zoom;
-    app.board_zoom_at(PaneId::A, rect, pos, -50.0);
-    let z1 = app.board_camera_target(PaneId::A).zoom;
-    app.board_zoom_at(PaneId::A, rect, pos, -50.0);
-    let z2 = app.board_camera_target(PaneId::A).zoom;
+    let z0 = app.pane_camera_target(PaneId::A).zoom;
+    app.pane_zoom_at(PaneId::A, rect, pos, -50.0);
+    let z1 = app.pane_camera_target(PaneId::A).zoom;
+    app.pane_zoom_at(PaneId::A, rect, pos, -50.0);
+    let z2 = app.pane_camera_target(PaneId::A).zoom;
     assert!((z1 / z0 - 1.25).abs() < 1e-9, "one 50 px tick = ×1.25");
     assert!(
         (z2 / z1 - 1.25).abs() < 1e-9,
@@ -111,13 +111,13 @@ fn wheel_ticks_compound_and_clamp() {
     );
     // Hammer zoom-in far past the clamp: the target must stop at MAX_ZOOM.
     for _ in 0..200 {
-        app.board_zoom_at(PaneId::A, rect, pos, -50.0);
+        app.pane_zoom_at(PaneId::A, rect, pos, -50.0);
     }
-    assert_eq!(app.board_camera_target(PaneId::A).zoom, MAX_ZOOM);
+    assert_eq!(app.pane_camera_target(PaneId::A).zoom, MAX_ZOOM);
     for _ in 0..400 {
-        app.board_zoom_at(PaneId::A, rect, pos, 50.0);
+        app.pane_zoom_at(PaneId::A, rect, pos, 50.0);
     }
-    assert_eq!(app.board_camera_target(PaneId::A).zoom, MIN_ZOOM);
+    assert_eq!(app.pane_camera_target(PaneId::A).zoom, MIN_ZOOM);
 }
 
 /// Pan math: the Select-tool camera pan moves the center by −Δpx/zoom with
@@ -125,18 +125,18 @@ fn wheel_ticks_compound_and_clamp() {
 #[test]
 fn camera_pan_center_math() {
     let (app, rect) = fitted_app();
-    let cam0 = app.board_camera(PaneId::A);
-    let p0 = board_unproject(&cam0, rect, (300.0, 300.0));
+    let cam0 = app.pane_camera(PaneId::A);
+    let p0 = pane_unproject(&cam0, rect, (300.0, 300.0));
     // Simulate the pointer.rs pan: start at (300,300), drag to (360, 260).
     let d = (60.0f32, -40.0f32);
     let center = (
         cam0.center.0 - d.0 as f64 / cam0.zoom,
         cam0.center.1 + d.1 as f64 / cam0.zoom,
     );
-    app.board_snap_center(PaneId::A, center);
-    let cam1 = app.board_camera(PaneId::A);
+    app.pane_snap_center(PaneId::A, center);
+    let cam1 = app.pane_camera(PaneId::A);
     // The board point that was under the press is now under press+Δ.
-    let p1 = board_unproject(&cam1, rect, (360.0, 260.0));
+    let p1 = pane_unproject(&cam1, rect, (360.0, 260.0));
     assert!(
         (p1.x - p0.x).abs() <= 1 && (p1.y - p0.y).abs() <= 1,
         "pan must track the pointer: {p0:?} vs {p1:?}"
@@ -150,7 +150,7 @@ fn camera_pan_center_math() {
 fn fit_and_reset_requests_apply_in_build() {
     let (app, rect) = fitted_app();
     let bounds = app.derived.borrow().scene.as_ref().unwrap().bounds;
-    let fitted = app.board_camera(PaneId::A);
+    let fitted = app.pane_camera(PaneId::A);
     // The initial fit framed the bounds: both extents fit inside the pane.
     let w_px = (bounds.2 - bounds.0) as f64 * fitted.zoom;
     let h_px = (bounds.3 - bounds.1) as f64 * fitted.zoom;
@@ -161,17 +161,17 @@ fn fit_and_reset_requests_apply_in_build() {
     );
 
     // Reset: request + build-consume → glide TARGET is the reset camera.
-    app.request_board_cam(PaneId::A, CamRequest::Reset);
-    let _ = app.board_build_camera(PaneId::A, rect);
-    let t = app.board_camera_target(PaneId::A);
+    app.request_pane_cam(PaneId::A, CamRequest::Reset);
+    let _ = app.pane_build_camera(PaneId::A, rect);
+    let t = app.pane_camera_target(PaneId::A);
     assert_eq!(t.zoom, RESET_ZOOM);
     // Back to fit.
-    app.request_board_cam(PaneId::A, CamRequest::Fit);
-    let _ = app.board_build_camera(PaneId::A, rect);
-    let t = app.board_camera_target(PaneId::A);
+    app.request_pane_cam(PaneId::A, CamRequest::Fit);
+    let _ = app.pane_build_camera(PaneId::A, rect);
+    let t = app.pane_camera_target(PaneId::A);
     assert!((t.zoom - fitted.zoom).abs() / fitted.zoom < 1e-9);
     // The request is consumed exactly once.
-    assert!(app.board_cams.borrow()[0].request.is_none());
+    assert!(app.pane_cams.borrow()[0].request.is_none());
 }
 
 /// Reload never re-fits: the `fitted` flag survives, so a later build leaves
@@ -179,8 +179,8 @@ fn fit_and_reset_requests_apply_in_build() {
 #[test]
 fn build_camera_is_stable_once_fitted() {
     let (app, rect) = fitted_app();
-    let cam0 = app.board_camera(PaneId::A);
-    let cam1 = app.board_build_camera(PaneId::A, rect);
+    let cam0 = app.pane_camera(PaneId::A);
+    let cam1 = app.pane_build_camera(PaneId::A, rect);
     assert_eq!(cam0, cam1, "no request, no re-fit — camera untouched");
 }
 
@@ -377,18 +377,7 @@ fn sync_board_states_writes_selection_flags() {
 fn overlay_lowering_covers_every_field() {
     let zoom = 2e-6;
     let count = |o: &Overlay| overlay_prims(o, zoom).len();
-    let empty = Overlay {
-        highlights: vec![],
-        measure: None,
-        findings: vec![],
-        ghost: vec![],
-        ratsnest: vec![],
-        route_runs: vec![],
-        route_rubber: None,
-        route_vias: vec![],
-        edit_path: None,
-        handles: vec![],
-    };
+    let empty = Overlay::default();
     assert_eq!(count(&empty), 0, "empty overlay lowers to nothing");
 
     let one = |f: &dyn Fn(&mut Overlay)| {
@@ -407,12 +396,8 @@ fn overlay_lowering_covers_every_field() {
     assert!(one(&|o| o.route_vias = vec![(mm_pt(3, 0), 300_000)]) >= 1);
     assert!(one(&|o| o.edit_path = Some((vec![mm_pt(0, 0), mm_pt(2, 2)], 150_000))) >= 1);
     assert!(one(&|o| o.handles = vec![mm_pt(0, 0), mm_pt(2, 2)]) >= 2);
-    // Highlights are state-buffer territory: no overlay geometry.
-    assert_eq!(
-        one(&|o| o.highlights = vec![(eutectic_core::geom::Shape2D::disc(mm_pt(1, 1), MM), false)]),
-        0,
-        "highlight geometry must NOT lower to the overlay"
-    );
+    // (Selection/hover highlight geometry no longer exists as an overlay
+    // channel at all — emphasis rides the semantic state buffer, spec §5.)
     // Content equality gates the GPU upload: identical overlays lower to
     // identical prims (the overlay generation stays put).
     let mut a = empty.clone();
@@ -429,7 +414,7 @@ fn overlay_lowering_covers_every_field() {
 #[test]
 fn stale_dim_state_machine() {
     let (app, _rect) = fitted_app();
-    let g0 = app.board_style_gen();
+    let g0 = app.style_gen();
     assert_eq!(g0 % 2, 0, "fresh doc: stale bit clear");
     // A failed reload keeps the last-good doc + sets reload_error (a
     // malformed `inst` missing its part token is a genuine syntax fault).
@@ -442,7 +427,7 @@ fn stale_dim_state_machine() {
         app.domain.reload_error.is_some(),
         "reload failed as intended"
     );
-    let g1 = app.board_style_gen();
+    let g1 = app.style_gen();
     assert_ne!(g0, g1, "going stale damages the pane");
     assert_eq!(g1 % 2, 1, "stale bit set");
 
@@ -515,8 +500,8 @@ fn free_hover_resolves_pane_and_picks_with_y_flip() {
             },
         )
     };
-    let cam = app.board_camera(PaneId::A);
-    let px = board_project(&cam, rect, center);
+    let cam = app.pane_camera(PaneId::A);
+    let px = pane_project(&cam, rect, center);
     assert!(
         app.raw_cursor_moved(px),
         "hover over the pane needs a redraw"
@@ -531,7 +516,7 @@ fn free_hover_resolves_pane_and_picks_with_y_flip() {
     assert!((cross.0 - (px.0 - rect.0)).abs() < 1e-3);
 
     // Moving to empty board clears the pick but keeps the crosshair.
-    let off = board_project(&cam, rect, mm_pt(0, 0));
+    let off = pane_project(&cam, rect, mm_pt(0, 0));
     app.raw_cursor_moved((off.0.max(rect.0 + 1.0), off.1.min(rect.1 + rect.3 - 1.0)));
     assert!(app.domain.selection.borrow().hovered().next().is_none());
     assert!(app.cursor_px.get()[0].is_some());
@@ -571,7 +556,7 @@ fn free_hover_is_suppressed_during_drags() {
             y: (c.aabb.0.y + c.aabb.1.y) / 2,
         }
     };
-    let px = board_project(&app.board_camera(PaneId::A), rect, center);
+    let px = pane_project(&app.pane_camera(PaneId::A), rect, center);
     app.raw.borrow_mut().primary_down = true;
     app.raw_cursor_moved(px);
     assert!(
@@ -613,10 +598,10 @@ fn middle_drag_pans_camera() {
     let start = (rect.0 + 400.0, rect.1 + 300.0);
     app.raw_cursor_moved(start);
     assert!(app.raw_middle(true), "middle press arms over a board pane");
-    let cam0 = app.board_camera(PaneId::A);
+    let cam0 = app.pane_camera(PaneId::A);
     let to = (start.0 + 120.0, start.1 - 80.0);
     assert!(app.raw_cursor_moved(to), "pan motion needs a redraw");
-    let cam1 = app.board_camera(PaneId::A);
+    let cam1 = app.pane_camera(PaneId::A);
     assert!((cam1.center.0 - (cam0.center.0 - 120.0 / cam0.zoom)).abs() < 1.0);
     assert!((cam1.center.1 - (cam0.center.1 - 80.0 / cam0.zoom)).abs() < 1.0);
     assert_eq!(cam1.zoom, cam0.zoom);

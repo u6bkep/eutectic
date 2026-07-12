@@ -15,25 +15,25 @@ use damascene_core::state::UiState;
 /// requests → layout) against a persistent [`RunnerCore`], whose pointer
 /// entry points synthesize the same capture decisions + `UiEvent`s the
 /// windowed host dispatches. `render_settled`'s twin, plus real input.
-struct Native {
-    rt: RunnerCore,
-    vp: Rect,
+pub(super) struct Native {
+    pub(super) rt: RunnerCore,
+    pub(super) vp: Rect,
 }
 
 impl Native {
     /// Build + settle `app` exactly like [`crate::harness::render_settled`],
     /// but against the runtime's own persistent `UiState` so pointer input
     /// can be delivered afterwards.
-    fn settled(app: &mut EutecticApp) -> Native {
+    pub(super) fn settled(app: &mut EutecticApp) -> Native {
         let mut n = Native {
             rt: RunnerCore::new(),
             vp: Rect::new(0.0, 0.0, 1280.0, 800.0),
         };
         let mut frames = 0;
         loop {
-            let queued = n.frame(app);
+            n.frame(app);
             frames += 1;
-            if (frames >= crate::harness::MIN_FRAMES && !queued)
+            if (frames >= crate::harness::MIN_FRAMES && !app.cameras_pending())
                 || frames >= crate::harness::MAX_FRAMES
             {
                 break;
@@ -42,11 +42,10 @@ impl Native {
         n
     }
 
-    /// One host frame: before_build → build (against the persistent UiState)
-    /// → push the app's viewport requests → layout (which applies them) →
-    /// snapshot the laid-out tree for hit-testing. Returns whether the app
-    /// queued any viewport requests this frame (the settle signal).
-    fn frame(&mut self, app: &mut EutecticApp) -> bool {
+    /// One host frame: before_build → build (against the persistent UiState,
+    /// where `pane_build_camera` applies pending camera work against the
+    /// laid-out rects) → layout → snapshot the laid-out tree for hit-testing.
+    pub(super) fn frame(&mut self, app: &mut EutecticApp) {
         app.before_build();
         let theme = app.theme();
         let mut tree = {
@@ -55,17 +54,13 @@ impl Native {
                 .with_viewport(self.vp.w, self.vp.h);
             app.build(&cx)
         };
-        let requests = app.drain_viewport_requests();
-        let queued = !requests.is_empty();
-        self.rt.ui_state.push_viewport_requests(requests);
         let _ = render_bundle_with_theme(&mut tree, &mut self.rt.ui_state, self.vp, &theme);
         self.rt.last_tree = Some(tree);
-        queued
     }
 
     /// Dispatch runtime-synthesized events through the app, with the same
     /// `EventCx` the windowed host builds.
-    fn dispatch(&self, app: &mut EutecticApp, events: Vec<UiEvent>) {
+    pub(super) fn dispatch(&self, app: &mut EutecticApp, events: Vec<UiEvent>) {
         for e in events {
             let cx = EventCx::new()
                 .with_ui_state(&self.rt.ui_state)
@@ -74,19 +69,19 @@ impl Native {
         }
     }
 
-    fn press(&mut self, app: &mut EutecticApp, px: (f32, f32)) {
+    pub(super) fn press(&mut self, app: &mut EutecticApp, px: (f32, f32)) {
         let evs = self
             .rt
             .pointer_down(Pointer::mouse(px.0, px.1, PointerButton::Primary));
         self.dispatch(app, evs);
     }
 
-    fn move_to(&mut self, app: &mut EutecticApp, px: (f32, f32)) {
+    pub(super) fn move_to(&mut self, app: &mut EutecticApp, px: (f32, f32)) {
         let m = self.rt.pointer_moved(Pointer::moving(px.0, px.1));
         self.dispatch(app, m.events);
     }
 
-    fn release(&mut self, app: &mut EutecticApp, px: (f32, f32)) {
+    pub(super) fn release(&mut self, app: &mut EutecticApp, px: (f32, f32)) {
         let evs = self
             .rt
             .pointer_up(Pointer::mouse(px.0, px.1, PointerButton::Primary));
@@ -94,7 +89,7 @@ impl Native {
     }
 
     /// Pane A's laid-out canvas rect.
-    fn rect_a(&self) -> Rect {
+    pub(super) fn rect_a(&self) -> Rect {
         self.rt
             .ui_state
             .rect_of_key(PaneId::A.canvas_key())
@@ -107,8 +102,8 @@ impl Native {
 /// `super::px_of_board`, which reads a `Rendered`).
 fn px_of_board_ui(app: &EutecticApp, ui: &UiState, p: Point) -> (f32, f32) {
     let rect = ui.rect_of_key(PaneId::A.canvas_key()).expect("pane A");
-    let cam = app.board_camera(PaneId::A);
-    crate::app::board_pane::board_project(&cam, (rect.x, rect.y, rect.w, rect.h), p)
+    let cam = app.pane_camera(PaneId::A);
+    crate::app::canvas_pane::pane_project(&cam, (rect.x, rect.y, rect.w, rect.h), p)
 }
 
 /// A board point inside the GND pour, away from both caps' pads (resolves to
@@ -129,7 +124,7 @@ fn pour_point() -> Point {
 fn select_drag_on_pour_pans_camera() {
     let mut app = edit_app();
     let mut n = Native::settled(&mut app);
-    let cam0 = app.board_camera(PaneId::A);
+    let cam0 = app.pane_camera(PaneId::A);
 
     let from = px_of_board_ui(&app, &n.rt.ui_state, pour_point());
     // Drag straight down 60 px.
@@ -139,7 +134,7 @@ fn select_drag_on_pour_pans_camera() {
     assert!(!app.drag_active(), "a pour press must not arm a part drag");
     n.move_to(&mut app, to);
 
-    let cam1 = app.board_camera(PaneId::A);
+    let cam1 = app.pane_camera(PaneId::A);
     // Screen y down + board y up: dragging DOWN moves the camera center UP
     // in board space by 60 px / zoom.
     let want_dy = 60.0 / cam0.zoom;
@@ -173,24 +168,24 @@ fn select_drag_in_gutter_pans_camera() {
     let mut app = edit_app();
     let mut n = Native::settled(&mut app);
     let rect = n.rect_a();
-    let cam0 = app.board_camera(PaneId::A);
+    let cam0 = app.pane_camera(PaneId::A);
 
     // Bottom-left corner of the pane: outside the fitted board's footprint
     // (the fit centers the board with padding), i.e. empty canvas.
     let px = (rect.x + 8.0, rect.y + rect.h - 8.0);
-    let p = crate::app::board_pane::board_unproject(&cam0, (rect.x, rect.y, rect.w, rect.h), px);
+    let p = crate::app::canvas_pane::pane_unproject(&cam0, (rect.x, rect.y, rect.w, rect.h), px);
     {
         let derived = app.derived.borrow();
         let view = derived.board.as_ref().unwrap();
         assert!(
-            crate::canvas::pick::resolve(&view.candidates, p, 0, |_| true).is_none(),
+            crate::pick::resolve(&view.candidates, p, 0, |_| true).is_none(),
             "test point must be empty canvas, hit something at {p:?}"
         );
     }
 
     n.press(&mut app, px);
     n.move_to(&mut app, (px.0 + 40.0, px.1 - 30.0));
-    let cam1 = app.board_camera(PaneId::A);
+    let cam1 = app.pane_camera(PaneId::A);
     assert!(
         (cam1.center.0 - (cam0.center.0 - 40.0 / cam0.zoom)).abs() * cam0.zoom < 1.0
             && (cam1.center.1 - (cam0.center.1 - 30.0 / cam0.zoom)).abs() * cam0.zoom < 1.0,
@@ -208,7 +203,7 @@ fn select_drag_in_gutter_pans_camera() {
 fn part_drag_still_drags_and_never_pans() {
     let mut app = edit_app();
     let mut n = Native::settled(&mut app);
-    let cam0 = app.board_camera(PaneId::A);
+    let cam0 = app.pane_camera(PaneId::A);
     let comp = EntityId::new("C1");
     let grab = px_of_board_ui(&app, &n.rt.ui_state, pad_center_of(&app, &comp));
 
@@ -217,18 +212,14 @@ fn part_drag_still_drags_and_never_pans() {
     n.move_to(&mut app, (grab.0 + 40.0, grab.1 + 25.0));
     n.frame(&mut app);
     assert_eq!(
-        app.board_camera(PaneId::A),
+        app.pane_camera(PaneId::A),
         cam0,
         "a component drag must not pan the camera"
     );
     n.release(&mut app, (grab.0 + 40.0, grab.1 + 25.0));
     assert!(!app.drag_active());
     assert!(app.dirty(), "the moved part committed");
-    assert_eq!(
-        app.board_camera(PaneId::A),
-        cam0,
-        "still no camera movement"
-    );
+    assert_eq!(app.pane_camera(PaneId::A), cam0, "still no camera movement");
 }
 
 /// Selection still works as a plain click everywhere, including pours: a
@@ -237,7 +228,7 @@ fn part_drag_still_drags_and_never_pans() {
 fn click_selects_pour_without_panning() {
     let mut app = edit_app();
     let mut n = Native::settled(&mut app);
-    let cam0 = app.board_camera(PaneId::A);
+    let cam0 = app.pane_camera(PaneId::A);
     let px = px_of_board_ui(&app, &n.rt.ui_state, pour_point());
 
     n.press(&mut app, px);
@@ -249,7 +240,7 @@ fn click_selects_pour_without_panning() {
         other => panic!("an un-moved press-release on the pour selects it, got {other:?}"),
     }
     assert_eq!(
-        app.board_camera(PaneId::A),
+        app.pane_camera(PaneId::A),
         cam0,
         "a plain click must not pan"
     );
@@ -266,7 +257,7 @@ fn route_tool_gestures_keep_canvas_priority() {
     let cx = EventCx::new().with_ui_state(&n.rt.ui_state);
     app.on_event(click(&PaneId::A.strip_key(Tool::Route)), &cx);
     assert_eq!(app.tool_for(ViewKind::Board), Tool::Route);
-    let cam0 = app.board_camera(PaneId::A);
+    let cam0 = app.pane_camera(PaneId::A);
 
     let comp = EntityId::new("C1");
     let pin_px = px_of_board_ui(&app, &n.rt.ui_state, pad_center_of(&app, &comp));
@@ -275,7 +266,7 @@ fn route_tool_gestures_keep_canvas_priority() {
     n.release(&mut app, (pin_px.0 + 30.0, pin_px.1 + 30.0));
     n.frame(&mut app);
     assert_eq!(
-        app.board_camera(PaneId::A),
+        app.pane_camera(PaneId::A),
         cam0,
         "Route-tool pointer work must not arm the Select camera pan"
     );
@@ -287,20 +278,20 @@ fn route_tool_gestures_keep_canvas_priority() {
 /// `render::gpu::grid_params` pins its ladder/coverage; the old
 /// grid-asset-window tests died with the grid cache.)
 #[test]
-fn toolbar_fit_and_reset_drive_board_camera() {
+fn toolbar_fit_and_reset_drive_pane_camera() {
     let mut app = edit_app();
     let mut n = Native::settled(&mut app);
-    let fitted = app.board_camera(PaneId::A);
+    let fitted = app.pane_camera(PaneId::A);
 
     {
         let cx = EventCx::new().with_ui_state(&n.rt.ui_state);
         app.on_event(click("reset"), &cx);
     }
     n.frame(&mut app); // build consumes the request (glide retargets)
-    let t = app.board_camera_target(PaneId::A);
+    let t = app.pane_camera_target(PaneId::A);
     assert_eq!(
         t.zoom,
-        crate::app::board_pane::RESET_ZOOM,
+        crate::app::canvas_pane::RESET_ZOOM,
         "reset targets 1 px/mm"
     );
 
@@ -309,7 +300,7 @@ fn toolbar_fit_and_reset_drive_board_camera() {
         app.on_event(click("fit"), &cx);
     }
     n.frame(&mut app);
-    let t = app.board_camera_target(PaneId::A);
+    let t = app.pane_camera_target(PaneId::A);
     assert!(
         (t.zoom - fitted.zoom).abs() / fitted.zoom < 1e-9,
         "fit re-frames the scene bounds (zoom {} vs fitted {})",
@@ -319,18 +310,18 @@ fn toolbar_fit_and_reset_drive_board_camera() {
 }
 
 /// Wheel zoom-at-cursor through the real wheel-event path (`on_wheel_event`
-/// consumes wheel over a board pane): the board point under the cursor is
-/// unchanged from tick through settle, and the schematic pane's wheel stays
-/// unconsumed (native viewport zoom).
+/// consumes wheel over any canvas pane): the board point under the cursor is
+/// unchanged from tick through settle. (The schematic twin lives in
+/// `tests::schematic_pane`.)
 #[test]
 fn wheel_over_board_zooms_at_cursor_and_is_consumed() {
     let mut app = edit_app();
     let n = Native::settled(&mut app);
     let rect = n.rect_a();
     let pos = (rect.x + rect.w * 0.7, rect.y + rect.h * 0.3);
-    let cam0 = app.board_camera(PaneId::A);
+    let cam0 = app.pane_camera(PaneId::A);
     let anchor =
-        crate::app::board_pane::board_unproject(&cam0, (rect.x, rect.y, rect.w, rect.h), pos);
+        crate::app::canvas_pane::pane_unproject(&cam0, (rect.x, rect.y, rect.w, rect.h), pos);
 
     let mut e = UiEvent::synthetic_click(PaneId::A.canvas_key());
     e.kind = UiEventKind::PointerWheel;
@@ -345,14 +336,14 @@ fn wheel_over_board_zooms_at_cursor_and_is_consumed() {
     );
     // Settle the glide and re-check the anchor.
     {
-        let mut cams = app.board_cams.borrow_mut();
+        let mut cams = app.pane_cams.borrow_mut();
         while !cams[0].glide.settled() {
             cams[0].glide.step(1.0 / 120.0);
         }
     }
-    let cam1 = app.board_camera(PaneId::A);
+    let cam1 = app.pane_camera(PaneId::A);
     assert!(cam1.zoom > cam0.zoom, "scroll up zooms in");
-    let now = crate::app::board_pane::board_unproject(&cam1, (rect.x, rect.y, rect.w, rect.h), pos);
+    let now = crate::app::canvas_pane::pane_unproject(&cam1, (rect.x, rect.y, rect.w, rect.h), pos);
     let err_px = (((now.x - anchor.x) as f64).hypot((now.y - anchor.y) as f64)) * cam1.zoom;
     assert!(
         err_px < 1.0,
@@ -381,7 +372,7 @@ fn wheel_is_not_consumed_while_modal_chrome_is_open() {
         e
     };
 
-    let cam0 = app.board_camera(PaneId::A);
+    let cam0 = app.pane_camera(PaneId::A);
     app.set_libraries_open(true);
     assert!(
         !app.on_wheel_event(wheel(), &cx),
@@ -396,7 +387,7 @@ fn wheel_is_not_consumed_while_modal_chrome_is_open() {
     );
     app.set_open_menu(None);
 
-    let cam1 = app.board_camera(PaneId::A);
+    let cam1 = app.pane_camera(PaneId::A);
     assert_eq!(
         (cam0.zoom, cam0.center),
         (cam1.zoom, cam1.center),

@@ -42,6 +42,23 @@ pub struct InstanceRaw {
     pub sem: u32,
 }
 
+/// One MSDF glyph quad instance (renderer-spec §6, WP3): the glyph's quad in
+/// anchor-relative nm, its atlas-page uv rect, the semantic id, and the MSDF
+/// spread (atlas px — the shader's distance-range input). Built by
+/// [`text::glyph_instances`](super::text::glyph_instances); 40 bytes.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct TextInstRaw {
+    /// `[x_left, y_top, w, h]` — anchor-relative nm, y-up top edge; the quad
+    /// extends `h` downward (−y).
+    pub rect: [f32; 4],
+    /// `[u, v, uw, vh]` — the glyph's rect on its atlas page, 0‥1.
+    pub uv: [f32; 4],
+    pub sem: u32,
+    /// MSDF spread in atlas px.
+    pub spread: f32,
+}
+
 /// One polygon-mesh vertex: anchor-relative position + the semantic id
 /// (per-vertex so one buffer batches every polygon of a plane).
 #[repr(C)]
@@ -123,8 +140,9 @@ pub fn build_prim_data(prims: &[Prim], anchor: Point) -> PlaneData {
                 out.mesh_indices
                     .extend(mesh.indices.iter().map(|&i| base + i));
             }
-            // WP1 renders no text (spec §6): board silk arrives as Polygon
-            // glyphs; TextRun is the schematic slice's MSDF work (WP3).
+            // Text is not geometry: TextRuns lower through the MSDF tier
+            // ([`super::text::glyph_instances`], spec §6), never through the
+            // analytic/mesh path. Board silk arrives as Polygon glyphs.
             PrimShape::TextRun { .. } => {}
         }
     }
@@ -220,7 +238,7 @@ mod tests {
     }
 
     #[test]
-    fn text_runs_build_nothing_in_wp1() {
+    fn text_runs_build_no_geometry() {
         let prims = vec![Prim::fill(
             1,
             PrimShape::TextRun {

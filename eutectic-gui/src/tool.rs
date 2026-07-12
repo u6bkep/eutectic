@@ -316,7 +316,7 @@ pub const CAMERA_PAN_SLOP_PX: f32 = 4.0;
 /// so the board tracks the pointer exactly. Pure per-event arithmetic — no
 /// kernel, no tessellation (event-path discipline). The middle-drag pan
 /// (spec §7's primary pan gesture) is its raw-event twin in
-/// `app::board_pane`; this left-drag pan is preserved behavior from the
+/// `app::canvas_pane`; this left-drag pan is preserved behavior from the
 /// viewport era.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CameraPanState {

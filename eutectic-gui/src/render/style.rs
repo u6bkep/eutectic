@@ -62,7 +62,9 @@ pub struct StyleTables {
     pub emphasis: Color,
     /// Dash patterns; index 0 is the board-edge dash
     /// ([`board::DASH_EDGE`](super::board::DASH_EDGE), 0.8 mm on / 0.5 mm
-    /// off — the old canvas's edge treatment).
+    /// off — the old canvas's edge treatment); index 1 is the schematic
+    /// bin-divider dash ([`schematic::DASH_BIN`](super::schematic::DASH_BIN),
+    /// 1 mm on / 1 mm off — the SVG oracle's `stroke-dasharray="1,1"`).
     pub dash: Vec<DashPattern>,
     dark: bool,
     generation: u64,
@@ -106,10 +108,19 @@ impl StyleTables {
                 [0x22, 0xd3, 0xee, 0xff],
                 [0x06, 0x91, 0xa5, 0xff],
             ),
-            dash: vec![DashPattern {
-                on_nm: 800_000.0,
-                off_nm: 500_000.0,
-            }],
+            dash: vec![
+                // 0: board-edge (0.8 mm on / 0.5 mm off).
+                DashPattern {
+                    on_nm: 800_000.0,
+                    off_nm: 500_000.0,
+                },
+                // 1: schematic bin divider (1 mm / 1 mm — the SVG oracle's
+                // `stroke-dasharray="1,1"`).
+                DashPattern {
+                    on_nm: 1_000_000.0,
+                    off_nm: 1_000_000.0,
+                },
+            ],
             dark,
             generation: 0,
         }
@@ -144,6 +155,13 @@ impl StyleTables {
         let mut s = self.plane_style(key, &copper_order(scene));
         s.dim = dim;
         self.set_plane(key.clone(), s);
+    }
+
+    /// The effective (default ⊕ override) appearance of one plane — the
+    /// layer panel's swatch source (WP3: layer rows derive from the scene's
+    /// plane list, not from a dead tessellation pass).
+    pub fn plane_appearance(&self, key: &PlaneKey, scene: &Scene) -> PlaneStyle {
+        self.plane_style(key, &copper_order(scene))
     }
 
     /// The effective (default ⊕ override) style of one plane. `copper` is
@@ -245,6 +263,40 @@ impl StyleTables {
                 visible: true,
                 background_paint: true,
             },
+            // Schematic tiers (WP3): the old schematic view's palette (its
+            // `class_color` table) with light-mode variants.
+            PlaneKey::SchematicWire => plain(
+                t(
+                    "eutectic.schematic.wire",
+                    [0x2e, 0xa0, 0x43, 0xff],
+                    [0x15, 0x80, 0x3d, 0xff],
+                ),
+                1.0,
+            ),
+            PlaneKey::SchematicInk => plain(
+                t(
+                    "eutectic.schematic.ink",
+                    [0xd8, 0xd8, 0xd8, 0xff],
+                    [0x37, 0x41, 0x51, 0xff],
+                ),
+                1.0,
+            ),
+            PlaneKey::SchematicTag => plain(
+                t(
+                    "eutectic.schematic.tag",
+                    [0x6f, 0xb7, 0xc9, 0xff],
+                    [0x0e, 0x74, 0x90, 0xff],
+                ),
+                1.0,
+            ),
+            PlaneKey::SchematicChrome => plain(
+                t(
+                    "eutectic.schematic.chrome",
+                    [0x88, 0x88, 0x88, 0xff],
+                    [0x6b, 0x72, 0x80, 0xff],
+                ),
+                1.0,
+            ),
             PlaneKey::Overlay => plain(
                 t(
                     "eutectic.overlay.preview",
