@@ -906,6 +906,9 @@ DOF analysis, no decomposition into independent subsystems, no global-optimality
 claim for least-change; `MinSep`/`NoOverlap` make the feasible region non-convex,
 so a pathological start can settle poorly. `Solution.converged`/`unsatisfied` is
 not yet threaded into `ReconReport` (noted at the call sites in `elaborate.rs`).
+**Min-separation-to-a-pin is not implemented** — `MinSep` is entity-to-entity
+only; the pin-relative constraint exists solely as `NearPin` (attraction), with
+no repulsive counterpart.
 
 ## Prototype status (footprint import)
 
@@ -1030,7 +1033,9 @@ is byte-stable and a one-thing change yields a one-line diff.
   ([d15](log/d15-paste-derived-fab-slab.md)).
 - **`schematic_svg(doc, lib)`** — the schematic view, serialized from the
   `schematic_features` stream ([d23](log/d23-schematic-features-tier.md)); the
-  headless/agent artifact and test oracle (golden fixture committed).
+  headless/agent artifact and test oracle (golden fixture committed). Lives in
+  its own top-level `schematic_svg` module (a sibling of `export` that reuses its
+  SVG helpers), not inside `export`.
 - **Gerber + Excellon** — see "Prototype status (Gerber/fab output)".
 
 ## Prototype status (routing core)
@@ -1067,6 +1072,12 @@ is byte-stable and a one-thing change yields a one-line diff.
 
 Honest limits: the `Drc` query still uses `DesignRules::default()` (`query.rs`) —
 wiring rules to a per-board process definition is the documented follow-up.
+**Netless copper is invisible to the clearance check** — the conductor list is
+built `net = nf.net.as_ref()?` (`route/drc.rs`), so a floating/mounting pad's
+copper (`net == None`) participates in no clearance pair. And **ratsnest
+connectivity is tolerance-based incidence, not true overlap** — union-find joins
+features within `DesignRules::touch_tol` (`route/model.rs`, default 0.01 mm; live
+at `route/drc.rs`), not by a geometric-intersection test.
 
 ## Prototype status (autorouter)
 
