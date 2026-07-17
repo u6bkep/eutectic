@@ -68,6 +68,9 @@ impl EutecticApp {
     /// [`swap_source`]: EutecticApp::swap_source
     pub fn apply_reload(&mut self, source: String) {
         if self.swap_source(source) {
+            // An export result describes the prior live document; once a disk
+            // reload/revert lands, do not leave that stale result advertised.
+            *self.chrome_notice.borrow_mut() = None;
             let d = &mut self.domain;
             d.edit.dirty = false;
             d.edit.undo.clear();
@@ -251,6 +254,9 @@ impl EutecticApp {
         let text = eutectic_core::text::serialize(doc);
         match domain::atomic_write(&path, &text) {
             Ok(()) => {
+                // A successful save supersedes any earlier export result (or
+                // failure); the next export will publish a fresh notice.
+                *self.chrome_notice.borrow_mut() = None;
                 let edit = &mut self.domain.edit;
                 edit.dirty = false;
                 edit.saved_canon = Some(text.clone());

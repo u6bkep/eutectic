@@ -3,10 +3,12 @@
 
 use super::*;
 use crate::app::canvas_pane::{MAX_ZOOM, MIN_ZOOM};
+use crate::app::pane::{REDO_KEY, SAVE_KEY, UNDO_KEY};
 use crate::chrome::actions::*;
 use crate::chrome::dialogs::{ABOUT_KEY, ChromeDialog, KEYMAP_KEY, WIRED_CHORDS};
 use crate::chrome::menubar::{MenuRow, menu_defs};
 use crate::render::camera::Camera;
+use damascene_core::runtime::RunnerCore;
 
 fn all_texts(el: &El) -> Vec<String> {
     fn walk(el: &El, out: &mut Vec<String>) {
@@ -22,6 +24,15 @@ fn all_texts(el: &El) -> Vec<String> {
     out
 }
 
+fn find_text_el<'a>(el: &'a El, needle: &str) -> Option<&'a El> {
+    if el.text.as_deref() == Some(needle) {
+        return Some(el);
+    }
+    el.children
+        .iter()
+        .find_map(|child| find_text_el(child, needle))
+}
+
 fn source_backed_app(tag: &str) -> (Scratch, EutecticApp, std::path::PathBuf) {
     let scratch = Scratch::new(tag);
     let mut app = board();
@@ -29,6 +40,47 @@ fn source_backed_app(tag: &str) -> (Scratch, EutecticApp, std::path::PathBuf) {
     std::fs::write(&path, &app.domain.source).expect("copy fixture source");
     app.domain.source_path = Some(path.clone());
     (scratch, app, path)
+}
+
+/// Spell the public `KeyChord` fields exactly as the Keymap renders them.
+/// Keeping this on the test side makes the dialog's literal inventory fail
+/// when registration changes without a matching content update.
+fn chord_label(chord: &KeyChord) -> String {
+    let ChordTrigger::Logical(LogicalKey::Character(key)) = &chord.trigger else {
+        panic!("the app currently registers only logical character chords")
+    };
+    let mut parts: Vec<String> = Vec::new();
+    if chord.modifiers.ctrl {
+        parts.push("Ctrl".to_string());
+    }
+    if chord.modifiers.shift {
+        parts.push("Shift".to_string());
+    }
+    if chord.modifiers.alt {
+        parts.push("Alt".to_string());
+    }
+    if chord.modifiers.logo {
+        parts.push("Meta".to_string());
+    }
+    parts.push(
+        if key.is_ascii() && key.chars().all(|c| c.is_ascii_alphabetic()) {
+            key.to_ascii_uppercase()
+        } else {
+            key.clone()
+        },
+    );
+    parts.join("+")
+}
+
+fn hotkey_action_label(action: &str) -> &'static str {
+    match action {
+        SAVE_KEY => "Save",
+        UNDO_KEY => "Undo",
+        REDO_KEY => "Redo",
+        ZOOM_IN_KEY => "Zoom in",
+        ZOOM_OUT_KEY => "Zoom out",
+        other => panic!("unlisted registered hotkey action: {other}"),
+    }
 }
 
 #[test]
@@ -69,6 +121,85 @@ fn export_actions_write_full_fab_set_and_both_svgs() {
     let notice = app.chrome_notice.borrow().clone().expect("success notice");
     assert!(!notice.error);
     assert!(notice.message.contains("2 SVG files"));
+}
+
+#[test]
+fn export_uses_unsaved_live_document_without_rewriting_source() {
+    let (_scratch, mut app, source) = source_backed_app("chrome-live-export");
+    let disk_before = std::fs::read_to_string(&source).unwrap();
+    let svg_before =
+        eutectic_core::export::svg(app.domain.doc.as_ref().unwrap(), &app.domain.lib).unwrap();
+
+    commit_move(&mut app, -2, 0);
+    assert!(app.dirty(), "the export happens before an explicit save");
+    let live_svg =
+        eutectic_core::export::svg(app.domain.doc.as_ref().unwrap(), &app.domain.lib).unwrap();
+    assert_ne!(
+        live_svg, svg_before,
+        "the in-memory edit changes SVG output"
+    );
+
+    app.on_event(click(EXPORT_SVG_KEY), &EventCx::new());
+    let exported = std::fs::read_to_string(source.with_extension("svg")).unwrap();
+    assert_eq!(exported, live_svg, "export snapshots the live edited doc");
+    assert_ne!(exported, svg_before, "the export reflects the unsaved move");
+    assert_eq!(
+        std::fs::read_to_string(&source).unwrap(),
+        disk_before,
+        "export never saves or rewrites the source document"
+    );
+}
+
+#[test]
+fn export_write_failure_surfaces_a_destructive_notice_without_panicking() {
+    let (_scratch, mut app, source) = source_backed_app("chrome-export-failure");
+    let output = source.with_extension("svg");
+    std::fs::create_dir(&output).expect("directory blocks the SVG output file");
+
+    app.on_event(click(EXPORT_SVG_KEY), &EventCx::new());
+    let notice = app.chrome_notice.borrow().clone().expect("failure notice");
+    assert!(notice.error);
+    assert!(notice.message.contains("SVG export failed"));
+    assert!(notice.message.contains("writing"));
+
+    let bar = app.menubar_bar();
+    let chip = find_text_el(&bar, &notice.message).expect("export failure chip is rendered");
+    assert_eq!(
+        chip.text_color,
+        Some(damascene_core::tokens::DESTRUCTIVE),
+        "an export failure is rendered as a destructive chip"
+    );
+}
+
+#[test]
+fn export_notice_clears_after_reload_revert_and_successful_save() {
+    let (_scratch, mut app, _source) = source_backed_app("chrome-export-lifecycle");
+    let cx = EventCx::new();
+
+    app.on_event(click(EXPORT_SVG_KEY), &cx);
+    assert!(app.chrome_notice.borrow().is_some());
+    app.apply_reload(app.domain.source.clone());
+    assert!(
+        app.chrome_notice.borrow().is_none(),
+        "a successful document reload clears the prior export result"
+    );
+
+    commit_move(&mut app, -1, 0);
+    app.on_event(click(EXPORT_SVG_KEY), &cx);
+    assert!(app.chrome_notice.borrow().is_some());
+    app.save();
+    assert!(
+        app.chrome_notice.borrow().is_none(),
+        "a successful save clears the prior export result"
+    );
+
+    app.on_event(click(EXPORT_SVG_KEY), &cx);
+    assert!(app.chrome_notice.borrow().is_some());
+    app.revert_to_saved();
+    assert!(
+        app.chrome_notice.borrow().is_none(),
+        "a successful Revert to Saved clears the prior export result"
+    );
 }
 
 #[test]
@@ -121,6 +252,120 @@ fn zoom_targets_only_the_focused_pane_and_clamps() {
 }
 
 #[test]
+fn runtime_zoom_hotkey_does_not_steal_library_path_hyphen() {
+    let mut app = board();
+    app.focused_pane.set(PaneId::B);
+    let before = app.pane_camera_target(PaneId::B);
+
+    // Exercise actual damascene hotkey matching, not a fabricated Hotkey event.
+    let mut runtime = RunnerCore::new();
+    runtime.set_hotkeys(app.hotkeys());
+    let ctrl = KeyModifiers {
+        ctrl: true,
+        ..Default::default()
+    };
+    let events = runtime.key_down(
+        LogicalKey::Character("-".into()),
+        PhysicalKey::Minus,
+        ctrl,
+        false,
+    );
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].kind, UiEventKind::Hotkey);
+    for event in events {
+        app.on_event(event, &EventCx::new());
+    }
+    assert_eq!(
+        app.pane_camera_target(PaneId::B).zoom,
+        before.zoom / 1.25,
+        "Ctrl+- zooms the focused pane through the runtime"
+    );
+
+    // Build and lay out the real Libraries modal, then focus its path input
+    // with a runtime pointer press exactly as the host does.
+    app.set_libraries_open(true);
+    let rendered = settle(&mut app);
+    let path = rendered
+        .ui
+        .rect_of_key("libraries:input:path")
+        .expect("Libraries path input is laid out");
+    let mut runtime = RunnerCore::new();
+    runtime.ui_state = rendered.ui;
+    runtime.ui_state.sync_focus_order(&rendered.tree);
+    runtime.last_tree = Some(rendered.tree);
+    runtime.set_hotkeys(app.hotkeys());
+    let pointer = Pointer::mouse(
+        path.x + path.w / 2.0,
+        path.y + path.h / 2.0,
+        PointerButton::Primary,
+    );
+    assert!(
+        runtime.would_press_focus_text_input(pointer.x, pointer.y),
+        "the runtime hit-test sees the Libraries path input"
+    );
+    for event in runtime.pointer_down(pointer) {
+        app.on_event(event, &EventCx::new());
+    }
+    assert!(
+        runtime.focused_captures_keys(),
+        "pointer-down focuses the path input"
+    );
+    for event in runtime.pointer_up(pointer) {
+        app.on_event(event, &EventCx::new());
+    }
+
+    let camera_before_typing = app.pane_camera_target(PaneId::B);
+    let events = runtime.key_down(
+        LogicalKey::Character("-".into()),
+        PhysicalKey::Minus,
+        KeyModifiers::default(),
+        false,
+    );
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].kind,
+        UiEventKind::KeyDown,
+        "bare - must reach the focused input rather than match a hotkey"
+    );
+    for event in events {
+        app.on_event(event, &EventCx::new());
+    }
+    let text = runtime
+        .text_input("-".to_string())
+        .expect("focused input receives composed text from the same key press");
+    app.on_event(text, &EventCx::new());
+    assert!(
+        app.lib_ui.borrow().path.contains('-'),
+        "the focused path input receives the typed hyphen"
+    );
+    assert_eq!(
+        app.pane_camera_target(PaneId::B),
+        camera_before_typing,
+        "typing into the modal must not move the pane behind its scrim"
+    );
+}
+
+#[test]
+fn chrome_hotkeys_are_suppressed_while_modal_chrome_owns_input() {
+    for owner in ["libraries", "menu", "dialog"] {
+        let mut app = board();
+        let before = app.pane_camera_target(PaneId::A);
+        match owner {
+            "libraries" => app.set_libraries_open(true),
+            "menu" => app.set_open_menu(Some("view")),
+            "dialog" => app.chrome_dialog.set(Some(ChromeDialog::Keymap)),
+            _ => unreachable!(),
+        }
+        app.on_event(hotkey(ZOOM_OUT_KEY), &EventCx::new());
+        assert_eq!(
+            app.pane_camera_target(PaneId::A),
+            before,
+            "{owner} must own chrome hotkeys"
+        );
+    }
+}
+
+#[test]
 fn units_toggle_converts_cursor_and_measure_readouts() {
     let mut app = board();
     app.cursor_board_mm.set(Some((25.4, 50.8)));
@@ -166,6 +411,24 @@ fn grid_toggle_changes_state_and_damage_generation() {
 #[test]
 fn help_dialogs_list_only_wired_chords_and_real_version() {
     let mut app = board();
+    let mut registered: Vec<(String, String)> = app
+        .hotkeys()
+        .iter()
+        .map(|(chord, action)| (chord_label(chord), hotkey_action_label(action).to_string()))
+        .collect();
+    registered.push((
+        "Esc".to_string(),
+        "Cancel gesture/tool or clear selection".to_string(),
+    ));
+    let documented: Vec<(String, String)> = WIRED_CHORDS
+        .iter()
+        .map(|(chord, action)| ((*chord).to_string(), (*action).to_string()))
+        .collect();
+    assert_eq!(
+        documented, registered,
+        "Keymap rows must exactly match registered chords plus raw Escape"
+    );
+
     app.on_event(click(KEYMAP_KEY), &EventCx::new());
     assert_eq!(app.chrome_dialog.get(), Some(ChromeDialog::Keymap));
     let texts = all_texts(&app.chrome_dialog_overlay().unwrap());
@@ -173,12 +436,6 @@ fn help_dialogs_list_only_wired_chords_and_real_version() {
         assert!(texts.iter().any(|t| t == chord));
         assert!(texts.iter().any(|t| t == action));
     }
-    assert_eq!(
-        app.hotkeys().len() + 1,
-        WIRED_CHORDS.len(),
-        "keymap rows are the registered hotkeys plus the directly handled Escape key"
-    );
-
     app.chrome_dialog.set(None);
     app.on_event(click(ABOUT_KEY), &EventCx::new());
     let texts = all_texts(&app.chrome_dialog_overlay().unwrap());

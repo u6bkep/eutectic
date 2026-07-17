@@ -146,9 +146,10 @@ impl EutecticApp {
             return true;
         }
 
-        // The two add-entry text inputs: fold routed edits into the app-owned
-        // strings + shared Selection (the damascene text_input contract —
-        // apply_event self-gates pointer events by route, key events by focus).
+        // The two add-entry text inputs: fold edits into the app-owned strings
+        // + shared Selection. Pointer events self-gate inside `apply_event`,
+        // while key/text events must be offered only to their runtime-routed
+        // focused target (otherwise the first input would claim path typing).
         {
             let mut ui = self.lib_ui.borrow_mut();
             let LibUi {
@@ -157,9 +158,16 @@ impl EutecticApp {
                 selection,
                 ..
             } = &mut *ui;
-            if text_input::apply_event(name, selection, event, LIB_NAME_INPUT_KEY)
-                || text_input::apply_event(path, selection, event, LIB_PATH_INPUT_KEY)
-            {
+            let handled = match event.target_key().or_else(|| event.route()) {
+                Some(LIB_NAME_INPUT_KEY) => {
+                    text_input::apply_event(name, selection, event, LIB_NAME_INPUT_KEY)
+                }
+                Some(LIB_PATH_INPUT_KEY) => {
+                    text_input::apply_event(path, selection, event, LIB_PATH_INPUT_KEY)
+                }
+                _ => false,
+            };
+            if handled {
                 return true;
             }
             // A runtime selection update (focus moved, drag-select) not folded by

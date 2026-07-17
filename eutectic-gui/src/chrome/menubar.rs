@@ -192,12 +192,12 @@ pub(crate) fn menu_defs() -> Vec<MenuDef> {
                 },
                 Wired {
                     label: "Zoom In",
-                    shortcut: Some("+"),
+                    shortcut: Some("Ctrl++ / Ctrl+="),
                     action: ZOOM_IN_KEY,
                 },
                 Wired {
                     label: "Zoom Out",
-                    shortcut: Some("−"),
+                    shortcut: Some("Ctrl+-"),
                     action: ZOOM_OUT_KEY,
                 },
                 Sep,

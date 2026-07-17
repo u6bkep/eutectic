@@ -1,6 +1,11 @@
 //! Chrome command handlers that are independent of the menu/toolbar widgets:
 //! deterministic convention-based exports, display/grid toggles, focused-pane
 //! zoom, and clean quit state.
+//!
+//! Exports deliberately serialize the live in-memory document, including
+//! unsaved edits, rather than re-reading the last-saved source. This matches
+//! the suite's permissive editing model: export is a snapshot of what the user
+//! is currently reviewing, while Save remains an independent explicit action.
 
 use crate::app::pane::SidebarSection;
 use crate::app::{EutecticApp, PaneId};
@@ -44,7 +49,16 @@ impl EutecticApp {
     /// Handle a routed chrome command. Kept outside `app/events.rs` so sibling
     /// event work has one narrow integration point.
     pub(crate) fn handle_chrome_event(&mut self, event: &UiEvent) -> bool {
-        let clicked = |key| event.is_click_or_activate(key) || event.is_hotkey(key);
+        // Modal chrome owns the keyboard, mirroring the Save / Undo / Redo
+        // gate in `on_event`: registered hotkeys beat focused widgets' raw-key
+        // capture in damascene, so never dispatch one beneath a Libraries
+        // modal, Help dialog, or open menu. Pointer activation still works
+        // after a menu row closes its own popover earlier in the route table.
+        let hotkeys_allowed = !self.libraries_open.get()
+            && self.chrome_dialog.get().is_none()
+            && self.open_menu.borrow().is_none();
+        let clicked =
+            |key| event.is_click_or_activate(key) || (hotkeys_allowed && event.is_hotkey(key));
         if clicked(EXPORT_GERBERS_KEY) {
             self.export_gerbers();
         } else if clicked(EXPORT_SVG_KEY) {

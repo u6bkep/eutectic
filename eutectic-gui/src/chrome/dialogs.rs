@@ -16,8 +16,9 @@ pub(crate) const WIRED_CHORDS: &[(&str, &str)] = &[
     ("Ctrl+Z", "Undo"),
     ("Ctrl+Shift+Z", "Redo"),
     ("Ctrl+Y", "Redo"),
-    ("+", "Zoom in"),
-    ("−", "Zoom out"),
+    ("Ctrl++", "Zoom in"),
+    ("Ctrl+=", "Zoom in"),
+    ("Ctrl+-", "Zoom out"),
     ("Esc", "Cancel gesture/tool or clear selection"),
 ];
 

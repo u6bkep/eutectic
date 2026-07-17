@@ -482,14 +482,9 @@ impl App for EutecticApp {
             (KeyChord::ctrl('z'), UNDO_KEY.to_string()),
             (KeyChord::ctrl_shift('z'), REDO_KEY.to_string()),
             (KeyChord::ctrl('y'), REDO_KEY.to_string()),
-            (
-                KeyChord::vim('+').with_modifiers(KeyModifiers {
-                    shift: true,
-                    ..Default::default()
-                }),
-                ZOOM_IN_KEY.to_string(),
-            ),
-            (KeyChord::vim('-'), ZOOM_OUT_KEY.to_string()),
+            (KeyChord::ctrl('+'), ZOOM_IN_KEY.to_string()),
+            (KeyChord::ctrl('='), ZOOM_IN_KEY.to_string()),
+            (KeyChord::ctrl('-'), ZOOM_OUT_KEY.to_string()),
         ]
     }
 
