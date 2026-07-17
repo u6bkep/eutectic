@@ -151,7 +151,10 @@ impl EutecticApp {
 /// permissive philosophy starts here).
 pub(crate) fn error_card(message: &str) -> El {
     // The empty state uses the same path — "no document" is just an `Err`.
-    if message.starts_with("no document") {
+    // Exact sentinel or the "no document: ..." prefix only: a bare starts_with
+    // would also swallow unrelated strings like editing.rs's "no document to
+    // edit: ..." if one ever flowed here, turning a real error friendly.
+    if message == "no document" || message.starts_with("no document:") {
         let description = if message == "no document" {
             "Pass a path to a .eut file to load a document."
         } else {
@@ -166,4 +169,51 @@ pub(crate) fn error_card(message: &str) -> El {
     ])
     .destructive()
     .width(Size::Fixed(420.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every text in the card, depth-first — enough to tell the friendly
+    /// "No document" card from the destructive load-error alert.
+    fn texts(el: &El, out: &mut Vec<String>) {
+        if let Some(t) = &el.text {
+            out.push(t.clone());
+        }
+        for c in &el.children {
+            texts(c, out);
+        }
+    }
+
+    fn card_texts(message: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        texts(&error_card(message), &mut out);
+        out
+    }
+
+    /// The exact sentinel and the "no document: ..." startup note render the
+    /// friendly card (note text visible); anything else — including the
+    /// near-miss "no document to edit: ..." shape from the editing layer —
+    /// stays a destructive load error.
+    #[test]
+    fn error_card_separates_no_document_shapes_from_real_errors() {
+        let friendly = card_texts("no document");
+        assert!(friendly.iter().any(|t| t == "No document"), "{friendly:?}");
+        assert!(!friendly.iter().any(|t| t == "Could not load document"));
+
+        let note = "no document: showcase not found at /tmp/x.eut; pass a .eut path";
+        let fallback = card_texts(note);
+        assert!(fallback.iter().any(|t| t == "No document"), "{fallback:?}");
+        assert!(fallback.iter().any(|t| t == note), "note text shown");
+
+        for real_error in ["no document to edit: parse failed", "line 3: bad token"] {
+            let destructive = card_texts(real_error);
+            assert!(
+                destructive.iter().any(|t| t == "Could not load document"),
+                "{real_error:?} must stay a load error: {destructive:?}"
+            );
+            assert!(!destructive.iter().any(|t| t == "No document"));
+        }
+    }
 }
