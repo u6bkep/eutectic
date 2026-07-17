@@ -5,6 +5,20 @@ use crate::elaborate::{elaborate, psu_module};
 use crate::history::History;
 use crate::part::part_library;
 
+#[test]
+fn named_net_with_zero_members_roundtrips() {
+    let Parsed { source, .. } = parse("net SPARE").expect("empty named net parses");
+    assert_eq!(
+        source,
+        vec![GenDirective::ConnectPins {
+            net: "SPARE".to_string(),
+            pins: Vec::new(),
+        }]
+    );
+    let doc = doc_of(source, BTreeMap::new());
+    assert_eq!(serialize(&doc), "net SPARE\n");
+}
+
 // ---- fixtures --------------------------------------------------------
 
 fn uart_link() -> Source {

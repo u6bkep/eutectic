@@ -41,7 +41,7 @@
 //! alignx  <node> <node> ...        # share an x coordinate (vertical line)
 //! aligny  <node> <node> ...        # share a y coordinate (horizontal line)
 //! connect <compA>.<port> <compB>.<port>   # typed-interface connection (auto-crossed)
-//! net     <name> <comp>.<pin> <comp>.<pin> ...   # join discrete pins onto a net
+//! net     <name> [<comp>.<pin> ...]       # declare a named net; optionally join pins
 //! nc      <comp>.<pin> <comp>.<pin> ...          # mark pads deliberately unconnected
 //!
 //! A `<pin>` in `net`/`nc` is a *selector*: a functional name fans out to every pad

@@ -747,10 +747,8 @@ pub(crate) fn parse_line(line: &str) -> Result<Item, String> {
         }
         "net" => {
             let toks: Vec<&str> = rest.split_whitespace().collect();
-            if toks.len() < 2 {
-                return Err(
-                    "net needs a name and at least one pin: net <name> <comp>.<pin> ...".into(),
-                );
+            if toks.is_empty() {
+                return Err("net needs a name: net <name> [<comp>.<pin> ...]".into());
             }
             let net = toks[0].to_string();
             let mut pins = Vec::new();
