@@ -51,6 +51,7 @@ implemented-on-`main` commit where one was recorded).
 | [d21](d21-source-language-core.md) | 2026-07-04 | implemented (`468fe23`) | The source language: declarative core, hermetic non-Turing-complete expressions, `def` reuse; computation stays at the rim (the Onshape clause) |
 | [d22](d22-route-identity-persists.md) | 2026-07-07 | implemented (`8f7c1ec`) | Route identity persists: small-integer ids serialize in the state zone, lenient parse, one engine allocator |
 | [d23](d23-schematic-features-tier.md) | 2026-07-09 | items 1–4 implemented (`669b2f7`) | The schematic realized-geometry tier: `schematic_features` is the one home for drawing conventions; symbol artwork is a seam; footprints and symbols are one thing in two vocabularies |
+| [d24](d24-ui-usability-rulings.md) | 2026-07-16 | implemented (`8d1d71d`) | UI usability rulings: the oracle owns the tool strips (supersedes Select-only schematic), showcase opens by default, explorer rows show values; wave 1 delivered; the hotkeys-beat-text-inputs gotcha |
 
 ## Analyses, plans, ledgers
 

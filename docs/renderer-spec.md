@@ -100,9 +100,10 @@ ordinary plane composited after copper that paints the background color
 never needs subtraction).
 
 Also procedural, evaluated in the composite/background stage from camera
-uniforms alone (zero CPU, zero geometry): the **dot grid** (1-2-5 pitch
-ladder keyed to zoom, one emphasis tier, origin marker; mm-native, mil
-toggle later) and the **crosshair cursor** (full-pane hairlines at the
+uniforms alone (zero CPU, zero geometry): the **grid** (1-2-5 pitch
+ladder keyed to zoom, one emphasis tier, origin marker; dots by default with
+a uniform-selected hairline-lines style; mm-native, mil toggle later) and the
+**crosshair cursor** (full-pane hairlines at the
 pointer; OS cursor hidden over the canvas).
 
 If profiling shows the per-plane pass count matters, planes can pack four

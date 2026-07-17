@@ -145,7 +145,7 @@ commits (Decision 18's gate at the mouse button, but per the permissive
 philosophy, commit is never legality-gated).
 
 1. **Manual point-to-point** — click pads/waypoints; snapping; via drop on
-   layer switch; violations highlight live rather than block. *(v1 target)*
+   layer switch; violations highlight live rather than block. *(delivered)*
 2. **Assisted manual** — the pending segment continuously re-derives as a
    legal 45° connection hugging obstacles (walkaround); never moves existing
    copper. *(roadmap)*
@@ -295,6 +295,16 @@ Delivered as milestones, roughly in order:
    then manual trace drawing at ladder level 1 with the permissive model
    (naive source→dest commit, waypoint refinement); undo/redo via source
    snapshots.
+
+Beyond v1, the first usability wave is delivered ([d24](log/d24-ui-usability-rulings.md)):
+the showcase document opens on a no-argument launch; File exports (Gerber/
+Excellon/SVG of the live doc), zoom chords, mm/in display units, grid style,
+Quit/About/Keymap are wired; the Explorer has a filter and Ctrl+K opens the
+command palette (fuzzy jump-to + command registry, gw-12); the inspector edits
+component position/rotation and trace width/layer as permissive source-first
+commands (gw-05's core — reference rename and value editing wait on engine
+schema); board objects delete via Del/menu/tool and rotate via R; and the tool
+strips carry the oracle's enumeration with per-view-kind memory.
 
 Everything else — net classes, DRC waivers, library browser, Gerber preview,
 3D view, diff pairs, length tuning, variants, revision diff/review mode,
