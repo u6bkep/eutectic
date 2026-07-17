@@ -275,10 +275,10 @@ fn runtime_zoom_hotkey_does_not_steal_library_path_hyphen() {
     for event in events {
         app.on_event(event, &EventCx::new());
     }
-    assert_eq!(
-        app.pane_camera_target(PaneId::B).zoom,
-        before.zoom / 1.25,
-        "Ctrl+- zooms the focused pane through the runtime"
+    let zoomed = app.pane_camera_target(PaneId::B).zoom;
+    assert!(
+        (zoomed - before.zoom / 1.25).abs() < 1e-9,
+        "Ctrl+- zooms the focused pane through the runtime (got {zoomed})"
     );
 
     // Build and lay out the real Libraries modal, then focus its path input
@@ -362,6 +362,19 @@ fn chrome_hotkeys_are_suppressed_while_modal_chrome_owns_input() {
             before,
             "{owner} must own chrome hotkeys"
         );
+        // Damascene has no modal focus trap, so Tab can land focus on a
+        // behind-scrim toolbar button — a keyboard Activate must be as inert
+        // as the hotkey while a SCRIM modal owns input. (An open menu is
+        // different by design: the route table closes it on any click and the
+        // click then acts, so only the true modals assert here.)
+        if owner != "menu" {
+            app.on_event(click(ZOOM_IN_KEY), &EventCx::new());
+            assert_eq!(
+                app.pane_camera_target(PaneId::A),
+                before,
+                "{owner} must own behind-scrim activation too"
+            );
+        }
     }
 }
 

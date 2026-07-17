@@ -49,16 +49,17 @@ impl EutecticApp {
     /// Handle a routed chrome command. Kept outside `app/events.rs` so sibling
     /// event work has one narrow integration point.
     pub(crate) fn handle_chrome_event(&mut self, event: &UiEvent) -> bool {
-        // Modal chrome owns the keyboard, mirroring the Save / Undo / Redo
-        // gate in `on_event`: registered hotkeys beat focused widgets' raw-key
-        // capture in damascene, so never dispatch one beneath a Libraries
-        // modal, Help dialog, or open menu. Pointer activation still works
-        // after a menu row closes its own popover earlier in the route table.
-        let hotkeys_allowed = !self.libraries_open.get()
+        // Modal chrome owns the input, mirroring the Save / Undo / Redo gate
+        // in `on_event` — for BOTH halves of `clicked`: registered hotkeys
+        // beat focused widgets' raw-key capture in damascene, and damascene
+        // has no modal focus trap, so Tab can walk focus onto a behind-scrim
+        // toolbar button and Enter would Activate it. Menu rows still
+        // dispatch: the route table closes the menu before this runs.
+        let chrome_allowed = !self.libraries_open.get()
             && self.chrome_dialog.get().is_none()
             && self.open_menu.borrow().is_none();
         let clicked =
-            |key| event.is_click_or_activate(key) || (hotkeys_allowed && event.is_hotkey(key));
+            |key| chrome_allowed && (event.is_click_or_activate(key) || event.is_hotkey(key));
         if clicked(EXPORT_GERBERS_KEY) {
             self.export_gerbers();
         } else if clicked(EXPORT_SVG_KEY) {
