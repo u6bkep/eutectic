@@ -803,7 +803,8 @@ vertical slice, M2 override decay, M3's first solver — are preserved in the lo
   an override is ineffective iff freeing it lands the entity in the same place.
 - Honest limits: the document store is `BTreeMap`-based with full clones per
   version (not persistent `im` maps) and entity id = hierarchical path string
-  (issue 0015); an orientation-only change does not bump `geom_rev` (issue 0013).
+  (issue 0015). Component position, orientation, addition, and removal all bump
+  `geom_rev`, invalidating footprint-local geometry consumers.
 
 ## Prototype status (text front-end)
 
@@ -860,8 +861,8 @@ the full [d06](log/d06-integer-quaternion-orient.md) transform:
 
 Honest limits: the solver does not optimize over orientation; interface-signal
 offsets live on the shared `InterfaceDef` (`part.rs`), so one interface type places
-its pins identically on every part that uses it; an orientation-only change does
-not bump `geom_rev` (issue 0013).
+its pins identically on every part that uses it. Component position, orientation,
+addition, and removal invalidate the geometry query tier through `geom_rev`.
 
 ## Prototype status (resolution UX)
 

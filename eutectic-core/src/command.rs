@@ -493,14 +493,16 @@ fn part_shape_changed(a: &Doc, b: &Doc) -> bool {
 /// Orientation affects every footprint-local feature and must invalidate the
 /// geometry query tier (issue 0013).
 fn positions_or_orientations_changed(a: &Doc, b: &Doc) -> bool {
+    if a.components.len() != b.components.len() {
+        return true;
+    }
     for (id, cb) in &b.components {
         match a.components.get(id) {
             Some(ca) if ca.pos == cb.pos && ca.orient.same_rotation(cb.orient) => {}
             _ => return true,
         }
     }
-    // also catches removals affecting geometry
-    a.components.len() != b.components.len()
+    false
 }
 
 /// Lower a [`Command::Resolve`] to an `overrides` mutation on the candidate doc.
@@ -706,6 +708,32 @@ mod route_commit_tests {
 
         assert!(h.doc().geom_rev > before);
         assert_eq!(h.doc().components[&EntityId::new("a")].orient.to_deg(), 90);
+    }
+
+    /// Removing a component invalidates footprint-local geometry as well as
+    /// connectivity, so memoized DRC cannot retain the removed pad copper.
+    #[test]
+    fn component_removal_bumps_geometry_revision() {
+        let (mut h, lib) = scene();
+        let before = h.doc().geom_rev;
+        let mut src = h.doc().source.clone();
+        src.retain(|directive| {
+            !matches!(
+                directive,
+                G::Instance { path, .. } | G::Place { path, .. } if path == "b"
+            )
+        });
+        for directive in &mut src {
+            if let G::ConnectPins { pins, .. } = directive {
+                pins.retain(|(component, _)| component != "b");
+            }
+        }
+
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "delete")
+            .unwrap();
+
+        assert!(!h.doc().components.contains_key(&EntityId::new("b")));
+        assert!(h.doc().geom_rev > before);
     }
 
     /// A re-elaboration (a fresh SetSource that keeps the net) must NOT wipe committed
