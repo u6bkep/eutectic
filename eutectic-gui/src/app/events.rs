@@ -349,8 +349,9 @@ impl App for EutecticApp {
             }
             let focused = self.focused_pane.get();
             let focused_kind = self.panes.borrow()[pane_index(focused)].view;
+            let measure_kind = self.panes.borrow()[pane_index(self.measure_pane.get())].view;
             let mut m = self.measure.get();
-            if self.measure_pane.get() == focused
+            if measure_kind == focused_kind
                 && self.tool_for(focused_kind) == Tool::Measure
                 && m.segment().is_some()
             {

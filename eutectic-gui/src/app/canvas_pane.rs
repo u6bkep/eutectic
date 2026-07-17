@@ -1246,6 +1246,13 @@ impl EutecticApp {
                 if !busy {
                     let cam = self.pane_camera(pane);
                     let p = pane_unproject(&cam, rect, pos);
+                    if self.tool_for(ViewKind::Schematic) == crate::tool::Tool::Measure {
+                        self.claim_measure_pane(pane);
+                        let mut m = self.measure.get();
+                        m.hover(p);
+                        self.measure.set(m);
+                        changed = true;
+                    }
                     let derived = self.derived.borrow();
                     if !derived.schematic_picks.is_empty() {
                         let tol = pick::tolerance_nm(

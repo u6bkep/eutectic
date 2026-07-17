@@ -309,6 +309,66 @@ fn schematic_measure_uses_schematic_space() {
     assert!(app.measure.get().segment().is_none());
 }
 
+/// Schematic free-hover owns the measure just like board free-hover: crossing
+/// from a board measure drops the incompatible anchor, then raw pointer motion
+/// advances a schematic anchor without a pressed button or routed Drag event.
+#[test]
+fn schematic_measure_free_hover_tracks_raw_cursor_and_resets_board_anchor() {
+    let mut app = split_app();
+    let rendered = settle(&mut app);
+    let cx = EventCx::new().with_ui_state(&rendered.ui);
+    let board_rect = rendered
+        .ui
+        .rect_of_key(PaneId::A.canvas_key())
+        .expect("board pane");
+    let schematic_rect = rendered
+        .ui
+        .rect_of_key(PaneId::B.canvas_key())
+        .expect("schematic pane");
+    let board_at = (
+        board_rect.x + board_rect.w / 2.0,
+        board_rect.y + board_rect.h / 2.0,
+    );
+    let schematic_at = (
+        schematic_rect.x + schematic_rect.w * 0.35,
+        schematic_rect.y + schematic_rect.h * 0.4,
+    );
+
+    app.on_event(click(&PaneId::A.strip_key(Tool::Measure)), &cx);
+    app.on_event(pointer_in(PaneId::A, UiEventKind::Click, board_at), &cx);
+    assert!(app.measure.get().segment().is_some());
+
+    app.on_event(click(&PaneId::B.strip_key(Tool::Measure)), &cx);
+    assert!(app.raw_cursor_moved(schematic_at));
+    assert_eq!(app.measure_pane.get(), PaneId::B);
+    assert!(
+        app.measure.get().segment().is_none(),
+        "schematic raw hover discarded the board-space anchor"
+    );
+
+    let cam = app.pane_camera(PaneId::B);
+    let rect = (
+        schematic_rect.x,
+        schematic_rect.y,
+        schematic_rect.w,
+        schematic_rect.h,
+    );
+    let anchor = Point::mm(2, 3);
+    let hover = Point::mm(7, 9);
+    let project = |p| crate::app::canvas_pane::pane_project(&cam, rect, p);
+    app.on_event(
+        pointer_in(PaneId::B, UiEventKind::Click, project(anchor)),
+        &cx,
+    );
+    assert!(app.raw_cursor_moved(project(hover)));
+
+    let (got_anchor, got_hover) = app.measure.get().segment().expect("rubber band");
+    assert!((got_anchor.x - anchor.x).abs() < 20);
+    assert!((got_anchor.y - anchor.y).abs() < 20);
+    assert!((got_hover.x - hover.x).abs() < 20);
+    assert!((got_hover.y - hover.y).abs() < 20);
+}
+
 /// Switching the BOARD kind's tool through a strip cancels the board previews
 /// (a measure in progress here); a SCHEMATIC-strip click leaves board previews
 /// alone — cancellation follows the kind whose slot changed.
@@ -388,4 +448,63 @@ fn measure_resets_across_view_kinds_in_both_directions() {
         app.measure.get().segment().is_none(),
         "board free-hover discarded the schematic-space anchor"
     );
+}
+
+/// Two board panes share one coordinate kind, so free-hover ownership may move
+/// between them without discarding the first pane's in-progress anchor.
+#[test]
+fn same_kind_board_measure_handoff_preserves_anchor() {
+    let mut app = split_app();
+    app.set_pane_views(ViewKind::Board, ViewKind::Board);
+    let rendered = settle(&mut app);
+    let cx = EventCx::new().with_ui_state(&rendered.ui);
+    let pane_a = rendered
+        .ui
+        .rect_of_key(PaneId::A.canvas_key())
+        .expect("pane A");
+    let pane_b = rendered
+        .ui
+        .rect_of_key(PaneId::B.canvas_key())
+        .expect("pane B");
+    let anchor_px = (pane_a.x + pane_a.w / 2.0, pane_a.y + pane_a.h / 2.0);
+    let hover_px = (pane_b.x + pane_b.w / 2.0, pane_b.y + pane_b.h / 2.0);
+
+    app.on_event(click(&PaneId::A.strip_key(Tool::Measure)), &cx);
+    app.on_event(pointer_in(PaneId::A, UiEventKind::Click, anchor_px), &cx);
+    let (anchor, _) = app.measure.get().segment().expect("pane A anchor");
+
+    assert!(app.raw_cursor_moved(hover_px));
+    assert_eq!(app.measure_pane.get(), PaneId::B);
+    let (got_anchor, _) = app.measure.get().segment().expect("preserved measure");
+    assert_eq!(got_anchor, anchor);
+}
+
+/// Escape follows view-kind ownership rather than pane identity: a second board
+/// pane can cancel the shared board measure before the normal selection clear.
+#[test]
+fn escape_cancels_dual_board_measure_owned_by_other_pane_before_selection() {
+    let mut app = split_app();
+    app.set_pane_views(ViewKind::Board, ViewKind::Board);
+    let rendered = settle(&mut app);
+    let cx = EventCx::new().with_ui_state(&rendered.ui);
+    let pane_a = rendered
+        .ui
+        .rect_of_key(PaneId::A.canvas_key())
+        .expect("pane A");
+    let anchor_px = (pane_a.x + pane_a.w / 2.0, pane_a.y + pane_a.h / 2.0);
+    let selection = SemanticId::Part(EntityId::new("U1"));
+
+    app.on_event(click(&PaneId::A.strip_key(Tool::Measure)), &cx);
+    app.on_event(pointer_in(PaneId::A, UiEventKind::Click, anchor_px), &cx);
+    app.domain
+        .selection
+        .borrow_mut()
+        .select_only(selection.clone());
+    app.on_event(click(&PaneId::B.strip_key(Tool::Measure)), &cx);
+    assert_eq!(app.focused_pane.get(), PaneId::B);
+    assert_eq!(app.measure_pane.get(), PaneId::A);
+
+    app.on_event(escape(), &cx);
+    assert!(app.measure.get().segment().is_none());
+    assert_eq!(app.domain.selection.borrow().single(), Some(&selection));
 }

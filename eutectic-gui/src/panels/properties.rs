@@ -176,6 +176,8 @@ impl EutecticApp {
         let mut ui = self.inspector_ui.borrow_mut();
         ui.active = Some(key);
         ui.raw.entry(key).or_insert(canonical);
+        // Shared-container debt: inspector carets live in `lib_ui.selection`,
+        // namespaced by widget key and safe while the modal gate serializes both surfaces.
         let mut lib_ui = self.lib_ui.borrow_mut();
         let changed = text_input::apply_event(
             ui.raw.get_mut(key).expect("seeded above"),
