@@ -79,6 +79,7 @@ fn hotkey_action_label(action: &str) -> &'static str {
         REDO_KEY => "Redo",
         ZOOM_IN_KEY => "Zoom in",
         ZOOM_OUT_KEY => "Zoom out",
+        crate::palette::PALETTE_TOGGLE_KEY => "Command palette",
         other => panic!("unlisted registered hotkey action: {other}"),
     }
 }
