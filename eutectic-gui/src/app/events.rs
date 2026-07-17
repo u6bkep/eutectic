@@ -19,6 +19,7 @@ use crate::app::pane::{
 use crate::app::{EutecticApp, PaneId, PaneLayout, ViewKind};
 use crate::chrome::actions::{ZOOM_IN_KEY, ZOOM_OUT_KEY};
 use crate::chrome::menubar::{MENUBAR_KEY, REVERT_KEY};
+use crate::palette::PALETTE_TOGGLE_KEY;
 use crate::panels::findings::error_card;
 use crate::reload::SourceMsg;
 use crate::tool::Tool;
@@ -59,6 +60,7 @@ impl App for EutecticApp {
                 self.libraries_open.get().then(|| self.libraries_modal()),
                 self.chrome_dialog_overlay(),
                 self.menu_overlay(),
+                self.palette_open.get().then(|| self.palette_modal()),
             ],
         )
     }
@@ -94,6 +96,12 @@ impl App for EutecticApp {
                 PaneLayout::Stacked => r.h,
             };
             self.split_extent.set(extent);
+        }
+
+        // Ctrl+K / the toolbar button toggles the command palette. While open,
+        // it owns all routed input (including Escape) ahead of document tools.
+        if self.handle_palette_event(&event) {
+            return;
         }
 
         // Pane-split resize handle (weighted): fold the drag into the split weights.
@@ -152,13 +160,17 @@ impl App for EutecticApp {
             return;
         }
 
+        if self.handle_explorer_filter_event(&event) {
+            return;
+        }
+
         // Editing actions (m6): the Save / Undo / Redo toolbar buttons and their
         // hotkey twins (Ctrl+S / Ctrl+Z / Ctrl+Shift+Z or Ctrl+Y — registered in
         // `hotkeys()`, delivered as `UiEventKind::Hotkey` with the same action
         // names). Suppressed while the Libraries modal is open: its text inputs
         // own the keyboard, and a doc-level undo under a typing user would be a
         // surprise (the buttons sit behind the scrim anyway).
-        if !self.libraries_open.get() {
+        if !self.libraries_open.get() && !self.palette_open.get() {
             if event.is_click_or_activate(SAVE_KEY) || event.is_hotkey(SAVE_KEY) {
                 self.save();
                 return;
@@ -446,10 +458,12 @@ impl App for EutecticApp {
     /// handling proceeds unchanged.
     fn on_wheel_event(&mut self, event: UiEvent, cx: &EventCx) -> bool {
         // Modal chrome owns the pointer (the same gate free hover applies):
-        // wheel over the Libraries modal or an open menu must scroll the
-        // chrome, never zoom the pane beneath it.
+        // wheel over the Libraries modal, a Help dialog, the command palette,
+        // or an open menu must scroll the chrome, never zoom the pane beneath
+        // it (the palette stamps the open_menu sentinel, but gate explicitly).
         if self.libraries_open.get()
             || self.chrome_dialog.get().is_some()
+            || self.palette_open.get()
             || self.open_menu.borrow().is_some()
         {
             return false;
@@ -485,6 +499,7 @@ impl App for EutecticApp {
             (KeyChord::ctrl('+'), ZOOM_IN_KEY.to_string()),
             (KeyChord::ctrl('='), ZOOM_IN_KEY.to_string()),
             (KeyChord::ctrl('-'), ZOOM_OUT_KEY.to_string()),
+            (KeyChord::ctrl('k'), PALETTE_TOGGLE_KEY.to_string()),
         ]
     }
 
@@ -492,6 +507,21 @@ impl App for EutecticApp {
     /// only text fields, so their shared [`Selection`] is the app's (the host
     /// reads this once per frame to paint highlight bands / resolve clipboard).
     fn selection(&self) -> Selection {
-        self.lib_ui.borrow().selection.clone()
+        if self.palette_open.get() {
+            return self.palette_ui.borrow().selection.clone();
+        }
+        if self.libraries_open.get() {
+            return self.lib_ui.borrow().selection.clone();
+        }
+        let explorer = self.explorer_filter_selection.borrow();
+        if explorer.range.is_some() {
+            explorer.clone()
+        } else {
+            self.lib_ui.borrow().selection.clone()
+        }
+    }
+
+    fn drain_focus_requests(&mut self) -> Vec<String> {
+        std::mem::take(&mut *self.focus_requests.borrow_mut())
     }
 }

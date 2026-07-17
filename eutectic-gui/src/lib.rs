@@ -14,6 +14,7 @@ pub mod harness;
 pub mod highlight;
 pub mod host;
 pub mod inspector;
+mod palette;
 mod panels;
 mod panes;
 pub mod pick;

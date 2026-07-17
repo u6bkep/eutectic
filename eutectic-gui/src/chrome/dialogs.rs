@@ -19,6 +19,7 @@ pub(crate) const WIRED_CHORDS: &[(&str, &str)] = &[
     ("Ctrl++", "Zoom in"),
     ("Ctrl+=", "Zoom in"),
     ("Ctrl+-", "Zoom out"),
+    ("Ctrl+K", "Command palette"),
     ("Esc", "Cancel gesture/tool or clear selection"),
 ];
 

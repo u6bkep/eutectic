@@ -9,8 +9,8 @@
 //! - `[zoom in, zoom out, fit]` — zoom acts on the focused pane through the
 //!   camera glide; Fit keeps its existing all-pane action ([`FIT_KEY`]).
 //! - `[findings jump, command palette]` — findings jump toggles the findings
-//!   panel (the Findings accordion header key, same toggle the chips use); the palette is disabled
-//!   (gw-12, unimplemented).
+//!   panel (the Findings accordion header key, same toggle the chips use); the palette opens
+//!   the Ctrl+K command/jump modal.
 //!
 //! Right side: a clickable `Units: mm|in` app-display-setting chip. Snap remains
 //! omitted because edit-path grid snapping does not exist.
@@ -23,6 +23,7 @@ use crate::app::pane::{REDO_KEY, SAVE_KEY, SidebarSection, UNDO_KEY};
 use crate::chrome::actions::{UNITS_TOGGLE_KEY, ZOOM_IN_KEY, ZOOM_OUT_KEY};
 use crate::chrome::icons;
 use crate::chrome::menubar::FIT_KEY;
+use crate::palette::PALETTE_TOGGLE_KEY;
 use damascene_core::prelude::*;
 
 impl EutecticApp {
@@ -75,13 +76,14 @@ impl EutecticApp {
         ])
         .gap(tokens::SPACE_1);
 
-        // Group 4: findings jump (toggles the findings panel) + command palette
-        // (disabled — gw-12).
+        // Group 4: findings jump (toggles the findings panel) + command palette.
         let group_inspect = row([
             icon_button(icons::FINDINGS.clone())
                 .tooltip("Findings")
                 .key(SidebarSection::Findings.toggle_key()),
-            disabled("command"),
+            icon_button("command")
+                .tooltip("Command palette (Ctrl+K)")
+                .key(PALETTE_TOGGLE_KEY),
         ])
         .gap(tokens::SPACE_1);
 

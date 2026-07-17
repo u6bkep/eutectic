@@ -43,6 +43,7 @@ pub use pane::{PaneId, PaneLayout, PaneState, ViewKind};
 
 // The `EutecticApp` struct fields + `EutecticApp::new`/reload impl reference the derived-cache
 // bundle and the Libraries UI state that were moved to submodules.
+use crate::palette::PaletteUi;
 use domain::DerivedCaches;
 use libraries::{LibRow, LibUi};
 use pane::{SectionOpen, SidebarSection};
@@ -291,6 +292,14 @@ pub struct EutecticApp {
     pub(crate) chrome_dialog: Cell<Option<crate::chrome::dialogs::ChromeDialog>>,
     /// File ▸ Quit's host-observed exit request (headless tests inspect it).
     pub(crate) quit_requested: Cell<bool>,
+    /// Live Explorer substring filter and its text-input selection.
+    pub(crate) explorer_filter: RefCell<String>,
+    pub(crate) explorer_filter_selection: RefCell<Selection>,
+    /// Command-palette modal state, appended to keep the shell change minimal.
+    pub(crate) palette_open: Cell<bool>,
+    pub(crate) palette_ui: RefCell<PaletteUi>,
+    /// One-shot programmatic focus requests drained by damascene after layout.
+    pub(crate) focus_requests: RefCell<Vec<String>>,
 }
 
 /// The trace / via defaults the Route tool commits with, sourced from the same
@@ -357,6 +366,11 @@ impl EutecticApp {
             chrome_notice: RefCell::new(None),
             chrome_dialog: Cell::new(None),
             quit_requested: Cell::new(false),
+            explorer_filter: RefCell::new(String::new()),
+            explorer_filter_selection: RefCell::new(Selection::default()),
+            palette_open: Cell::new(false),
+            palette_ui: RefCell::new(PaletteUi::default()),
+            focus_requests: RefCell::new(Vec::new()),
         }
     }
 
