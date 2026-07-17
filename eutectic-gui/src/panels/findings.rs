@@ -151,12 +151,14 @@ impl EutecticApp {
 /// permissive philosophy starts here).
 pub(crate) fn error_card(message: &str) -> El {
     // The empty state uses the same path — "no document" is just an `Err`.
-    if message == "no document" {
-        return titled_card(
-            "No document",
-            [text("Pass a path to a .eut file to load a document.").muted()],
-        )
-        .width(Size::Fixed(420.0));
+    if message.starts_with("no document") {
+        let description = if message == "no document" {
+            "Pass a path to a .eut file to load a document."
+        } else {
+            message
+        };
+        return titled_card("No document", [text(description.to_string()).muted()])
+            .width(Size::Fixed(420.0));
     }
     alert([
         alert_title("Could not load document"),

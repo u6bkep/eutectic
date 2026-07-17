@@ -6,7 +6,9 @@
 //! surfaced in the UI rather than crashing (the permissive philosophy). With no
 //! path, the app opens the repository's `examples/showcase.eut` (overridable with
 //! `$EUTECTIC_SHOWCASE`); an installed binary that cannot find the example falls
-//! back to the no-document state with an explanatory status note.
+//! back to the no-document state with an explanatory status note. The environment
+//! override is an explicit request, like a CLI path, so a missing override fails with
+//! the file read error rather than silently falling back.
 //!
 //! # Live source loop (milestone 5)
 //!
@@ -25,24 +27,47 @@ use damascene_core::prelude::Rect;
 use eutectic_gui::host::HostConfig;
 use eutectic_gui::{DomainState, EutecticApp, LibSource, Registry, SourceMailbox};
 
-/// Resolve the startup request without touching the filesystem. An explicit CLI path
-/// always wins. Otherwise `$EUTECTIC_SHOWCASE` wins when it is set (including to a
-/// relative path), with the repository example relative to this crate as the default.
-/// The bool records whether the path was an explicit CLI request: a missing explicit
-/// path keeps the existing fail-fast read error, while a missing dev-tool default
-/// degrades to the empty-document UI.
-fn requested_path(
+#[derive(Debug, PartialEq, Eq)]
+enum StartupDecision {
+    OpenPath(std::path::PathBuf),
+    FallbackNote(String),
+}
+
+fn default_showcase_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../examples/showcase.eut")
+}
+
+/// Resolve the complete startup branch headlessly. An explicit CLI path always wins;
+/// otherwise `$EUTECTIC_SHOWCASE` wins when set (including to a relative path). Both are
+/// explicit requests and therefore proceed to the fail-fast read path even when missing.
+/// Only an absent repository default degrades to the explanatory no-document state.
+fn startup_decision(
     cli_path: Option<std::ffi::OsString>,
     showcase_override: Option<std::ffi::OsString>,
-) -> (std::path::PathBuf, bool) {
-    if let Some(path) = cli_path {
-        return (std::path::PathBuf::from(path), true);
+    default_showcase: std::path::PathBuf,
+) -> StartupDecision {
+    let (path, explicit) = if let Some(path) = cli_path {
+        (std::path::PathBuf::from(path), true)
+    } else if let Some(path) = showcase_override {
+        (std::path::PathBuf::from(path), true)
+    } else {
+        (default_showcase, false)
+    };
+
+    if explicit || path.is_file() {
+        StartupDecision::OpenPath(path)
+    } else {
+        StartupDecision::FallbackNote(format!(
+            "no document: showcase not found at {}; pass a .eut path or set EUTECTIC_SHOWCASE",
+            path.display()
+        ))
     }
-    let path = showcase_override.map_or_else(
-        || std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../examples/showcase.eut"),
-        std::path::PathBuf::from,
-    );
-    (path, false)
+}
+
+fn fallback_domain(note: String, lib_source: LibSource) -> DomainState {
+    let mut domain = DomainState::empty().with_lib_source(lib_source);
+    domain.doc = Err(note);
+    domain
 }
 
 /// The per-machine registry file location — computed **only here** (the
@@ -61,19 +86,11 @@ fn default_registry_path() -> Option<std::path::PathBuf> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (requested_path, explicit_path) = requested_path(
+    let startup = startup_decision(
         std::env::args_os().nth(1),
         std::env::var_os("EUTECTIC_SHOWCASE"),
+        default_showcase_path(),
     );
-    let (path, startup_note) = if explicit_path || requested_path.is_file() {
-        (Some(requested_path), None)
-    } else {
-        let note = format!(
-            "no document: showcase not found at {}; pass a .eut path or set EUTECTIC_SHOWCASE",
-            requested_path.display()
-        );
-        (None, Some(note))
-    };
 
     // The per-machine library registry (library packages, slice 2). A missing
     // file is the empty first-run registry; a malformed one degrades to empty
@@ -105,9 +122,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         save_path: registry_path,
     };
 
-    let domain = match &path {
-        Some(path) => {
-            let source = std::fs::read_to_string(path)
+    let (path, domain) = match startup {
+        StartupDecision::OpenPath(path) => {
+            let source = std::fs::read_to_string(&path)
                 .map_err(|e| format!("reading {}: {e}", path.display()))?;
             let filename = path.file_name().map(|n| n.to_string_lossy().into_owned());
             // Resolve the doc's `use` names through the registry (real
@@ -124,15 +141,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // The explicit-save target (m6): the loaded file itself. Only the
             // windowed path sets this — fixtures have no save affordance.
             domain.source_path = Some(path.clone());
-            domain
+            (Some(path), domain)
         }
-        None => {
-            let mut domain = DomainState::empty().with_lib_source(lib_source);
-            if let Some(note) = startup_note {
-                domain.doc = Err(note);
-            }
-            domain
-        }
+        StartupDecision::FallbackNote(note) => (None, fallback_domain(note, lib_source)),
     };
 
     // The live-source mailbox: the app keeps the receiver; the sender goes to the
@@ -174,31 +185,62 @@ mod tests {
     use super::*;
 
     #[test]
-    fn no_arg_path_defaults_to_the_workspace_showcase() {
-        let (path, explicit) = requested_path(None, None);
-        assert!(!explicit);
+    fn cli_path_wins() {
+        let cli_path = std::ffi::OsString::from("explicit.eut");
+        let override_path = std::ffi::OsString::from("override.eut");
         assert_eq!(
-            path,
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../examples/showcase.eut")
-        );
-        assert!(
-            path.is_file(),
-            "the default showcase ships in the workspace"
+            startup_decision(
+                Some(cli_path.clone()),
+                Some(override_path),
+                std::path::PathBuf::from("default.eut"),
+            ),
+            StartupDecision::OpenPath(std::path::PathBuf::from(cli_path))
         );
     }
 
     #[test]
-    fn cli_then_environment_override_have_the_documented_priority() {
-        let override_path = std::ffi::OsString::from("override.eut");
-        let cli_path = std::ffi::OsString::from("explicit.eut");
+    fn environment_override_is_an_explicit_open_request() {
+        let override_path = std::ffi::OsString::from("missing-override.eut");
+        assert_eq!(
+            startup_decision(
+                None,
+                Some(override_path.clone()),
+                std::path::PathBuf::from("default.eut"),
+            ),
+            StartupDecision::OpenPath(std::path::PathBuf::from(override_path))
+        );
+    }
 
-        assert_eq!(
-            requested_path(None, Some(override_path.clone())),
-            (std::path::PathBuf::from(&override_path), false)
+    #[test]
+    fn present_workspace_showcase_opens() {
+        let path = default_showcase_path();
+        assert!(
+            path.is_file(),
+            "the default showcase ships in the workspace"
         );
         assert_eq!(
-            requested_path(Some(cli_path.clone()), Some(override_path)),
-            (std::path::PathBuf::from(cli_path), true)
+            startup_decision(None, None, path.clone()),
+            StartupDecision::OpenPath(path)
         );
+    }
+
+    #[test]
+    fn missing_workspace_showcase_wires_the_path_note_into_the_domain() {
+        let path = std::env::temp_dir().join(format!(
+            "eutectic-missing-showcase-{}-{}.eut",
+            std::process::id(),
+            line!()
+        ));
+        assert!(!path.is_file(), "test path must remain absent");
+        let StartupDecision::FallbackNote(note) = startup_decision(None, None, path.clone()) else {
+            panic!("missing implicit showcase should fall back")
+        };
+        assert!(note.contains(&path.display().to_string()));
+
+        let domain = fallback_domain(
+            note.clone(),
+            LibSource::Fixed(eutectic_core::part::part_library()),
+        );
+        assert_eq!(domain.doc.as_ref().expect_err("fallback has no doc"), &note);
     }
 }
