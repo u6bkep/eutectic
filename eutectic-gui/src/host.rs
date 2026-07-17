@@ -17,7 +17,9 @@
 //     to a no-op; nothing overrides it yet. (A `before_frame` renderer-reach
 //     hook shipped with this slice and was removed: its only intended
 //     consumer was the pre-owned-canvas camera plan, which is dead — the
-//     owned canvas never writes a camera into damascene at all.)
+//     owned canvas never writes a camera into damascene at all);
+//   - one clean-exit seam on `WinitWgpuApp`: `should_exit`, checked before
+//     each window event so an app command can request orderly event-loop exit.
 
 //! Optional desktop host for running [`App`]s against a real `wgpu`
 //! surface in a `winit` window.
@@ -311,8 +313,8 @@ pub trait WinitWgpuApp: App {
         App::before_build(self);
     }
 
-    /// Whether the app requested a clean event-loop exit (for example from a
-    /// File ▸ Quit command). Checked at the next window event.
+    /// ECAD: whether the app requested a clean event-loop exit (for example
+    /// from a File ▸ Quit command). Checked at the next window event.
     fn should_exit(&self) -> bool {
         false
     }
@@ -927,6 +929,8 @@ impl<A: WinitWgpuApp> ApplicationHandler for Host<A> {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // ECAD: clean-exit seam (see `WinitWgpuApp::should_exit`) — let app
+        // commands stop the event loop without terminating from a UI callback.
         if self.app.should_exit() {
             self.gfx.take();
             event_loop.exit();
