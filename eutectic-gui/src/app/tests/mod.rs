@@ -13,6 +13,7 @@ mod chrome;
 mod editing;
 mod libraries;
 mod menubar;
+mod palette;
 mod panes;
 mod reload;
 mod routing;
