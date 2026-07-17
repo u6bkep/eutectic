@@ -10,6 +10,7 @@
 
 mod camera;
 mod chrome;
+mod direct_manip;
 mod editing;
 mod libraries;
 mod menubar;

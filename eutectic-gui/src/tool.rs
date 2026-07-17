@@ -28,24 +28,27 @@ use eutectic_core::geom::{Path, Seg, Shape2D};
 use eutectic_core::id::{EntityId, NetId, TraceId};
 
 /// The active tool of one view kind's slot. `Select` is the default mode (and the
-/// default entry of any view kind without one); `Measure` is the first non-select
-/// tool, proving the machine + preview channel; `Route` (m6 slice B) is manual
-/// trace drawing at routing-ladder level 1. Which tools a kind offers is
-/// structural — `ViewKind::strip_groups` lists them; the schematic strip
-/// offers Select only (its future editing tools will be their own vocabulary,
-/// not borrowed board tools — user ruling 2026-07-11).
+/// default entry of any view kind without one); `Pan` and `Measure` are shared
+/// canvas tools; `Delete` is board-only in this editing slice; `Route` (m6 slice
+/// B) is manual trace drawing at routing-ladder level 1. Which tools a kind offers
+/// is structural — `ViewKind::strip_groups` lists them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Tool {
     /// Pick / select entities (the default). Clicks hit-test into the selection model.
     #[default]
     Select,
+    /// Pan the pane camera with any primary-button drag, including drags that start
+    /// over an object. Offered by both canvas view kinds.
+    Pan,
+    /// Measure distance in the active pane's own coordinate space.
+    Measure,
+    /// Delete the object under the next click. Board-only in this slice;
+    /// schematic deletion is deferred to the schematic-editing campaign.
+    Delete,
     /// Manual point-to-point trace drawing (routing ladder level 1): click a pin or
     /// known-net copper to start, click waypoints, click a pin to commit — permissive,
     /// never legality-gated. Offered by the board kind's strip only.
     Route,
-    /// Measure distance: first click anchors, second click (and the live pointer where
-    /// events arrive) reports dx / dy / euclidean distance.
-    Measure,
 }
 
 impl Tool {
@@ -54,8 +57,10 @@ impl Tool {
     pub fn key(self) -> &'static str {
         match self {
             Tool::Select => "tool:select",
-            Tool::Route => "tool:route",
+            Tool::Pan => "tool:pan",
             Tool::Measure => "tool:measure",
+            Tool::Delete => "tool:delete",
+            Tool::Route => "tool:route",
         }
     }
 
@@ -63,15 +68,23 @@ impl Tool {
     pub fn label(self) -> &'static str {
         match self {
             Tool::Select => "Select",
-            Tool::Route => "Route",
+            Tool::Pan => "Pan",
             Tool::Measure => "Measure",
+            Tool::Delete => "Delete",
+            Tool::Route => "Route",
         }
     }
 
     /// Every tool, in a stable order — the key-parse vocabulary. Which tools a
     /// view kind actually offers is `ViewKind::strip_groups`, not this list.
-    pub fn all() -> [Tool; 3] {
-        [Tool::Select, Tool::Route, Tool::Measure]
+    pub fn all() -> [Tool; 5] {
+        [
+            Tool::Select,
+            Tool::Pan,
+            Tool::Measure,
+            Tool::Delete,
+            Tool::Route,
+        ]
     }
 }
 
@@ -80,15 +93,15 @@ impl Tool {
 /// the readout. Lives outside the doc — cancelled by Esc / tool switch with no undo.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MeasureState {
-    /// The first-click anchor in board nm, once placed.
+    /// The first-click anchor in the active pane's nm coordinate space, once placed.
     pub anchor: Option<Point>,
-    /// The live / second cursor position in board nm (the moving end while an anchor
-    /// is set, or the committed second point). Sparse on 0.4.5 free-hover.
+    /// The live / second cursor position in the same pane coordinate space (the moving
+    /// end while an anchor is set, or the committed second point).
     pub cursor: Option<Point>,
 }
 
 impl MeasureState {
-    /// Handle a measure click at board point `p`: if no anchor, set it (and seed the
+    /// Handle a measure click at pane-space point `p`: if no anchor, set it (and seed the
     /// cursor so a segment shows immediately); otherwise set the second point (the
     /// measurement is now complete but stays previewed until reset). Returns nothing —
     /// the app reads [`segment`](Self::segment) / [`readout`](Self::readout) to render.
@@ -115,7 +128,7 @@ impl MeasureState {
         self.cursor = None;
     }
 
-    /// The current preview segment `(anchor, cursor)` in board nm, if an anchor is set.
+    /// The current preview segment `(anchor, cursor)` in pane-space nm, if anchored.
     pub fn segment(&self) -> Option<(Point, Point)> {
         Some((self.anchor?, self.cursor?))
     }

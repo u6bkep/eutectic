@@ -3,7 +3,8 @@
 //! chrome (route keys, the canvas-target predicate, placeholders). Split out of
 //! `app.rs` as pure code motion.
 
-use crate::tool::Tool;
+use super::EutecticApp;
+use crate::tool::{MeasureState, Tool};
 use damascene_core::prelude::*;
 
 /// Which view a pane renders (mockup: the pane header's view-type switcher). v1 has two
@@ -43,12 +44,13 @@ impl ViewKind {
     /// that exist today are listed; future tools join their group when they land.
     pub(crate) fn strip_groups(self) -> &'static [&'static [Tool]] {
         match self {
-            ViewKind::Board => &[&[Tool::Select, Tool::Measure], &[Tool::Route]],
-            // Select only (user ruling 2026-07-11): schematic Measure was a
-            // structural no-op (the preview is board-space geometry), and
-            // schematics are expected to grow their OWN tool vocabulary
-            // rather than borrow the board's.
-            ViewKind::Schematic => &[&[Tool::Select]],
+            ViewKind::Board => &[
+                &[Tool::Select, Tool::Pan, Tool::Measure, Tool::Delete],
+                &[Tool::Route],
+            ],
+            // Schematic Delete is deliberately deferred: its source semantics
+            // belong to the schematic-editing campaign.
+            ViewKind::Schematic => &[&[Tool::Select, Tool::Pan, Tool::Measure]],
         }
     }
 
@@ -185,6 +187,37 @@ pub(crate) fn pane_index(p: PaneId) -> usize {
     match p {
         PaneId::A => 0,
         PaneId::B => 1,
+    }
+}
+
+impl EutecticApp {
+    /// The active tool of view kind `kind`. A kind with no entry defaults to
+    /// [`Tool::Select`].
+    pub fn tool_for(&self, kind: ViewKind) -> Tool {
+        self.tools.borrow().get(&kind).copied().unwrap_or_default()
+    }
+
+    /// Set a view kind's active tool. Changing a kind cancels a measurement
+    /// owned by that kind; board changes also cancel route/refinement previews.
+    pub fn set_tool(&self, kind: ViewKind, tool: Tool) {
+        if self.tool_for(kind) != tool {
+            let measure_kind = self.panes.borrow()[pane_index(self.measure_pane.get())].view;
+            if measure_kind == kind {
+                self.measure.set(MeasureState::default());
+            }
+            if kind == ViewKind::Board {
+                *self.route.borrow_mut() = None;
+                *self.trace_drag.borrow_mut() = None;
+            }
+            *self.camera_pan.borrow_mut() = None;
+        }
+        self.tools.borrow_mut().insert(kind, tool);
+    }
+
+    /// The focused pane's view-kind tool without changing either kind's memory.
+    pub fn live_tool(&self) -> Tool {
+        let kind = self.panes.borrow()[pane_index(self.focused_pane.get())].view;
+        self.tool_for(kind)
     }
 }
 

@@ -242,7 +242,7 @@ fn dual_boards_is_lint_clean() {
 
 /// The per-kind-tools scene (revised structural commitment 4): the two kinds
 /// hold DIFFERENT active tools simultaneously — the board slot Route, the
-/// schematic slot its lone Select — and the scene renders lint-clean with both
+/// schematic slot Select — and the scene renders lint-clean with both
 /// panes fitted (each pane's strip shows its own kind's active tool).
 #[test]
 fn per_kind_tools_is_lint_clean_and_holds_two_tools() {
@@ -465,8 +465,8 @@ fn trace_vertex_drag_is_lint_clean_and_previews() {
 
 /// Inspector value honesty: the selected part's inspector shows the position
 /// authored in the fixture source — no hardcoded values. Selects a component by
-/// its real entity id and asserts the projected `Position` row matches the doc's
-/// stored position.
+/// its real entity id and asserts the projected X/Y rows match the doc's stored
+/// position.
 #[test]
 fn inspector_shows_authored_part_position() {
     use crate::inspector::InspectorData;
@@ -483,21 +483,26 @@ fn inspector_shows_authored_part_position() {
     let data =
         InspectorData::project(&SemanticId::Part(eid.clone()), doc, &d.lib).expect("part projects");
 
-    // The identity card shows the refdes; a Position row shows the authored mm.
+    // The identity card shows the refdes; separate X/Y rows show authored mm.
     assert_eq!(data.kind, "Part");
-    let pos_row = data
+    let pos_x = data
         .rows
         .iter()
-        .find(|r| r.key == "Position")
-        .expect("inspector has a Position row");
-    let expect = format!(
-        "{:.3}, {:.3} mm",
-        comp.pos.value.x as f64 / MM as f64,
-        comp.pos.value.y as f64 / MM as f64
+        .find(|r| r.key == "Position X")
+        .expect("inspector has a Position X row");
+    let pos_y = data
+        .rows
+        .iter()
+        .find(|r| r.key == "Position Y")
+        .expect("inspector has a Position Y row");
+    assert_eq!(
+        pos_x.value,
+        format!("{:.3}", comp.pos.value.x as f64 / MM as f64),
+        "inspector Position X must come from the doc"
     );
     assert_eq!(
-        pos_row.value, expect,
-        "inspector Position must be the doc's authored position, not a hardcoded value"
+        pos_y.value,
+        format!("{:.3}", comp.pos.value.y as f64 / MM as f64)
     );
 }
 

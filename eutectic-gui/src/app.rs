@@ -302,6 +302,9 @@ pub struct EutecticApp {
     pub(crate) palette_ui: RefCell<PaletteUi>,
     /// One-shot programmatic focus requests drained by damascene after layout.
     pub(crate) focus_requests: RefCell<Vec<String>>,
+    /// Editable Properties-panel raw text + caret ownership. Appended state for
+    /// the oracle's fieldRaw commit/revert behavior.
+    pub(crate) inspector_ui: RefCell<crate::panels::properties::InspectorUi>,
 }
 
 /// The trace / via defaults the Route tool commits with, sourced from the same
@@ -373,6 +376,7 @@ impl EutecticApp {
             palette_open: Cell::new(false),
             palette_ui: RefCell::new(PaletteUi::default()),
             focus_requests: RefCell::new(Vec::new()),
+            inspector_ui: RefCell::new(crate::panels::properties::InspectorUi::default()),
         }
     }
 
@@ -484,36 +488,6 @@ impl EutecticApp {
     /// Maximize a pane (hide the other) — for fixtures.
     pub fn set_maximized(&self, pane: Option<PaneId>) {
         self.maximized.set(pane);
-    }
-
-    /// The active tool of view kind `kind` (per-view-kind tool memory, revised
-    /// structural commitment 4). A kind with no entry yet defaults to
-    /// [`Tool::Select`].
-    pub fn tool_for(&self, kind: ViewKind) -> Tool {
-        self.tools.borrow().get(&kind).copied().unwrap_or_default()
-    }
-
-    /// Set view kind `kind`'s active tool — the strip clicks land here, and
-    /// fixtures / tests use it directly. Changing the **board** kind's tool
-    /// cancels every in-flight board preview (measure / pending route / vertex
-    /// drag) — a preview never outlives its tool. (All previews today are board
-    /// previews; a schematic-kind switch has nothing to cancel.)
-    pub fn set_tool(&self, kind: ViewKind, tool: Tool) {
-        if kind == ViewKind::Board && self.tool_for(kind) != tool {
-            self.measure.set(MeasureState::default());
-            *self.route.borrow_mut() = None;
-            *self.trace_drag.borrow_mut() = None;
-            *self.camera_pan.borrow_mut() = None;
-        }
-        self.tools.borrow_mut().insert(kind, tool);
-    }
-
-    /// The **live** tool: the focused pane's view kind's tool slot (the tool the
-    /// status bar reads out; moving focus between panes of different kinds swaps
-    /// it without touching either kind's memory).
-    pub fn live_tool(&self) -> Tool {
-        let kind = self.panes.borrow()[pane::pane_index(self.focused_pane.get())].view;
-        self.tool_for(kind)
     }
 
     /// Set the measure preview state — for fixtures / tests that render a

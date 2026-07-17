@@ -16,10 +16,10 @@
 //! The row enumeration is the oracle's in full (absence is not allowed). Rows
 //! backed by real app/engine behavior are keyed to their existing action routes:
 //! save/revert/history, deterministic exports, focused zoom, units/grid,
-//! Findings, Libraries, Quit, and the Help dialogs. Everything else renders as
-//! a visible-but-inert [`disabled`](damascene_core::prelude) row (muted,
-//! unfocusable, no route); in particular autoroute and command-palette rows do
-//! not dispatch to no-ops.
+//! Findings, Libraries, Delete/Rotate, Quit, and the Help dialogs. Everything
+//! else renders as a visible-but-inert [`disabled`](damascene_core::prelude)
+//! row (muted, unfocusable, no route); in particular autoroute rows do not
+//! dispatch to no-ops.
 //!
 //! Save / Revert additionally require a source path (the m6 save model — an
 //! in-memory doc has nowhere to write / re-read); without one they render
@@ -49,6 +49,12 @@ pub(crate) const FIT_KEY: &str = "fit";
 /// The `File ▸ Revert to Saved` route key — reload the document from disk,
 /// discarding in-memory edits ([`EutecticApp::revert_to_saved`]).
 pub(crate) const REVERT_KEY: &str = "revert";
+
+/// Edit ▸ Delete and the bare Delete chord route.
+pub(crate) const DELETE_KEY: &str = "delete";
+
+/// Edit ▸ Rotate and the bare R chord route.
+pub(crate) const ROTATE_KEY: &str = "rotate";
 
 /// One menu row. The enumeration is the oracle's; `Wired` rows carry the existing
 /// route key they dispatch to (so a click routes exactly like the retired
@@ -167,8 +173,16 @@ pub(crate) fn menu_defs() -> Vec<MenuDef> {
                     action: REDO_KEY,
                 },
                 Sep,
-                dis("Delete", Some("Del")),
-                dis("Rotate", Some("R")),
+                Wired {
+                    label: "Delete",
+                    shortcut: Some("Del"),
+                    action: DELETE_KEY,
+                },
+                Wired {
+                    label: "Rotate",
+                    shortcut: Some("R"),
+                    action: ROTATE_KEY,
+                },
                 Sep,
                 dis("Copy", None),
                 dis("Paste", None),
@@ -363,6 +377,11 @@ impl EutecticApp {
         let def = menu_defs().into_iter().find(|d| d.value == value)?;
         // Save / Revert need a source path to act on (the m6 save model).
         let has_path = self.domain.source_path.is_some();
+        let focused_kind =
+            self.panes.borrow()[crate::app::pane::pane_index(self.focused_pane.get())].view;
+        let board_focused = focused_kind == crate::app::ViewKind::Board;
+        let can_delete = board_focused && self.can_delete_selection();
+        let can_rotate = board_focused && self.can_rotate_selection();
         let rows: Vec<El> = def
             .rows
             .iter()
@@ -372,6 +391,8 @@ impl EutecticApp {
                     has_path,
                     self.display_units().label(),
                     self.grid_style().label(),
+                    can_delete,
+                    can_rotate,
                 )
             })
             .collect();
@@ -423,6 +444,8 @@ fn menu_row_el(
     has_path: bool,
     units_label: &'static str,
     grid_label: &'static str,
+    can_delete: bool,
+    can_rotate: bool,
 ) -> El {
     match *row {
         MenuRow::Separator => menubar_separator(),
@@ -435,7 +458,9 @@ fn menu_row_el(
             let unavailable = matches!(
                 action,
                 SAVE_KEY | REVERT_KEY | EXPORT_GERBERS_KEY | EXPORT_SVG_KEY
-            ) && !has_path;
+            ) && !has_path
+                || (action == DELETE_KEY && !can_delete)
+                || (action == ROTATE_KEY && !can_rotate);
             let trailing = match action {
                 UNITS_TOGGLE_KEY => Some(units_label),
                 GRID_TOGGLE_KEY => Some(grid_label),
@@ -542,6 +567,7 @@ mod tests {
             ABOUT_KEY,
             EXPORT_GERBERS_KEY,
             EXPORT_SVG_KEY,
+            DELETE_KEY,
             FIT_KEY,
             FINDINGS_PANEL_KEY,
             GRID_TOGGLE_KEY,
@@ -550,6 +576,7 @@ mod tests {
             QUIT_KEY,
             REDO_KEY,
             REVERT_KEY,
+            ROTATE_KEY,
             SAVE_KEY,
             UNITS_TOGGLE_KEY,
             UNDO_KEY,
@@ -565,6 +592,54 @@ mod tests {
         assert_eq!(
             wired.iter().filter(|a| **a == LIBRARIES_TOGGLE_KEY).count(),
             2
+        );
+    }
+
+    /// Delete and Rotate stay visible but inert without a compatible board
+    /// selection, then carry their shared action routes when selection permits.
+    #[test]
+    fn edit_mutation_rows_are_disabled_by_selection_state() {
+        let rows = menu_defs()
+            .into_iter()
+            .find(|menu| menu.value == "edit")
+            .expect("Edit menu")
+            .rows;
+        let delete = rows
+            .iter()
+            .find(|row| matches!(row, MenuRow::Wired { action, .. } if *action == DELETE_KEY))
+            .expect("Delete row");
+        let rotate = rows
+            .iter()
+            .find(|row| matches!(row, MenuRow::Wired { action, .. } if *action == ROTATE_KEY))
+            .expect("Rotate row");
+
+        assert_eq!(
+            find_row_key(
+                &menu_row_el(delete, true, "mm", "Dots", false, false),
+                "Delete",
+            ),
+            Some(None)
+        );
+        assert_eq!(
+            find_row_key(
+                &menu_row_el(rotate, true, "mm", "Dots", false, false),
+                "Rotate",
+            ),
+            Some(None)
+        );
+        assert_eq!(
+            find_row_key(
+                &menu_row_el(delete, true, "mm", "Dots", true, true),
+                "Delete",
+            ),
+            Some(Some(DELETE_KEY.to_string()))
+        );
+        assert_eq!(
+            find_row_key(
+                &menu_row_el(rotate, true, "mm", "Dots", true, true),
+                "Rotate",
+            ),
+            Some(Some(ROTATE_KEY.to_string()))
         );
     }
 

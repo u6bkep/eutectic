@@ -8,11 +8,291 @@
 
 use crate::app::domain::{self, DerivedCaches};
 use crate::app::{EutecticApp, PaneId, route_defaults};
+use crate::pick::SemanticId;
 use crate::tool::{RouteState, TraceDragState};
-use eutectic_core::command::Transaction;
-use eutectic_core::doc::Doc;
+use eutectic_core::command::{Command, Transaction};
+use eutectic_core::doc::{Doc, Orient, Provenance};
+use eutectic_core::id::{EntityId, TraceId};
+use eutectic_core::ir::GenDirective;
 
 impl EutecticApp {
+    /// Fold editable-inspector events and the board-only Delete/Rotate routes.
+    /// Kept beside their mutation implementations so the central app dispatcher
+    /// only needs one direct-manipulation hook.
+    pub(crate) fn handle_direct_manip_event(
+        &mut self,
+        event: &damascene_core::prelude::UiEvent,
+    ) -> bool {
+        if self.handle_inspector_event(event) {
+            return true;
+        }
+        if event.kind == damascene_core::prelude::UiEventKind::Escape {
+            let measure_kind =
+                self.panes.borrow()[crate::app::pane::pane_index(self.measure_pane.get())].view;
+            if measure_kind == crate::app::ViewKind::Schematic
+                && self.tool_for(measure_kind) == crate::tool::Tool::Measure
+                && self.measure.get().segment().is_some()
+            {
+                self.measure.set(Default::default());
+                return true;
+            }
+        }
+        let board_focused =
+            self.panes.borrow()[crate::app::pane::pane_index(self.focused_pane.get())].view
+                == crate::app::ViewKind::Board;
+        if !board_focused {
+            return false;
+        }
+        if event.is_click_or_activate(crate::chrome::menubar::DELETE_KEY)
+            || event.is_hotkey(crate::chrome::menubar::DELETE_KEY)
+        {
+            self.delete_selection();
+            return true;
+        }
+        if event.is_click_or_activate(crate::chrome::menubar::ROTATE_KEY)
+            || event.is_hotkey(crate::chrome::menubar::ROTATE_KEY)
+        {
+            self.rotate_selection_ccw();
+            return true;
+        }
+        false
+    }
+
+    /// Whether the current single selection can be deleted by the board editing
+    /// surface. A selected pad denotes its owning component. Pours deliberately
+    /// return false: their semantic id lacks a stable source-region identity.
+    pub(crate) fn can_delete_selection(&self) -> bool {
+        matches!(
+            self.domain.selection.borrow().single(),
+            Some(
+                SemanticId::Part(_)
+                    | SemanticId::Pin { .. }
+                    | SemanticId::Trace(_)
+                    | SemanticId::Via(_)
+            )
+        )
+    }
+
+    /// Whether the current single selection is a board component (a whole-part
+    /// selection or one of its pads) and can therefore be rotated.
+    pub(crate) fn can_rotate_selection(&self) -> bool {
+        matches!(
+            self.domain.selection.borrow().single(),
+            Some(SemanticId::Part(_) | SemanticId::Pin { .. })
+        )
+    }
+
+    /// Delete the current board selection through the one semantic-id mutation
+    /// path shared by the Del chord and Edit ▸ Delete.
+    pub(crate) fn delete_selection(&mut self) {
+        let id = self.domain.selection.borrow().single().cloned();
+        if let Some(id) = id {
+            self.delete_id(id);
+        }
+    }
+
+    /// Delete one board semantic id. This is the single mutation path used by all
+    /// three doors: current-selection chord, menu row, and Delete-tool pick.
+    pub(crate) fn delete_id(&mut self, id: SemanticId) {
+        let result = match id {
+            SemanticId::Part(id) | SemanticId::Pin { comp: id, .. } => self.delete_component(id),
+            SemanticId::Trace(id) => {
+                self.commit_edit(Transaction::one(Command::RemoveTrace(id)), "delete trace")
+            }
+            SemanticId::Via(id) => {
+                self.commit_edit(Transaction::one(Command::RemoveVia(id)), "delete via")
+            }
+            // Pour deletion is intentionally deferred: net+layer does not identify
+            // one authored Region when multiple pours share that pair.
+            SemanticId::Pour { .. } | SemanticId::Net(_) => return,
+        };
+        if let Err(e) = result {
+            self.domain.edit.error = Some(e);
+        }
+    }
+
+    /// Rotate the selected board component 90° counterclockwise. A selected pad
+    /// denotes its owner. Bottom-side placement is preserved.
+    pub(crate) fn rotate_selection_ccw(&mut self) {
+        let id = match self.domain.selection.borrow().single() {
+            Some(SemanticId::Part(id)) | Some(SemanticId::Pin { comp: id, .. }) => id.clone(),
+            _ => return,
+        };
+        let Some(component) = self
+            .domain
+            .doc
+            .as_ref()
+            .ok()
+            .and_then(|doc| doc.components.get(&id))
+        else {
+            return;
+        };
+        let degrees = crate::inspector::rotation_degrees(component.orient) + 90.0;
+        let bottom = component.orient.is_bottom();
+        self.set_component_rotation(&id, degrees, bottom, "rotate component");
+    }
+
+    /// Commit one component coordinate in mm, preserving the other coordinate.
+    pub(crate) fn set_component_position_mm(
+        &mut self,
+        id: &EntityId,
+        x_mm: Option<f64>,
+        y_mm: Option<f64>,
+    ) {
+        let Some(component) = self
+            .domain
+            .doc
+            .as_ref()
+            .ok()
+            .and_then(|doc| doc.components.get(id))
+        else {
+            return;
+        };
+        let mm = eutectic_core::coord::MM as f64;
+        let target = eutectic_core::coord::Point {
+            x: x_mm
+                .map(|v| (v * mm).round() as eutectic_core::coord::Nm)
+                .unwrap_or(component.pos.value.x),
+            y: y_mm
+                .map(|v| (v * mm).round() as eutectic_core::coord::Nm)
+                .unwrap_or(component.pos.value.y),
+        };
+        if let Err(e) = self.commit_edit(
+            Transaction::one(Command::Pin(id.clone(), target)),
+            "edit component position",
+        ) {
+            self.domain.edit.error = Some(e);
+        }
+    }
+
+    /// Commit an inspector-authored planar rotation in degrees, preserving the
+    /// component's current board side.
+    pub(crate) fn set_component_rotation_deg(&mut self, id: &EntityId, degrees: f64) {
+        let bottom = self
+            .domain
+            .doc
+            .as_ref()
+            .ok()
+            .and_then(|doc| doc.components.get(id))
+            .is_some_and(|component| component.orient.is_bottom());
+        self.set_component_rotation(id, degrees, bottom, "edit component rotation");
+    }
+
+    /// Commit a trace width edit in mm by replacing the trace under its stable id.
+    pub(crate) fn set_trace_width_mm(&mut self, id: TraceId, width_mm: f64) {
+        let width =
+            (width_mm * eutectic_core::coord::MM as f64).round() as eutectic_core::coord::Nm;
+        self.replace_trace(id, "edit trace width", |trace| trace.width = width);
+    }
+
+    /// Cycle a trace through the document's copper slabs, preserving every other
+    /// authored trace field. The common two-layer case is F.Cu ↔ B.Cu.
+    pub(crate) fn cycle_trace_layer(&mut self, id: TraceId) {
+        let copper = self.copper_layer_names();
+        let Some(trace) = self
+            .domain
+            .doc
+            .as_ref()
+            .ok()
+            .and_then(|doc| doc.traces.get(&id))
+        else {
+            return;
+        };
+        let next = copper
+            .iter()
+            .position(|name| name == &trace.layer)
+            .map(|i| copper[(i + 1) % copper.len()].clone())
+            .or_else(|| copper.first().cloned());
+        if let Some(next) = next {
+            self.replace_trace(id, "edit trace layer", |trace| trace.layer = next);
+        }
+    }
+
+    fn replace_trace(
+        &mut self,
+        id: TraceId,
+        label: &str,
+        edit: impl FnOnce(&mut eutectic_core::route::Trace),
+    ) {
+        let Some(mut trace) = self
+            .domain
+            .doc
+            .as_ref()
+            .ok()
+            .and_then(|doc| doc.traces.get(&id))
+            .cloned()
+        else {
+            return;
+        };
+        edit(&mut trace);
+        trace.prov = Provenance::Pinned;
+        if let Err(e) = self.commit_edit(
+            Transaction(vec![Command::RemoveTrace(id), Command::AddTrace(id, trace)]),
+            label,
+        ) {
+            self.domain.edit.error = Some(e);
+        }
+    }
+
+    fn set_component_rotation(&mut self, id: &EntityId, degrees: f64, bottom: bool, label: &str) {
+        if !degrees.is_finite() {
+            return;
+        }
+        let rounded = degrees.round();
+        let mut orient = if (degrees - rounded).abs() < f64::EPSILON
+            && rounded >= i32::MIN as f64
+            && rounded <= i32::MAX as f64
+        {
+            Orient::from_deg(rounded as i32).unwrap_or_else(|| Orient::from_angle_deg(degrees))
+        } else {
+            Orient::from_angle_deg(degrees)
+        };
+        if bottom {
+            orient = orient.flipped();
+        }
+        let mut source = match &self.domain.doc {
+            Ok(doc) if doc.components.contains_key(id) => doc.source.clone(),
+            _ => return,
+        };
+        source.retain(|d| !matches!(d, GenDirective::Rotate { path, .. } if path == id.as_str()));
+        source.push(GenDirective::Rotate {
+            path: id.as_str().to_string(),
+            orient,
+        });
+        if let Err(e) = self.commit_edit(Transaction::one(Command::SetSource(source)), label) {
+            self.domain.edit.error = Some(e);
+        }
+    }
+
+    fn delete_component(&mut self, id: EntityId) -> Result<(), String> {
+        let text = match &self.domain.doc {
+            Ok(doc) => {
+                let source = delete_component_from_source(&doc.source, &id).ok_or_else(|| {
+                    format!(
+                        "component `{id}` is generated by a range/def and cannot be deleted independently"
+                    )
+                })?;
+                // LoadText is the command algebra's whole-tier-1 ingest path. Build
+                // its canonical payload from a clone so schematic references and
+                // ID-keyed exceptions disappear atomically with the instance while
+                // materialized net-owned routing is preserved.
+                let mut staged = doc.clone();
+                staged.source = source;
+                staged.overrides.remove(&id);
+                staged.refdes_pins.remove(&id);
+                if let Some(layout) = &mut staged.schematic {
+                    prune_schematic_component(&mut layout.roots, id.as_str());
+                }
+                eutectic_core::text::serialize(&staged)
+            }
+            Err(e) => return Err(format!("no document to edit: {e}")),
+        };
+        self.commit_edit(
+            Transaction::one(Command::LoadText(text)),
+            "delete component",
+        )
+    }
+
     /// Start a canned component drag with the ghost at `to` — for fixtures /
     /// tests that render a drag-in-progress scene without driving live pointer
     /// events. Uses the same drag builder as the interactive pointer-down path
@@ -546,4 +826,72 @@ impl EutecticApp {
         let mut sel = self.domain.selection.borrow_mut();
         sel.retain(|id| domain::resolves_in(id, doc, derived));
     }
+}
+
+/// Remove one plain authored instance and every directive that would otherwise
+/// retain a dangling reference to it. Named nets are kept even when their member
+/// list becomes empty so net-owned materialized routes remain valid under the
+/// engine's existing semantics. Returns `None` for generated/def-expanded parts:
+/// deleting one expansion would require rewriting its generator or definition.
+fn delete_component_from_source(
+    source: &[GenDirective],
+    id: &EntityId,
+) -> Option<Vec<GenDirective>> {
+    let target = id.as_str();
+    let mut found = false;
+    let mut out = Vec::with_capacity(source.len());
+    for directive in source.iter().cloned() {
+        match directive {
+            GenDirective::Instance { path, .. } if path == target => found = true,
+            GenDirective::Place { ref path, .. }
+            | GenDirective::Fix { ref path, .. }
+            | GenDirective::Rotate { ref path, .. }
+                if path == target => {}
+            GenDirective::Near { ref a, ref b, .. } | GenDirective::MinSep { ref a, ref b, .. }
+                if a == target || b == target => {}
+            GenDirective::NearPin {
+                ref a, ref b_comp, ..
+            } if a == target || b_comp == target => {}
+            GenDirective::ConnectInterface { ref a, ref b } if a.0 == target || b.0 == target => {}
+            GenDirective::ConnectPins { net, mut pins } => {
+                pins.retain(|(comp, _)| comp != target);
+                out.push(GenDirective::ConnectPins { net, pins });
+            }
+            GenDirective::NoConnect { mut pins } => {
+                pins.retain(|(comp, _)| comp != target);
+                if !pins.is_empty() {
+                    out.push(GenDirective::NoConnect { pins });
+                }
+            }
+            GenDirective::AlignX { mut nodes } => {
+                nodes.retain(|node| node != target);
+                if nodes.len() >= 2 {
+                    out.push(GenDirective::AlignX { nodes });
+                }
+            }
+            GenDirective::AlignY { mut nodes } => {
+                nodes.retain(|node| node != target);
+                if nodes.len() >= 2 {
+                    out.push(GenDirective::AlignY { nodes });
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    found.then_some(out)
+}
+
+/// Remove a component's symbol and presentational wires from the authored
+/// schematic tree when the same plain instance is deleted on the board.
+fn prune_schematic_component(nodes: &mut Vec<eutectic_core::schematic::LayoutNode>, target: &str) {
+    use eutectic_core::schematic::LayoutNode;
+    nodes.retain_mut(|node| match node {
+        LayoutNode::Container(container) => {
+            prune_schematic_component(&mut container.children, target);
+            true
+        }
+        LayoutNode::Symbol(symbol) => symbol.path != target,
+        LayoutNode::Wire(wire) => wire.a.comp != target && wire.b.comp != target,
+        LayoutNode::Comment(_) | LayoutNode::Blank => true,
+    });
 }

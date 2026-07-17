@@ -149,8 +149,7 @@ pub fn dual_boards() -> EutecticApp {
 /// Per-view-kind tool memory made visible (revised structural commitment 4): a
 /// board pane and a schematic pane whose overlay strips show DIFFERENT active
 /// tools simultaneously — the board kind holds Route while the schematic kind
-/// holds its Select. The schematic strip offers Select ONLY (applicability is
-/// structural; board tools are never borrowed).
+/// holds its Select. Board-only Delete/Route remain structurally absent there.
 pub fn per_kind_tools() -> EutecticApp {
     use crate::tool::Tool;
     let app = EutecticApp::new(schematic_domain());

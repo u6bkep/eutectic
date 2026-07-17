@@ -4,7 +4,7 @@
 //! Coordinate and measure values project through the app-wide mm/in display setting.
 //! Moved out of `app/panels.rs` as pure code motion (gui-module-split).
 
-use crate::app::{EutecticApp, ViewKind};
+use crate::app::EutecticApp;
 use crate::inspector::InspectorData;
 use crate::tool::Tool;
 use damascene_core::prelude::*;
@@ -28,9 +28,9 @@ impl EutecticApp {
         let mut items: Vec<El> = vec![text(cursor).muted().mono()];
 
         // The measure readout (mockup taste: dx/dy/dist in the status bar) — shown only
-        // while the board kind's slot is Measure with a segment in progress (measure
-        // is a board-pane preview).
-        if self.tool_for(ViewKind::Board) == Tool::Measure
+        // while the focused pane's kind is measuring with a segment in progress.
+        if self.live_tool() == Tool::Measure
+            && self.measure_pane.get() == self.focused_pane.get()
             && let Some((dx, dy, dist)) = self.measure.get().readout()
         {
             items.push(

@@ -164,6 +164,16 @@ impl App for EutecticApp {
             return;
         }
 
+        // Editable Properties plus the Delete/Rotate actions share one
+        // direct-manipulation dispatch hook. A field blur deliberately returns
+        // false so the click that caused it continues.
+        if !self.libraries_open.get()
+            && !self.palette_open.get()
+            && self.handle_direct_manip_event(&event)
+        {
+            return;
+        }
+
         // Editing actions (m6): the Save / Undo / Redo toolbar buttons and their
         // hotkey twins (Ctrl+S / Ctrl+Z / Ctrl+Shift+Z or Ctrl+Y — registered in
         // `hotkeys()`, delivered as `UiEventKind::Hotkey` with the same action
@@ -307,9 +317,8 @@ impl App for EutecticApp {
         // trace-vertex drag, then a pending route (preview discarded, nothing
         // committed — m6); with the Route tool idle, Esc exits the board kind's
         // slot back to Select; then a measure in progress; else clear the
-        // selection. The Route/Measure checks key off the BOARD kind's slot —
-        // every preview today is a board-pane preview, so this is the same
-        // layering as before the per-kind re-keying.
+        // selection. Schematic measure cancellation is folded by the
+        // direct-manipulation hook above.
         if event.kind == UiEventKind::Escape {
             if self.camera_pan.borrow().is_some() {
                 // Cancel the pan gesture (the camera stays where it is — a pan

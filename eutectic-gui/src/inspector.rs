@@ -1,4 +1,4 @@
-//! The read-only properties inspector (milestone 3, mockup right-sidebar anatomy).
+//! The properties inspector projection (mockup right-sidebar anatomy).
 //!
 //! Projects the semantic selection into an **identity card** (kind label + primary id)
 //! plus **key/value rows**, every value pulled live from the doc / elaborated data —
@@ -9,7 +9,7 @@
 
 use crate::pick::SemanticId;
 use eutectic_core::coord::{MM, Nm};
-use eutectic_core::doc::{Doc, PinRef};
+use eutectic_core::doc::{Doc, Orient, PinRef};
 use eutectic_core::part::PartLib;
 
 /// One inspector key/value row.
@@ -45,10 +45,38 @@ pub struct InspectorData {
     pub net: Option<String>,
 }
 
+/// Format one nm coordinate in mm.
+fn mm_value(value: Nm) -> String {
+    format!("{:.3}", value as f64 / MM as f64)
+}
+
+/// Planar quaternion angle in degrees without the integer rounding used by
+/// [`Orient::to_deg`]'s compact display projection.
+pub(crate) fn rotation_degrees(orient: Orient) -> f64 {
+    let (w, x, y, z) = (
+        orient.w as f64,
+        orient.x as f64,
+        orient.y as f64,
+        orient.z as f64,
+    );
+    (2.0 * (w * z + x * y))
+        .atan2(w * w + x * x - y * y - z * z)
+        .to_degrees()
+        .rem_euclid(360.0)
+}
+
+fn degrees_value(orient: Orient) -> String {
+    let degrees = rotation_degrees(orient);
+    if (degrees - degrees.round()).abs() < 0.000_000_5 {
+        format!("{degrees:.0}")
+    } else {
+        format!("{degrees:.3}")
+    }
+}
+
 /// Format a nm coordinate pair as `x, y` in mm.
 fn xy_mm(x: Nm, y: Nm) -> String {
-    let mm = MM as f64;
-    format!("{:.3}, {:.3} mm", x as f64 / mm, y as f64 / mm)
+    format!("{}, {} mm", mm_value(x), mm_value(y))
 }
 
 /// The polyline length of a trace path in mm (sum of segment lengths, i128 exact
@@ -85,8 +113,9 @@ impl InspectorData {
                 let mut rows = vec![
                     Row::new("Refdes", eid.as_str()),
                     Row::new("Part", c.part.clone()),
-                    Row::new("Position", xy_mm(c.pos.value.x, c.pos.value.y)),
-                    Row::new("Rotation", format!("{} deg", c.orient.to_deg())),
+                    Row::new("Position X", mm_value(c.pos.value.x)),
+                    Row::new("Position Y", mm_value(c.pos.value.y)),
+                    Row::new("Rotation", degrees_value(c.orient)),
                     Row::new("Pins", pin_count.to_string()),
                 ];
                 // Per-pin net (cheap enough for the small parts in scope): one row per
@@ -110,7 +139,7 @@ impl InspectorData {
                 let rows = vec![
                     Row::new("Net", t.net.to_string()),
                     Row::new("Layer", t.layer.clone()),
-                    Row::new("Width", format!("{:.3} mm", t.width as f64 / MM as f64)),
+                    Row::new("Width", mm_value(t.width)),
                     Row::new("Length", format!("{:.3} mm", trace_length_mm(&t.path))),
                     Row::new("Vertices", t.path.len().to_string()),
                 ];

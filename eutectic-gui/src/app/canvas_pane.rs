@@ -67,6 +67,7 @@ use crate::render::{
     Camera, CameraGlide, DamageKey, OverlayGpu, RenderArgs, Renderer, ResolvedStyles, SceneCache,
     StyleTables, needs_render,
 };
+use crate::tool::Tool;
 use eutectic_core::coord::{Nm, Point};
 use eutectic_core::geom::Shape2D;
 use std::collections::BTreeSet;
@@ -777,7 +778,19 @@ impl EutecticApp {
                     let overlay_src = self.build_board_overlay(pane, &derived.findings);
                     overlay_prims(&overlay_src, phys.zoom)
                 }
-                ViewKind::Schematic => Vec::new(),
+                ViewKind::Schematic => {
+                    let measure = (self.tool_for(ViewKind::Schematic) == Tool::Measure
+                        && self.measure_pane.get() == pane)
+                        .then(|| self.measure.get().segment())
+                        .flatten();
+                    overlay_prims(
+                        &Overlay {
+                            measure,
+                            ..Overlay::default()
+                        },
+                        phys.zoom,
+                    )
+                }
             };
             if prims != pg.overlay_prims {
                 pg.overlay.update(device, queue, &prims, scene.anchor);

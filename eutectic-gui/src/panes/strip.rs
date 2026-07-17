@@ -35,6 +35,14 @@ static SELECT_GLYPH: LazyLock<SvgIcon> = LazyLock::new(|| {
     .expect("static select glyph parses")
 });
 
+/// Lucide `hand` — the Pan glyph.
+static PAN_GLYPH: LazyLock<SvgIcon> = LazyLock::new(|| {
+    SvgIcon::parse_current_color(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 11V6a2 2 0 0 0-4 0v5"/><path d="M14 10V4a2 2 0 0 0-4 0v7"/><path d="M10 9.5V6a2 2 0 0 0-4 0v9"/><path d="M6 14v-2a2 2 0 0 0-4 0v3c0 5 4 7 9 7h1c5 0 8-3 8-8v-3a2 2 0 0 0-4 0v1"/></svg>"##,
+    )
+    .expect("static pan glyph parses")
+});
+
 /// Lucide `route` — start/end dots joined by an S-curve, the trace-drawing glyph.
 static ROUTE_GLYPH: LazyLock<SvgIcon> = LazyLock::new(|| {
     SvgIcon::parse_current_color(
@@ -51,12 +59,22 @@ static MEASURE_GLYPH: LazyLock<SvgIcon> = LazyLock::new(|| {
     .expect("static measure glyph parses")
 });
 
+/// Lucide `trash-2` — the board Delete glyph.
+static DELETE_GLYPH: LazyLock<SvgIcon> = LazyLock::new(|| {
+    SvgIcon::parse_current_color(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m19 6-1 14H6L5 6"/><path d="M10 11v5"/><path d="M14 11v5"/></svg>"##,
+    )
+    .expect("static delete glyph parses")
+});
+
 /// The strip glyph for `tool`.
 fn glyph(tool: Tool) -> SvgIcon {
     match tool {
         Tool::Select => SELECT_GLYPH.clone(),
-        Tool::Route => ROUTE_GLYPH.clone(),
+        Tool::Pan => PAN_GLYPH.clone(),
         Tool::Measure => MEASURE_GLYPH.clone(),
+        Tool::Delete => DELETE_GLYPH.clone(),
+        Tool::Route => ROUTE_GLYPH.clone(),
     }
 }
 

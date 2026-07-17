@@ -82,6 +82,16 @@ impl EutecticApp {
         // The tool in force over a board pane is the BOARD kind's slot (per-view-
         // kind tool memory) — the pane being handled here is a board pane.
         match (self.tool_for(crate::app::ViewKind::Board), event.kind) {
+            (Tool::Pan, UiEventKind::PointerDown) => {
+                self.suppress_click.set(false);
+                let cam = self.pane_camera(pane);
+                *self.camera_pan.borrow_mut() = Some(CameraPanState {
+                    pane,
+                    start_px: pos,
+                    start_center: cam.center,
+                    moved: false,
+                });
+            }
             (Tool::Select, UiEventKind::PointerDown) => {
                 // A fresh press can never inherit a stale eaten-click flag —
                 // nor a stale camera pan (a press whose PointerUp never arrived
@@ -183,6 +193,18 @@ impl EutecticApp {
                 let mut m = self.measure.get();
                 m.hover(p);
                 self.measure.set(m);
+            }
+            (Tool::Delete, UiEventKind::Click) => {
+                let hit = {
+                    let derived = self.derived.borrow();
+                    let Some(view) = &derived.board else {
+                        return;
+                    };
+                    pick::resolve(&view.candidates, p, tol, |id| self.layer_id_visible(id))
+                };
+                if let Some(hit) = hit {
+                    self.delete_id(hit.id);
+                }
             }
             (Tool::Route, UiEventKind::Click) => {
                 self.route_click(p, tol);
@@ -587,6 +609,15 @@ impl EutecticApp {
         };
 
         match (self.tool_for(crate::app::ViewKind::Schematic), event.kind) {
+            (Tool::Pan, UiEventKind::PointerDown) => {
+                self.suppress_click.set(false);
+                *self.camera_pan.borrow_mut() = Some(CameraPanState {
+                    pane,
+                    start_px: pos,
+                    start_center: cam.center,
+                    moved: false,
+                });
+            }
             (Tool::Select, UiEventKind::PointerDown) => {
                 // A fresh press can never inherit a stale eaten-click flag —
                 // nor a stale camera pan.
@@ -623,9 +654,18 @@ impl EutecticApp {
             (Tool::Select, UiEventKind::PointerLeave) => {
                 self.domain.selection.borrow_mut().clear_hover();
             }
-            // The schematic kind offers Select only (strip_groups), so no
-            // other tool's events can arrive here; the arm stays as the
-            // structural catch-all.
+            (Tool::Measure, UiEventKind::Click) => {
+                self.measure_pane.set(pane);
+                let mut m = self.measure.get();
+                m.click(p);
+                self.measure.set(m);
+            }
+            (Tool::Measure, UiEventKind::PointerEnter | UiEventKind::Drag) => {
+                self.measure_pane.set(pane);
+                let mut m = self.measure.get();
+                m.hover(p);
+                self.measure.set(m);
+            }
             _ => {}
         }
     }
