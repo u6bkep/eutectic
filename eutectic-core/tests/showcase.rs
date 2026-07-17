@@ -1,8 +1,8 @@
 use eutectic_core::command::{Command, Transaction};
-use eutectic_core::doc::Doc;
-use eutectic_core::geom::{Role, Seg};
+use eutectic_core::doc::{Doc, Point, Provenance};
+use eutectic_core::geom::{KeepoutKind, Role, Seg};
 use eutectic_core::history::History;
-use eutectic_core::id::NetId;
+use eutectic_core::id::{EntityId, NetId, TraceId};
 use eutectic_core::ir::GenDirective;
 use eutectic_core::part::part_library;
 use eutectic_core::query::{Engine, Key};
@@ -58,6 +58,22 @@ fn showcase_inventory_and_deliberate_findings_are_exact() {
             |directive| matches!(directive, GenDirective::Slab(slab) if slab.role == Role::Mask),
         )
         .count();
+    let hole_count = doc
+        .source
+        .iter()
+        .filter(|directive| matches!(directive, GenDirective::Hole { .. }))
+        .count();
+    let component_keepout_count = doc
+        .source
+        .iter()
+        .filter(|directive| {
+            matches!(
+                directive,
+                GenDirective::Region(region)
+                    if region.role == Role::Keepout(KeepoutKind::Component)
+            )
+        })
+        .count();
     let outline_arcs = doc
         .source
         .iter()
@@ -75,14 +91,52 @@ fn showcase_inventory_and_deliberate_findings_are_exact() {
         .expect("showcase has a board outline");
     let findings = engine.query(&doc, &lib, Key::Drc).as_drc().to_vec();
 
-    assert_eq!(doc.components.len(), 7, "elaborated toy-library parts");
-    assert_eq!(doc.traces.len(), 11, "persisted routed traces");
+    assert_eq!(doc.components.len(), 8, "elaborated toy-library parts");
+    assert_eq!(doc.nets.len(), 5, "three named nets plus both UART legs");
+    assert_eq!(doc.no_connects.len(), 2, "both intentional NC pads");
+    assert_eq!(doc.traces.len(), 8, "persisted routed traces");
     assert_eq!(doc.vias.len(), 2, "persisted through-vias");
     assert!(
         doc.vias.values().all(|via| via.span.is_none()),
         "both vias are through-vias"
     );
-    assert_eq!(trace_layers, BTreeMap::from([("B.Cu", 1), ("F.Cu", 10)]));
+    assert_eq!(trace_layers, BTreeMap::from([("B.Cu", 1), ("F.Cu", 7)]));
+    assert_eq!(
+        doc.traces
+            .values()
+            .filter(|trace| trace.prov == Provenance::Free)
+            .count(),
+        1
+    );
+    assert_eq!(
+        doc.traces
+            .values()
+            .filter(|trace| trace.prov == Provenance::Hint)
+            .count(),
+        1
+    );
+    assert_eq!(
+        doc.traces
+            .values()
+            .filter(|trace| trace.prov == Provenance::Pinned)
+            .count(),
+        5
+    );
+    assert_eq!(
+        doc.traces
+            .values()
+            .filter(|trace| trace.prov == Provenance::Fixed)
+            .count(),
+        1
+    );
+    let vin_trace = &doc.traces[&TraceId(1)];
+    assert_eq!(vin_trace.net, NetId::new("VIN"));
+    assert_eq!(vin_trace.path.first(), Some(&Point::mm(8, 16)));
+    assert_eq!(vin_trace.path.last(), Some(&Point::mm(6, 22)));
+    let vcc_trace = &doc.traces[&TraceId(2)];
+    assert_eq!(vcc_trace.net, NetId::new("VCC"));
+    assert_eq!(vcc_trace.path.first(), Some(&Point::mm(12, 16)));
+    assert_eq!(vcc_trace.path.last(), Some(&Point::mm(19, 24)));
     assert_eq!(pours.len(), 2, "derived copper pours");
     assert_eq!(
         pours
@@ -97,6 +151,8 @@ fn showcase_inventory_and_deliberate_findings_are_exact() {
     assert_eq!(authored_silk_count, 4, "authored silk text/graphics");
     assert_eq!(silk_count, 62, "realized silk glyph-stroke features");
     assert_eq!(mask_slabs, 2, "front and back solder-mask slabs");
+    assert_eq!(hole_count, 2, "authored NPTH mounting holes");
+    assert_eq!(component_keepout_count, 1, "authored component keepout");
     assert_eq!(
         outline_arcs, 4,
         "one rounded treatment at every board corner"
@@ -113,6 +169,15 @@ fn showcase_inventory_and_deliberate_findings_are_exact() {
             .wires()
             .len(),
         3
+    );
+    let solver_part = &doc.components[&EntityId::new("C_SOLVER")];
+    assert_eq!(solver_part.pos.value, Point::mm(44, 16));
+    assert_eq!(solver_part.pos.prov, Provenance::Free);
+    assert!(doc.overrides.is_empty(), "no positional overrides");
+    assert_eq!(
+        doc.refdes_pins,
+        BTreeMap::from([(EntityId::new("C_SOLVER"), "C99".to_string())]),
+        "the overrides zone carries one stable refdes pin"
     );
     assert!(doc.nets.contains_key(&NetId::new("U2.uart.tx")));
     assert!(doc.nets.contains_key(&NetId::new("U2.uart.rx")));
