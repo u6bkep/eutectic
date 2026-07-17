@@ -3,6 +3,7 @@
 use crate::app::canvas_pane::CamRequest;
 use crate::app::pane::{SidebarSection, pane_index};
 use crate::app::{EutecticApp, PaneId, ViewKind};
+use crate::explorer::component_display;
 use crate::pick::{LayerId, SemanticId};
 use damascene_core::prelude::*;
 use eutectic_core::coord::{Nm, Point};
@@ -69,7 +70,6 @@ impl EutecticApp {
             self.focus_requests
                 .borrow_mut()
                 .push(PALETTE_INPUT_KEY.to_string());
-            self.libraries_open.set(false);
             *self.open_menu.borrow_mut() = Some(PALETTE_MENU_GATE.to_string());
         } else if self.open_menu.borrow().as_deref() == Some(PALETTE_MENU_GATE) {
             *self.open_menu.borrow_mut() = None;
@@ -145,6 +145,11 @@ impl EutecticApp {
 
     pub(crate) fn handle_palette_event(&mut self, event: &UiEvent) -> bool {
         if event.is_hotkey(PALETTE_TOGGLE_KEY) || event.is_click_or_activate(PALETTE_TOGGLE_KEY) {
+            if !self.palette_open.get()
+                && (self.libraries_open.get() || self.open_menu.borrow().is_some())
+            {
+                return true;
+            }
             self.set_palette_open(!self.palette_open.get());
             return true;
         }
@@ -233,6 +238,12 @@ impl EutecticApp {
 
     fn palette_items(&self, query: &str) -> Vec<PaletteItem> {
         let mut items = Vec::new();
+        let registry = self
+            .domain
+            .doc
+            .as_ref()
+            .ok()
+            .map(|doc| eutectic_core::annotate::registry(&doc.source));
         let derived = self.derived.borrow();
         for row in &derived.explorer.nets {
             let label = format!("net {}", row.label);
@@ -250,7 +261,7 @@ impl EutecticApp {
         }
         for row in &derived.explorer.components {
             let label = format!("part {}", row.label);
-            let detail = self.palette_component_detail(&row.id, &row.secondary);
+            let detail = self.palette_component_detail(&row.id, &row.secondary, registry.as_ref());
             if fuzzy_match(query, &format!("{label} {detail}")) {
                 items.push(PaletteItem {
                     group: "Jump to",
@@ -281,7 +292,7 @@ impl EutecticApp {
     fn palette_commands(&self) -> Vec<PaletteCommand> {
         let mut commands = vec![PaletteCommand {
             label: "Fit view".to_string(),
-            shortcut: Some("F"),
+            shortcut: None,
             enabled: true,
             action: PaletteAction::FitView,
         }];
@@ -407,28 +418,27 @@ impl EutecticApp {
         }))
     }
 
-    fn palette_component_detail(&self, id: &SemanticId, fallback: &str) -> String {
+    fn palette_component_detail(
+        &self,
+        id: &SemanticId,
+        fallback: &str,
+        registry: Option<&std::collections::BTreeMap<String, eutectic_core::annotate::ClassEntry>>,
+    ) -> String {
         let SemanticId::Part(part) = id else {
             return fallback.to_string();
         };
         let Ok(doc) = &self.domain.doc else {
             return fallback.to_string();
         };
-        let Some(comp) = doc.components.get(part) else {
+        let Some(display) =
+            registry.and_then(|registry| component_display(doc, &self.domain.lib, part, registry))
+        else {
             return fallback.to_string();
         };
-        let Some(def) = self.domain.lib.get(&comp.part) else {
-            return comp.part.clone();
-        };
-        let value = eutectic_core::annotate::label(
-            comp,
-            def,
-            &eutectic_core::annotate::registry(&doc.source),
-        );
-        if value == comp.part {
-            comp.part.clone()
+        if display.value == display.part {
+            display.part
         } else {
-            format!("{} · {value}", comp.part)
+            format!("{} · {}", display.part, display.value)
         }
     }
 }

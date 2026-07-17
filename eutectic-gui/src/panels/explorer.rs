@@ -3,7 +3,7 @@
 //! `app/panels.rs` as pure code motion (gui-module-split).
 
 use crate::app::EutecticApp;
-use crate::explorer::Explorer;
+use crate::explorer::{Explorer, component_display};
 use damascene_core::prelude::*;
 
 pub(crate) const EXPLORER_FILTER_KEY: &str = "explorer:filter";
@@ -18,6 +18,12 @@ impl EutecticApp {
         let query = self.explorer_filter.borrow();
         let needle = query.trim().to_lowercase();
         let sel = self.domain.selection.borrow();
+        let registry = self
+            .domain
+            .doc
+            .as_ref()
+            .ok()
+            .map(|doc| eutectic_core::annotate::registry(&doc.source));
         let comp_rows: Vec<El> = explorer
             .components
             .iter()
@@ -25,17 +31,17 @@ impl EutecticApp {
                 needle.is_empty()
                     || r.label.to_lowercase().contains(&needle)
                     || self
-                        .explorer_component_value(r)
+                        .explorer_component_value(r, registry.as_ref())
                         .to_lowercase()
                         .contains(&needle)
             })
-            .map(|r| self.explorer_row(r, sel.is_selected(&r.id)))
+            .map(|r| self.explorer_row(r, sel.is_selected(&r.id), registry.as_ref()))
             .collect();
         let net_rows: Vec<El> = explorer
             .nets
             .iter()
             .filter(|r| needle.is_empty() || r.label.to_lowercase().contains(&needle))
-            .map(|r| self.explorer_row(r, sel.is_selected(&r.id)))
+            .map(|r| self.explorer_row(r, sel.is_selected(&r.id), registry.as_ref()))
             .collect();
         column([
             text_input_with(
@@ -62,8 +68,15 @@ impl EutecticApp {
 
     /// One explorer row: a click-to-select `sidebar_menu_button` labelled with the id +
     /// secondary text + count badge, `current` when it is the selection.
-    fn explorer_row(&self, r: &crate::explorer::ExplorerRow, current: bool) -> El {
-        let secondary = self.explorer_component_value(r);
+    fn explorer_row(
+        &self,
+        r: &crate::explorer::ExplorerRow,
+        current: bool,
+        registry: Option<&std::collections::BTreeMap<String, eutectic_core::annotate::ClassEntry>>,
+    ) -> El {
+        // The binding oracle specifies component rows as refdes + effective value. The
+        // projected row's `secondary` remains the part name for non-rendering consumers.
+        let secondary = self.explorer_component_value(r, registry);
         let label = if secondary.is_empty() {
             format!("{}  [{}]", r.label, r.count)
         } else {
@@ -72,39 +85,44 @@ impl EutecticApp {
         sidebar_menu_button(label, current).key(r.key.clone())
     }
 
-    fn explorer_component_value(&self, row: &crate::explorer::ExplorerRow) -> String {
+    fn explorer_component_value(
+        &self,
+        row: &crate::explorer::ExplorerRow,
+        registry: Option<&std::collections::BTreeMap<String, eutectic_core::annotate::ClassEntry>>,
+    ) -> String {
         let crate::pick::SemanticId::Part(id) = &row.id else {
             return String::new();
         };
         let Ok(doc) = &self.domain.doc else {
             return row.secondary.clone();
         };
-        let Some(comp) = doc.components.get(id) else {
-            return row.secondary.clone();
-        };
-        let Some(def) = self.domain.lib.get(&comp.part) else {
-            return comp
-                .params
-                .get("value")
-                .cloned()
-                .unwrap_or_else(|| comp.part.clone());
-        };
-        eutectic_core::annotate::label(comp, def, &eutectic_core::annotate::registry(&doc.source))
+        registry
+            .and_then(|registry| component_display(doc, &self.domain.lib, id, registry))
+            .map_or_else(|| row.secondary.clone(), |display| display.value)
     }
 
     pub(crate) fn handle_explorer_filter_event(&self, event: &UiEvent) -> bool {
-        let changed = text_input::apply_event(
+        let mut selection = self.explorer_filter_selection.borrow_mut();
+        // SelectionChanged is deliberately route-less in damascene. Always adopt the
+        // runtime's selection so focus leaving this field releases its range.
+        if let Some(adopted) = &event.selection {
+            *selection = adopted.clone();
+        }
+
+        // TextInput is window-level whenever any node has focus, and KeyDown is likewise
+        // not input-specific. Only the currently adopted filter selection authorizes these
+        // events to edit the filter; pointer events remain self-gated by the widget route.
+        if matches!(event.kind, UiEventKind::TextInput | UiEventKind::KeyDown)
+            && !selection.is_within(EXPLORER_FILTER_KEY)
+        {
+            return false;
+        }
+
+        text_input::apply_event(
             &mut self.explorer_filter.borrow_mut(),
-            &mut self.explorer_filter_selection.borrow_mut(),
+            &mut selection,
             event,
             EXPLORER_FILTER_KEY,
-        );
-        if !changed
-            && let Some(selection) = &event.selection
-            && event.is_route(EXPLORER_FILTER_KEY)
-        {
-            *self.explorer_filter_selection.borrow_mut() = selection.clone();
-        }
-        changed
+        )
     }
 }

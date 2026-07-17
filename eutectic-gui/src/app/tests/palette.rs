@@ -55,6 +55,44 @@ fn named_key(key: NamedKey) -> UiEvent {
     event
 }
 
+fn text_input(text: &str, selection: Selection) -> UiEvent {
+    let mut event = click("");
+    event.key = None;
+    event.kind = UiEventKind::TextInput;
+    event.text = Some(text.to_string());
+    event.selection = Some(selection);
+    event
+}
+
+fn selection_changed(selection: Selection) -> UiEvent {
+    let mut event = click("");
+    event.key = None;
+    event.kind = UiEventKind::SelectionChanged;
+    event.selection = Some(selection);
+    event
+}
+
+fn jump_fixture() -> EutecticApp {
+    let source = "\
+inst C1 Cap
+inst C2 Cap
+net VDD C1.p1 C2.p1
+place C1 (10mm, 10mm)
+place C2 (20mm, 10mm)
+schematic {
+  row gap=8mm align=center {
+    sym C1
+    sym C2
+    wire C1.p1 C2.p1
+  }
+}
+";
+    EutecticApp::new(DomainState::from_source(
+        source.to_string(),
+        Some("palette-jump.eut".to_string()),
+    ))
+}
+
 #[test]
 fn explorer_filter_narrows_components_and_nets_and_rows_still_select() {
     let source = "\
@@ -90,6 +128,21 @@ net GND C2.p1
 }
 
 #[test]
+fn explorer_component_row_renders_refdes_and_effective_value() {
+    let source = "inst C1 Cap p:value=100nF\n";
+    let app = EutecticApp::new(DomainState::from_source(
+        source.to_string(),
+        Some("component-value.eut".to_string()),
+    ));
+    app.set_section_open(SidebarSection::Explorer, true);
+
+    assert!(
+        contains_text(&build_tree(&app), "Cap1  (100nF)  [2]"),
+        "the oracle anatomy is refdes + effective value + pin count"
+    );
+}
+
+#[test]
 fn explorer_filter_text_input_updates_live() {
     let mut app = EutecticApp::new(schematic_domain());
     *app.explorer_filter_selection.borrow_mut() = Selection::caret(EXPLORER_FILTER_KEY, 0);
@@ -98,6 +151,54 @@ fn explorer_filter_text_input_updates_live() {
     input.text = Some("vdd".to_string());
     app.on_event(input, &EventCx::new());
     assert_eq!(&*app.explorer_filter.borrow(), "vdd");
+}
+
+#[test]
+fn explorer_filter_only_accepts_typing_while_its_selection_is_current() {
+    let mut app = EutecticApp::new(schematic_domain());
+    *app.explorer_filter.borrow_mut() = "kept".to_string();
+
+    app.on_event(
+        selection_changed(Selection::caret(PALETTE_TOGGLE_KEY, 0)),
+        &EventCx::new(),
+    );
+    app.on_event(
+        text_input("x", Selection::caret(PALETTE_TOGGLE_KEY, 0)),
+        &EventCx::new(),
+    );
+    assert_eq!(
+        &*app.explorer_filter.borrow(),
+        "kept",
+        "typing with a button focused must not leak into the Explorer filter"
+    );
+
+    app.on_event(
+        selection_changed(Selection::caret(EXPLORER_FILTER_KEY, 4)),
+        &EventCx::new(),
+    );
+    app.on_event(
+        text_input("x", Selection::caret(EXPLORER_FILTER_KEY, 4)),
+        &EventCx::new(),
+    );
+    assert_eq!(&*app.explorer_filter.borrow(), "keptx");
+}
+
+#[test]
+fn explorer_filter_selection_releases_on_route_less_focus_change() {
+    let mut app = EutecticApp::new(schematic_domain());
+    app.on_event(click(EXPLORER_FILTER_KEY), &EventCx::new());
+    app.on_event(
+        selection_changed(Selection::caret(EXPLORER_FILTER_KEY, 0)),
+        &EventCx::new(),
+    );
+    assert!(app.selection().is_within(EXPLORER_FILTER_KEY));
+
+    app.on_event(click(PaneId::A.canvas_key()), &EventCx::new());
+    app.on_event(selection_changed(Selection::default()), &EventCx::new());
+    assert!(
+        !app.selection().is_within(EXPLORER_FILTER_KEY),
+        "the route-less runtime selection update releases the filter range"
+    );
 }
 
 #[test]
@@ -124,13 +225,29 @@ fn ctrl_k_opens_autofocuses_and_escape_closes_before_selection_clear() {
 }
 
 #[test]
-fn jump_to_net_selects_and_center_glides_the_focused_view() {
+fn ctrl_k_is_inert_while_modal_chrome_owns_the_keyboard() {
     let mut app = EutecticApp::new(schematic_domain());
+    app.set_libraries_open(true);
+    app.on_event(hotkey(PALETTE_TOGGLE_KEY), &EventCx::new());
+    assert!(!app.palette_open.get());
+    assert!(app.libraries_open.get(), "Libraries remains the owner");
+
+    app.set_libraries_open(false);
+    app.set_open_menu(Some("file"));
+    app.on_event(hotkey(PALETTE_TOGGLE_KEY), &EventCx::new());
+    assert!(!app.palette_open.get());
+    assert_eq!(app.open_menu.borrow().as_deref(), Some("file"));
+}
+
+#[test]
+fn jump_to_net_targets_the_known_board_feature_center() {
+    let mut app = jump_fixture();
     let _ = settle(&mut app);
+    app.pane_center_on(PaneId::A, (0.0, 0.0));
     app.set_palette_open(true);
     app.palette_ui.borrow_mut().query = "net VDD".to_string();
     let key = result_key(&build_tree(&app), "net VDD").expect("VDD result");
-    let zoom = app.pane_camera_target(PaneId::A).zoom;
+    let before = app.pane_camera_target(PaneId::A);
 
     app.on_event(click(&key), &EventCx::new());
 
@@ -139,10 +256,54 @@ fn jump_to_net_selects_and_center_glides_the_focused_view() {
         Some(&SemanticId::Net(NetId::new("VDD")))
     );
     let target = app.pane_camera_target(PaneId::A);
-    assert_eq!(target.zoom, zoom, "jump keeps the user's zoom");
+    assert_eq!(target.zoom, before.zoom, "jump keeps the user's zoom");
+    assert_ne!(
+        target.center, before.center,
+        "jump must retarget the camera"
+    );
+    let expected = (14.0 * NM_PER_MM as f64, 10.0 * NM_PER_MM as f64);
     assert!(
-        target.center.0.is_finite() && target.center.1.is_finite(),
-        "jump queues a finite semantic center"
+        (target.center.0 - expected.0).abs() < 1.0 && (target.center.1 - expected.1).abs() < 1.0,
+        "two identical 0.8 mm p1 pads at 9/19 mm center at {expected:?}, got {:?}",
+        target.center
+    );
+    assert!(!app.palette_open.get());
+}
+
+#[test]
+fn jump_to_part_targets_visible_schematic_when_focused_pane_is_hidden() {
+    let mut app = jump_fixture();
+    app.set_pane_views(ViewKind::Board, ViewKind::Schematic);
+    app.set_maximized(Some(PaneId::B));
+    let _ = settle(&mut app);
+    let hidden_before = app.pane_camera_target(PaneId::A);
+    let before = app.pane_camera_target(PaneId::B);
+    app.set_palette_open(true);
+    app.palette_ui.borrow_mut().query = "part Cap2".to_string();
+    let key = result_key(&build_tree(&app), "part Cap2").expect("Cap2 result");
+
+    app.on_event(click(&key), &EventCx::new());
+
+    assert_eq!(
+        app.domain.selection.borrow().single(),
+        Some(&SemanticId::Part(EntityId::new("C2")))
+    );
+    assert_eq!(
+        app.pane_camera_target(PaneId::A),
+        hidden_before,
+        "the hidden focused pane is not targeted"
+    );
+    let target = app.pane_camera_target(PaneId::B);
+    assert_eq!(target.zoom, before.zoom, "jump keeps the user's zoom");
+    assert_ne!(
+        target.center, before.center,
+        "jump must retarget the camera"
+    );
+    let expected = (23.67 * NM_PER_MM as f64, -3.81 * NM_PER_MM as f64);
+    assert!(
+        (target.center.0 - expected.0).abs() < 1.0 && (target.center.1 - expected.1).abs() < 1.0,
+        "Cap2's known row-reflow center is {expected:?}, got {:?}",
+        target.center
     );
     assert!(!app.palette_open.get());
 }
@@ -159,6 +320,15 @@ fn fit_view_command_executes() {
     assert_eq!(app.pane_cams.borrow()[0].request, Some(CamRequest::Fit));
     assert_eq!(app.pane_cams.borrow()[1].request, Some(CamRequest::Fit));
     assert!(!app.palette_open.get());
+}
+
+#[test]
+fn fit_view_has_no_unbound_shortcut_hint() {
+    let app = EutecticApp::new(schematic_domain());
+    app.set_palette_open(true);
+    let tree = build_tree(&app);
+    assert!(result_key(&tree, "Fit view").is_some());
+    assert!(!contains_text(&tree, "Fit view    F"));
 }
 
 #[test]
@@ -189,24 +359,53 @@ fn palette_renders_no_matches_empty_state() {
 }
 
 #[test]
-fn wheel_and_free_hover_are_gated_while_palette_is_open() {
+fn palette_menu_token_gates_canvas_input_until_close() {
     let mut app = edit_app();
     let native = Native::settled(&mut app);
     let rect = native.rect_a();
-    let pos = (rect.x + rect.w * 0.5, rect.y + rect.h * 0.5);
+    let pad = pad_center_of(&app, &EntityId::new("C1"));
+    let pos = crate::app::canvas_pane::pane_project(
+        &app.pane_camera(PaneId::A),
+        (rect.x, rect.y, rect.w, rect.h),
+        pad,
+    );
     let cx = EventCx::new()
         .with_ui_state(&native.rt.ui_state)
         .with_viewport(native.vp.w, native.vp.h);
     let cam = app.pane_camera(PaneId::A);
-    let mut wheel = pointer(UiEventKind::PointerWheel, pos);
-    wheel.wheel_delta = Some((0.0, -50.0));
+    let wheel = || {
+        let mut event = pointer(UiEventKind::PointerWheel, pos);
+        event.wheel_delta = Some((0.0, -50.0));
+        event
+    };
+
+    app.raw_cursor_moved(pos);
+    assert!(app.cursor_px.get()[0].is_some());
+    assert!(app.domain.selection.borrow().hovered().next().is_some());
 
     app.set_palette_open(true);
-    assert!(!app.on_wheel_event(wheel, &cx));
+    assert_eq!(
+        app.open_menu.borrow().as_deref(),
+        Some("__palette_modal_gate")
+    );
+    assert!(!app.on_wheel_event(wheel(), &cx));
     app.raw_cursor_moved(pos);
     assert_eq!(app.cursor_px.get(), [None, None]);
     assert!(app.domain.selection.borrow().hovered().next().is_none());
+    assert!(!app.raw_middle(true), "middle-drag cannot arm");
     assert_eq!(app.pane_camera(PaneId::A), cam);
+
+    app.set_palette_open(false);
+    assert!(app.open_menu.borrow().is_none(), "the gate token clears");
+    assert!(app.on_wheel_event(wheel(), &cx), "wheel gate lifts");
+    app.raw_cursor_moved(pos);
+    assert!(app.cursor_px.get()[0].is_some(), "crosshair gate lifts");
+    assert!(
+        app.domain.selection.borrow().hovered().next().is_some(),
+        "free-hover gate lifts"
+    );
+    assert!(app.raw_middle(true), "middle-drag gate lifts");
+    assert!(app.raw_middle(false));
 }
 
 #[test]

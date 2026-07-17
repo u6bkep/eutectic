@@ -14,8 +14,11 @@
 
 use crate::pick::SemanticId;
 use eutectic_core::annotate;
+use eutectic_core::annotate::ClassEntry;
 use eutectic_core::doc::Doc;
+use eutectic_core::id::EntityId;
 use eutectic_core::part::PartLib;
+use std::collections::BTreeMap;
 
 /// One explorer row: its display parts and the semantic id it selects. `key` is the
 /// event-route key of the row's button; `count` is the badge (pin count for a part, member
@@ -42,6 +45,35 @@ pub struct Explorer {
     pub components: Vec<ExplorerRow>,
     /// Nets, in net-id order (stable).
     pub nets: Vec<ExplorerRow>,
+}
+
+/// The shared component text projection used by both the Explorer and command palette.
+/// Keeping the part name and effective value together prevents those two UI surfaces from
+/// drifting while allowing each to format the pair for its own anatomy.
+pub(crate) struct ComponentDisplay {
+    pub(crate) part: String,
+    pub(crate) value: String,
+}
+
+pub(crate) fn component_display(
+    doc: &Doc,
+    lib: &PartLib,
+    id: &EntityId,
+    registry: &BTreeMap<String, ClassEntry>,
+) -> Option<ComponentDisplay> {
+    let comp = doc.components.get(id)?;
+    let value = match lib.get(&comp.part) {
+        Some(def) => annotate::label(comp, def, registry),
+        None => comp
+            .params
+            .get("value")
+            .cloned()
+            .unwrap_or_else(|| comp.part.clone()),
+    };
+    Some(ComponentDisplay {
+        part: comp.part.clone(),
+        value,
+    })
 }
 
 /// The route-key prefix for a component row.
