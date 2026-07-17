@@ -147,12 +147,10 @@ fn schematic_strip_offers_select_only_and_ignores_forged_board_tools() {
             "board strip renders {tool:?}"
         );
     }
-    for tool in [Tool::Select] {
-        assert!(
-            tree_has_key(&r.tree, &PaneId::B.strip_key(tool)),
-            "schematic strip renders {tool:?}"
-        );
-    }
+    assert!(
+        tree_has_key(&r.tree, &PaneId::B.strip_key(Tool::Select)),
+        "schematic strip renders Select"
+    );
     for absent in [Tool::Route, Tool::Measure] {
         assert!(
             !tree_has_key(&r.tree, &PaneId::B.strip_key(absent)),
