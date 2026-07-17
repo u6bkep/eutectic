@@ -503,9 +503,11 @@ impl App for EutecticApp {
         ]
     }
 
-    /// The app's current text selection — the Libraries menu's inputs are the
-    /// only text fields, so their shared [`Selection`] is the app's (the host
-    /// reads this once per frame to paint highlight bands / resolve clipboard).
+    /// The app's current text selection, arbitrated by which surface owns the
+    /// keyboard: the palette input while the palette is open, the Libraries
+    /// inputs while that modal is open, else the Explorer filter's adopted
+    /// selection (the host reads this once per frame to paint highlight bands /
+    /// resolve clipboard).
     fn selection(&self) -> Selection {
         if self.palette_open.get() {
             return self.palette_ui.borrow().selection.clone();

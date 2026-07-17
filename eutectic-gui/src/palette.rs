@@ -70,6 +70,16 @@ impl EutecticApp {
             self.focus_requests
                 .borrow_mut()
                 .push(PALETTE_INPUT_KEY.to_string());
+            // Borrowed mechanism: stamping a sentinel into `open_menu` inherits
+            // every raw-input gate keyed off an open menu (free hover, crosshair,
+            // wheel, middle-drag) without teaching the canvas a second token.
+            // `menu_overlay` renders nothing for it (unknown menu key). The open
+            // path refuses to run while a real menu is open, so the slot must be
+            // free here — assert the invariant where it lives.
+            debug_assert!(
+                self.open_menu.borrow().is_none(),
+                "palette must not clobber an open menu's slot"
+            );
             *self.open_menu.borrow_mut() = Some(PALETTE_MENU_GATE.to_string());
         } else if self.open_menu.borrow().as_deref() == Some(PALETTE_MENU_GATE) {
             *self.open_menu.borrow_mut() = None;

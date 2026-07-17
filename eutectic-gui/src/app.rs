@@ -280,7 +280,9 @@ pub struct EutecticApp {
     /// slot damascene's [`menubar`](damascene_core::menubar) folds trigger clicks
     /// into (`RefCell` for the interior-mutability pattern: flipped in `on_event`,
     /// read in `build`). Clicking outside (the popover scrim) or invoking any row
-    /// closes it.
+    /// closes it. The command palette borrows this slot with a non-menu sentinel
+    /// (`palette::PALETTE_MENU_GATE`) to inherit the raw-input gates keyed off an
+    /// open menu — see `set_palette_open`.
     pub(crate) open_menu: RefCell<Option<String>>,
     /// App-wide chrome display units (session-only; persistence is out of scope).
     pub(crate) display_units: Cell<DisplayUnits>,

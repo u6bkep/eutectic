@@ -462,9 +462,16 @@ fn hotkeys_drive_undo_redo_save() {
     assert!(!app.dirty(), "Ctrl+S saves");
     assert!(file.exists());
 
-    // The registered chord table carries all three actions.
+    // The registered chord table carries every advertised action — including
+    // the palette's Ctrl+K, so deleting its registration can't pass the suite
+    // while the toolbar tooltip still advertises the shortcut.
     let chords = app.hotkeys();
-    for action in [SAVE_KEY, UNDO_KEY, REDO_KEY] {
+    for action in [
+        SAVE_KEY,
+        UNDO_KEY,
+        REDO_KEY,
+        crate::palette::PALETTE_TOGGLE_KEY,
+    ] {
         assert!(
             chords.iter().any(|(_, a)| a == action),
             "{action} is registered as a hotkey"
