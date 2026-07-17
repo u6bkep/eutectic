@@ -17,6 +17,7 @@ use crate::app::pane::{
     strip_target_of_key, switch_key,
 };
 use crate::app::{EutecticApp, PaneId, PaneLayout, ViewKind};
+use crate::chrome::actions::{ZOOM_IN_KEY, ZOOM_OUT_KEY};
 use crate::chrome::menubar::{MENUBAR_KEY, REVERT_KEY};
 use crate::panels::findings::error_card;
 use crate::reload::SourceMsg;
@@ -56,6 +57,7 @@ impl App for EutecticApp {
             main,
             [
                 self.libraries_open.get().then(|| self.libraries_modal()),
+                self.chrome_dialog_overlay(),
                 self.menu_overlay(),
             ],
         )
@@ -81,6 +83,10 @@ impl App for EutecticApp {
     }
 
     fn on_event(&mut self, event: UiEvent, cx: &EventCx) {
+        // Help dialogs are modal and own all input until dismissed.
+        if self.handle_chrome_dialog_event(&event) {
+            return;
+        }
         // Capture the split extent for the weighted resize handler (README idiom).
         if let Some(r) = cx.rect_of_key(SPLIT_ROW_KEY) {
             let extent = match self.layout.get() {
@@ -137,6 +143,12 @@ impl App for EutecticApp {
             return;
         }
         if self.libraries_open.get() && self.handle_libraries_event(&event) {
+            return;
+        }
+
+        // Convention exports, focused zoom, display/grid toggles, Help
+        // dialogs, and Quit share one chrome-owned dispatch seam.
+        if self.handle_chrome_event(&event) {
             return;
         }
 
@@ -436,7 +448,10 @@ impl App for EutecticApp {
         // Modal chrome owns the pointer (the same gate free hover applies):
         // wheel over the Libraries modal or an open menu must scroll the
         // chrome, never zoom the pane beneath it.
-        if self.libraries_open.get() || self.open_menu.borrow().is_some() {
+        if self.libraries_open.get()
+            || self.chrome_dialog.get().is_some()
+            || self.open_menu.borrow().is_some()
+        {
             return false;
         }
         let Some(pos) = event.pointer_pos() else {
@@ -467,6 +482,14 @@ impl App for EutecticApp {
             (KeyChord::ctrl('z'), UNDO_KEY.to_string()),
             (KeyChord::ctrl_shift('z'), REDO_KEY.to_string()),
             (KeyChord::ctrl('y'), REDO_KEY.to_string()),
+            (
+                KeyChord::vim('+').with_modifiers(KeyModifiers {
+                    shift: true,
+                    ..Default::default()
+                }),
+                ZOOM_IN_KEY.to_string(),
+            ),
+            (KeyChord::vim('-'), ZOOM_OUT_KEY.to_string()),
         ]
     }
 

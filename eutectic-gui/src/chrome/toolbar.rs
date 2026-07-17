@@ -6,22 +6,21 @@
 //! - `[open, save]` — open is disabled (no file-open flow yet); save is wired to
 //!   [`SAVE_KEY`] and enabled only with a source path (accent-tinted while dirty).
 //! - `[undo, redo]` — wired to [`UNDO_KEY`] / [`REDO_KEY`].
-//! - `[zoom in, zoom out, fit]` — only Fit is wired ([`FIT_KEY`]); zoom in/out
-//!   ship disabled (no relative-zoom camera request is defined yet — the
-//!   owned cameras' Fit / Reset / CenterOn are the wired vocabulary).
+//! - `[zoom in, zoom out, fit]` — zoom acts on the focused pane through the
+//!   camera glide; Fit keeps its existing all-pane action ([`FIT_KEY`]).
 //! - `[findings jump, command palette]` — findings jump toggles the findings
 //!   panel (the Findings accordion header key, same toggle the chips use); the palette is disabled
 //!   (gw-12, unimplemented).
 //!
-//! Right side: a static `Units: mm` chip stating the current truth. Grid / Snap
-//! chips from the oracle are omitted — there is no grid or snap system yet, so a
-//! chip for them would state a capability that does not exist.
+//! Right side: a clickable `Units: mm|in` app-display-setting chip. Snap remains
+//! omitted because edit-path grid snapping does not exist.
 //!
 //! The filename badge, dirty dot, findings chips, and reload-error chip that used
 //! to live here moved to the menu bar's right cluster (`chrome::menubar`).
 
 use crate::app::EutecticApp;
 use crate::app::pane::{REDO_KEY, SAVE_KEY, SidebarSection, UNDO_KEY};
+use crate::chrome::actions::{UNITS_TOGGLE_KEY, ZOOM_IN_KEY, ZOOM_OUT_KEY};
 use crate::chrome::icons;
 use crate::chrome::menubar::FIT_KEY;
 use damascene_core::prelude::*;
@@ -62,10 +61,14 @@ impl EutecticApp {
         ])
         .gap(tokens::SPACE_1);
 
-        // Group 3: zoom in / out (disabled — no relative-zoom request) + fit.
+        // Group 3: focused-pane zoom in / out + fit.
         let group_view = row([
-            icon_button(icons::ZOOM_IN.clone()).disabled(),
-            icon_button(icons::ZOOM_OUT.clone()).disabled(),
+            icon_button(icons::ZOOM_IN.clone())
+                .tooltip("Zoom in")
+                .key(ZOOM_IN_KEY),
+            icon_button(icons::ZOOM_OUT.clone())
+                .tooltip("Zoom out")
+                .key(ZOOM_OUT_KEY),
             icon_button(icons::FIT.clone())
                 .tooltip("Zoom to fit")
                 .key(FIT_KEY),
@@ -88,10 +91,13 @@ impl EutecticApp {
             group_view,
             group_inspect,
             spacer(),
-            // A static status chip stating the current truth: coordinates are mm
-            // (no unit toggle exists yet). Grid / Snap chips are omitted — no grid
-            // or snap system exists to describe.
-            badge("Units: mm").muted(),
+            // Session-level display units. Snap remains omitted because no edit
+            // path implements grid snapping.
+            badge(format!("Units: {}", self.display_units().label()))
+                .key(UNITS_TOGGLE_KEY)
+                .focusable()
+                .cursor(Cursor::Pointer)
+                .muted(),
         ])
         .gap(tokens::SPACE_3)
         .padding(Sides::xy(tokens::SPACE_4, tokens::SPACE_2))

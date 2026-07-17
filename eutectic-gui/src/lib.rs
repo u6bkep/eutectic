@@ -24,6 +24,9 @@ pub mod schematic_pick;
 pub mod selection;
 pub mod tool;
 
-pub use app::{DomainState, EutecticApp, LibSource, PaneId, PaneLayout, PaneState, ViewKind};
+pub use app::{
+    DisplayUnits, DomainState, EutecticApp, GridStyle, LibSource, PaneId, PaneLayout, PaneState,
+    ViewKind,
+};
 pub use registry::{LibNote, Registry};
 pub use reload::{SourceMailbox, SourceMsg};

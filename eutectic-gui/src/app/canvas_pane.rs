@@ -854,6 +854,7 @@ impl EutecticApp {
                     size: needed,
                     cursor_px: cursor,
                     grid,
+                    grid_style: self.grid_style(),
                 },
             );
         }
@@ -930,6 +931,17 @@ impl EutecticApp {
                 viewport: vp,
             },
         );
+    }
+
+    /// Retarget a focused pane's glide by a relative zoom factor about the
+    /// pane centre. Since the anchor is the viewport centre, the camera centre
+    /// stays fixed; successive commands compound on the target and share the
+    /// wheel path's clamp.
+    pub(crate) fn pane_zoom_center(&self, pane: PaneId, factor: f64) {
+        let mut cams = self.pane_cams.borrow_mut();
+        let glide = &mut cams[pane_index(pane)].glide;
+        let target = glide.target();
+        glide.retarget(Camera::new(target.center, clamp_zoom(target.zoom * factor)));
     }
 
     /// Snap a pane's camera (no glide) — the pan gestures' per-event write
@@ -1151,7 +1163,10 @@ impl EutecticApp {
         }
 
         // Modal chrome owns the pointer: no hover, no crosshair.
-        if self.libraries_open.get() || self.open_menu.borrow().is_some() {
+        if self.libraries_open.get()
+            || self.chrome_dialog.get().is_some()
+            || self.open_menu.borrow().is_some()
+        {
             let mut changed = self.set_crosshair(None);
             changed |= self.clear_free_hover();
             return changed;
@@ -1273,7 +1288,10 @@ impl EutecticApp {
         if !pressed {
             return self.raw.borrow_mut().middle_pan.take().is_some();
         }
-        if self.libraries_open.get() || self.open_menu.borrow().is_some() {
+        if self.libraries_open.get()
+            || self.chrome_dialog.get().is_some()
+            || self.open_menu.borrow().is_some()
+        {
             return false;
         }
         let Some(pos) = self.raw.borrow().cursor else {
@@ -1303,6 +1321,9 @@ impl EutecticApp {
 // ---------------------------------------------------------------------------
 
 impl crate::host::WinitWgpuApp for EutecticApp {
+    fn should_exit(&self) -> bool {
+        self.quit_requested()
+    }
     fn gpu_setup(
         &mut self,
         device: &wgpu::Device,

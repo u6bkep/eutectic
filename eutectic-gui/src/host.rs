@@ -311,6 +311,12 @@ pub trait WinitWgpuApp: App {
         App::before_build(self);
     }
 
+    /// Whether the app requested a clean event-loop exit (for example from a
+    /// File ▸ Quit command). Checked at the next window event.
+    fn should_exit(&self) -> bool {
+        false
+    }
+
     /// Called once after the host has created its `wgpu::Device` and
     /// before the first frame is drawn. Apps that need to allocate
     /// app-owned GPU textures (typically for use with
@@ -921,6 +927,11 @@ impl<A: WinitWgpuApp> ApplicationHandler for Host<A> {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        if self.app.should_exit() {
+            self.gfx.take();
+            event_loop.exit();
+            return;
+        }
         // ECAD: raw event tap (see `WinitWgpuApp::raw_window_event`) — WP2's
         // free hover / crosshair / middle-drag pan. A `true` return means app
         // state changed without any El-level event, so request a frame.

@@ -1,11 +1,12 @@
 //! The bottom status bar: live cursor readout, measure readout, active-layer /
 //! selected-net chips, compact DRC findings state, and the focused pane's zoom as
 //! a `×N` scale factor ([`chrome::zoom_scale_label`](crate::chrome::zoom_scale_label)).
+//! Coordinate and measure values project through the app-wide mm/in display setting.
 //! Moved out of `app/panels.rs` as pure code motion (gui-module-split).
 
 use crate::app::{EutecticApp, ViewKind};
 use crate::inspector::InspectorData;
-use crate::tool::{Tool, format_readout};
+use crate::tool::Tool;
 use damascene_core::prelude::*;
 
 impl EutecticApp {
@@ -14,9 +15,15 @@ impl EutecticApp {
     /// readout updates on pointer enter and while panning — see the module
     /// deviation note on free-hover.
     pub(crate) fn status_bar(&self, zoom: f32) -> El {
+        let units = self.display_units();
         let cursor = match self.cursor_board_mm.get() {
-            Some((x, y)) => format!("X {x:.2}  Y {y:.2} mm"),
-            None => "X --  Y -- mm".to_string(),
+            Some((x, y)) => format!(
+                "X {:.2}  Y {:.2} {}",
+                units.from_mm(x as f64),
+                units.from_mm(y as f64),
+                units.label()
+            ),
+            None => format!("X --  Y -- {}", units.label()),
         };
         let mut items: Vec<El> = vec![text(cursor).muted().mono()];
 
@@ -26,7 +33,16 @@ impl EutecticApp {
         if self.tool_for(ViewKind::Board) == Tool::Measure
             && let Some((dx, dy, dist)) = self.measure.get().readout()
         {
-            items.push(text(format_readout(dx, dy, dist)).mono());
+            items.push(
+                text(format!(
+                    "dx {:.2}  dy {:.2}  d {:.2} {}",
+                    units.from_mm(dx),
+                    units.from_mm(dy),
+                    units.from_mm(dist),
+                    units.label()
+                ))
+                .mono(),
+            );
         }
 
         items.push(spacer());

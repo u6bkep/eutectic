@@ -9,6 +9,7 @@
 //! module through `use super::*`.
 
 mod camera;
+mod chrome;
 mod editing;
 mod libraries;
 mod menubar;

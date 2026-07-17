@@ -13,20 +13,13 @@
 //!
 //! ## Wired vs disabled
 //!
-//! The row enumeration is the oracle's in full (absence is not allowed). Only the
-//! rows whose functionality already exists in this build are live; every other
-//! row renders as a visible-but-inert [`disabled`](damascene_core::prelude) row
-//! (muted, unfocusable, no route). The live rows and the existing action they
-//! dispatch to:
-//!
-//! | Row | Route key | Handler |
-//! |---|---|---|
-//! | File ▸ Save | [`SAVE_KEY`] | [`EutecticApp::save`] |
-//! | File ▸ Revert to Saved | [`REVERT_KEY`] | [`EutecticApp::revert_to_saved`] |
-//! | File ▸ Libraries… / Tools ▸ Libraries… | [`LIBRARIES_TOGGLE_KEY`] | Libraries modal |
-//! | Edit ▸ Undo | [`UNDO_KEY`] | [`EutecticApp::undo`] |
-//! | Edit ▸ Redo | [`REDO_KEY`] | [`EutecticApp::redo`] |
-//! | View ▸ Fit | [`FIT_KEY`] | fit every pane |
+//! The row enumeration is the oracle's in full (absence is not allowed). Rows
+//! backed by real app/engine behavior are keyed to their existing action routes:
+//! save/revert/history, deterministic exports, focused zoom, units/grid,
+//! Findings, Libraries, Quit, and the Help dialogs. Everything else renders as
+//! a visible-but-inert [`disabled`](damascene_core::prelude) row (muted,
+//! unfocusable, no route); in particular autoroute and command-palette rows do
+//! not dispatch to no-ops.
 //!
 //! Save / Revert additionally require a source path (the m6 save model — an
 //! in-memory doc has nowhere to write / re-read); without one they render
@@ -35,6 +28,11 @@
 use crate::app::EutecticApp;
 use crate::app::libraries::LIBRARIES_TOGGLE_KEY;
 use crate::app::pane::{REDO_KEY, SAVE_KEY, UNDO_KEY, findings_chip_key};
+use crate::chrome::actions::{
+    EXPORT_GERBERS_KEY, EXPORT_SVG_KEY, FINDINGS_PANEL_KEY, GRID_TOGGLE_KEY, QUIT_KEY,
+    UNITS_TOGGLE_KEY, ZOOM_IN_KEY, ZOOM_OUT_KEY,
+};
+use crate::chrome::dialogs::{ABOUT_KEY, KEYMAP_KEY};
 use crate::findings::FindingSource;
 use damascene_core::prelude::*;
 use eutectic_core::diagnostic::Severity;
@@ -130,8 +128,16 @@ pub(crate) fn menu_defs() -> Vec<MenuDef> {
                     action: REVERT_KEY,
                 },
                 Sep,
-                dis("Export Gerbers…", None),
-                dis("Export SVG…", None),
+                Wired {
+                    label: "Export Gerbers…",
+                    shortcut: None,
+                    action: EXPORT_GERBERS_KEY,
+                },
+                Wired {
+                    label: "Export SVG…",
+                    shortcut: None,
+                    action: EXPORT_SVG_KEY,
+                },
                 Sep,
                 Wired {
                     label: "Libraries…",
@@ -139,7 +145,11 @@ pub(crate) fn menu_defs() -> Vec<MenuDef> {
                     action: LIBRARIES_TOGGLE_KEY,
                 },
                 Sep,
-                dis("Quit", None),
+                Wired {
+                    label: "Quit",
+                    shortcut: None,
+                    action: QUIT_KEY,
+                },
             ],
         },
         MenuDef {
@@ -180,14 +190,34 @@ pub(crate) fn menu_defs() -> Vec<MenuDef> {
                     shortcut: None,
                     action: FIT_KEY,
                 },
-                dis("Zoom In", None),
-                dis("Zoom Out", None),
+                Wired {
+                    label: "Zoom In",
+                    shortcut: Some("+"),
+                    action: ZOOM_IN_KEY,
+                },
+                Wired {
+                    label: "Zoom Out",
+                    shortcut: Some("−"),
+                    action: ZOOM_OUT_KEY,
+                },
                 Sep,
                 dis("Flip Board (bottom view)", None),
-                dis("Grid: dots / lines", None),
-                dis("Units: mm / in", None),
+                Wired {
+                    label: "Grid: dots / lines",
+                    shortcut: None,
+                    action: GRID_TOGGLE_KEY,
+                },
+                Wired {
+                    label: "Units: mm / in",
+                    shortcut: None,
+                    action: UNITS_TOGGLE_KEY,
+                },
                 Sep,
-                dis("Findings Panel", None),
+                Wired {
+                    label: "Findings Panel",
+                    shortcut: None,
+                    action: FINDINGS_PANEL_KEY,
+                },
             ],
         },
         MenuDef {
@@ -245,7 +275,18 @@ pub(crate) fn menu_defs() -> Vec<MenuDef> {
         MenuDef {
             value: "help",
             label: "Help",
-            rows: vec![dis("Keymap", None), dis("About eutectic", None)],
+            rows: vec![
+                Wired {
+                    label: "Keymap",
+                    shortcut: None,
+                    action: KEYMAP_KEY,
+                },
+                Wired {
+                    label: "About eutectic",
+                    shortcut: None,
+                    action: ABOUT_KEY,
+                },
+            ],
         },
     ]
 }
@@ -301,6 +342,14 @@ impl EutecticApp {
             let first = err.lines().next().unwrap_or(err);
             cluster.push(badge(format!("edit failed: {first}")).destructive());
         }
+        if let Some(notice) = self.chrome_notice.borrow().as_ref() {
+            let chip = badge(notice.message.clone());
+            cluster.push(if notice.error {
+                chip.destructive()
+            } else {
+                chip.success()
+            });
+        }
         row(cluster).gap(tokens::SPACE_2).align(Align::Center)
     }
 
@@ -314,7 +363,18 @@ impl EutecticApp {
         let def = menu_defs().into_iter().find(|d| d.value == value)?;
         // Save / Revert need a source path to act on (the m6 save model).
         let has_path = self.domain.source_path.is_some();
-        let rows: Vec<El> = def.rows.iter().map(|r| menu_row_el(r, has_path)).collect();
+        let rows: Vec<El> = def
+            .rows
+            .iter()
+            .map(|r| {
+                menu_row_el(
+                    r,
+                    has_path,
+                    self.display_units().label(),
+                    self.grid_style().label(),
+                )
+            })
+            .collect();
         Some(menubar_menu(MENUBAR_KEY, value, rows))
     }
 
@@ -358,7 +418,12 @@ impl EutecticApp {
 /// Render one [`MenuRow`] into a menu-panel El. Wired rows carry their route key;
 /// Save / Revert downgrade to disabled without a source path; disabled rows are
 /// muted + inert (no key), submenu rows carry a trailing chevron.
-fn menu_row_el(row: &MenuRow, has_path: bool) -> El {
+fn menu_row_el(
+    row: &MenuRow,
+    has_path: bool,
+    units_label: &'static str,
+    grid_label: &'static str,
+) -> El {
     match *row {
         MenuRow::Separator => menubar_separator(),
         MenuRow::Wired {
@@ -367,8 +432,16 @@ fn menu_row_el(row: &MenuRow, has_path: bool) -> El {
             action,
         } => {
             // Save / Revert are only actionable with a file to write / re-read.
-            let unavailable = (action == SAVE_KEY || action == REVERT_KEY) && !has_path;
-            let el = menu_item(label, shortcut);
+            let unavailable = matches!(
+                action,
+                SAVE_KEY | REVERT_KEY | EXPORT_GERBERS_KEY | EXPORT_SVG_KEY
+            ) && !has_path;
+            let trailing = match action {
+                UNITS_TOGGLE_KEY => Some(units_label),
+                GRID_TOGGLE_KEY => Some(grid_label),
+                _ => shortcut,
+            };
+            let el = menu_item(label, trailing);
             if unavailable {
                 el.disabled()
             } else {
@@ -445,9 +518,8 @@ mod tests {
         walk(menu, label)
     }
 
-    /// Exactly these six actions are wired in the menu enumeration; every other
-    /// row is a disabled row or a separator. (Libraries appears in both File and
-    /// Tools, so the wired-row *count* is seven but the action *set* is six.)
+    /// The wired action surface is explicit; every other row is disabled or a
+    /// separator. Libraries appears in both File and Tools.
     #[test]
     fn wired_rows_carry_their_existing_action_keys() {
         // `MenuRow::Disabled` has no `action` field by construction, so collecting
@@ -467,17 +539,27 @@ mod tests {
         set.sort_unstable();
         set.dedup();
         let mut want = vec![
+            ABOUT_KEY,
+            EXPORT_GERBERS_KEY,
+            EXPORT_SVG_KEY,
             FIT_KEY,
+            FINDINGS_PANEL_KEY,
+            GRID_TOGGLE_KEY,
+            KEYMAP_KEY,
             LIBRARIES_TOGGLE_KEY,
+            QUIT_KEY,
             REDO_KEY,
             REVERT_KEY,
             SAVE_KEY,
+            UNITS_TOGGLE_KEY,
             UNDO_KEY,
+            ZOOM_IN_KEY,
+            ZOOM_OUT_KEY,
         ];
         want.sort_unstable();
         assert_eq!(
             set, want,
-            "wired menu rows must route to exactly {{Save, Revert, Libraries, Undo, Redo, Fit}}"
+            "wired menu rows must match the implemented chrome surface"
         );
         // Libraries is wired in two menus (File + Tools); everything else once.
         assert_eq!(
@@ -530,7 +612,10 @@ mod tests {
             Some(None),
             "a disabled row must have no route key"
         );
-        assert_eq!(find_row_key(&menu, "Quit"), Some(None));
+        assert_eq!(
+            find_row_key(&menu, "Quit"),
+            Some(Some(QUIT_KEY.to_string()))
+        );
     }
 
     /// The filename badge + per-source findings chips render in the MENU BAR, and

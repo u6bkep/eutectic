@@ -138,6 +138,7 @@ fn render_scene(
             size: (W, H),
             cursor_px: cursor,
             grid: true,
+            grid_style: eutectic_gui::GridStyle::Dots,
         },
     );
     readback(gpu, &target)
@@ -590,6 +591,7 @@ fn schematic_scene_renders() {
             size: (W, H),
             cursor_px: None,
             grid: false, // schematic furniture: no grid, no crosshair
+            grid_style: eutectic_gui::GridStyle::Dots,
         },
     );
     let data = readback(&gpu, &target);

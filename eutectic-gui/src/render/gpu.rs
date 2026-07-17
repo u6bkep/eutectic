@@ -258,6 +258,18 @@ const PLANE_STRIDE: u64 = 256;
 const FLAG_CURSOR: u32 = 1;
 const FLAG_X_AXIS: u32 = 2;
 const FLAG_Y_AXIS: u32 = 4;
+const FLAG_GRID_LINES: u32 = 8;
+
+fn frame_flags(axis_flags: u32, cursor: bool, style: crate::app::GridStyle) -> u32 {
+    let mut flags = axis_flags;
+    if cursor {
+        flags |= FLAG_CURSOR;
+    }
+    if style == crate::app::GridStyle::Lines {
+        flags |= FLAG_GRID_LINES;
+    }
+    flags
+}
 
 // ---------------------------------------------------------------------------
 // Grid parameters (CPU side, pure — unit-tested).
@@ -397,6 +409,8 @@ pub struct RenderArgs<'a> {
     /// Board panes pass `true`; schematic panes pass `false` (the old
     /// schematic pane had no grid — a per-view config seam, not a fork).
     pub grid: bool,
+    /// Dot or hairline-line procedural branch. Ignored when `grid` is false.
+    pub grid_style: crate::app::GridStyle,
 }
 
 struct CoverageTargets {
@@ -1056,10 +1070,7 @@ impl Renderer {
         };
         let dot_r_minor = (grid.pitch_px * 0.09).clamp(0.75, 2.5) as f32;
         let dot_r_major = (dot_r_minor * 1.8).min(4.0);
-        let mut flags = grid.axis_flags;
-        if args.cursor_px.is_some() {
-            flags |= FLAG_CURSOR;
-        }
+        let flags = frame_flags(grid.axis_flags, args.cursor_px.is_some(), args.grid_style);
         let mut dash = [[0f32; 4]; 4];
         for (i, d) in args.styles.dash.iter().take(4).enumerate() {
             let on_px = (d[0] * args.camera.zoom) as f32;
@@ -1309,5 +1320,14 @@ mod tests {
         assert_eq!(std::mem::size_of::<InstanceRaw>(), 40);
         assert_eq!(std::mem::size_of::<MeshVertex>(), 12);
         assert_eq!(std::mem::size_of::<TextInstRaw>(), 40);
+    }
+
+    #[test]
+    fn grid_style_is_encoded_in_the_frame_uniform_flags() {
+        let dots = frame_flags(FLAG_X_AXIS, false, crate::app::GridStyle::Dots);
+        let lines = frame_flags(FLAG_X_AXIS, false, crate::app::GridStyle::Lines);
+        assert_eq!(dots & FLAG_GRID_LINES, 0, "dots are the default branch");
+        assert_ne!(lines & FLAG_GRID_LINES, 0, "lines set the uniform branch");
+        assert_eq!(dots & FLAG_X_AXIS, lines & FLAG_X_AXIS);
     }
 }

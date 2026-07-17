@@ -66,6 +66,70 @@ use damascene_core::prelude::*;
 use eutectic_core::coord::Nm;
 use std::cell::{Cell, RefCell};
 
+/// App-wide display units for chrome readouts. Document geometry remains in
+/// integer nanometres; this setting changes presentation only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DisplayUnits {
+    /// Millimetres (the native/default ECAD display unit).
+    #[default]
+    Millimetres,
+    /// Decimal inches.
+    Inches,
+}
+
+impl DisplayUnits {
+    /// Short label used by the toolbar, menus, and status bar.
+    pub fn label(self) -> &'static str {
+        match self {
+            DisplayUnits::Millimetres => "mm",
+            DisplayUnits::Inches => "in",
+        }
+    }
+
+    /// Convert a millimetre value for display in this unit.
+    pub fn from_mm(self, value: f64) -> f64 {
+        match self {
+            DisplayUnits::Millimetres => value,
+            DisplayUnits::Inches => value / 25.4,
+        }
+    }
+
+    fn toggled(self) -> DisplayUnits {
+        match self {
+            DisplayUnits::Millimetres => DisplayUnits::Inches,
+            DisplayUnits::Inches => DisplayUnits::Millimetres,
+        }
+    }
+}
+
+/// Procedural board-grid presentation. Dots remain the default so existing
+/// GPU output is byte-for-byte unchanged until the user toggles the setting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GridStyle {
+    /// Minor/major lattice points.
+    #[default]
+    Dots,
+    /// Hairline minor/major lattice lines.
+    Lines,
+}
+
+impl GridStyle {
+    /// Lowercase value shown at the right edge of the View menu row.
+    pub fn label(self) -> &'static str {
+        match self {
+            GridStyle::Dots => "dots",
+            GridStyle::Lines => "lines",
+        }
+    }
+
+    fn toggled(self) -> GridStyle {
+        match self {
+            GridStyle::Dots => GridStyle::Lines,
+            GridStyle::Lines => GridStyle::Dots,
+        }
+    }
+}
+
 // Test-only symbols the `tests` child module reaches through `super::*`; the
 // non-test `EutecticApp` body does not name them (the `#[cfg(test)]` accessors that
 // return `Explorer` etc. are themselves test-only).
@@ -217,6 +281,16 @@ pub struct EutecticApp {
     /// read in `build`). Clicking outside (the popover scrim) or invoking any row
     /// closes it.
     pub(crate) open_menu: RefCell<Option<String>>,
+    /// App-wide chrome display units (session-only; persistence is out of scope).
+    pub(crate) display_units: Cell<DisplayUnits>,
+    /// Board procedural-grid style (dots by default, or hairline lines).
+    pub(crate) grid_style: Cell<GridStyle>,
+    /// Most recent export result, rendered as a persistent menu-bar chip.
+    pub(crate) chrome_notice: RefCell<Option<crate::chrome::actions::ChromeNotice>>,
+    /// The small Help modal currently open, if any.
+    pub(crate) chrome_dialog: Cell<Option<crate::chrome::dialogs::ChromeDialog>>,
+    /// File ▸ Quit's host-observed exit request (headless tests inspect it).
+    pub(crate) quit_requested: Cell<bool>,
 }
 
 /// The trace / via defaults the Route tool commits with, sourced from the same
@@ -278,6 +352,11 @@ impl EutecticApp {
             raw: RefCell::new(RawInput::default()),
             active_layer: RefCell::new(None),
             open_menu: RefCell::new(None),
+            display_units: Cell::new(DisplayUnits::default()),
+            grid_style: Cell::new(GridStyle::default()),
+            chrome_notice: RefCell::new(None),
+            chrome_dialog: Cell::new(None),
+            quit_requested: Cell::new(false),
         }
     }
 
@@ -425,5 +504,31 @@ impl EutecticApp {
     /// measure-in-progress scene without driving live pointer events.
     pub fn set_measure(&self, m: MeasureState) {
         self.measure.set(m);
+    }
+
+    /// The single source of truth for chrome display units.
+    pub fn display_units(&self) -> DisplayUnits {
+        self.display_units.get()
+    }
+
+    /// Toggle the app-wide display unit between millimetres and inches.
+    pub(crate) fn toggle_display_units(&self) {
+        self.display_units.set(self.display_units.get().toggled());
+    }
+
+    /// The current board-grid presentation.
+    pub fn grid_style(&self) -> GridStyle {
+        self.grid_style.get()
+    }
+
+    /// Toggle dots/lines and damage the canvas so the uniform is rewritten.
+    pub(crate) fn toggle_grid_style(&self) {
+        self.grid_style.set(self.grid_style.get().toggled());
+        self.style_rev.set(self.style_rev.get() + 1);
+    }
+
+    /// Whether File ▸ Quit has requested a clean host exit.
+    pub fn quit_requested(&self) -> bool {
+        self.quit_requested.get()
     }
 }

@@ -3,6 +3,8 @@
 //! pure code motion (gui-module-split); the menu bar + icon-toolbar rewrite
 //! adopts the oracle anatomy (`docs/ui-oracle`).
 
+pub(crate) mod actions;
+pub(crate) mod dialogs;
 pub(crate) mod icons;
 pub(crate) mod menubar;
 pub(crate) mod status_bar;

@@ -17,7 +17,7 @@ struct Frame {
     grid: vec4f,          // pitch_px, dot_r_minor_px, dot_r_major_px, unused
     grid_offset: vec2f,   // phase of the 10x-pitch lattice, px
     origin_marker: vec2f, // px of the board origin
-    flags: u32,           // bit0 cursor valid, bit1 x-axis, bit2 y-axis
+    flags: u32,           // bit0 cursor, bit1 x-axis, bit2 y-axis, bit3 grid lines
     _p1: u32,
     _p2: u32,
     _p3: u32,
@@ -54,12 +54,19 @@ fn fs_background(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let pitch = F.grid.x;
     if pitch >= 2.0 {
         let d = p - F.grid_offset;
-        // Distance to the nearest minor / major (10x) lattice point.
+        // Distance to the nearest minor / major (10x) lattice point/line.
         let c1 = (fract(d / pitch + vec2f(0.5)) - vec2f(0.5)) * pitch;
         let p10 = pitch * 10.0;
         let c10 = (fract(d / p10 + vec2f(0.5)) - vec2f(0.5)) * p10;
-        let major = clamp(F.grid.z + 0.5 - length(c10), 0.0, 1.0);
-        let minor = clamp(F.grid.y + 0.5 - length(c1), 0.0, 1.0) * (1.0 - major);
+        var major: f32;
+        var minor: f32;
+        if (F.flags & 8u) != 0u {
+            major = clamp(0.75 - min(abs(c10.x), abs(c10.y)), 0.0, 1.0);
+            minor = clamp(0.6 - min(abs(c1.x), abs(c1.y)), 0.0, 1.0) * (1.0 - major);
+        } else {
+            major = clamp(F.grid.z + 0.5 - length(c10), 0.0, 1.0);
+            minor = clamp(F.grid.y + 0.5 - length(c1), 0.0, 1.0) * (1.0 - major);
+        }
         acc = premul(F.dot_major) * major + premul(F.dot) * minor;
     }
     // Origin axes (hairlines through board (0,0)) + a small origin ring.
