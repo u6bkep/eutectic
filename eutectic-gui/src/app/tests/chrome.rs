@@ -430,6 +430,8 @@ fn help_dialogs_list_only_wired_chords_and_real_version() {
         .iter()
         .map(|(chord, action)| (chord_label(chord), hotkey_action_label(action).to_string()))
         .collect();
+    registered.push(("Del".to_string(), "Delete selection".to_string()));
+    registered.push(("R".to_string(), "Rotate selection".to_string()));
     registered.push((
         "Esc".to_string(),
         "Cancel gesture/tool or clear selection".to_string(),
@@ -440,7 +442,7 @@ fn help_dialogs_list_only_wired_chords_and_real_version() {
         .collect();
     assert_eq!(
         documented, registered,
-        "Keymap rows must exactly match registered chords plus raw Escape"
+        "Keymap rows must match registered chords plus raw editor keys"
     );
 
     app.on_event(click(KEYMAP_KEY), &EventCx::new());

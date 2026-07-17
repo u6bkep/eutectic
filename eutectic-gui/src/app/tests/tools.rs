@@ -290,6 +290,13 @@ fn schematic_measure_uses_schematic_space() {
     let project =
         |p| crate::app::canvas_pane::pane_project(&cam, (rect.x, rect.y, rect.w, rect.h), p);
     app.on_event(pointer_in(PaneId::B, UiEventKind::Click, project(a)), &cx);
+    app.on_event(
+        pointer_in(PaneId::B, UiEventKind::PointerEnter, project(b)),
+        &cx,
+    );
+    let (_, hover) = app.measure.get().segment().expect("rubber band");
+    assert!((hover.x - b.x).abs() < 20);
+    assert!((hover.y - b.y).abs() < 20);
     app.on_event(pointer_in(PaneId::B, UiEventKind::Click, project(b)), &cx);
 
     assert_eq!(app.measure_pane.get(), PaneId::B);
@@ -321,8 +328,8 @@ fn board_tool_switch_cancels_board_previews_schematic_switch_does_not() {
     app.set_measure(m);
     assert!(app.measure.get().segment().is_some());
 
-    // A SCHEMATIC-strip Select click leaves the board preview alone.
-    app.on_event(click(&PaneId::B.strip_key(Tool::Select)), &cx);
+    // A real SCHEMATIC tool change leaves the board preview alone.
+    app.on_event(click(&PaneId::B.strip_key(Tool::Pan)), &cx);
     assert!(
         app.measure.get().segment().is_some(),
         "a schematic-strip click cancels nothing on the board"
@@ -333,5 +340,52 @@ fn board_tool_switch_cancels_board_previews_schematic_switch_does_not() {
     assert!(
         app.measure.get().segment().is_none(),
         "changing the board slot cancels the board measure preview"
+    );
+}
+
+/// Moving a measurement between Board and Schematic panes drops the old anchor
+/// before either event-driven or free-hover cursor coordinates can mix with it.
+#[test]
+fn measure_resets_across_view_kinds_in_both_directions() {
+    let mut app = split_app();
+    let rendered = settle(&mut app);
+    let cx = EventCx::new().with_ui_state(&rendered.ui);
+    let board_rect = rendered
+        .ui
+        .rect_of_key(PaneId::A.canvas_key())
+        .expect("board pane");
+    let schematic_rect = rendered
+        .ui
+        .rect_of_key(PaneId::B.canvas_key())
+        .expect("schematic pane");
+    let board_at = (
+        board_rect.x + board_rect.w / 2.0,
+        board_rect.y + board_rect.h / 2.0,
+    );
+    let schematic_at = (
+        schematic_rect.x + schematic_rect.w / 2.0,
+        schematic_rect.y + schematic_rect.h / 2.0,
+    );
+
+    app.on_event(click(&PaneId::A.strip_key(Tool::Measure)), &cx);
+    app.on_event(pointer_in(PaneId::A, UiEventKind::Click, board_at), &cx);
+    assert!(app.measure.get().segment().is_some());
+    app.on_event(click(&PaneId::B.strip_key(Tool::Measure)), &cx);
+    app.on_event(
+        pointer_in(PaneId::B, UiEventKind::PointerEnter, schematic_at),
+        &cx,
+    );
+    assert!(
+        app.measure.get().segment().is_none(),
+        "schematic hover discarded the board-space anchor"
+    );
+
+    app.on_event(pointer_in(PaneId::B, UiEventKind::Click, schematic_at), &cx);
+    assert!(app.measure.get().segment().is_some());
+    assert!(app.raw_cursor_moved(board_at));
+    assert_eq!(app.measure_pane.get(), PaneId::A);
+    assert!(
+        app.measure.get().segment().is_none(),
+        "board free-hover discarded the schematic-space anchor"
     );
 }

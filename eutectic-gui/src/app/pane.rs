@@ -191,6 +191,18 @@ pub(crate) fn pane_index(p: PaneId) -> usize {
 }
 
 impl EutecticApp {
+    /// Move the shared measurement preview to `pane`. Coordinate spaces are
+    /// comparable only within one view kind, so crossing Board ↔ Schematic
+    /// cancels the old anchor before the new pane can update its cursor.
+    pub(crate) fn claim_measure_pane(&self, pane: PaneId) {
+        let previous = self.measure_pane.get();
+        let panes = self.panes.borrow();
+        if panes[pane_index(previous)].view != panes[pane_index(pane)].view {
+            self.measure.set(MeasureState::default());
+        }
+        self.measure_pane.set(pane);
+    }
+
     /// The active tool of view kind `kind`. A kind with no entry defaults to
     /// [`Tool::Select`].
     pub fn tool_for(&self, kind: ViewKind) -> Tool {

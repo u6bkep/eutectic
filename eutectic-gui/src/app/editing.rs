@@ -26,31 +26,25 @@ impl EutecticApp {
         if self.handle_inspector_event(event) {
             return true;
         }
-        if event.kind == damascene_core::prelude::UiEventKind::Escape {
-            let measure_kind =
-                self.panes.borrow()[crate::app::pane::pane_index(self.measure_pane.get())].view;
-            if measure_kind == crate::app::ViewKind::Schematic
-                && self.tool_for(measure_kind) == crate::tool::Tool::Measure
-                && self.measure.get().segment().is_some()
-            {
-                self.measure.set(Default::default());
-                return true;
-            }
-        }
         let board_focused =
             self.panes.borrow()[crate::app::pane::pane_index(self.focused_pane.get())].view
                 == crate::app::ViewKind::Board;
         if !board_focused {
             return false;
         }
+        let window_key = window_direct_manip_key(event);
+        let modal_chrome_open = self.libraries_open.get()
+            || self.chrome_dialog.get().is_some()
+            || self.palette_open.get()
+            || self.open_menu.borrow().is_some();
         if event.is_click_or_activate(crate::chrome::menubar::DELETE_KEY)
-            || event.is_hotkey(crate::chrome::menubar::DELETE_KEY)
+            || (!modal_chrome_open && window_key == Some(WindowDirectManipKey::Delete))
         {
             self.delete_selection();
             return true;
         }
         if event.is_click_or_activate(crate::chrome::menubar::ROTATE_KEY)
-            || event.is_hotkey(crate::chrome::menubar::ROTATE_KEY)
+            || (!modal_chrome_open && window_key == Some(WindowDirectManipKey::Rotate))
         {
             self.rotate_selection_ccw();
             return true;
@@ -825,6 +819,38 @@ impl EutecticApp {
     fn prune_selection(&self, doc: &Doc, derived: &DerivedCaches) {
         let mut sel = self.domain.selection.borrow_mut();
         sel.retain(|id| domain::resolves_in(id, doc, derived));
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WindowDirectManipKey {
+    Delete,
+    Rotate,
+}
+
+/// Bare editor keys deliberately bypass the app-global hotkey table: Damascene
+/// matches that table before a `capture_keys` input can edit. Only an unrouted
+/// raw key-down is a window-level editor command; a routed key-down belongs to
+/// its focused widget.
+fn window_direct_manip_key(
+    event: &damascene_core::prelude::UiEvent,
+) -> Option<WindowDirectManipKey> {
+    use damascene_core::prelude::{LogicalKey, NamedKey, UiEventKind};
+
+    if event.kind != UiEventKind::KeyDown || event.target_key().is_some() {
+        return None;
+    }
+    let press = event.key_press.as_ref()?;
+    let modifiers = press.modifiers;
+    if modifiers.ctrl || modifiers.alt || modifiers.shift || modifiers.logo {
+        return None;
+    }
+    match &press.logical {
+        LogicalKey::Named(NamedKey::Delete) => Some(WindowDirectManipKey::Delete),
+        LogicalKey::Character(character) if character.eq_ignore_ascii_case("r") => {
+            Some(WindowDirectManipKey::Rotate)
+        }
+        _ => None,
     }
 }
 

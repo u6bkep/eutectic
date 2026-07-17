@@ -9,8 +9,8 @@ pub(crate) const ABOUT_KEY: &str = "dialog:about:open";
 pub(crate) const DIALOG_CLOSE_KEY: &str = "dialog:chrome:close";
 const DIALOG_ROOT_KEY: &str = "chrome-dialog";
 
-/// Keys actually handled by `app/events.rs`: registered hotkeys plus Escape's
-/// direct contextual handler.
+/// Keys actually handled by `app/events.rs`: registered hotkeys plus the raw
+/// contextual editor keys that deliberately stay out of the global table.
 pub(crate) const WIRED_CHORDS: &[(&str, &str)] = &[
     ("Ctrl+S", "Save"),
     ("Ctrl+Z", "Undo"),
@@ -20,6 +20,8 @@ pub(crate) const WIRED_CHORDS: &[(&str, &str)] = &[
     ("Ctrl+=", "Zoom in"),
     ("Ctrl+-", "Zoom out"),
     ("Ctrl+K", "Command palette"),
+    ("Del", "Delete selection"),
+    ("R", "Rotate selection"),
     ("Esc", "Cancel gesture/tool or clear selection"),
 ];
 

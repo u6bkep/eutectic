@@ -159,6 +159,37 @@ fn route_esc_cancels_pending_then_exits_tool() {
     );
 }
 
+/// A lingering schematic measurement cannot jump ahead of the focused board
+/// cancellation cascade: the pending route consumes Escape first.
+#[test]
+fn board_route_escape_precedes_schematic_measure_cancel() {
+    let mut app = edit_app();
+    let rendered = settle(&mut app);
+    let cx = EventCx::new().with_ui_state(&rendered.ui);
+    app.on_event(strip_click(Tool::Route), &cx);
+    let c1 = pin_center_of(&app, &EntityId::new("C1"), "p1");
+    app.on_event(
+        pointer(UiEventKind::Click, px_of_board(&app, &rendered, c1)),
+        &cx,
+    );
+    assert!(app.route_active());
+
+    app.set_tool(ViewKind::Schematic, Tool::Measure);
+    app.claim_measure_pane(PaneId::B);
+    let mut measure = crate::tool::MeasureState::default();
+    measure.click(Point::mm(2, 3));
+    measure.hover(Point::mm(4, 7));
+    app.set_measure(measure);
+    app.focused_pane.set(PaneId::A);
+
+    app.on_event(escape(), &cx);
+    assert!(!app.route_active(), "focused board route cancelled first");
+    assert!(
+        app.measure.get().segment().is_some(),
+        "unfocused schematic measure was left untouched"
+    );
+}
+
 /// A Route-tool start click on empty space (or netless copper) does nothing
 /// — a trace needs a net (a data requirement, not a legality refusal).
 #[test]

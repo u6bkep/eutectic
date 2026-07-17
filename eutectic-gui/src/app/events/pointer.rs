@@ -183,13 +183,13 @@ impl EutecticApp {
                 self.domain.selection.borrow_mut().clear_hover();
             }
             (Tool::Measure, UiEventKind::Click) => {
-                self.measure_pane.set(pane);
+                self.claim_measure_pane(pane);
                 let mut m = self.measure.get();
                 m.click(p);
                 self.measure.set(m);
             }
             (Tool::Measure, UiEventKind::PointerEnter | UiEventKind::Drag) => {
-                self.measure_pane.set(pane);
+                self.claim_measure_pane(pane);
                 let mut m = self.measure.get();
                 m.hover(p);
                 self.measure.set(m);
@@ -655,13 +655,13 @@ impl EutecticApp {
                 self.domain.selection.borrow_mut().clear_hover();
             }
             (Tool::Measure, UiEventKind::Click) => {
-                self.measure_pane.set(pane);
+                self.claim_measure_pane(pane);
                 let mut m = self.measure.get();
                 m.click(p);
                 self.measure.set(m);
             }
             (Tool::Measure, UiEventKind::PointerEnter | UiEventKind::Drag) => {
-                self.measure_pane.set(pane);
+                self.claim_measure_pane(pane);
                 let mut m = self.measure.get();
                 m.hover(p);
                 self.measure.set(m);

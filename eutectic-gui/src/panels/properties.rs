@@ -128,17 +128,28 @@ impl EutecticApp {
         let target = NUMERIC_KEYS.into_iter().find(|key| routed == Some(*key));
         let active = self.inspector_ui.borrow().active;
 
-        if event.kind == UiEventKind::Escape
-            && let Some(active) = active
-        {
-            self.revert_inspector_raw(active);
-            return true;
-        }
-        if event.kind == UiEventKind::Activate
-            && let Some(active) = active
-        {
-            self.commit_inspector_raw(active);
-            return true;
+        if let Some(active) = active {
+            let targets_active = target == Some(active);
+            let named_key = event
+                .key_press
+                .as_ref()
+                .and_then(|press| press.logical.named());
+            if targets_active
+                && (event.kind == UiEventKind::Escape || named_key == Some(NamedKey::Escape))
+            {
+                self.revert_inspector_raw(active);
+                return true;
+            }
+            if targets_active
+                && (event.kind == UiEventKind::Activate || named_key == Some(NamedKey::Enter))
+            {
+                self.commit_inspector_raw(active);
+                return true;
+            }
+            if targets_active && named_key == Some(NamedKey::Tab) {
+                self.commit_inspector_raw(active);
+                return true;
+            }
         }
 
         // Clicking elsewhere is blur: commit the old raw value, then allow the
@@ -150,10 +161,15 @@ impl EutecticApp {
             self.commit_inspector_raw(active);
         }
 
-        let Some(key) = target
-            .or(active
-                .filter(|_| matches!(event.kind, UiEventKind::TextInput | UiEventKind::KeyDown)))
-        else {
+        let arm = matches!(
+            event.kind,
+            UiEventKind::PointerDown
+                | UiEventKind::Click
+                | UiEventKind::TextInput
+                | UiEventKind::KeyDown
+        );
+        let continuing_drag = event.kind == UiEventKind::Drag && target == active;
+        let Some(key) = target.filter(|_| arm || continuing_drag) else {
             return false;
         };
         let canonical = self.inspector_canonical(&subject, key);
@@ -184,11 +200,7 @@ impl EutecticApp {
             }
             (SemanticId::Part(id), ROTATION_KEY) => {
                 let degrees = crate::inspector::rotation_degrees(doc.components[id].orient);
-                if (degrees - degrees.round()).abs() < 0.000_000_5 {
-                    format!("{degrees:.0}")
-                } else {
-                    format!("{degrees:.3}")
-                }
+                crate::inspector::format_degrees(degrees)
             }
             (SemanticId::Trace(id), TRACE_WIDTH_KEY) => {
                 format!("{:.3}", doc.traces[id].width as f64 / mm)

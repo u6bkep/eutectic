@@ -66,7 +66,12 @@ pub(crate) fn rotation_degrees(orient: Orient) -> f64 {
 }
 
 fn degrees_value(orient: Orient) -> String {
-    let degrees = rotation_degrees(orient);
+    format_degrees(rotation_degrees(orient))
+}
+
+/// Format a planar angle for both the read-only projection and editable field
+/// seed: integers stay compact, while non-integers retain millidegree precision.
+pub(crate) fn format_degrees(degrees: f64) -> String {
     if (degrees - degrees.round()).abs() < 0.000_000_5 {
         format!("{degrees:.0}")
     } else {

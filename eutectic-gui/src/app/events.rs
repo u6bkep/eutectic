@@ -229,6 +229,9 @@ impl App for EutecticApp {
                     let mut panes = self.panes.borrow_mut();
                     let p = &mut panes[pane_index(pane)];
                     if p.view != v {
+                        if self.measure_pane.get() == pane {
+                            self.measure.set(Default::default());
+                        }
                         p.view = v;
                         p.fitted = false; // re-fit the new view on next build.
                     }
@@ -313,12 +316,12 @@ impl App for EutecticApp {
             return;
         }
 
-        // Escape: cancel an in-flight preview first — component drag, then a
-        // trace-vertex drag, then a pending route (preview discarded, nothing
-        // committed — m6); with the Route tool idle, Esc exits the board kind's
-        // slot back to Select; then a measure in progress; else clear the
-        // selection. Schematic measure cancellation is folded by the
-        // direct-manipulation hook above.
+        // Escape: cancel an in-flight preview first — camera pan, component
+        // drag, trace-vertex drag, then a pending route (preview discarded,
+        // nothing committed — m6); with the Route tool idle, Esc exits the
+        // board kind's slot back to Select. Next cancel a measurement owned by
+        // the focused pane's view kind; otherwise clear the selection. A focused
+        // inspector input consumes its routed Escape before this cascade.
         if event.kind == UiEventKind::Escape {
             if self.camera_pan.borrow().is_some() {
                 // Cancel the pan gesture (the camera stays where it is — a pan
@@ -344,8 +347,13 @@ impl App for EutecticApp {
                 self.set_tool(ViewKind::Board, Tool::Select);
                 return;
             }
+            let focused = self.focused_pane.get();
+            let focused_kind = self.panes.borrow()[pane_index(focused)].view;
             let mut m = self.measure.get();
-            if self.tool_for(ViewKind::Board) == Tool::Measure && m.segment().is_some() {
+            if self.measure_pane.get() == focused
+                && self.tool_for(focused_kind) == Tool::Measure
+                && m.segment().is_some()
+            {
                 m.cancel();
                 self.measure.set(m);
             } else {
@@ -498,7 +506,8 @@ impl App for EutecticApp {
     /// damascene 0.4.5 as [`UiEventKind::Hotkey`] events whose route is the
     /// registered action name — the same names as the toolbar button keys, so
     /// `on_event` handles both through one arm. Redo binds both the Ctrl+Shift+Z
-    /// and Ctrl+Y conventions.
+    /// and Ctrl+Y conventions. Bare Delete/R stay out of this table so focused
+    /// text inputs receive them.
     fn hotkeys(&self) -> Vec<(KeyChord, String)> {
         vec![
             (KeyChord::ctrl('s'), SAVE_KEY.to_string()),

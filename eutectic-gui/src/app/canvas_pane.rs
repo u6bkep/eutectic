@@ -1206,7 +1206,7 @@ impl EutecticApp {
                     // Live previews that track the pointer (free hover makes
                     // these smooth; the event path still updates them too).
                     if self.tool_for(ViewKind::Board) == crate::tool::Tool::Measure {
-                        self.measure_pane.set(pane);
+                        self.claim_measure_pane(pane);
                         let mut m = self.measure.get();
                         m.hover(p);
                         self.measure.set(m);
