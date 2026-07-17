@@ -396,7 +396,7 @@ pub fn apply(
         || part_shape_changed(doc, &next);
     // Pours are derived geometry; a region-only edit changes the DRC pour fills, so it
     // must bump geom_rev (which `Drc` depends on) or the fill would go stale.
-    let geometry_changed = positions_changed(doc, &next)
+    let geometry_changed = positions_or_orientations_changed(doc, &next)
         || crate::elaborate::regions(&next.source) != crate::elaborate::regions(&doc.source);
     let routing_changed = next.traces != doc.traces || next.vias != doc.vias;
     next.conn_rev = if connectivity_changed {
@@ -489,11 +489,13 @@ fn part_shape_changed(a: &Doc, b: &Doc) -> bool {
     false
 }
 
-/// Did any component position (value or provenance) change?
-fn positions_changed(a: &Doc, b: &Doc) -> bool {
+/// Did any component position (value or provenance) or orientation change?
+/// Orientation affects every footprint-local feature and must invalidate the
+/// geometry query tier (issue 0013).
+fn positions_or_orientations_changed(a: &Doc, b: &Doc) -> bool {
     for (id, cb) in &b.components {
         match a.components.get(id) {
-            Some(ca) if ca.pos == cb.pos => {}
+            Some(ca) if ca.pos == cb.pos && ca.orient.same_rotation(cb.orient) => {}
             _ => return true,
         }
     }
@@ -685,6 +687,25 @@ mod route_commit_tests {
             width: 150_000,
             prov,
         }
+    }
+
+    /// Orientation-only source edits invalidate footprint-local geometry. This
+    /// pins issue 0013 at the command/query revision boundary.
+    #[test]
+    fn orientation_only_change_bumps_geometry_revision() {
+        let (mut h, lib) = scene();
+        let before = h.doc().geom_rev;
+        let mut src = h.doc().source.clone();
+        src.push(G::Rotate {
+            path: "a".into(),
+            orient: Orient::from_deg(90).unwrap(),
+        });
+
+        h.commit(Transaction::one(Command::SetSource(src)), &lib, "rotate")
+            .unwrap();
+
+        assert!(h.doc().geom_rev > before);
+        assert_eq!(h.doc().components[&EntityId::new("a")].orient.to_deg(), 90);
     }
 
     /// A re-elaboration (a fresh SetSource that keeps the net) must NOT wipe committed
