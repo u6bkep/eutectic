@@ -1,0 +1,82 @@
+slab B.SilkS -0.035mm -0.025mm marking ink
+slab B.Mask -0.025mm 0mm mask soldermask
+slab B.Cu 0mm 0.035mm conductor copper
+slab core 0.035mm 1.565mm substrate FR4
+slab F.Cu 1.565mm 1.6mm conductor copper
+slab F.Mask 1.6mm 1.625mm mask soldermask
+slab F.SilkS 1.625mm 1.635mm marking ink
+board (3mm, 0mm) (47mm, 0mm) arc (50mm, 0mm) (50mm, 3mm) (50mm, 29mm) arc (50mm, 32mm) (47mm, 32mm) (3mm, 32mm) arc (0mm, 32mm) (0mm, 29mm) (0mm, 3mm) arc (0mm, 0mm) (3mm, 0mm)
+region conductor net=GND layer=F.Cu (2mm, 2mm) (48mm, 2mm) (48mm, 30mm) (2mm, 30mm)
+region conductor net=VCC layer=B.Cu (2mm, 2mm) (48mm, 2mm) (48mm, 30mm) (2mm, 30mm)
+def Bypass param value=100nF {
+  # A real user's reusable bypass primitive: value is a parameter, pins are the public surface.
+  inst C Cap p:value=(value)
+  port rail = C.p1
+  port return = C.p2
+  schematic {
+    # Every Bypass instance carries the same tiny schematic composition.
+    row bypass-cell {
+      sym C rot=90
+    }
+  }
+}
+inst U1 LDO label="3V3 REGULATOR"
+fix U1 (10mm, 16mm)
+inst U2 MCU label="CONTROL MCU"
+fix U2 (24mm, 16mm)
+inst U3 Sensor label="UART TELEMETRY"
+fix U3 (40mm, 16mm)
+inst C_IN Bypass p:value=1uF
+place C_IN.C (7mm, 22mm)
+inst C_MCU Bypass
+place C_MCU.C (20mm, 24mm)
+inst C_SENSOR Bypass
+place C_SENSOR.C (38mm, 24mm)
+inst C_AUX Bypass p:value=10nF
+place C_AUX.C (28mm, 26mm)
+net VIN U1.VIN C_IN.rail
+net VCC U1.VOUT U2.VDD U3.VDD C_MCU.rail C_SENSOR.rail C_AUX.rail
+net GND U1.GND U2.GND U3.GND C_IN.return C_MCU.return C_SENSOR.return C_AUX.return
+connect U2.uart U3.uart
+text "EUTECTIC SENSOR NODE" (4mm, 29mm) h=1.2mm layer=F.SilkS
+text "VIN >" (3mm, 17mm) h=0.8mm layer=F.SilkS
+text "> UART >" (31mm, 10mm) h=0.8mm layer=F.SilkS
+text "OPEN HARDWARE" (14mm, 4mm) h=1mm layer=B.SilkS rot=180
+schematic {
+  # Power enters at U1; the four reusable bypass blocks expand beside their consumers.
+  row showcase gap=16mm align=center {
+    column power gap=5mm align=center {
+      sym U1
+      sym C_IN
+    }
+    column control gap=5mm align=center {
+      sym U2
+      sym C_MCU
+      sym C_AUX
+    }
+    column telemetry gap=5mm align=center {
+      sym U3
+      sym C_SENSOR
+    }
+  }
+
+  # Authored wires document the local power flow; UART connectivity stays visible as named tags.
+  wire U1.VOUT U2.VDD via (18mm, 8mm)
+  wire U2.VDD U3.VDD via (36mm, 8mm)
+  wire U1.GND U2.GND
+}
+
+# routes
+route 1 VIN F.Cu w=0.2mm (8mm, 16mm) (6mm, 18mm) (6mm, 22mm)
+route 2 VCC F.Cu w=0.2mm (12mm, 16mm) (16mm, 16mm) (19mm, 19mm) (21mm, 19mm)
+route 3 VCC F.Cu w=0.2mm (21mm, 19mm) (21mm, 22mm) (19mm, 24mm)
+route 4 VCC F.Cu w=0.2mm (21mm, 19mm) (24mm, 19mm) (25mm, 20mm) (28mm, 20mm)
+route 5 VCC B.Cu w=0.25mm (28mm, 20mm) (32mm, 20mm) (36mm, 20mm)
+route 6 VCC F.Cu w=0.2mm (36mm, 20mm) (37mm, 19mm)
+route 7 VCC F.Cu w=0.2mm (37mm, 19mm) (37mm, 24mm)
+route 8 VCC F.Cu w=0.2mm (28mm, 20mm) (28mm, 25mm) (27mm, 26mm)
+route 9 U2.uart.tx F.Cu w=0.15mm (27mm, 17mm) (31mm, 17mm) (33mm, 15mm) (43mm, 15mm)
+route 10 VIN F.Cu w=0.15mm (6mm, 8mm) (16mm, 8mm)
+route 11 VCC F.Cu w=0.15mm (6mm, 8.25mm) (16mm, 8.25mm)
+via 101 VCC (28mm, 20mm) drill=0.3mm pad=0.6mm
+via 102 VCC (36mm, 20mm) drill=0.3mm pad=0.6mm
