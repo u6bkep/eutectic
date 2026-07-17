@@ -147,11 +147,6 @@ impl MeasureState {
     }
 }
 
-/// Format a measure readout for the status bar: `dx / dy / dist` in mm.
-pub fn format_readout(dx: f64, dy: f64, dist: f64) -> String {
-    format!("dx {dx:.2}  dy {dy:.2}  d {dist:.2} mm")
-}
-
 // ----------------------------------------------------------------------------
 // The Select tool's component drag (m6 slice A).
 // ----------------------------------------------------------------------------
