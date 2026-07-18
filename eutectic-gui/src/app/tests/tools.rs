@@ -133,8 +133,8 @@ fn strip_click_routes_to_the_kind_not_the_pane() {
     );
 }
 
-/// Applicability is structural: board has the shared four-tool head plus Route;
-/// schematic has Select/Pan/Measure and excludes Delete/Route.
+/// Applicability is structural: board has the shared four-tool head plus Place/Route;
+/// schematic has Select/Pan/Measure and excludes Delete/Place/Route.
 #[test]
 fn strips_match_the_view_ruling_and_ignore_forged_tools() {
     let mut app = split_app();
@@ -144,7 +144,7 @@ fn strips_match_the_view_ruling_and_ignore_forged_tools() {
         ViewKind::Board.strip_groups(),
         &[
             &[Tool::Select, Tool::Pan, Tool::Measure, Tool::Delete][..],
-            &[Tool::Route][..],
+            &[Tool::Place, Tool::Route][..],
         ]
     );
     assert_eq!(
@@ -157,6 +157,7 @@ fn strips_match_the_view_ruling_and_ignore_forged_tools() {
         Tool::Pan,
         Tool::Measure,
         Tool::Delete,
+        Tool::Place,
         Tool::Route,
     ] {
         assert!(
@@ -170,7 +171,7 @@ fn strips_match_the_view_ruling_and_ignore_forged_tools() {
             "schematic strip renders {tool:?}"
         );
     }
-    for absent in [Tool::Delete, Tool::Route] {
+    for absent in [Tool::Delete, Tool::Place, Tool::Route] {
         assert!(
             !tree_has_key(&r.tree, &PaneId::B.strip_key(absent)),
             "the schematic strip must not render a {absent:?} button"
@@ -179,7 +180,7 @@ fn strips_match_the_view_ruling_and_ignore_forged_tools() {
 
     // Forged board-only tool clicks on the schematic pane's strip are ignored.
     let cx = EventCx::new().with_ui_state(&r.ui);
-    for forged in [Tool::Delete, Tool::Route] {
+    for forged in [Tool::Delete, Tool::Place, Tool::Route] {
         app.on_event(click(&PaneId::B.strip_key(forged)), &cx);
         assert_eq!(
             app.tool_for(ViewKind::Schematic),

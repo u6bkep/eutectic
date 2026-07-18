@@ -51,6 +51,14 @@ static ROUTE_GLYPH: LazyLock<SvgIcon> = LazyLock::new(|| {
     .expect("static route glyph parses")
 });
 
+/// Lucide `package-plus` — a footprint package with a placement plus.
+static PLACE_GLYPH: LazyLock<SvgIcon> = LazyLock::new(|| {
+    SvgIcon::parse_current_color(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7.5 4.27 9 5.15"/><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l3-1.72"/><path d="M3.29 7 12 12l8.71-5"/><path d="M12 22V12"/><path d="M19 16v6"/><path d="M16 19h6"/></svg>"##,
+    )
+    .expect("static place glyph parses")
+});
+
 /// Lucide `ruler` — the Measure glyph.
 static MEASURE_GLYPH: LazyLock<SvgIcon> = LazyLock::new(|| {
     SvgIcon::parse_current_color(
@@ -74,6 +82,7 @@ fn glyph(tool: Tool) -> SvgIcon {
         Tool::Pan => PAN_GLYPH.clone(),
         Tool::Measure => MEASURE_GLYPH.clone(),
         Tool::Delete => DELETE_GLYPH.clone(),
+        Tool::Place => PLACE_GLYPH.clone(),
         Tool::Route => ROUTE_GLYPH.clone(),
     }
 }

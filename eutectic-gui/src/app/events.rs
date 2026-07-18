@@ -109,6 +109,13 @@ impl App for EutecticApp {
             return;
         }
 
+        // The library browser is a palette-like dock, not a modal: it gets
+        // first refusal for its filter/rows, while unrelated canvas/chrome
+        // events continue through the normal route table.
+        if event.kind != UiEventKind::Escape && self.handle_library_browser_event(&event) {
+            return;
+        }
+
         // Pane-split resize handle (weighted): fold the drag into the split weights.
         {
             let mut w = self.split_weights.get();
@@ -338,6 +345,9 @@ impl App for EutecticApp {
             if kind.offers_tool(tool) {
                 self.set_tool(kind, tool);
                 self.focused_pane.set(pane);
+                if kind == ViewKind::Board && tool == Tool::Place {
+                    self.open_library_browser();
+                }
             }
             return;
         }
@@ -380,6 +390,10 @@ impl App for EutecticApp {
             }
             if self.route.borrow().is_some() {
                 *self.route.borrow_mut() = None;
+                return;
+            }
+            if self.tool_for(ViewKind::Board) == Tool::Place && self.armed_part.borrow().is_some() {
+                self.disarm_part();
                 return;
             }
             if self.tool_for(ViewKind::Board) == Tool::Route {
@@ -502,6 +516,21 @@ impl App for EutecticApp {
         // pane's kind's tool slot is the live tool the status bar reads out.
         self.focused_pane.set(pane);
         let view = self.panes.borrow()[pane_index(pane)].view;
+        if view == ViewKind::Board && self.tool_for(ViewKind::Board) == Tool::Place {
+            let Some(rect) = cx.rect_of_key(pane.canvas_key()) else {
+                return;
+            };
+            let point = crate::app::canvas_pane::pane_unproject(
+                &self.pane_camera(pane),
+                (rect.x, rect.y, rect.w, rect.h),
+                pos,
+            );
+            self.hover_place_part(pane, point);
+            if event.kind == UiEventKind::Click {
+                self.commit_armed_part(point);
+            }
+            return;
+        }
         match view {
             ViewKind::Board => self.handle_board_pointer(event, cx, pane, pos),
             ViewKind::Schematic => self.handle_schematic_pointer(event, cx, pane, pos),
@@ -573,6 +602,12 @@ impl App for EutecticApp {
         }
         if self.libraries_open.get() {
             return self.lib_ui.borrow().selection.clone();
+        }
+        if self.library_browser_open.get() {
+            let browser = self.library_browser_ui.borrow();
+            if browser.selection.range.is_some() {
+                return browser.selection.clone();
+            }
         }
         let explorer = self.explorer_filter_selection.borrow();
         if explorer.range.is_some() {

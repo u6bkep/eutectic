@@ -80,6 +80,7 @@ pub fn all() -> Vec<(&'static str, EutecticApp)> {
         ("per_kind_tools", per_kind_tools()),
         ("unresolved_libs", unresolved_libs()),
         ("libraries_menu", libraries_menu()),
+        ("place_flyout", place_flyout()),
         ("drag_in_progress", drag_in_progress()),
         ("dirty_doc", dirty_doc()),
         ("conflict_banner", conflict_banner()),

@@ -3,7 +3,8 @@
 //! `fixtures.rs` (gui-module-split).
 
 use super::BOARD_ECAD;
-use crate::app::{DomainState, EutecticApp, PaneId};
+use crate::app::{DomainState, EutecticApp, PaneId, ViewKind};
+use crate::tool::Tool;
 
 // ---------------------------------------------------------------------------
 // Milestone-6 slice-A scenes: the editing foundation. A drag in progress
@@ -25,6 +26,23 @@ pub fn edit_board_domain() -> DomainState {
         eutectic_core::part::part_library(),
         |_| Vec::new(),
     )
+}
+
+/// The gw-03 placement palette: board Place is active, Cap is armed, and the
+/// docked browser remains open with its grouped rows and preview card.
+pub fn place_flyout() -> EutecticApp {
+    let mut app = EutecticApp::new(edit_board_domain());
+    app.set_tool(ViewKind::Board, Tool::Place);
+    app.open_library_browser();
+    let cap = app
+        .domain
+        .library_parts
+        .iter()
+        .find(|row| row.part == "Cap")
+        .cloned()
+        .expect("builtin Cap row");
+    app.arm_library_part(&cap);
+    app
 }
 
 /// A component drag in progress over the editing board: `C1` grabbed at its own

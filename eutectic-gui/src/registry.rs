@@ -38,7 +38,7 @@
 //! (machine-local paths must never travel) is enforced at this boundary.
 
 use eutectic_core::part::PartLib;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// The per-machine name → library-directory registry. Values are absolute
@@ -206,6 +206,27 @@ pub struct LibNote {
     pub message: String,
 }
 
+/// One placeable part in the resolved library union, retaining the package
+/// that won first-wins resolution. Rows are ordered by package resolution
+/// order and then part name, so the browser can group without re-reading the
+/// registry or guessing ownership from the flattened [`PartLib`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LibraryPart {
+    pub library: String,
+    pub part: String,
+}
+
+impl LibraryPart {
+    pub(crate) fn from_lib(library: &str, lib: &PartLib) -> Vec<LibraryPart> {
+        lib.keys()
+            .map(|part| LibraryPart {
+                library: library.to_string(),
+                part: part.clone(),
+            })
+            .collect()
+    }
+}
+
 /// Resolve a source text's `use` names into the [`PartLib`] to elaborate with,
 /// plus the resolution notes. The (re)load-time step shared by the initial load
 /// and every reload — a reload may add or remove `use` lines, so this re-runs
@@ -226,6 +247,18 @@ pub struct LibNote {
 /// [`union`]: eutectic_core::library::union
 /// [`part_library`]: eutectic_core::part::part_library
 pub fn resolve(source: &str, registry: &Registry) -> (PartLib, Vec<LibNote>) {
+    let (lib, notes, _, _) = resolve_with_index(source, registry);
+    (lib, notes)
+}
+
+/// [`resolve`] plus the browser-facing catalog union and ownership index. The
+/// catalog loads every registered package in registry order, then `builtin`;
+/// the index contains exactly the parts that survive first-wins unioning, so a
+/// shadowed duplicate is listed only under its winning package.
+pub(crate) fn resolve_with_index(
+    source: &str,
+    registry: &Registry,
+) -> (PartLib, Vec<LibNote>, PartLib, Vec<LibraryPart>) {
     let mut notes: Vec<LibNote> = Vec::new();
     let mut libs: Vec<(String, PartLib)> = Vec::new();
 
@@ -258,7 +291,32 @@ pub fn resolve(source: &str, registry: &Registry) -> (PartLib, Vec<LibNote>) {
         code: W_LIB_COLLISION,
         message,
     }));
-    (lib, notes)
+
+    // The placement catalog is wider than the document's dependency union:
+    // every successfully loaded registry package is discoverable, in registry
+    // order, even before the document has authored `use NAME`. Choosing such a
+    // row adds that declaration in the same source-first placement transaction.
+    let mut catalog_libs = Vec::new();
+    for (name, dir) in registry.iter() {
+        if let Ok(parts) = eutectic_core::library::load_library(dir) {
+            catalog_libs.push((name.to_string(), parts));
+        }
+    }
+    catalog_libs.push(("builtin".to_string(), eutectic_core::part::part_library()));
+    let mut seen = BTreeSet::new();
+    let mut index = Vec::new();
+    for (library, parts) in &catalog_libs {
+        for part in parts.keys() {
+            if seen.insert(part.clone()) {
+                index.push(LibraryPart {
+                    library: library.clone(),
+                    part: part.clone(),
+                });
+            }
+        }
+    }
+    let (catalog, _) = eutectic_core::library::union(&catalog_libs);
+    (lib, notes, catalog, index)
 }
 
 // ---------------------------------------------------------------------------

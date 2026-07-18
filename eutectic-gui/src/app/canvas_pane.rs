@@ -534,6 +534,14 @@ struct PaneTexture {
     alloc: (u32, u32),
 }
 
+struct LibraryPreviewTexture {
+    /// Kept alive beside the damascene handle.
+    _texture: wgpu::Texture,
+    handle: damascene_core::surface::AppTexture,
+    _scene: crate::render::SceneBuffers,
+    _states: crate::render::SemanticStates,
+}
+
 /// The app's GPU bundle, created by the host's `gpu_setup` seam on the
 /// runner's device (same-device zero-copy compositing) and **rebuilt from
 /// CPU caches** whenever the host hands us a fresh device (Android
@@ -551,6 +559,8 @@ pub(crate) struct GpuState {
     /// and the tables carry every plane key (board slabs + schematic tiers).
     styles: StyleTables,
     panes: [PaneGpu; 2],
+    /// Render-once thumbnail textures keyed by (part, library, doc revision).
+    library_previews: std::collections::BTreeMap<(String, String, u64), LibraryPreviewTexture>,
     last_frame: Option<Instant>,
 }
 
@@ -577,6 +587,7 @@ impl EutecticApp {
             schematic_scenes: SceneCache::new(),
             styles: StyleTables::board_defaults(true),
             panes: [PaneGpu::default(), PaneGpu::default()],
+            library_previews: std::collections::BTreeMap::new(),
             last_frame: None,
         });
     }
@@ -591,6 +602,97 @@ impl EutecticApp {
         let gpu = self.gpu.borrow();
         let t = gpu.as_ref()?.panes[pane_index(pane)].tex.as_ref()?;
         Some((t.handle.clone(), t.alloc))
+    }
+
+    /// The highlighted row's cached owned-renderer thumbnail, if the GPU paint
+    /// pass has produced it. The panel has a text fallback on the CPU harness.
+    pub(crate) fn library_preview_texture(
+        &self,
+    ) -> Option<(damascene_core::surface::AppTexture, (u32, u32))> {
+        let row = self.highlighted_library_part()?;
+        let key = (row.part, row.library, self.domain.revision);
+        let gpu = self.gpu.borrow();
+        let preview = gpu.as_ref()?.library_previews.get(&key)?;
+        Some((preview.handle.clone(), (236, 120)))
+    }
+
+    fn paint_library_preview(&self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        if !self.library_browser_open.get() {
+            return;
+        }
+        let Some(row) = self.highlighted_library_part() else {
+            return;
+        };
+        let key = (row.part.clone(), row.library.clone(), self.domain.revision);
+        if self
+            .gpu
+            .borrow()
+            .as_ref()
+            .is_some_and(|gpu| gpu.library_previews.contains_key(&key))
+        {
+            return;
+        }
+        let Ok((scene, _)) =
+            crate::app::place::isolated_part_preview(&row.part, &self.domain.catalog_lib)
+        else {
+            return;
+        };
+
+        let mut gpu = self.gpu.borrow_mut();
+        let Some(gpu) = gpu.as_mut() else {
+            return;
+        };
+        gpu.library_previews
+            .retain(|(_, _, revision), _| *revision == self.domain.revision);
+        let size = (472, 240);
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("eutectic.library-preview"),
+            size: wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: gpu.renderer.target_format(),
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let handle = damascene_wgpu::app_texture(std::sync::Arc::new(texture.clone()));
+        let scene_buffers =
+            crate::render::SceneBuffers::build(device, &scene, gpu.renderer.text_mut());
+        let states = crate::render::SemanticStates::for_scene(&scene);
+        let camera = Camera::fit(scene.bounds, (size.0 as f64, size.1 as f64), 24.0);
+        let styles = gpu
+            .styles
+            .resolve(&scene, Some(&damascene_core::App::theme(self)));
+        let target = texture.create_view(&Default::default());
+        gpu.renderer.render(
+            device,
+            queue,
+            &RenderArgs {
+                scene: &scene_buffers,
+                overlay: None,
+                camera: &camera,
+                styles: &styles,
+                state: &states,
+                target: &target,
+                size,
+                cursor_px: None,
+                grid: false,
+                grid_style: self.grid_style(),
+            },
+        );
+        gpu.library_previews.insert(
+            key,
+            LibraryPreviewTexture {
+                _texture: texture,
+                handle,
+                _scene: scene_buffers,
+                _states: states,
+            },
+        );
     }
 
     /// The style/theme damage-key input: the layer-visibility revision plus
@@ -681,6 +783,7 @@ impl EutecticApp {
             }
         }
 
+        self.paint_library_preview(device, queue);
         self.sync_board_states();
         self.sync_schematic_states();
 
@@ -1181,6 +1284,7 @@ impl EutecticApp {
             || self.open_menu.borrow().is_some()
         {
             let mut changed = self.set_crosshair(None);
+            changed |= self.clear_place_cursor();
             changed |= self.clear_free_hover();
             return changed;
         }
@@ -1205,6 +1309,7 @@ impl EutecticApp {
                 if !busy {
                     // Live previews that track the pointer (free hover makes
                     // these smooth; the event path still updates them too).
+                    self.hover_place_part(pane, p);
                     if self.tool_for(ViewKind::Board) == crate::tool::Tool::Measure {
                         self.claim_measure_pane(pane);
                         let mut m = self.measure.get();
@@ -1244,6 +1349,7 @@ impl EutecticApp {
             // no board-mm readout (furniture parity with the old pane).
             Some((pane, ViewKind::Schematic, rect)) => {
                 let mut changed = self.set_crosshair(None);
+                changed |= self.clear_place_cursor();
                 let busy = {
                     let raw = self.raw.borrow();
                     raw.primary_down || self.camera_pan.borrow().is_some()
@@ -1279,6 +1385,7 @@ impl EutecticApp {
             }
             None => {
                 let mut changed = self.set_crosshair(None);
+                changed |= self.clear_place_cursor();
                 changed |= self.clear_free_hover();
                 changed
             }
@@ -1305,6 +1412,7 @@ impl EutecticApp {
         raw.primary_down = false;
         drop(raw);
         let mut changed = self.set_crosshair(None);
+        changed |= self.clear_place_cursor();
         changed |= self.clear_free_hover();
         changed
     }

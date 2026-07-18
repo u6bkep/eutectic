@@ -7,7 +7,7 @@
 use crate::explorer::Explorer;
 use crate::findings::Findings;
 use crate::pick::{self, Candidate, LayerId, SemanticId};
-use crate::registry::{self, LibNote, Registry};
+use crate::registry::{self, LibNote, LibraryPart, Registry};
 use crate::render::scene::PlaneKey;
 use crate::selection::SelectionModel;
 use damascene_core::prelude::Color;
@@ -69,6 +69,12 @@ pub struct DomainState {
     /// every successful (re)load; for a [`LibSource::Fixed`] domain this is
     /// simply that library.
     pub lib: eutectic_core::part::PartLib,
+    /// Browser index over every loadable registry package plus `builtin`,
+    /// retaining each first-wins part's owner. Re-derived on every load.
+    pub(crate) library_parts: Vec<LibraryPart>,
+    /// First-wins union behind [`library_parts`](Self::library_parts): every
+    /// loadable registry package in registry order, then `builtin`.
+    pub(crate) catalog_lib: eutectic_core::part::PartLib,
     /// The library-resolution notes for the current load (unregistered `use`
     /// names, packages that failed to load, union collisions) — data, not
     /// errors (§9 permissive rule). Merged into the findings panel.
@@ -157,6 +163,8 @@ impl DomainState {
             doc: Err("no document".to_string()),
             lib_source: LibSource::Fixed(eutectic_core::part::part_library()),
             lib: eutectic_core::part::part_library(),
+            library_parts: LibraryPart::from_lib("builtin", &eutectic_core::part::part_library()),
+            catalog_lib: eutectic_core::part::part_library(),
             lib_notes: Vec::new(),
             filename: None,
             selection: RefCell::new(SelectionModel::new()),
@@ -216,6 +224,8 @@ impl DomainState {
             },
             doc,
             lib_source: LibSource::Fixed(lib.clone()),
+            library_parts: LibraryPart::from_lib("builtin", &lib),
+            catalog_lib: lib.clone(),
             lib,
             lib_notes: Vec::new(),
             filename,
@@ -239,7 +249,8 @@ impl DomainState {
         registry: Registry,
         save_path: Option<std::path::PathBuf>,
     ) -> Self {
-        let (lib, lib_notes) = registry::resolve(&source, &registry);
+        let (lib, lib_notes, catalog_lib, library_parts) =
+            registry::resolve_with_index(&source, &registry);
         let history = elaborate(&source, &lib, |_| Vec::new());
         let (history, doc) = split_history(history);
         DomainState {
@@ -253,6 +264,8 @@ impl DomainState {
                 registry,
                 save_path,
             },
+            library_parts,
+            catalog_lib,
             lib,
             lib_notes,
             filename,
@@ -269,10 +282,23 @@ impl DomainState {
     /// `Fixed` source is the identity (its lib, zero notes); a `Registry`
     /// source re-runs [`registry::resolve`], because a reload may add or
     /// remove `use` lines and a registry edit changes what a name binds to.
-    fn resolve_lib(&self, source: &str) -> (eutectic_core::part::PartLib, Vec<LibNote>) {
+    pub(crate) fn resolve_lib(
+        &self,
+        source: &str,
+    ) -> (
+        eutectic_core::part::PartLib,
+        Vec<LibNote>,
+        eutectic_core::part::PartLib,
+        Vec<LibraryPart>,
+    ) {
         match &self.lib_source {
-            LibSource::Fixed(lib) => (lib.clone(), Vec::new()),
-            LibSource::Registry { registry, .. } => registry::resolve(source, registry),
+            LibSource::Fixed(lib) => (
+                lib.clone(),
+                Vec::new(),
+                lib.clone(),
+                LibraryPart::from_lib("builtin", lib),
+            ),
+            LibSource::Registry { registry, .. } => registry::resolve_with_index(source, registry),
         }
     }
 
@@ -289,11 +315,13 @@ impl DomainState {
     ) -> (
         eutectic_core::part::PartLib,
         Vec<LibNote>,
+        eutectic_core::part::PartLib,
+        Vec<LibraryPart>,
         Result<History, String>,
     ) {
-        let (lib, notes) = self.resolve_lib(source);
+        let (lib, notes, catalog_lib, library_parts) = self.resolve_lib(source);
         let history = elaborate(source, &lib, |_| Vec::new());
-        (lib, notes, history)
+        (lib, notes, catalog_lib, library_parts, history)
     }
 
     /// Commit a GUI-authored transaction against the held [`History`] — **the

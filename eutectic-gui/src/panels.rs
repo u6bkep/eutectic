@@ -7,5 +7,6 @@
 pub(crate) mod explorer;
 pub(crate) mod findings;
 pub(crate) mod layers;
+pub(crate) mod library_browser;
 pub(crate) mod properties;
 pub(crate) mod sidebar;

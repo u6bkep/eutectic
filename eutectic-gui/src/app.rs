@@ -37,6 +37,7 @@ mod events;
 pub(crate) mod libraries;
 pub(crate) mod open;
 pub(crate) mod pane;
+pub(crate) mod place;
 #[cfg(test)]
 mod tests;
 
@@ -46,9 +47,11 @@ pub use pane::{PaneId, PaneLayout, PaneState, ViewKind};
 // The `EutecticApp` struct fields + `EutecticApp::new`/reload impl reference the derived-cache
 // bundle and the Libraries UI state that were moved to submodules.
 use crate::palette::PaletteUi;
+use crate::panels::library_browser::LibraryBrowserUi;
 use domain::DerivedCaches;
 use libraries::{LibRow, LibUi};
 use pane::{SectionOpen, SidebarSection};
+use place::ArmedPart;
 // The tests (a child module using `super::*`) reach these moved items through the
 // facade — keep their old flat paths available. Pure code motion: nothing is renamed.
 #[cfg(test)]
@@ -325,6 +328,16 @@ pub struct EutecticApp {
     /// Editable Properties-panel raw text + caret ownership. Appended state for
     /// the oracle's fieldRaw commit/revert behavior.
     pub(crate) inspector_ui: RefCell<crate::panels::properties::InspectorUi>,
+    /// The Place tool's docked, palette-like browser and its filter/highlight
+    /// state. It does not gate canvas input.
+    pub(crate) library_browser_open: Cell<bool>,
+    pub(crate) library_browser_ui: RefCell<LibraryBrowserUi>,
+    /// The selected library part remains armed across repeated commits.
+    pub(crate) armed_part: RefCell<Option<ArmedPart>>,
+    /// Isolated footprint shapes at the origin, translated by the dynamic
+    /// overlay while the raw cursor is over a board pane.
+    pub(crate) place_shapes: RefCell<Vec<eutectic_core::geom::Shape2D>>,
+    pub(crate) place_cursor: Cell<Option<(PaneId, eutectic_core::coord::Point)>>,
 }
 
 /// The trace / via defaults the Route tool commits with, sourced from the same
@@ -410,6 +423,11 @@ impl EutecticApp {
             palette_ui: RefCell::new(PaletteUi::default()),
             focus_requests: RefCell::new(Vec::new()),
             inspector_ui: RefCell::new(crate::panels::properties::InspectorUi::default()),
+            library_browser_open: Cell::new(false),
+            library_browser_ui: RefCell::new(LibraryBrowserUi::default()),
+            armed_part: RefCell::new(None),
+            place_shapes: RefCell::new(Vec::new()),
+            place_cursor: Cell::new(None),
         }
     }
 

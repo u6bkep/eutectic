@@ -48,8 +48,14 @@ impl EutecticApp {
         if let Some(banner) = self.conflict_banner() {
             children.push(banner);
         }
+        let mut work_area = Vec::new();
+        if self.library_browser_open.get() {
+            work_area.push(self.library_browser());
+        }
+        work_area.push(split);
+        work_area.push(self.right_sidebar());
         children.push(
-            row([split, self.right_sidebar()])
+            row(work_area)
                 .gap(tokens::SPACE_3)
                 .width(Size::Fill(1.0))
                 .height(Size::Fill(1.0)),
@@ -274,13 +280,14 @@ impl EutecticApp {
         // un-moved press shows nothing). Both are pure vector math over state
         // captured at drag start — no kernel call, and the static board layers
         // are untouched (never re-tessellated) during the drag.
-        let (ghost, ratsnest) = {
+        let (mut ghost, ratsnest) = {
             let drag = self.drag.borrow();
             match drag.as_ref() {
                 Some(d) if d.pane == pane && d.moved => (d.ghost_shapes(), d.ratsnest()),
                 _ => (Vec::new(), Vec::new()),
             }
         };
+        ghost.extend(self.place_ghost_shapes(pane));
         // Pending route preview (m6 slice B): board-space geometry, so — like the
         // findings markers — every board pane shows it. Runs render at the width
         // the commit will use; the layer-switch vias as pad-sized rings.

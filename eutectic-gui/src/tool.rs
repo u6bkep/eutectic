@@ -30,7 +30,8 @@ use eutectic_core::id::{EntityId, NetId, TraceId};
 /// The active tool of one view kind's slot. `Select` is the default mode (and the
 /// default entry of any view kind without one); `Pan` and `Measure` are shared
 /// canvas tools; `Delete` is board-only in this editing slice; `Route` (m6 slice
-/// B) is manual trace drawing at routing-ladder level 1. Which tools a kind offers
+/// B) is manual trace drawing at routing-ladder level 1. `Place` is the board
+/// part-placement mode. Which tools a kind offers
 /// is structural — `ViewKind::strip_groups` lists them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Tool {
@@ -45,6 +46,9 @@ pub enum Tool {
     /// Delete the object under the next click. Board-only in this slice;
     /// schematic deletion is deferred to the schematic-editing campaign.
     Delete,
+    /// Repeated board part placement. Activating it opens the library browser;
+    /// choosing a part arms a free-hover footprint ghost until Escape disarms it.
+    Place,
     /// Manual point-to-point trace drawing (routing ladder level 1): click a pin or
     /// known-net copper to start, click waypoints, click a pin to commit — permissive,
     /// never legality-gated. Offered by the board kind's strip only.
@@ -60,6 +64,7 @@ impl Tool {
             Tool::Pan => "tool:pan",
             Tool::Measure => "tool:measure",
             Tool::Delete => "tool:delete",
+            Tool::Place => "tool:place",
             Tool::Route => "tool:route",
         }
     }
@@ -71,18 +76,20 @@ impl Tool {
             Tool::Pan => "Pan",
             Tool::Measure => "Measure",
             Tool::Delete => "Delete",
+            Tool::Place => "Place part",
             Tool::Route => "Route",
         }
     }
 
     /// Every tool, in a stable order — the key-parse vocabulary. Which tools a
     /// view kind actually offers is `ViewKind::strip_groups`, not this list.
-    pub fn all() -> [Tool; 5] {
+    pub fn all() -> [Tool; 6] {
         [
             Tool::Select,
             Tool::Pan,
             Tool::Measure,
             Tool::Delete,
+            Tool::Place,
             Tool::Route,
         ]
     }

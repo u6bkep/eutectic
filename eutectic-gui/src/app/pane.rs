@@ -46,7 +46,7 @@ impl ViewKind {
         match self {
             ViewKind::Board => &[
                 &[Tool::Select, Tool::Pan, Tool::Measure, Tool::Delete],
-                &[Tool::Route],
+                &[Tool::Place, Tool::Route],
             ],
             // Schematic Delete is deliberately deferred: its source semantics
             // belong to the schematic-editing campaign.
@@ -220,6 +220,10 @@ impl EutecticApp {
             if kind == ViewKind::Board {
                 *self.route.borrow_mut() = None;
                 *self.trace_drag.borrow_mut() = None;
+                self.clear_place_cursor();
+                if tool != Tool::Place {
+                    self.library_browser_open.set(false);
+                }
             }
             *self.camera_pan.borrow_mut() = None;
         }

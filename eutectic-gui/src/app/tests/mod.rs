@@ -18,6 +18,7 @@ mod menubar;
 mod open;
 mod palette;
 mod panes;
+mod place;
 mod reload;
 mod routing;
 mod schematic_pane;
