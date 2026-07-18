@@ -15,18 +15,19 @@
 //!
 //! The row enumeration is the oracle's in full (absence is not allowed). Rows
 //! backed by real app/engine behavior are keyed to their existing action routes:
-//! save/revert/history, deterministic exports, focused zoom, units/grid,
-//! Findings, Libraries, Delete/Rotate, Quit, and the Help dialogs. Everything
-//! else renders as a visible-but-inert [`disabled`](damascene_core::prelude)
-//! row (muted, unfocusable, no route); in particular autoroute rows do not
-//! dispatch to no-ops.
+//! open/recent/save/revert/history, deterministic exports, focused zoom,
+//! units/grid, Findings, Libraries, Delete/Rotate, autoroute, Quit, and the
+//! Help dialogs. Everything else renders as a visible-but-inert
+//! [`disabled`](damascene_core::prelude) row (muted, unfocusable, no route).
 //!
 //! Save / Revert additionally require a source path (the m6 save model — an
 //! in-memory doc has nowhere to write / re-read); without one they render
 //! disabled, exactly like the toolbar's Save affordance.
 
 use crate::app::EutecticApp;
+use crate::app::autoroute::{AUTOROUTE_BOARD_KEY, AUTOROUTE_NET_KEY};
 use crate::app::libraries::LIBRARIES_TOGGLE_KEY;
+use crate::app::open::{OPEN_KEY, OPEN_RECENT_KEY, RECENT_POPOVER_KEY, recent_item_key};
 use crate::app::pane::{REDO_KEY, SAVE_KEY, UNDO_KEY, findings_chip_key};
 use crate::chrome::actions::{
     EXPORT_GERBERS_KEY, EXPORT_SVG_KEY, FINDINGS_PANEL_KEY, GRID_TOGGLE_KEY, QUIT_KEY,
@@ -73,7 +74,7 @@ pub(crate) enum MenuRow {
         /// Display label.
         label: &'static str,
         /// Trailing keyboard-shortcut hint (shown only where a real chord is
-        /// wired — Ctrl+S / Ctrl+Z / Ctrl+Shift+Z).
+        /// wired — Ctrl+O / Ctrl+S / Ctrl+Z / Ctrl+Shift+Z).
         shortcut: Option<&'static str>,
         /// The route key this row emits (an existing `on_event` action).
         action: &'static str,
@@ -86,7 +87,7 @@ pub(crate) enum MenuRow {
         label: &'static str,
         /// The oracle's keystroke hint, rendered inert.
         shortcut: Option<&'static str>,
-        /// Submenu indicator (Open Recent, Active Layer).
+        /// Submenu indicator (Active Layer).
         arrow: bool,
     },
 }
@@ -124,8 +125,16 @@ pub(crate) fn menu_defs() -> Vec<MenuDef> {
             value: "file",
             label: "File",
             rows: vec![
-                dis("Open…", None),
-                arrow("Open Recent"),
+                Wired {
+                    label: "Open…",
+                    shortcut: Some("Ctrl+O"),
+                    action: OPEN_KEY,
+                },
+                Wired {
+                    label: "Open Recent",
+                    shortcut: Some("›"),
+                    action: OPEN_RECENT_KEY,
+                },
                 Wired {
                     label: "Save",
                     shortcut: Some("Ctrl+S"),
@@ -264,8 +273,16 @@ pub(crate) fn menu_defs() -> Vec<MenuDef> {
                 Sep,
                 arrow("Active Layer"),
                 Sep,
-                dis("Autoroute Net", None),
-                dis("Autoroute Board", None),
+                Wired {
+                    label: "Autoroute Net",
+                    shortcut: None,
+                    action: AUTOROUTE_NET_KEY,
+                },
+                Wired {
+                    label: "Autoroute Board",
+                    shortcut: None,
+                    action: AUTOROUTE_BOARD_KEY,
+                },
             ],
         },
         MenuDef {
@@ -390,22 +407,56 @@ impl EutecticApp {
         let board_focused = focused_kind == crate::app::ViewKind::Board;
         let can_delete = board_focused && self.can_delete_selection();
         let can_rotate = board_focused && self.can_rotate_selection();
+        let can_autoroute_net = self.can_autoroute_selection();
+        let has_doc = self.domain.doc.is_ok();
+        let availability = MenuAvailability {
+            has_path,
+            can_delete,
+            can_rotate,
+            can_autoroute_net,
+            has_doc,
+        };
         let rows: Vec<El> = def
             .rows
             .iter()
             .map(|r| {
                 menu_row_el(
                     r,
-                    has_path,
                     self.display_units().label(),
                     self.grid_style().label(),
                     self.snap_to_grid(),
-                    can_delete,
-                    can_rotate,
+                    availability,
                 )
             })
             .collect();
         Some(menubar_menu(MENUBAR_KEY, value, rows))
+    }
+
+    /// The nested File ▸ Open Recent menu. Damascene's menubar surface is a
+    /// single-level primitive, so the submenu is a second stock popover
+    /// anchored to the keyed parent row.
+    pub(crate) fn recent_menu_overlay(&self) -> Option<El> {
+        if !self.recent_open.get() || self.open_menu.borrow().as_deref() != Some("file") {
+            return None;
+        }
+        let rows: Vec<El> = if self.recents.borrow().paths().is_empty() {
+            vec![menu_item("(none)", None).disabled()]
+        } else {
+            self.recents
+                .borrow()
+                .paths()
+                .iter()
+                .enumerate()
+                .map(|(index, path)| {
+                    menu_item(&path.display().to_string(), None).key(recent_item_key(index))
+                })
+                .collect()
+        };
+        Some(popover(
+            RECENT_POPOVER_KEY,
+            Anchor::right_of_key(OPEN_RECENT_KEY),
+            menubar_content(rows),
+        ))
     }
 
     /// The per-source findings chips (oracle menu-bar chrome): one chip per
@@ -448,14 +499,21 @@ impl EutecticApp {
 /// Render one [`MenuRow`] into a menu-panel El. Wired rows carry their route key;
 /// Save / Revert downgrade to disabled without a source path; disabled rows are
 /// muted + inert (no key), submenu rows carry a trailing chevron.
+#[derive(Clone, Copy)]
+struct MenuAvailability {
+    has_path: bool,
+    can_delete: bool,
+    can_rotate: bool,
+    can_autoroute_net: bool,
+    has_doc: bool,
+}
+
 fn menu_row_el(
     row: &MenuRow,
-    has_path: bool,
     units_label: &'static str,
     grid_label: &'static str,
     snap_to_grid: bool,
-    can_delete: bool,
-    can_rotate: bool,
+    available: MenuAvailability,
 ) -> El {
     match *row {
         MenuRow::Separator => menubar_separator(),
@@ -468,9 +526,11 @@ fn menu_row_el(
             let unavailable = matches!(
                 action,
                 SAVE_KEY | REVERT_KEY | EXPORT_GERBERS_KEY | EXPORT_SVG_KEY
-            ) && !has_path
-                || (action == DELETE_KEY && !can_delete)
-                || (action == ROTATE_KEY && !can_rotate);
+            ) && !available.has_path
+                || (action == DELETE_KEY && !available.can_delete)
+                || (action == ROTATE_KEY && !available.can_rotate)
+                || (action == AUTOROUTE_NET_KEY && !available.can_autoroute_net)
+                || (action == AUTOROUTE_BOARD_KEY && !available.has_doc);
             let trailing = match action {
                 UNITS_TOGGLE_KEY => Some(units_label),
                 GRID_TOGGLE_KEY => Some(grid_label),
@@ -576,6 +636,8 @@ mod tests {
         set.dedup();
         let mut want = vec![
             ABOUT_KEY,
+            AUTOROUTE_BOARD_KEY,
+            AUTOROUTE_NET_KEY,
             EXPORT_GERBERS_KEY,
             EXPORT_SVG_KEY,
             DELETE_KEY,
@@ -584,6 +646,8 @@ mod tests {
             GRID_TOGGLE_KEY,
             KEYMAP_KEY,
             LIBRARIES_TOGGLE_KEY,
+            OPEN_KEY,
+            OPEN_RECENT_KEY,
             QUIT_KEY,
             REDO_KEY,
             REVERT_KEY,
@@ -627,28 +691,76 @@ mod tests {
 
         assert_eq!(
             find_row_key(
-                &menu_row_el(delete, true, "mm", "Dots", true, false, false),
+                &menu_row_el(
+                    delete,
+                    "mm",
+                    "Dots",
+                    true,
+                    MenuAvailability {
+                        has_path: true,
+                        can_delete: false,
+                        can_rotate: false,
+                        can_autoroute_net: false,
+                        has_doc: true,
+                    },
+                ),
                 "Delete",
             ),
             Some(None)
         );
         assert_eq!(
             find_row_key(
-                &menu_row_el(rotate, true, "mm", "Dots", true, false, false),
+                &menu_row_el(
+                    rotate,
+                    "mm",
+                    "Dots",
+                    true,
+                    MenuAvailability {
+                        has_path: true,
+                        can_delete: false,
+                        can_rotate: false,
+                        can_autoroute_net: false,
+                        has_doc: true,
+                    },
+                ),
                 "Rotate",
             ),
             Some(None)
         );
         assert_eq!(
             find_row_key(
-                &menu_row_el(delete, true, "mm", "Dots", true, true, true),
+                &menu_row_el(
+                    delete,
+                    "mm",
+                    "Dots",
+                    true,
+                    MenuAvailability {
+                        has_path: true,
+                        can_delete: true,
+                        can_rotate: true,
+                        can_autoroute_net: false,
+                        has_doc: true,
+                    },
+                ),
                 "Delete",
             ),
             Some(Some(DELETE_KEY.to_string()))
         );
         assert_eq!(
             find_row_key(
-                &menu_row_el(rotate, true, "mm", "Dots", true, true, true),
+                &menu_row_el(
+                    rotate,
+                    "mm",
+                    "Dots",
+                    true,
+                    MenuAvailability {
+                        has_path: true,
+                        can_delete: true,
+                        can_rotate: true,
+                        can_autoroute_net: false,
+                        has_doc: true,
+                    },
+                ),
                 "Rotate",
             ),
             Some(Some(ROTATE_KEY.to_string()))
@@ -693,11 +805,10 @@ mod tests {
             Some(Some(SAVE_KEY.to_string())),
             "the Save row must dispatch to the save action"
         );
-        // Disabled rows carry no key (nothing to route → they emit nothing).
+        // Open is now wired to the native-dialog mailbox path.
         assert_eq!(
             find_row_key(&menu, "Open…"),
-            Some(None),
-            "a disabled row must have no route key"
+            Some(Some(OPEN_KEY.to_string()))
         );
         assert_eq!(
             find_row_key(&menu, "Quit"),

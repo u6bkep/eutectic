@@ -29,11 +29,13 @@
 //! concern. Public items keep their old paths through the re-exports below
 //! (`lib.rs` re-exports these unchanged).
 
+pub(crate) mod autoroute;
 pub(crate) mod canvas_pane;
 pub(crate) mod domain;
 mod editing;
 mod events;
 pub(crate) mod libraries;
+pub(crate) mod open;
 pub(crate) mod pane;
 #[cfg(test)]
 mod tests;
@@ -204,6 +206,20 @@ pub struct EutecticApp {
     /// The live-source mailbox (m5): drained in `before_build`; a file change reloads.
     /// A [`SourceMailbox::disconnected`] mailbox (fixtures / no file) never yields.
     pub(crate) mailbox: SourceMailbox,
+    /// Native-open results arrive here from a background dialog thread. Tests
+    /// inject picks directly and never launch native chrome.
+    pub(crate) open_mailbox: crate::open_dialog::OpenMailbox,
+    pub(crate) open_dialog_launcher: std::sync::Arc<dyn crate::open_dialog::OpenDialogLauncher>,
+    pub(crate) background_wakeup: crate::open_dialog::WakeFn,
+    pub(crate) open_dialog_busy: Cell<bool>,
+    pub(crate) open_discard_approved: Cell<bool>,
+    pub(crate) pending_open: RefCell<Option<open::PendingOpen>>,
+    /// File ▸ Open Recent state and its independently persisted XDG path.
+    pub(crate) recents: RefCell<crate::recents::RecentFiles>,
+    pub(crate) recents_path: Option<std::path::PathBuf>,
+    pub(crate) recent_open: Cell<bool>,
+    /// Switches the live-source watcher to a newly opened document.
+    pub(crate) watch_path_tx: Option<std::sync::mpsc::Sender<std::path::PathBuf>>,
     /// The right-sidebar accordion's per-section expanded state (all four headers
     /// always render; this governs which bodies are open). Default: Properties +
     /// Layers open.
@@ -349,6 +365,16 @@ impl EutecticApp {
             measure: Cell::new(MeasureState::default()),
             measure_pane: Cell::new(PaneId::A),
             mailbox: SourceMailbox::disconnected(),
+            open_mailbox: crate::open_dialog::OpenMailbox::new(),
+            open_dialog_launcher: std::sync::Arc::new(crate::open_dialog::NativeOpenDialog),
+            background_wakeup: std::sync::Arc::new(|| {}),
+            open_dialog_busy: Cell::new(false),
+            open_discard_approved: Cell::new(false),
+            pending_open: RefCell::new(None),
+            recents: RefCell::new(crate::recents::RecentFiles::new()),
+            recents_path: None,
+            recent_open: Cell::new(false),
+            watch_path_tx: None,
             sections: Cell::new(SectionOpen::default()),
             libraries_open: Cell::new(false),
             lib_ui: RefCell::new(LibUi::default()),

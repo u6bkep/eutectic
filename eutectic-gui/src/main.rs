@@ -25,7 +25,10 @@
 
 use damascene_core::prelude::Rect;
 use eutectic_gui::host::HostConfig;
+use eutectic_gui::open_dialog::{NativeOpenDialog, WakeFn, load_domain};
+use eutectic_gui::recents::RecentFiles;
 use eutectic_gui::{DomainState, EutecticApp, LibSource, Registry, SourceMailbox};
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, PartialEq, Eq)]
 enum StartupDecision {
@@ -85,6 +88,18 @@ fn default_registry_path() -> Option<std::path::PathBuf> {
         .map(|home| std::path::PathBuf::from(home).join(".config/eutectic/libraries"))
 }
 
+/// Recent documents use their own injectable-format file; only this native
+/// boundary chooses the real XDG location.
+fn default_recents_path() -> Option<std::path::PathBuf> {
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME")
+        && !xdg.is_empty()
+    {
+        return Some(std::path::PathBuf::from(xdg).join("eutectic/recent"));
+    }
+    std::env::var_os("HOME")
+        .map(|home| std::path::PathBuf::from(home).join(".config/eutectic/recent"))
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let startup = startup_decision(
         std::env::args_os().nth(1),
@@ -122,55 +137,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         save_path: registry_path,
     };
 
-    let (path, domain) = match startup {
+    let (path, domain, opened_successfully) = match startup {
         StartupDecision::OpenPath(path) => {
-            let source = std::fs::read_to_string(&path)
-                .map_err(|e| format!("reading {}: {e}", path.display()))?;
-            let filename = path.file_name().map(|n| n.to_string_lossy().into_owned());
-            // Resolve the doc's `use` names through the registry (real
-            // libraries first, the built-in toy lib appended last).
-            let LibSource::Registry {
-                registry,
-                save_path,
-            } = lib_source
-            else {
-                unreachable!("lib_source is constructed as Registry above")
-            };
-            let mut domain =
-                DomainState::from_source_registry(source, filename, registry, save_path);
-            // The explicit-save target (m6): the loaded file itself. Only the
-            // windowed path sets this — fixtures have no save affordance.
-            domain.source_path = Some(path.clone());
-            (Some(path), domain)
+            let loaded = load_domain(&path, lib_source);
+            (Some(loaded.absolute_path), loaded.domain, loaded.success)
         }
-        StartupDecision::FallbackNote(note) => (None, fallback_domain(note, lib_source)),
+        StartupDecision::FallbackNote(note) => (None, fallback_domain(note, lib_source), false),
     };
+
+    let recents_path = default_recents_path();
+    let mut recents = match recents_path.as_deref() {
+        Some(path) => RecentFiles::load(path).unwrap_or_else(|error| {
+            eprintln!("warning: recent documents ignored: {error}");
+            RecentFiles::new()
+        }),
+        None => RecentFiles::new(),
+    };
+    if opened_successfully && let Some(opened) = path.clone() {
+        recents.push(opened);
+        if let Some(save_path) = recents_path.as_deref()
+            && let Err(error) = recents.save(save_path)
+        {
+            eprintln!("warning: recent documents not saved: {error}");
+        }
+    }
 
     // The live-source mailbox: the app keeps the receiver; the sender goes to the
     // watch thread. With no file loaded, the app keeps the disconnected default.
     let (mailbox, tx) = SourceMailbox::new();
-    let app = EutecticApp::new(domain).with_mailbox(mailbox);
+    let (watch_path_tx, watch_path_rx) = std::sync::mpsc::channel();
+    let wake_slot = Arc::new(Mutex::new(None));
+    let wake: WakeFn = {
+        let wake_slot = wake_slot.clone();
+        Arc::new(move || {
+            if let Some(wakeup) = wake_slot.lock().expect("wakeup slot poisoned").as_ref() {
+                eutectic_gui::host::Wakeup::wake(wakeup);
+            }
+        })
+    };
+    let app = EutecticApp::new(domain)
+        .with_mailbox(mailbox)
+        .with_recents(recents, recents_path)
+        .with_open_services(Arc::new(NativeOpenDialog), wake, watch_path_tx);
 
     let viewport = Rect::new(0.0, 0.0, 1280.0, 800.0);
 
-    // Only spawn the watcher when a file was actually loaded. The external-wakeup hook
-    // runs once on the UI thread just before the loop starts; it hands the `Wakeup` to
-    // the polling thread so a detected change schedules a frame.
-    let config = match path {
-        Some(path) => {
-            let watch_path = path;
-            HostConfig::default().with_external_wakeup(move |wakeup| {
-                let tx = tx.clone();
-                let watch_path = watch_path.clone();
-                eutectic_gui::reload::spawn_watcher(watch_path, tx, move || wakeup.wake());
-            })
-        }
-        None => {
-            // No file: drop the sender so the mailbox is inert (drains to nothing).
-            drop(tx);
-            HostConfig::default()
-        }
-    };
+    // The external-wakeup hook runs once on the UI thread just before the loop
+    // starts. The watcher begins with the startup path (if any) and switches
+    // targets after each in-app open.
+    let watch_rx = Arc::new(Mutex::new(Some(watch_path_rx)));
+    let config = HostConfig::default().with_external_wakeup(move |wakeup| {
+        *wake_slot.lock().expect("wakeup slot poisoned") = Some(wakeup.clone());
+        let Some(rx) = watch_rx.lock().expect("watch receiver poisoned").take() else {
+            return;
+        };
+        let tx = tx.clone();
+        let initial = path.clone();
+        eutectic_gui::open_dialog::spawn_switchable_watcher(initial, rx, tx, move || {
+            wakeup.wake();
+        });
+    });
 
     // Run through the WinitWgpuApp path (not the plain-App `run_with_config`
     // wrapper): `EutecticApp` implements the host's GPU seams — `gpu_setup`

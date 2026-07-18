@@ -10,6 +10,7 @@ mod pointer;
 pub(crate) use pointer::PICK_TOL_PX;
 
 use crate::app::libraries::LIBRARIES_TOGGLE_KEY;
+use crate::app::open::{OPEN_RECENT_KEY, RECENT_POPOVER_KEY, recent_item_index};
 use crate::app::pane::{
     CONFLICT_KEEP_KEY, CONFLICT_RELOAD_KEY, LAYOUT_TOGGLE_KEY, REDO_KEY, SAVE_KEY,
     SPLIT_HANDLE_KEY, SPLIT_ROW_KEY, SidebarSection, UNDO_KEY, active_layer_of_key,
@@ -60,6 +61,7 @@ impl App for EutecticApp {
                 self.libraries_open.get().then(|| self.libraries_modal()),
                 self.chrome_dialog_overlay(),
                 self.menu_overlay(),
+                self.recent_menu_overlay(),
                 self.palette_open.get().then(|| self.palette_modal()),
             ],
         )
@@ -73,6 +75,7 @@ impl App for EutecticApp {
         if let Some(SourceMsg::Changed(source)) = self.mailbox.drain() {
             self.handle_disk_change(source);
         }
+        self.drain_open_mailbox();
 
         // Camera settlement note (WP3, owned canvas everywhere): the initial
         // fit-to-content for BOTH view kinds is app-camera math applied in
@@ -136,10 +139,29 @@ impl App for EutecticApp {
         {
             let mut open = self.open_menu.borrow_mut();
             if menubar::apply_event(&mut open, &event, MENUBAR_KEY) {
+                self.recent_open.set(false);
+                return;
+            }
+            if open.as_deref() == Some("file") && event.is_click_or_activate(OPEN_RECENT_KEY) {
+                self.recent_open.set(true);
+                return;
+            }
+            if event.is_click_or_activate(&format!("{RECENT_POPOVER_KEY}:dismiss")) {
+                self.recent_open.set(false);
+                return;
+            }
+            if open.as_deref() == Some("file")
+                && let Some(index) = event.route().and_then(recent_item_index)
+            {
+                *open = None;
+                self.recent_open.set(false);
+                drop(open);
+                self.request_recent(index);
                 return;
             }
             if open.is_some() && matches!(event.kind, UiEventKind::Click | UiEventKind::Activate) {
                 *open = None;
+                self.recent_open.set(false);
             }
         }
 
@@ -185,7 +207,11 @@ impl App for EutecticApp {
         // names). Suppressed while the Libraries modal is open: its text inputs
         // own the keyboard, and a doc-level undo under a typing user would be a
         // surprise (the buttons sit behind the scrim anyway).
-        if !self.libraries_open.get() && !self.palette_open.get() {
+        if !self.libraries_open.get()
+            && !self.palette_open.get()
+            && self.chrome_dialog.get().is_none()
+            && self.open_menu.borrow().is_none()
+        {
             if event.is_click_or_activate(SAVE_KEY) || event.is_hotkey(SAVE_KEY) {
                 self.save();
                 return;
@@ -517,6 +543,7 @@ impl App for EutecticApp {
     fn hotkeys(&self) -> Vec<(KeyChord, String)> {
         vec![
             (KeyChord::ctrl('s'), SAVE_KEY.to_string()),
+            (KeyChord::ctrl('o'), crate::app::open::OPEN_KEY.to_string()),
             (KeyChord::ctrl('z'), UNDO_KEY.to_string()),
             (KeyChord::ctrl_shift('z'), REDO_KEY.to_string()),
             (KeyChord::ctrl('y'), REDO_KEY.to_string()),

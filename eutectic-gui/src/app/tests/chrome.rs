@@ -79,6 +79,7 @@ fn hotkey_action_label(action: &str) -> &'static str {
         REDO_KEY => "Redo",
         ZOOM_IN_KEY => "Zoom in",
         ZOOM_OUT_KEY => "Zoom out",
+        crate::app::open::OPEN_KEY => "Open",
         crate::palette::PALETTE_TOGGLE_KEY => "Command palette",
         other => panic!("unlisted registered hotkey action: {other}"),
     }
@@ -472,13 +473,10 @@ fn findings_and_quit_rows_dispatch_and_unimplemented_rows_stay_inert() {
     assert!(app.quit_requested());
 
     for label in [
-        "Open…",
         "Copy",
         "Paste",
         "Command Palette…",
         "Flip Board (bottom view)",
-        "Autoroute Net",
-        "Autoroute Board",
         "Preferences…",
     ] {
         let row = menu_defs()

@@ -7,12 +7,16 @@ use damascene_core::prelude::*;
 pub(crate) const KEYMAP_KEY: &str = "dialog:keymap:open";
 pub(crate) const ABOUT_KEY: &str = "dialog:about:open";
 pub(crate) const DIALOG_CLOSE_KEY: &str = "dialog:chrome:close";
+pub(crate) const OPEN_SAVE_KEY: &str = "dialog:open:save";
+pub(crate) const OPEN_DISCARD_KEY: &str = "dialog:open:discard";
+pub(crate) const OPEN_CANCEL_KEY: &str = "dialog:open:cancel";
 const DIALOG_ROOT_KEY: &str = "chrome-dialog";
 
 /// Keys actually handled by `app/events.rs`: registered hotkeys plus the raw
 /// contextual editor keys that deliberately stay out of the global table.
 pub(crate) const WIRED_CHORDS: &[(&str, &str)] = &[
     ("Ctrl+S", "Save"),
+    ("Ctrl+O", "Open"),
     ("Ctrl+Z", "Undo"),
     ("Ctrl+Shift+Z", "Redo"),
     ("Ctrl+Y", "Redo"),
@@ -29,6 +33,7 @@ pub(crate) const WIRED_CHORDS: &[(&str, &str)] = &[
 pub(crate) enum ChromeDialog {
     Keymap,
     About,
+    ConfirmOpen,
 }
 
 impl EutecticApp {
@@ -56,20 +61,45 @@ impl EutecticApp {
                 rows.push(row([spacer(), button("Close").key(DIALOG_CLOSE_KEY)]));
                 rows
             }
+            ChromeDialog::ConfirmOpen => vec![
+                text("This document has unsaved changes. Save it before opening another document?")
+                    .wrap_text(),
+                row([
+                    button("Cancel").key(OPEN_CANCEL_KEY),
+                    spacer(),
+                    button("Discard changes").key(OPEN_DISCARD_KEY),
+                    button("Save and Open").key(OPEN_SAVE_KEY),
+                ])
+                .gap(tokens::SPACE_2),
+            ],
         };
         Some(modal(
             DIALOG_ROOT_KEY,
             match open {
                 ChromeDialog::Keymap => "Keymap",
                 ChromeDialog::About => "About eutectic",
+                ChromeDialog::ConfirmOpen => "Unsaved changes",
             },
             body,
         ))
     }
 
-    pub(crate) fn handle_chrome_dialog_event(&self, event: &UiEvent) -> bool {
-        if self.chrome_dialog.get().is_none() {
+    pub(crate) fn handle_chrome_dialog_event(&mut self, event: &UiEvent) -> bool {
+        let Some(open) = self.chrome_dialog.get() else {
             return false;
+        };
+        if open == ChromeDialog::ConfirmOpen {
+            if event.is_click_or_activate(OPEN_SAVE_KEY) {
+                self.confirm_open_save();
+            } else if event.is_click_or_activate(OPEN_DISCARD_KEY) {
+                self.confirm_open_discard();
+            } else if event.is_click_or_activate(OPEN_CANCEL_KEY)
+                || event.is_click_or_activate(&format!("{DIALOG_ROOT_KEY}:dismiss"))
+                || event.kind == UiEventKind::Escape
+            {
+                self.cancel_pending_open();
+            }
+            return true;
         }
         if event.is_click_or_activate(DIALOG_CLOSE_KEY)
             || event.is_click_or_activate(&format!("{DIALOG_ROOT_KEY}:dismiss"))

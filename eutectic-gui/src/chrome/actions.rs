@@ -7,6 +7,8 @@
 //! the suite's permissive editing model: export is a snapshot of what the user
 //! is currently reviewing, while Save remains an independent explicit action.
 
+use crate::app::autoroute::{AUTOROUTE_BOARD_KEY, AUTOROUTE_NET_KEY};
+use crate::app::open::OPEN_KEY;
 use crate::app::pane::SidebarSection;
 use crate::app::{EutecticApp, PaneId};
 use crate::chrome::dialogs::{ABOUT_KEY, ChromeDialog, KEYMAP_KEY};
@@ -30,14 +32,14 @@ pub(crate) struct ChromeNotice {
 }
 
 impl ChromeNotice {
-    fn success(message: String) -> ChromeNotice {
+    pub(crate) fn success(message: String) -> ChromeNotice {
         ChromeNotice {
             message,
             error: false,
         }
     }
 
-    fn error(message: String) -> ChromeNotice {
+    pub(crate) fn error(message: String) -> ChromeNotice {
         ChromeNotice {
             message,
             error: true,
@@ -60,7 +62,13 @@ impl EutecticApp {
             && self.open_menu.borrow().is_none();
         let clicked =
             |key| chrome_allowed && (event.is_click_or_activate(key) || event.is_hotkey(key));
-        if clicked(EXPORT_GERBERS_KEY) {
+        if clicked(OPEN_KEY) {
+            self.request_open_dialog();
+        } else if clicked(AUTOROUTE_NET_KEY) {
+            self.autoroute_selection();
+        } else if clicked(AUTOROUTE_BOARD_KEY) {
+            self.autoroute_board();
+        } else if clicked(EXPORT_GERBERS_KEY) {
             self.export_gerbers();
         } else if clicked(EXPORT_SVG_KEY) {
             self.export_svg();

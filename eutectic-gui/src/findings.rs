@@ -59,12 +59,13 @@ use eutectic_core::query::{Engine, Key};
 /// silently drop a row from its chip.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FindingSource {
-    /// Design-rule check (clearance / min-width / unrouted / keepout / edge) — the
+    /// Design-rule check (clearance / min-width / keepout / edge) — the geometric
     /// `Key::Drc` violations.
     Drc,
     /// Electrical-rule check — the `Key::Erc` diagnostics (e.g. multiple drivers).
     Erc,
-    /// Connectivity: the `Key::Floating` diagnostics — floating (unconnected) pads.
+    /// Connectivity: unrouted `Key::Drc` violations and the `Key::Floating`
+    /// diagnostics for floating (unconnected) pads.
     Net,
     /// Library resolution: unresolved parts (`W_UNRESOLVED_PART`) + the GUI-side
     /// `W_LIB_*` resolution notes (unregistered `use` / load error / collision).
@@ -215,7 +216,11 @@ impl Findings {
                 .unwrap_or_default();
             let board_mm = halo_point(&refs, doc, candidates);
             items.push(Finding {
-                source: FindingSource::Drc,
+                source: if matches!(v, eutectic_core::route::Violation::Unrouted { .. }) {
+                    FindingSource::Net
+                } else {
+                    FindingSource::Drc
+                },
                 severity: Severity::Error,
                 code,
                 message,

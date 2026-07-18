@@ -8,12 +8,14 @@
 //! This module holds the shared helpers + imports, reached by each concern
 //! module through `use super::*`.
 
+mod autoroute;
 mod camera;
 mod chrome;
 mod direct_manip;
 mod editing;
 mod libraries;
 mod menubar;
+mod open;
 mod palette;
 mod panes;
 mod reload;

@@ -38,6 +38,7 @@ bytemuck = { version = "1", features = ["derive"] }
 log = "0.4"
 lyon_tessellation = "1"
 pollster = "0.4"
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
 wgpu = "29"
 winit = { version = "0.30", features = ["android-native-activity"] }
 
