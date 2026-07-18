@@ -25,7 +25,7 @@ use super::scene::{PlaneKey, Prim, Scene};
 use super::state::SemanticStates;
 use super::style::ResolvedStyles;
 use super::text::{TextBuf, TextGpu};
-use eutectic_core::coord::Point;
+use eutectic_core::coord::{Nm, Point};
 use wgpu::util::DeviceExt;
 
 /// Smallest on-screen grid spacing the 1-2-5 pitch ladder targets (px) —
@@ -281,10 +281,11 @@ fn frame_flags(axis_flags: u32, cursor: bool, style: crate::app::GridStyle) -> u
 /// 10× lattice reaches the shader).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GridParams {
-    /// Minor dot pitch in px — in `[GRID_MIN_PX, 2.5 · GRID_MIN_PX)`.
+    /// Minor dot pitch in px — in `[GRID_MIN_PX, 2.5 · GRID_MIN_PX)` until
+    /// the integer coordinate domain's 1 nm minimum pitch is reached.
     pub pitch_px: f64,
     /// The chosen ladder pitch in nm (1/2/5 × 10ⁿ mm).
-    pub pitch_nm: f64,
+    pub pitch_nm: Nm,
     /// Screen-px phase of the 10×-pitch lattice (both lattices share it —
     /// a major dot sits on the origin).
     pub offset_px: [f64; 2],
@@ -295,11 +296,12 @@ pub struct GridParams {
     pub axis_flags: u32,
 }
 
-/// Compute the grid ladder + phases for a camera (mm-native 1-2-5 ladder
-/// keyed to zoom; renderer-spec §4).
-pub fn grid_params(cam: &Camera, viewport: (f32, f32)) -> GridParams {
-    let z = if cam.zoom.is_finite() && cam.zoom > 0.0 {
-        cam.zoom
+/// The displayed grid's 1-2-5 ladder pitch for `zoom` (px/nm), in the
+/// engine's exact integer-nm coordinate domain. This is the single source of
+/// truth shared by the renderer and snap-to-grid interactions.
+pub fn grid_pitch_nm(zoom: f64) -> Nm {
+    let z = if zoom.is_finite() && zoom > 0.0 {
+        zoom
     } else {
         1e-6
     };
@@ -316,8 +318,19 @@ pub fn grid_params(cam: &Camera, viewport: (f32, f32)) -> GridParams {
     } else {
         10.0
     };
-    let pitch_nm = step * decade * 1e6;
-    let pitch_px = pitch_nm * z;
+    (step * decade * 1e6).round().clamp(1.0, Nm::MAX as f64) as Nm
+}
+
+/// Compute the grid ladder + phases for a camera (mm-native 1-2-5 ladder
+/// keyed to zoom; renderer-spec §4).
+pub fn grid_params(cam: &Camera, viewport: (f32, f32)) -> GridParams {
+    let z = if cam.zoom.is_finite() && cam.zoom > 0.0 {
+        cam.zoom
+    } else {
+        1e-6
+    };
+    let pitch_nm = grid_pitch_nm(z);
+    let pitch_px = pitch_nm as f64 * z;
     let (w, h) = (viewport.0 as f64, viewport.1 as f64);
     // Screen position of board (0,0) in f64 — exact camera math.
     let ox = w / 2.0 - cam.center.0 * z;
@@ -1062,7 +1075,7 @@ impl Renderer {
         } else {
             GridParams {
                 pitch_px: 0.0,
-                pitch_nm: 0.0,
+                pitch_nm: 0,
                 offset_px: [0.0, 0.0],
                 origin_px: [0.0, 0.0],
                 axis_flags: 0,
@@ -1258,17 +1271,19 @@ mod tests {
     #[test]
     fn grid_ladder_is_1_2_5_and_spacing_band_holds() {
         // Sweep zooms across 12 decades; the chosen pitch must be a 1/2/5
-        // decade multiple in mm and the screen spacing in [8, 20) px.
+        // decade multiple in mm and the screen spacing in [8, 20) px until
+        // the integer coordinate domain bottoms out at 1 nm.
         let mut z = 1e-9; // px per nm
         while z < 1e3 {
             let cam = Camera::new((0.0, 0.0), z);
             let g = grid_params(&cam, (800.0, 600.0));
             assert!(
-                g.pitch_px >= GRID_MIN_PX && g.pitch_px < GRID_MIN_PX * 2.5 + 1e-9,
+                g.pitch_px >= GRID_MIN_PX
+                    && (g.pitch_px < GRID_MIN_PX * 2.5 + 1e-9 || g.pitch_nm == 1),
                 "zoom {z}: pitch_px {}",
                 g.pitch_px
             );
-            let mm = g.pitch_nm / 1e6;
+            let mm = g.pitch_nm as f64 / 1e6;
             let decade = 10f64.powf(mm.log10().floor());
             let step = mm / decade;
             let ok = [1.0, 2.0, 5.0, 10.0]

@@ -288,6 +288,8 @@ pub struct EutecticApp {
     pub(crate) display_units: Cell<DisplayUnits>,
     /// Board procedural-grid style (dots by default, or hairline lines).
     pub(crate) grid_style: Cell<GridStyle>,
+    /// Whether board editing gestures snap to the displayed pane grid.
+    pub(crate) snap_to_grid: Cell<bool>,
     /// Most recent export result, rendered as a persistent menu-bar chip.
     pub(crate) chrome_notice: RefCell<Option<crate::chrome::actions::ChromeNotice>>,
     /// The small Help modal currently open, if any.
@@ -368,6 +370,7 @@ impl EutecticApp {
             open_menu: RefCell::new(None),
             display_units: Cell::new(DisplayUnits::default()),
             grid_style: Cell::new(GridStyle::default()),
+            snap_to_grid: Cell::new(true),
             chrome_notice: RefCell::new(None),
             chrome_dialog: Cell::new(None),
             quit_requested: Cell::new(false),
@@ -517,8 +520,51 @@ impl EutecticApp {
         self.style_rev.set(self.style_rev.get() + 1);
     }
 
+    /// Whether board editing gestures snap to the displayed pane grid.
+    pub fn snap_to_grid(&self) -> bool {
+        self.snap_to_grid.get()
+    }
+
+    /// Toggle app-wide snap-to-grid behavior.
+    pub(crate) fn toggle_snap_to_grid(&self) {
+        self.snap_to_grid.set(!self.snap_to_grid.get());
+    }
+
+    /// The exact integer-nm pitch currently displayed in `pane`.
+    pub(crate) fn displayed_grid_pitch(&self, pane: PaneId) -> Nm {
+        let zoom = self.pane_camera(pane).zoom * (self.scale_factor.get() as f64).max(0.1);
+        crate::render::grid_pitch_nm(zoom)
+    }
+
     /// Whether File ▸ Quit has requested a clean host exit.
     pub fn quit_requested(&self) -> bool {
         self.quit_requested.get()
+    }
+}
+
+/// Round one integer-nm coordinate to the nearest `pitch` multiple. Exact
+/// half-pitch ties round away from zero on both sides of the origin.
+pub(crate) fn snap_nm(value: Nm, pitch: Nm) -> Nm {
+    assert!(pitch > 0, "grid pitch must be positive");
+    let value = value as i128;
+    let pitch = pitch as i128;
+    let quotient = value / pitch;
+    let remainder = value % pitch;
+    let rounded = if remainder.abs() * 2 >= pitch {
+        quotient + remainder.signum()
+    } else {
+        quotient
+    } * pitch;
+    rounded.clamp(Nm::MIN as i128, Nm::MAX as i128) as Nm
+}
+
+/// Snap both coordinates of a board point in exact integer-nm arithmetic.
+pub(crate) fn snap_point(
+    point: eutectic_core::coord::Point,
+    pitch: Nm,
+) -> eutectic_core::coord::Point {
+    eutectic_core::coord::Point {
+        x: snap_nm(point.x, pitch),
+        y: snap_nm(point.y, pitch),
     }
 }

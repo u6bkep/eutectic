@@ -4,7 +4,7 @@
 //! `app/events.rs` as pure code motion (gui-module-split); `on_event`'s route
 //! table stays in [`events`](crate::app::events).
 
-use crate::app::{EutecticApp, PaneId};
+use crate::app::{EutecticApp, PaneId, snap_point};
 use crate::pick::{self, SemanticId};
 use crate::schematic_pick;
 use crate::tool::{self, CameraPanState, DragState, RouteState, Tool, TraceDragState};
@@ -78,6 +78,7 @@ impl EutecticApp {
                 pick::tolerance_nm(PICK_TOL_PX, crate::app::canvas_pane::zoom_px_per_mm(&cam)),
             )
         };
+        let snap_pitch = self.snap_to_grid().then(|| self.displayed_grid_pitch(pane));
 
         // The tool in force over a board pane is the BOARD kind's slot (per-view-
         // kind tool memory) — the pane being handled here is a board pane.
@@ -144,11 +145,25 @@ impl EutecticApp {
                 // hover cue, as before.
                 if let Some(d) = self.trace_drag.borrow_mut().as_mut() {
                     d.update(p);
+                    if d.moved
+                        && let Some(pitch) = snap_pitch
+                    {
+                        d.path[d.index] = snap_point(p, pitch);
+                    }
                     return;
                 }
                 let mut drag = self.drag.borrow_mut();
                 if let Some(d) = drag.as_mut() {
                     d.update(p);
+                    if d.moved
+                        && let Some(pitch) = snap_pitch
+                    {
+                        let target = snap_point(d.target_pos(), pitch);
+                        d.cursor = Point {
+                            x: d.start.x + target.x - d.orig_pos.x,
+                            y: d.start.y + target.y - d.orig_pos.y,
+                        };
+                    }
                     return;
                 }
                 drop(drag);
@@ -207,7 +222,7 @@ impl EutecticApp {
                 }
             }
             (Tool::Route, UiEventKind::Click) => {
-                self.route_click(p, tol);
+                self.route_click(p, tol, snap_pitch);
             }
             (
                 Tool::Route,
@@ -219,7 +234,7 @@ impl EutecticApp {
                 // Rubber-segment update on every pointer event 0.4.5 delivers
                 // (no free-hover pointer-move — the documented toolkit limit).
                 if let Some(r) = self.route.borrow_mut().as_mut() {
-                    r.hover(p);
+                    r.hover(snap_pitch.map_or(p, |pitch| snap_point(p, pitch)));
                 }
             }
             _ => {}
@@ -238,11 +253,11 @@ impl EutecticApp {
     ///
     /// Pending: a PIN click — any pin, even one on a DIFFERENT net (permissive;
     /// overlap surfaces as DRC findings, never a block) — snaps to that pad's
-    /// centre and COMMITS. Anything else appends a waypoint at the raw board
-    /// position (no grid snap in v1).
-    fn route_click(&mut self, p: Point, tol: Nm) {
+    /// centre and COMMITS. Anything else appends a waypoint at the displayed
+    /// grid pitch when snapping is enabled.
+    fn route_click(&mut self, p: Point, tol: Nm, snap_pitch: Option<Nm>) {
         if self.route.borrow().is_none() {
-            let Some((net, anchor)) = self.route_start_at(p, tol) else {
+            let Some((net, anchor)) = self.route_start_at(p, tol, snap_pitch) else {
                 return;
             };
             let Some(layer) = self.active_layer_name() else {
@@ -267,6 +282,7 @@ impl EutecticApp {
             }
             None => {
                 let mut r = self.route.borrow_mut();
+                let p = snap_pitch.map_or(p, |pitch| snap_point(p, pitch));
                 r.as_mut().expect("pending checked above").push_waypoint(p);
             }
         }
@@ -292,7 +308,7 @@ impl EutecticApp {
     /// Resolve a route START click: the net the new trace belongs to and the
     /// snapped anchor point. `None` when the click hits nothing routable (empty
     /// space, or a netless pin — a trace needs a net).
-    fn route_start_at(&self, p: Point, tol: Nm) -> Option<(NetId, Point)> {
+    fn route_start_at(&self, p: Point, tol: Nm, snap_pitch: Option<Nm>) -> Option<(NetId, Point)> {
         let derived = self.derived.borrow();
         let view = derived.board.as_ref()?;
         let hit = pick::resolve(&view.candidates, p, tol, |id| self.layer_id_visible(id))?;
@@ -311,13 +327,23 @@ impl EutecticApp {
             }
             SemanticId::Trace(tid) => {
                 let t = doc.traces.get(tid)?;
-                Some((t.net.clone(), tool::closest_on_path(&t.path, p)?))
+                let anchor = tool::closest_on_path(&t.path, p)?;
+                Some((
+                    t.net.clone(),
+                    snap_pitch.map_or(anchor, |pitch| snap_point(anchor, pitch)),
+                ))
             }
             SemanticId::Via(vid) => {
                 let v = doc.vias.get(vid)?;
-                Some((v.net.clone(), v.at))
+                Some((
+                    v.net.clone(),
+                    snap_pitch.map_or(v.at, |pitch| snap_point(v.at, pitch)),
+                ))
             }
-            SemanticId::Pour { net, .. } => Some((net.clone(), p)),
+            SemanticId::Pour { net, .. } => Some((
+                net.clone(),
+                snap_pitch.map_or(p, |pitch| snap_point(p, pitch)),
+            )),
             _ => None,
         }
     }

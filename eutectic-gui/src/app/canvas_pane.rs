@@ -1212,6 +1212,11 @@ impl EutecticApp {
                         self.measure.set(m);
                     }
                     if let Some(r) = self.route.borrow_mut().as_mut() {
+                        let p = if self.snap_to_grid() {
+                            crate::app::snap_point(p, self.displayed_grid_pitch(pane))
+                        } else {
+                            p
+                        };
                         r.hover(p);
                     }
                     // The pick: same candidates, same kernel as the click path.

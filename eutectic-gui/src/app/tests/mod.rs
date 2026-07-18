@@ -21,6 +21,7 @@ mod routing;
 mod schematic_pane;
 mod selection;
 mod sidebar;
+mod snap;
 mod tools;
 
 use super::*;

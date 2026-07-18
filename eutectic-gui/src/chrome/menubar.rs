@@ -56,6 +56,9 @@ pub(crate) const DELETE_KEY: &str = "delete";
 /// Edit ▸ Rotate and the bare R chord route.
 pub(crate) const ROTATE_KEY: &str = "rotate";
 
+/// View ▸ Snap to Grid's app-wide toggle route.
+pub(crate) const SNAP_TO_GRID_KEY: &str = "display:snap-to-grid:toggle";
+
 /// One menu row. The enumeration is the oracle's; `Wired` rows carry the existing
 /// route key they dispatch to (so a click routes exactly like the retired
 /// toolbar button did), `Disabled` rows are visible-but-inert, `Separator` is a
@@ -220,6 +223,11 @@ pub(crate) fn menu_defs() -> Vec<MenuDef> {
                     label: "Grid: dots / lines",
                     shortcut: None,
                     action: GRID_TOGGLE_KEY,
+                },
+                Wired {
+                    label: "Snap to Grid",
+                    shortcut: None,
+                    action: SNAP_TO_GRID_KEY,
                 },
                 Wired {
                     label: "Units: mm / in",
@@ -391,6 +399,7 @@ impl EutecticApp {
                     has_path,
                     self.display_units().label(),
                     self.grid_style().label(),
+                    self.snap_to_grid(),
                     can_delete,
                     can_rotate,
                 )
@@ -444,6 +453,7 @@ fn menu_row_el(
     has_path: bool,
     units_label: &'static str,
     grid_label: &'static str,
+    snap_to_grid: bool,
     can_delete: bool,
     can_rotate: bool,
 ) -> El {
@@ -464,6 +474,7 @@ fn menu_row_el(
             let trailing = match action {
                 UNITS_TOGGLE_KEY => Some(units_label),
                 GRID_TOGGLE_KEY => Some(grid_label),
+                SNAP_TO_GRID_KEY if snap_to_grid => Some("✓"),
                 _ => shortcut,
             };
             let el = menu_item(label, trailing);
@@ -577,6 +588,7 @@ mod tests {
             REDO_KEY,
             REVERT_KEY,
             ROTATE_KEY,
+            SNAP_TO_GRID_KEY,
             SAVE_KEY,
             UNITS_TOGGLE_KEY,
             UNDO_KEY,
@@ -615,28 +627,28 @@ mod tests {
 
         assert_eq!(
             find_row_key(
-                &menu_row_el(delete, true, "mm", "Dots", false, false),
+                &menu_row_el(delete, true, "mm", "Dots", true, false, false),
                 "Delete",
             ),
             Some(None)
         );
         assert_eq!(
             find_row_key(
-                &menu_row_el(rotate, true, "mm", "Dots", false, false),
+                &menu_row_el(rotate, true, "mm", "Dots", true, false, false),
                 "Rotate",
             ),
             Some(None)
         );
         assert_eq!(
             find_row_key(
-                &menu_row_el(delete, true, "mm", "Dots", true, true),
+                &menu_row_el(delete, true, "mm", "Dots", true, true, true),
                 "Delete",
             ),
             Some(Some(DELETE_KEY.to_string()))
         );
         assert_eq!(
             find_row_key(
-                &menu_row_el(rotate, true, "mm", "Dots", true, true),
+                &menu_row_el(rotate, true, "mm", "Dots", true, true, true),
                 "Rotate",
             ),
             Some(Some(ROTATE_KEY.to_string()))

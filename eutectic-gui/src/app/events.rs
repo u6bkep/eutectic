@@ -18,7 +18,7 @@ use crate::app::pane::{
 };
 use crate::app::{EutecticApp, PaneId, PaneLayout, ViewKind};
 use crate::chrome::actions::{ZOOM_IN_KEY, ZOOM_OUT_KEY};
-use crate::chrome::menubar::{MENUBAR_KEY, REVERT_KEY};
+use crate::chrome::menubar::{MENUBAR_KEY, REVERT_KEY, SNAP_TO_GRID_KEY};
 use crate::palette::PALETTE_TOGGLE_KEY;
 use crate::panels::findings::error_card;
 use crate::reload::SourceMsg;
@@ -151,6 +151,11 @@ impl App for EutecticApp {
             return;
         }
         if self.libraries_open.get() && self.handle_libraries_event(&event) {
+            return;
+        }
+
+        if event.is_click_or_activate(SNAP_TO_GRID_KEY) {
+            self.toggle_snap_to_grid();
             return;
         }
 

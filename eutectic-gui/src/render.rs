@@ -44,7 +44,7 @@ pub mod text;
 pub use board::board_scene;
 pub use camera::{Camera, CameraGlide};
 pub use damage::{DamageKey, needs_render};
-pub use gpu::{OverlayGpu, RenderArgs, Renderer, SceneBuffers, SceneCache};
+pub use gpu::{OverlayGpu, RenderArgs, Renderer, SceneBuffers, SceneCache, grid_pitch_nm};
 pub use scene::{Plane, PlaneKey, Prim, PrimShape, Scene, SemanticKey, StyleClass};
 pub use schematic::schematic_scene;
 pub use state::SemanticStates;
