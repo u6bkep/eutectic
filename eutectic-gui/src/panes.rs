@@ -165,8 +165,8 @@ impl EutecticApp {
             .height(Size::Fill(1.0))
     }
 
-    /// A pane header: view-kind dropdown, split-right/down, close, and
-    /// maximize. Split/close availability is structural.
+    /// A pane header: view-kind dropdown, split-right/down, reserved disabled
+    /// pop-out, close, and maximize. Split/close availability is structural.
     fn pane_header(&self, pane: PaneId, view: ViewKind) -> El {
         let max_label = if self.maximized.get() == Some(pane) {
             "Restore"
@@ -192,6 +192,7 @@ impl EutecticApp {
             } else {
                 split_down.disabled()
             },
+            icon_button(icons::POP_OUT.clone()).disabled(),
             if can_close {
                 close.tooltip("Close pane").key(pane.close_key())
             } else {

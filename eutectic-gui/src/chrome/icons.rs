@@ -12,7 +12,7 @@
 //! `IconSource::UnknownName`), so the review bundle stays lint-clean.
 //!
 //! Open (`Folder`) and the command palette (`Command`) reuse built-in names; only
-//! the nine glyphs with no faithful built-in live here.
+//! the ten glyphs with no faithful built-in live here.
 
 use damascene_core::prelude::SvgIcon;
 use std::sync::LazyLock;
@@ -93,6 +93,13 @@ pub static SPLIT_DOWN: LazyLock<SvgIcon> = LazyLock::new(|| {
     )
 });
 
+/// Reserved pop-out-to-window affordance (gw-21).
+pub static POP_OUT: LazyLock<SvgIcon> = LazyLock::new(|| {
+    glyph(
+        r#"<path d="M15 3h6v6"/><path d="m10 14 11-11"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>"#,
+    )
+});
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,6 +119,7 @@ mod tests {
             &*FINDINGS,
             &*SPLIT_RIGHT,
             &*SPLIT_DOWN,
+            &*POP_OUT,
         ] {
             // Cloning is the cheap Arc bump the builder does; forcing the
             // LazyLock above already ran `parse_current_color` (which panics on
