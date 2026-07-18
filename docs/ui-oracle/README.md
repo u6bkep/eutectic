@@ -78,7 +78,7 @@ they reserve the anatomy so no future slice paints over the space).
 
 ## Deliberate deviations from the original mockup
 
-- The Side-by-side/Stacked toggle is gone — replaced by a recursive Blender-style split tree
+- The fixed orientation toggle is gone — replaced by a recursive Blender-style split tree
   (split right / split down / close in every pane header, capped at 6 panes).
 - The global left tool rail from the first oracle revision was replaced by per-pane
   Blender-style overlay toolbars: a global rail plus hover-focus is geometrically broken —
