@@ -39,7 +39,7 @@ fn reload_good_to_good_bumps_revision_once_and_preserves_state() {
     // Reload with the SAME source (a good doc). The board fixture's source has no
     // routed copper (that was command-authored), so GND is still a net in the doc.
     let src = app.domain.source.clone();
-    app.mailbox_push(SourceMsg::Changed(src));
+    app.mailbox_push(SourceMsg::pathless(src));
     app.before_build();
 
     assert_eq!(app.revision(), rev0 + 1, "one good reload bumps once");
@@ -64,7 +64,7 @@ fn reload_good_to_good_bumps_revision_once_and_preserves_state() {
 
     // A second identical reload bumps again (each applied Changed is one revision).
     let src = app.domain.source.clone();
-    app.mailbox_push(SourceMsg::Changed(src));
+    app.mailbox_push(SourceMsg::pathless(src));
     app.before_build();
     assert_eq!(app.revision(), rev0 + 2);
 }
@@ -91,7 +91,7 @@ fn reload_preserves_camera_no_refit() {
 
     // Reload with identical good source, then run the frame loop again.
     let src = app.domain.source.clone();
-    app.mailbox_push(SourceMsg::Changed(src));
+    app.mailbox_push(SourceMsg::pathless(src));
     let _ = settle(&mut app);
     assert_eq!(
         app.pane_camera(PaneId::A),
@@ -113,7 +113,7 @@ fn reload_good_to_bad_keeps_last_good_and_sets_error() {
     assert!(app.has_board(), "board projects before the bad reload");
 
     // A source that fails elaboration (unknown part).
-    app.mailbox_push(SourceMsg::Changed(BROKEN_SRC.to_string()));
+    app.mailbox_push(SourceMsg::pathless(BROKEN_SRC));
     app.before_build();
 
     assert_eq!(
@@ -145,13 +145,13 @@ fn reload_good_to_bad_keeps_last_good_and_sets_error() {
 #[test]
 fn reload_bad_then_good_recovers() {
     let mut app = board();
-    app.mailbox_push(SourceMsg::Changed(BROKEN_SRC.to_string()));
+    app.mailbox_push(SourceMsg::pathless(BROKEN_SRC));
     app.before_build();
     assert!(app.reload_error().is_some());
     let rev_after_bad = app.revision();
 
     // Now a good source (the schematic doc) — recovers.
-    app.mailbox_push(SourceMsg::Changed(SCHEMATIC_ECAD.to_string()));
+    app.mailbox_push(SourceMsg::pathless(SCHEMATIC_ECAD));
     app.before_build();
     assert!(
         app.reload_error().is_none(),
@@ -187,7 +187,7 @@ net SOLO C1.p1
 nc C1.p2
 board (0mm, 0mm) (10mm, 0mm) (10mm, 10mm) (0mm, 10mm)
 ";
-    app.mailbox_push(SourceMsg::Changed(pruned_src.to_string()));
+    app.mailbox_push(SourceMsg::pathless(pruned_src));
     app.before_build(); // must not panic
 
     assert!(
@@ -206,7 +206,7 @@ fn reload_keeps_resolving_selection() {
         .borrow_mut()
         .select_only(SemanticId::Net(eutectic_core::id::NetId::new("VDD")));
     // Reload with the SAME source: VDD still resolves.
-    app.mailbox_push(SourceMsg::Changed(SCHEMATIC_ECAD.to_string()));
+    app.mailbox_push(SourceMsg::pathless(SCHEMATIC_ECAD));
     app.before_build();
     assert_eq!(
         app.domain.selection.borrow().single(),

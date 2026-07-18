@@ -79,6 +79,14 @@ pub(crate) enum MenuRow {
         /// The route key this row emits (an existing `on_event` action).
         action: &'static str,
     },
+    /// A live submenu parent: it has an action route and the oracle's trailing arrow,
+    /// but no keyboard-shortcut hint.
+    Submenu {
+        /// Display label.
+        label: &'static str,
+        /// The route that opens the nested popover.
+        action: &'static str,
+    },
     /// A visible-but-inert row (functionality not in this slice): label, the
     /// oracle's shortcut/keystroke hint (inert documentation), and whether it is
     /// a submenu (`arrow`, shown with a trailing chevron).
@@ -87,7 +95,7 @@ pub(crate) enum MenuRow {
         label: &'static str,
         /// The oracle's keystroke hint, rendered inert.
         shortcut: Option<&'static str>,
-        /// Submenu indicator (Active Layer).
+        /// Submenu indicator (Open Recent, Active Layer).
         arrow: bool,
     },
 }
@@ -108,7 +116,7 @@ pub(crate) struct MenuDef {
 /// row. This is a pure data function so the menu model can be unit-tested without
 /// a render.
 pub(crate) fn menu_defs() -> Vec<MenuDef> {
-    use MenuRow::{Disabled as Dis, Separator as Sep, Wired};
+    use MenuRow::{Disabled as Dis, Separator as Sep, Submenu, Wired};
     // Shorthand constructors.
     let dis = |label, shortcut| Dis {
         label,
@@ -130,9 +138,8 @@ pub(crate) fn menu_defs() -> Vec<MenuDef> {
                     shortcut: Some("Ctrl+O"),
                     action: OPEN_KEY,
                 },
-                Wired {
+                Submenu {
                     label: "Open Recent",
-                    shortcut: Some("›"),
                     action: OPEN_RECENT_KEY,
                 },
                 Wired {
@@ -496,9 +503,7 @@ impl EutecticApp {
     }
 }
 
-/// Render one [`MenuRow`] into a menu-panel El. Wired rows carry their route key;
-/// Save / Revert downgrade to disabled without a source path; disabled rows are
-/// muted + inert (no key), submenu rows carry a trailing chevron.
+/// Availability inputs shared by menu-row rendering.
 #[derive(Clone, Copy)]
 struct MenuAvailability {
     has_path: bool,
@@ -508,6 +513,9 @@ struct MenuAvailability {
     has_doc: bool,
 }
 
+/// Render one [`MenuRow`] into a menu-panel El. Wired rows carry their route key;
+/// Save / Revert downgrade to disabled without a source path; disabled rows are
+/// muted + inert (no key), submenu rows carry a trailing chevron.
 fn menu_row_el(
     row: &MenuRow,
     units_label: &'static str,
@@ -544,16 +552,25 @@ fn menu_row_el(
                 el.key(action)
             }
         }
+        MenuRow::Submenu { label, action } => submenu_item(label).key(action),
         MenuRow::Disabled {
             label,
             shortcut,
             arrow,
         } => {
-            // A submenu indicator renders as a trailing chevron in the shortcut slot.
-            let hint = if arrow { Some("›") } else { shortcut };
-            menu_item(label, hint).disabled()
+            if arrow {
+                submenu_item(label).disabled()
+            } else {
+                menu_item(label, shortcut).disabled()
+            }
         }
     }
+}
+
+/// A submenu row uses a dedicated trailing arrow affordance, not the keyboard-
+/// shortcut hint slot.
+fn submenu_item(label: &str) -> El {
+    menubar_item([menubar_item_label(label), spacer(), text("›").muted()])
 }
 
 /// A menu row body: label, plus an optional trailing shortcut/hint slot.
@@ -614,17 +631,17 @@ mod tests {
         walk(menu, label)
     }
 
-    /// The wired action surface is explicit; every other row is disabled or a
+    /// The live action surface is explicit; every other row is disabled or a
     /// separator. Libraries appears in both File and Tools.
     #[test]
     fn wired_rows_carry_their_existing_action_keys() {
         // `MenuRow::Disabled` has no `action` field by construction, so collecting
-        // the `Wired` routes is the whole wired surface.
+        // the wired and submenu routes is the whole live surface.
         let wired: Vec<&str> = menu_defs()
             .into_iter()
             .flat_map(|d| d.rows)
             .filter_map(|r| match r {
-                MenuRow::Wired { action, .. } => Some(action),
+                MenuRow::Wired { action, .. } | MenuRow::Submenu { action, .. } => Some(action),
                 _ => None,
             })
             .collect();
@@ -669,6 +686,45 @@ mod tests {
             wired.iter().filter(|a| **a == LIBRARIES_TOGGLE_KEY).count(),
             2
         );
+    }
+
+    #[test]
+    fn open_recent_is_a_submenu_with_an_arrow_not_a_shortcut() {
+        let row = menu_defs()
+            .into_iter()
+            .find(|menu| menu.value == "file")
+            .unwrap()
+            .rows
+            .into_iter()
+            .find(|row| {
+                matches!(
+                    row,
+                    MenuRow::Submenu {
+                        label: "Open Recent",
+                        ..
+                    }
+                )
+            })
+            .expect("Open Recent submenu row");
+
+        let rendered = menu_row_el(
+            &row,
+            "mm",
+            "Dots",
+            MenuAvailability {
+                has_path: true,
+                can_delete: false,
+                can_rotate: false,
+                can_autoroute_net: false,
+                has_doc: true,
+            },
+        );
+
+        assert_eq!(
+            find_row_key(&rendered, "Open Recent"),
+            Some(Some(OPEN_RECENT_KEY.into()))
+        );
+        assert!(all_texts(&rendered).iter().any(|text| text == "›"));
     }
 
     /// Delete and Rotate stay visible but inert without a compatible board

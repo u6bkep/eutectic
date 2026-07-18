@@ -141,7 +141,7 @@ fn save_echo_is_suppressed() {
 
     // The watcher sees the mtime change and delivers our own write back.
     let echoed = std::fs::read_to_string(&file).unwrap();
-    app.mailbox_push(SourceMsg::Changed(echoed));
+    app.mailbox_push(SourceMsg::pathless(echoed));
     app.before_build();
 
     assert_eq!(app.revision(), rev, "an echo must not reload");
@@ -154,7 +154,7 @@ fn save_echo_is_suppressed() {
     let echoed = std::fs::read_to_string(&file).unwrap();
     commit_move(&mut app, 3, 0);
     assert!(app.dirty());
-    app.mailbox_push(SourceMsg::Changed(echoed));
+    app.mailbox_push(SourceMsg::pathless(echoed));
     app.before_build();
     assert!(
         app.conflict().is_some(),
@@ -171,7 +171,7 @@ fn conflict_reload_discards_edits_and_follows_disk() {
     commit_move(&mut app, 4, 0);
     let rev_dirty = app.revision();
 
-    app.mailbox_push(SourceMsg::Changed(SCHEMATIC_ECAD.to_string()));
+    app.mailbox_push(SourceMsg::pathless(SCHEMATIC_ECAD));
     app.before_build();
     assert_eq!(
         app.conflict().as_deref(),
@@ -209,7 +209,7 @@ fn conflict_keep_mine_stays_dirty_and_save_overwrites() {
 
     // Someone writes an external version to disk; the watcher delivers it.
     std::fs::write(&file, SCHEMATIC_ECAD).unwrap();
-    app.mailbox_push(SourceMsg::Changed(SCHEMATIC_ECAD.to_string()));
+    app.mailbox_push(SourceMsg::pathless(SCHEMATIC_ECAD));
     app.before_build();
     assert!(app.conflict().is_some());
 
@@ -234,9 +234,9 @@ fn conflict_keep_mine_stays_dirty_and_save_overwrites() {
 fn conflict_updates_and_clean_doc_still_follows() {
     let mut app = edit_app();
     commit_move(&mut app, 1, 0);
-    app.mailbox_push(SourceMsg::Changed("v1".to_string()));
+    app.mailbox_push(SourceMsg::pathless("v1"));
     app.before_build();
-    app.mailbox_push(SourceMsg::Changed("v2".to_string()));
+    app.mailbox_push(SourceMsg::pathless("v2"));
     app.before_build();
     assert_eq!(
         app.conflict().as_deref(),
@@ -248,7 +248,7 @@ fn conflict_updates_and_clean_doc_still_follows() {
     app.on_event(click(CONFLICT_KEEP_KEY), &cx);
     let mut clean = edit_app();
     let rev0 = clean.revision();
-    clean.mailbox_push(SourceMsg::Changed(SCHEMATIC_ECAD.to_string()));
+    clean.mailbox_push(SourceMsg::pathless(SCHEMATIC_ECAD));
     clean.before_build();
     assert_eq!(clean.revision(), rev0 + 1, "a clean doc follows disk");
     assert!(!clean.dirty());
@@ -263,7 +263,7 @@ fn save_while_conflicted_overwrites_and_dismisses() {
     let mut app = edit_app();
     app.domain.source_path = Some(file.clone());
     commit_move(&mut app, 3, 0);
-    app.mailbox_push(SourceMsg::Changed(SCHEMATIC_ECAD.to_string()));
+    app.mailbox_push(SourceMsg::pathless(SCHEMATIC_ECAD));
     app.before_build();
     assert!(app.conflict().is_some());
 

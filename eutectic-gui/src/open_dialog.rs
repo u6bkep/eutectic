@@ -1,8 +1,7 @@
 //! Native File ▸ Open plumbing: an injectable dialog launcher, a polled
-//! mailbox, fresh-domain loading, and a switchable live-source watcher.
+//! mailbox and permissive fresh-domain loading for paths chosen in the dialog.
 
 use crate::app::{DomainState, LibSource};
-use crate::reload::{POLL_INTERVAL, SourceMsg};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
@@ -15,30 +14,40 @@ pub enum OpenMsg {
 }
 
 pub struct OpenMailbox {
-    rx: Receiver<OpenMsg>,
-    tx: Sender<OpenMsg>,
+    rx: std::cell::RefCell<Receiver<OpenMsg>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum OpenPoll {
+    Empty,
+    Disconnected,
+    Message(OpenMsg),
 }
 
 impl OpenMailbox {
     pub fn new() -> OpenMailbox {
         let (tx, rx) = channel();
-        OpenMailbox { rx, tx }
-    }
-
-    pub fn sender(&self) -> Sender<OpenMsg> {
-        self.tx.clone()
-    }
-
-    pub fn push(&self, msg: OpenMsg) {
-        let _ = self.tx.send(msg);
-    }
-
-    pub fn drain(&self) -> Option<OpenMsg> {
-        let mut latest = None;
-        while let Ok(msg) = self.rx.try_recv() {
-            latest = Some(msg);
+        drop(tx);
+        OpenMailbox {
+            rx: std::cell::RefCell::new(rx),
         }
-        latest
+    }
+
+    /// Replace any completed dialog channel and hand its sole sender to a launcher.
+    /// With no retained sender, a launcher thread that exits without replying makes the
+    /// receiver observably disconnected instead of wedging the busy flag forever.
+    pub(crate) fn begin_launch(&self) -> Sender<OpenMsg> {
+        let (tx, rx) = channel();
+        *self.rx.borrow_mut() = rx;
+        tx
+    }
+
+    pub(crate) fn poll(&self) -> OpenPoll {
+        match self.rx.borrow().try_recv() {
+            Ok(msg) => OpenPoll::Message(msg),
+            Err(TryRecvError::Empty) => OpenPoll::Empty,
+            Err(TryRecvError::Disconnected) => OpenPoll::Disconnected,
+        }
     }
 }
 
@@ -129,69 +138,23 @@ fn absolute_path(path: &Path) -> PathBuf {
     })
 }
 
-/// Spawn one watcher whose target can be replaced after an in-app open. The
-/// returned sender is held by the app; dropping it stops the thread.
-pub fn spawn_switchable_watcher<W>(
-    initial: Option<PathBuf>,
-    paths: Receiver<PathBuf>,
-    source_tx: Sender<SourceMsg>,
-    wake: W,
-) where
-    W: Fn() + Send + 'static,
-{
-    std::thread::spawn(move || {
-        let mut current = initial;
-        let mut last_mtime = current.as_deref().and_then(mtime);
-        loop {
-            loop {
-                match paths.try_recv() {
-                    Ok(path) => {
-                        last_mtime = mtime(&path);
-                        current = Some(path);
-                    }
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => return,
-                }
-            }
-            std::thread::sleep(POLL_INTERVAL);
-            let Some(path) = current.as_deref() else {
-                continue;
-            };
-            let now = mtime(path);
-            if now != last_mtime && now.is_some() {
-                if let Ok(source) = std::fs::read_to_string(path) {
-                    if source_tx.send(SourceMsg::Changed(source)).is_err() {
-                        return;
-                    }
-                    wake();
-                    last_mtime = now;
-                }
-            } else if now != last_mtime {
-                last_mtime = now;
-            }
-        }
-    });
-}
-
-fn mtime(path: &Path) -> Option<std::time::SystemTime> {
-    std::fs::metadata(path)
-        .ok()
-        .and_then(|meta| meta.modified().ok())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn mailbox_is_injectable_and_coalesces() {
+    fn mailbox_delivers_each_message_then_reports_disconnect() {
         let mailbox = OpenMailbox::new();
-        mailbox.push(OpenMsg::Picked(None));
-        mailbox.push(OpenMsg::Picked(Some(PathBuf::from("/tmp/latest.eut"))));
+        let tx = mailbox.begin_launch();
+        tx.send(OpenMsg::Picked(None)).unwrap();
+        tx.send(OpenMsg::Picked(Some(PathBuf::from("/tmp/latest.eut"))))
+            .unwrap();
+        assert_eq!(mailbox.poll(), OpenPoll::Message(OpenMsg::Picked(None)));
         assert_eq!(
-            mailbox.drain(),
-            Some(OpenMsg::Picked(Some(PathBuf::from("/tmp/latest.eut"))))
+            mailbox.poll(),
+            OpenPoll::Message(OpenMsg::Picked(Some(PathBuf::from("/tmp/latest.eut"))))
         );
-        assert_eq!(mailbox.drain(), None);
+        drop(tx);
+        assert_eq!(mailbox.poll(), OpenPoll::Disconnected);
     }
 }

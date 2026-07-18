@@ -72,7 +72,9 @@ impl App for EutecticApp {
         // save model BEFORE this frame builds (echo of our own save → consumed; clean
         // doc → auto-apply reload; dirty doc → conflict banner, never silent
         // last-writer). The drain coalesces a burst to the latest source.
-        if let Some(SourceMsg::Changed(source)) = self.mailbox.drain() {
+        if let Some(SourceMsg::Changed { path, source }) = self.mailbox.drain()
+            && path.as_deref() == self.domain.source_path.as_deref()
+        {
             self.handle_disk_change(source);
         }
         self.drain_open_mailbox();
@@ -150,7 +152,13 @@ impl App for EutecticApp {
                 self.recent_open.set(false);
                 return;
             }
+            if event.kind == UiEventKind::Escape && open.is_some() {
+                *open = None;
+                self.recent_open.set(false);
+                return;
+            }
             if open.as_deref() == Some("file")
+                && matches!(event.kind, UiEventKind::Click | UiEventKind::Activate)
                 && let Some(index) = event.route().and_then(recent_item_index)
             {
                 *open = None;

@@ -5,7 +5,7 @@ use super::domain::DerivedCaches;
 use super::{EutecticApp, PaneId, PaneLayout, PaneState, ViewKind};
 use crate::chrome::actions::ChromeNotice;
 use crate::chrome::dialogs::ChromeDialog;
-use crate::open_dialog::{OpenDialogLauncher, OpenMsg, WakeFn, load_domain};
+use crate::open_dialog::{OpenDialogLauncher, OpenMsg, OpenPoll, WakeFn, load_domain};
 use crate::recents::RecentFiles;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,8 +18,14 @@ const RECENT_ITEM_PREFIX: &str = "file:recent:";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PendingOpen {
-    Dialog,
+    Dialog { request_id: u64 },
     Path(PathBuf),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DiscardApproval {
+    request_id: u64,
+    revision: u64,
 }
 
 pub(crate) fn recent_item_key(index: usize) -> String {
@@ -53,12 +59,10 @@ impl EutecticApp {
         self.recents.borrow().paths().to_vec()
     }
 
-    pub fn open_mailbox_push(&self, msg: OpenMsg) {
-        self.open_mailbox.push(msg);
-    }
-
     pub(crate) fn request_open_dialog(&mut self) {
-        self.request_open(PendingOpen::Dialog);
+        let request_id = self.next_open_request_id.get();
+        self.next_open_request_id.set(request_id.saturating_add(1));
+        self.request_open(PendingOpen::Dialog { request_id });
     }
 
     pub(crate) fn request_recent(&mut self, index: usize) {
@@ -93,44 +97,72 @@ impl EutecticApp {
         let request = self.pending_open.borrow_mut().take();
         self.chrome_dialog.set(None);
         if let Some(request) = request {
-            self.open_discard_approved
-                .set(request == PendingOpen::Dialog);
+            *self.open_discard_approval.borrow_mut() = match request {
+                PendingOpen::Dialog { request_id } => Some(DiscardApproval {
+                    request_id,
+                    revision: self.domain.revision,
+                }),
+                PendingOpen::Path(_) => None,
+            };
             self.resume_open(request);
         }
     }
 
     pub(crate) fn cancel_pending_open(&self) {
         self.pending_open.borrow_mut().take();
-        self.open_discard_approved.set(false);
+        self.open_discard_approval.borrow_mut().take();
         self.chrome_dialog.set(None);
     }
 
     fn resume_open(&mut self, request: PendingOpen) {
         match request {
-            PendingOpen::Dialog => self.launch_open_dialog(),
+            PendingOpen::Dialog { request_id } => self.launch_open_dialog(request_id),
             PendingOpen::Path(path) => self.open_path(path),
         }
     }
 
-    fn launch_open_dialog(&self) {
+    fn launch_open_dialog(&self, request_id: u64) {
         if self.open_dialog_busy.replace(true) {
             return;
         }
+        self.active_dialog_request_id.set(Some(request_id));
+        let reply = self.open_mailbox.begin_launch();
         self.open_dialog_launcher
-            .launch(self.open_mailbox.sender(), self.background_wakeup.clone());
+            .launch(reply, self.background_wakeup.clone());
     }
 
+    /// Drain one native-picker result when the shared chrome-dialog slot is free.
+    /// Picks that arrive behind Keymap/About or an unrelated open confirmation remain
+    /// queued in the mailbox; they cannot overwrite that dialog's `pending_open`.
     pub(crate) fn drain_open_mailbox(&mut self) {
-        let Some(OpenMsg::Picked(path)) = self.open_mailbox.drain() else {
+        if self.chrome_dialog.get().is_some() {
             return;
-        };
-        self.open_dialog_busy.set(false);
-        let discard_approved = self.open_discard_approved.replace(false);
-        if let Some(path) = path {
-            if discard_approved {
-                self.resume_open(PendingOpen::Path(path));
-            } else {
-                self.request_open(PendingOpen::Path(path));
+        }
+        match self.open_mailbox.poll() {
+            OpenPoll::Empty => {}
+            OpenPoll::Disconnected => {
+                self.open_dialog_busy.set(false);
+                self.active_dialog_request_id.set(None);
+                self.open_discard_approval.borrow_mut().take();
+            }
+            OpenPoll::Message(OpenMsg::Picked(path)) => {
+                self.open_dialog_busy.set(false);
+                let request_id = self.active_dialog_request_id.take();
+                let approval = self.open_discard_approval.borrow_mut().take();
+                if let Some(path) = path {
+                    let approved =
+                        request_id
+                            .zip(approval)
+                            .is_some_and(|(request_id, approval)| {
+                                approval.request_id == request_id
+                                    && approval.revision == self.domain.revision
+                            });
+                    if approved {
+                        self.resume_open(PendingOpen::Path(path));
+                    } else {
+                        self.request_open(PendingOpen::Path(path));
+                    }
+                }
             }
         }
     }
@@ -204,5 +236,11 @@ impl EutecticApp {
         self.cursor_px.set([None, None]);
         self.open_menu.borrow_mut().take();
         self.recent_open.set(false);
+        self.explorer_filter.borrow_mut().clear();
+        *self.explorer_filter_selection.borrow_mut() = Default::default();
+        *self.inspector_ui.borrow_mut() = Default::default();
+        self.palette_open.set(false);
+        *self.palette_ui.borrow_mut() = Default::default();
+        self.focus_requests.borrow_mut().clear();
     }
 }

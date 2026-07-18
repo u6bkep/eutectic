@@ -25,18 +25,14 @@ impl RecentFiles {
             Err(e) => return Err(format!("reading {}: {e}", path.display())),
         };
         let mut recent = RecentFiles::new();
-        for (line_no, line) in text.lines().enumerate() {
+        for line in text.lines() {
             let value = line.trim();
             if value.is_empty() || value.starts_with('#') {
                 continue;
             }
             let entry = PathBuf::from(value);
             if !entry.is_absolute() {
-                return Err(format!(
-                    "{} line {}: recent path `{value}` is not absolute",
-                    path.display(),
-                    line_no + 1
-                ));
+                continue;
             }
             if !recent.paths.contains(&entry) {
                 recent.paths.push(entry);
@@ -131,5 +127,23 @@ mod tests {
         recent.save(&file).expect("save");
         assert_eq!(RecentFiles::load(&file).expect("load"), recent);
         assert!(!file.with_extension("tmp").exists());
+    }
+
+    #[test]
+    fn load_skips_invalid_lines_without_discarding_valid_entries() {
+        let scratch = Scratch::new();
+        let file = scratch.0.join("recent");
+        std::fs::write(
+            &file,
+            "# hand edited\n/tmp/first.eut\nrelative.eut\n/tmp/second.eut\n",
+        )
+        .expect("write recents");
+
+        let recent = RecentFiles::load(&file).expect("valid entries survive a bad line");
+
+        assert_eq!(
+            recent.paths(),
+            [Path::new("/tmp/first.eut"), Path::new("/tmp/second.eut")]
+        );
     }
 }

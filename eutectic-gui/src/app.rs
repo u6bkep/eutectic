@@ -212,7 +212,9 @@ pub struct EutecticApp {
     pub(crate) open_dialog_launcher: std::sync::Arc<dyn crate::open_dialog::OpenDialogLauncher>,
     pub(crate) background_wakeup: crate::open_dialog::WakeFn,
     pub(crate) open_dialog_busy: Cell<bool>,
-    pub(crate) open_discard_approved: Cell<bool>,
+    pub(crate) open_discard_approval: RefCell<Option<open::DiscardApproval>>,
+    pub(crate) next_open_request_id: Cell<u64>,
+    pub(crate) active_dialog_request_id: Cell<Option<u64>>,
     pub(crate) pending_open: RefCell<Option<open::PendingOpen>>,
     /// File ▸ Open Recent state and its independently persisted XDG path.
     pub(crate) recents: RefCell<crate::recents::RecentFiles>,
@@ -369,7 +371,9 @@ impl EutecticApp {
             open_dialog_launcher: std::sync::Arc::new(crate::open_dialog::NativeOpenDialog),
             background_wakeup: std::sync::Arc::new(|| {}),
             open_dialog_busy: Cell::new(false),
-            open_discard_approved: Cell::new(false),
+            open_discard_approval: RefCell::new(None),
+            next_open_request_id: Cell::new(0),
+            active_dialog_request_id: Cell::new(None),
             pending_open: RefCell::new(None),
             recents: RefCell::new(crate::recents::RecentFiles::new()),
             recents_path: None,
@@ -463,8 +467,14 @@ impl EutecticApp {
     }
 
     /// Push a source message onto the app's mailbox — the headless reload test entry
-    /// point. The next `before_build` drains and applies it.
-    pub fn mailbox_push(&self, msg: SourceMsg) {
+    /// point. A pathless fixture message is stamped with this app's current source path;
+    /// an explicitly tagged message is preserved for stale-path regression tests. The
+    /// next `before_build` drains and applies it.
+    pub fn mailbox_push(&self, mut msg: SourceMsg) {
+        let SourceMsg::Changed { path, .. } = &mut msg;
+        if path.is_none() {
+            *path = self.domain.source_path.clone();
+        }
         self.mailbox.push(msg);
     }
 

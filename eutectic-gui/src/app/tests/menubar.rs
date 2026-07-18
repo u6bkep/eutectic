@@ -5,8 +5,11 @@
 //! disabled) is asserted in `chrome::menubar`'s own unit tests.
 
 use super::*;
+use crate::app::open::recent_item_key;
+use crate::chrome::dialogs::ChromeDialog;
 use crate::chrome::menubar::{FIT_KEY, MENUBAR_KEY, REVERT_KEY};
 use crate::fixtures::dirty_doc;
+use crate::recents::RecentFiles;
 
 /// The routed key a top-level trigger for `value` emits.
 fn trigger(value: &str) -> String {
@@ -81,6 +84,99 @@ fn libraries_row_opens_the_modal_and_closes_the_menu() {
         "the Libraries row opened the modal"
     );
     assert!(app.open_menu.borrow().is_none());
+}
+
+fn app_with_recent(path: std::path::PathBuf) -> EutecticApp {
+    let mut recents = RecentFiles::new();
+    recents.push(path);
+    let app = board().with_recents(recents, None);
+    app.set_open_menu(Some("file"));
+    app.recent_open.set(true);
+    app
+}
+
+#[test]
+fn recent_pointer_down_does_not_open_document() {
+    let scratch = Scratch::new("recent-pointer-down");
+    let target = scratch.0.join("target.eut");
+    std::fs::write(&target, crate::fixtures::SAMPLE_ECAD).expect("write target");
+    let mut app = app_with_recent(target.clone());
+    let source_before = app.domain.source.clone();
+    let mut event = click(&recent_item_key(0));
+    event.kind = UiEventKind::PointerDown;
+
+    app.on_event(event, &EventCx::new());
+
+    assert_eq!(app.domain.source, source_before);
+    assert_ne!(app.domain.source_path.as_deref(), Some(target.as_path()));
+}
+
+#[test]
+fn recent_click_and_activate_open_document() {
+    for kind in [UiEventKind::Click, UiEventKind::Activate] {
+        let scratch = Scratch::new("recent-activate");
+        let target = scratch.0.join("target.eut");
+        std::fs::write(&target, crate::fixtures::SAMPLE_ECAD).expect("write target");
+        let mut app = app_with_recent(target.clone());
+        let mut event = click(&recent_item_key(0));
+        event.kind = kind;
+
+        app.on_event(event, &EventCx::new());
+
+        assert_eq!(app.domain.source_path.as_deref(), Some(target.as_path()));
+    }
+}
+
+#[test]
+fn recent_escape_closes_menu_without_opening_document() {
+    let scratch = Scratch::new("recent-escape");
+    let target = scratch.0.join("target.eut");
+    std::fs::write(&target, crate::fixtures::SAMPLE_ECAD).expect("write target");
+    let mut app = app_with_recent(target.clone());
+    let source_before = app.domain.source.clone();
+    let mut event = click(&recent_item_key(0));
+    event.kind = UiEventKind::Escape;
+
+    app.on_event(event, &EventCx::new());
+
+    assert_eq!(app.domain.source, source_before);
+    assert!(app.open_menu.borrow().is_none());
+    assert!(!app.recent_open.get());
+    assert_ne!(app.chrome_dialog.get(), Some(ChromeDialog::ConfirmOpen));
+}
+
+#[test]
+fn save_undo_redo_hotkeys_are_blocked_while_a_menu_is_open() {
+    for action in [SAVE_KEY, UNDO_KEY, REDO_KEY] {
+        let scratch = Scratch::new("menu-edit-hotkey");
+        let file = scratch.0.join("board.eut");
+        let mut app = edit_app();
+        app.domain.source_path = Some(file.clone());
+        commit_move(&mut app, 1, 0);
+        if action == REDO_KEY {
+            app.undo();
+        }
+        let before = (
+            app.domain.source.clone(),
+            app.undo_depths(),
+            app.dirty(),
+            file.exists(),
+        );
+        app.set_open_menu(Some("edit"));
+
+        app.on_event(hotkey(action), &EventCx::new());
+
+        assert_eq!(
+            (
+                app.domain.source.clone(),
+                app.undo_depths(),
+                app.dirty(),
+                file.exists(),
+            ),
+            before,
+            "{action} must not reach the document behind an open menu"
+        );
+    }
 }
 
 /// The File ▸ Revert to Saved row (keyed [`REVERT_KEY`]) re-reads the document

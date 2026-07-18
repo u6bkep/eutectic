@@ -84,6 +84,6 @@ pub fn conflict_banner() -> EutecticApp {
     // An externally-edited variant of the board source (a comment prepended is
     // enough — any text that differs from our own last save).
     let external = format!("# edited in $EDITOR\n{BOARD_ECAD}");
-    app.mailbox_push(SourceMsg::Changed(external));
+    app.mailbox_push(SourceMsg::pathless(external));
     app
 }

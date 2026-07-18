@@ -5,15 +5,13 @@
 //! window re-elaborates. This module owns the two testable halves of that loop:
 //!
 //! 1. **The mailbox** ([`SourceMailbox`]): an `mpsc` receiver the app drains in
-//!    `before_build`. The windowed `main.rs` spawns a background thread that polls the
-//!    loaded file's mtime (~200 ms), reads the source on change, sends it as a
-//!    [`SourceMsg`], and wakes the host ([`Wakeup`]). The **thread is host-only**; the
-//!    drain + reload logic here is pure and driven headlessly in tests by pushing
-//!    messages onto a channel by hand — no filesystem, no timing.
+//!    `before_build`. Every change carries its watched path, so the app can reject a
+//!    delayed event from a document that has since been replaced.
 //!
-//! 2. **The zero-dep watcher** ([`spawn_watcher`]): the polling thread itself. `std`
-//!    only — no `notify`, no new dependency (the file-watch is a bare mtime poll). It
-//!    is spawned by `main.rs`; the tests never touch it.
+//! 2. **The switchable zero-dep watcher** ([`spawn_switchable_watcher`]): the one
+//!    host-only polling loop. `main.rs` gives it the startup path and in-app opens send
+//!    replacement paths. It drains switches both before and after each sleep and tags
+//!    every event with the path it read. `std` only — no `notify` dependency.
 //!
 //! # Reload semantics (stated exactly; see `reload_semantics` in the report)
 //!
@@ -32,15 +30,34 @@
 //! The bump-once / preserve / prune / permissive-failure behaviours are all exercised
 //! by the reload tests in `app.rs` via [`SourceMailbox::push`] + `before_build`.
 
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 
 /// A message from the file-watch thread to the app. Only source *changes* flow today;
 /// the enum leaves room for watch-lifecycle events (file removed / re-created) without
 /// a signature churn.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SourceMsg {
-    /// The watched file's contents changed on disk; carry the new source text.
-    Changed(String),
+    /// The watched file's contents changed on disk; carry its path and new source text.
+    Changed {
+        /// The exact watcher target that produced this source. `None` is reserved for
+        /// pathless headless fixtures.
+        path: Option<PathBuf>,
+        /// The complete new file contents.
+        source: String,
+    },
+}
+
+impl SourceMsg {
+    /// Build a pathless change for a headless fixture whose current document also has
+    /// no source path. Native watcher events always use [`SourceMsg::Changed`] directly
+    /// with `Some(path)`.
+    pub fn pathless(source: impl Into<String>) -> SourceMsg {
+        SourceMsg::Changed {
+            path: None,
+            source: source.into(),
+        }
+    }
 }
 
 /// The app-side mailbox: an `mpsc` receiver drained once per frame in `before_build`.
@@ -100,33 +117,53 @@ impl SourceMailbox {
     }
 }
 
-/// Spawn the zero-dependency file-watch thread (host-only). Polls `path`'s mtime every
-/// [`POLL_INTERVAL`]; on a change it reads the file and sends [`SourceMsg::Changed`]
-/// over `tx`, then calls `wake()` to schedule a frame. `std` only — the "file watching
-/// = a zero-dep mtime-polling thread" repo norm.
+/// Spawn the zero-dependency file-watch thread (host-only). Its target starts at
+/// `initial` and is replaced by paths received on `paths`. It polls the current target's
+/// mtime every [`POLL_INTERVAL`]; on a change it reads the file and sends a path-tagged
+/// [`SourceMsg::Changed`] over `source_tx`, then calls `wake()` to schedule a frame.
 ///
 /// The thread runs until the channel is dropped (the app / host is gone), at which
 /// point the `send` errors and the loop exits. Read failures (a transient
 /// editor-swap-file dance, a missing file mid-rename) are skipped — the next poll that
 /// sees a readable file with a newer mtime resends. Generic over `wake` so the host
 /// passes a `move || wakeup.wake()` and tests need not run the thread at all.
-pub fn spawn_watcher<W>(path: std::path::PathBuf, tx: Sender<SourceMsg>, wake: W)
-where
+pub fn spawn_switchable_watcher<W>(
+    initial: Option<PathBuf>,
+    paths: Receiver<PathBuf>,
+    source_tx: Sender<SourceMsg>,
+    wake: W,
+) where
     W: Fn() + Send + 'static,
 {
     std::thread::spawn(move || {
-        // Baseline: the mtime at spawn (the initial contents are already loaded, so we
-        // only report *subsequent* changes). `None` when the file can't be stat'd yet.
-        let mut last_mtime = mtime(&path);
+        let mut current = initial;
+        let mut last_mtime = current.as_deref().and_then(mtime);
         loop {
+            if !drain_switches(&paths, &mut current, &mut last_mtime) {
+                return;
+            }
             std::thread::sleep(POLL_INTERVAL);
-            let now = mtime(&path);
+            // A switch may arrive during the sleep. Apply it before observing mtime so
+            // the old path can never be read after a replacement is already queued.
+            if !drain_switches(&paths, &mut current, &mut last_mtime) {
+                return;
+            }
+            let Some(path) = current.as_deref() else {
+                continue;
+            };
+            let now = mtime(path);
             // Fire only on a *changed* mtime (Some→Some newer, or None→Some after a
             // transient disappearance). Equal mtimes (the common idle poll) do nothing.
             if now != last_mtime && now.is_some() {
-                if let Ok(source) = std::fs::read_to_string(&path) {
-                    if tx.send(SourceMsg::Changed(source)).is_err() {
-                        break; // app gone — stop polling.
+                if let Ok(source) = std::fs::read_to_string(path) {
+                    if source_tx
+                        .send(SourceMsg::Changed {
+                            path: Some(path.to_path_buf()),
+                            source,
+                        })
+                        .is_err()
+                    {
+                        return; // app gone — stop polling.
                     }
                     wake();
                     // Advance the baseline only on a successful read: if the read
@@ -142,6 +179,23 @@ where
             }
         }
     });
+}
+
+fn drain_switches(
+    paths: &Receiver<PathBuf>,
+    current: &mut Option<PathBuf>,
+    last_mtime: &mut Option<std::time::SystemTime>,
+) -> bool {
+    loop {
+        match paths.try_recv() {
+            Ok(path) => {
+                *last_mtime = mtime(&path);
+                *current = Some(path);
+            }
+            Err(TryRecvError::Empty) => return true,
+            Err(TryRecvError::Disconnected) => return false,
+        }
+    }
 }
 
 /// The mtime-poll cadence — ~200 ms, per the milestone spec. Long enough that the poll
@@ -165,8 +219,12 @@ mod tests {
     fn push_then_drain_roundtrips() {
         let (mb, _tx) = SourceMailbox::new();
         assert_eq!(mb.drain(), None, "empty mailbox drains to nothing");
-        mb.push(SourceMsg::Changed("hello".into()));
-        assert_eq!(mb.drain(), Some(SourceMsg::Changed("hello".into())));
+        let msg = SourceMsg::Changed {
+            path: None,
+            source: "hello".into(),
+        };
+        mb.push(msg.clone());
+        assert_eq!(mb.drain(), Some(msg));
         assert_eq!(mb.drain(), None, "drained message is consumed once");
     }
 
@@ -175,12 +233,18 @@ mod tests {
     #[test]
     fn drain_coalesces_to_latest() {
         let (mb, _tx) = SourceMailbox::new();
-        mb.push(SourceMsg::Changed("v1".into()));
-        mb.push(SourceMsg::Changed("v2".into()));
-        mb.push(SourceMsg::Changed("v3".into()));
+        for source in ["v1", "v2", "v3"] {
+            mb.push(SourceMsg::Changed {
+                path: None,
+                source: source.into(),
+            });
+        }
         assert_eq!(
             mb.drain(),
-            Some(SourceMsg::Changed("v3".into())),
+            Some(SourceMsg::Changed {
+                path: None,
+                source: "v3".into(),
+            }),
             "a burst coalesces to the last message"
         );
         assert_eq!(mb.drain(), None);
@@ -191,7 +255,11 @@ mod tests {
     #[test]
     fn external_sender_delivers() {
         let (mb, tx) = SourceMailbox::new();
-        tx.send(SourceMsg::Changed("from thread".into())).unwrap();
-        assert_eq!(mb.drain(), Some(SourceMsg::Changed("from thread".into())));
+        let msg = SourceMsg::Changed {
+            path: Some(PathBuf::from("/tmp/source.eut")),
+            source: "from thread".into(),
+        };
+        tx.send(msg.clone()).unwrap();
+        assert_eq!(mb.drain(), Some(msg));
     }
 }

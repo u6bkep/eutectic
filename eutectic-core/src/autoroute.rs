@@ -392,8 +392,7 @@ mod filter_tests {
     use crate::elaborate::{GenDirective as G, board_rect};
     use crate::history::History;
 
-    #[test]
-    fn autoroute_nets_routes_only_requested_net() {
+    fn two_net_history() -> (History, crate::part::PartLib) {
         let source = vec![
             board_rect(Point::mm(-6, -10), Point::mm(18, 10)),
             G::Instance {
@@ -430,6 +429,12 @@ mod filter_tests {
         history
             .commit(Transaction::one(Command::SetSource(source)), &lib, "load")
             .expect("source elaborates");
+        (history, lib)
+    }
+
+    #[test]
+    fn autoroute_nets_routes_only_requested_net() {
+        let (history, lib) = two_net_history();
         let selected = BTreeSet::from([NetId::new("VBUS")]);
 
         let result = autoroute_nets(history.doc(), &lib, &DesignRules::default(), &selected);
@@ -439,6 +444,27 @@ mod filter_tests {
         assert!(result.commands.iter().all(|command| match command {
             Command::AddTrace(_, trace) => trace.net == NetId::new("VBUS"),
             Command::AddVia(_, via) => via.net == NetId::new("VBUS"),
+            _ => false,
+        }));
+    }
+
+    #[test]
+    fn autoroute_nets_routes_every_requested_net_in_multi_net_filter() {
+        let (history, lib) = two_net_history();
+        let selected = BTreeSet::from([NetId::new("GND"), NetId::new("VBUS")]);
+
+        let result = autoroute_nets(history.doc(), &lib, &DesignRules::default(), &selected);
+
+        let reported: BTreeSet<_> = result
+            .routed
+            .iter()
+            .chain(&result.unrouted)
+            .cloned()
+            .collect();
+        assert_eq!(reported, selected, "both requested non-trivial nets report");
+        assert!(result.commands.iter().all(|command| match command {
+            Command::AddTrace(_, trace) => selected.contains(&trace.net),
+            Command::AddVia(_, via) => selected.contains(&via.net),
             _ => false,
         }));
     }

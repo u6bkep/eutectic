@@ -105,6 +105,39 @@ fn autoroute_net_selection_resolves_pin_trace_and_via_membership() {
 }
 
 #[test]
+fn autoroute_net_routes_multiple_selected_nets() {
+    let mut app = edit_app();
+    {
+        let mut selection = app.domain.selection.borrow_mut();
+        selection.select_only(SemanticId::Net(NetId::new("GND")));
+        selection.add(SemanticId::Net(NetId::new("VBUS")));
+    }
+    assert_eq!(
+        app.selected_route_nets(),
+        std::collections::BTreeSet::from([NetId::new("GND"), NetId::new("VBUS")])
+    );
+
+    app.on_event(click(AUTOROUTE_NET_KEY), &EventCx::new());
+
+    let doc = app.domain.doc.as_ref().expect("document remains loaded");
+    let routed_nets: std::collections::BTreeSet<_> = doc
+        .traces
+        .values()
+        .map(|trace| trace.net.clone())
+        .chain(doc.vias.values().map(|via| via.net.clone()))
+        .collect();
+    assert_eq!(
+        routed_nets,
+        std::collections::BTreeSet::from([NetId::new("VBUS")])
+    );
+    assert_eq!(app.undo_depths(), (1, 0));
+    assert_eq!(
+        app.chrome_notice.borrow().as_ref().unwrap().message,
+        "autoroute: 2/2 nets routed"
+    );
+}
+
+#[test]
 fn autoroute_board_row_routes_without_selection() {
     let mut app = edit_app();
     assert!(app.domain.selection.borrow().is_empty());

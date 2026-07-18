@@ -418,7 +418,7 @@ fn stale_dim_state_machine() {
     assert_eq!(g0 % 2, 0, "fresh doc: stale bit clear");
     // A failed reload keeps the last-good doc + sets reload_error (a
     // malformed `inst` missing its part token is a genuine syntax fault).
-    app.mailbox_push(crate::reload::SourceMsg::Changed(
+    app.mailbox_push(crate::reload::SourceMsg::pathless(
         "inst U1\nnet GND U1.GND\n".to_string(),
     ));
     let mut app = app;

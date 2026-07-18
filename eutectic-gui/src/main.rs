@@ -2,8 +2,9 @@
 //!
 //! Usage: `eutectic-gui [PATH.eut]`. With a path, the file is read, parsed, and
 //! elaborated through `eutectic-core`'s public API (`History` + `Command::LoadText`
-//! — the same entry point the `eutectic-core` examples use); a load failure is
-//! surfaced in the UI rather than crashing (the permissive philosophy). With no
+//! — the same entry point the `eutectic-core` examples use); an explicit path that
+//! cannot be read fails in the terminal, while elaboration errors for readable files
+//! remain visible in the UI. With no
 //! path, the app opens the repository's `examples/showcase.eut` (overridable with
 //! `$EUTECTIC_SHOWCASE`); an installed binary that cannot find the example falls
 //! back to the no-document state with an explanatory status note. The environment
@@ -25,7 +26,7 @@
 
 use damascene_core::prelude::Rect;
 use eutectic_gui::host::HostConfig;
-use eutectic_gui::open_dialog::{NativeOpenDialog, WakeFn, load_domain};
+use eutectic_gui::open_dialog::{NativeOpenDialog, WakeFn};
 use eutectic_gui::recents::RecentFiles;
 use eutectic_gui::{DomainState, EutecticApp, LibSource, Registry, SourceMailbox};
 use std::sync::{Arc, Mutex};
@@ -71,6 +72,31 @@ fn fallback_domain(note: String, lib_source: LibSource) -> DomainState {
     let mut domain = DomainState::empty().with_lib_source(lib_source);
     domain.doc = Err(note);
     domain
+}
+
+/// Load an explicit startup path with main's fail-fast read contract. A readable
+/// file still enters the permissive elaboration domain, but a read error is returned
+/// to `main` before any host or watcher is constructed.
+fn load_startup_domain(
+    path: &std::path::Path,
+    lib_source: LibSource,
+) -> Result<DomainState, String> {
+    let source = std::fs::read_to_string(path)
+        .map_err(|error| format!("reading {}: {error}", path.display()))?;
+    let filename = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned());
+    let mut domain = match lib_source {
+        LibSource::Fixed(lib) => {
+            DomainState::from_source_with(source, filename, lib, |_| Vec::new())
+        }
+        LibSource::Registry {
+            registry,
+            save_path,
+        } => DomainState::from_source_registry(source, filename, registry, save_path),
+    };
+    domain.source_path = Some(path.to_path_buf());
+    Ok(domain)
 }
 
 /// The per-machine registry file location — computed **only here** (the
@@ -139,8 +165,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (path, domain, opened_successfully) = match startup {
         StartupDecision::OpenPath(path) => {
-            let loaded = load_domain(&path, lib_source);
-            (Some(loaded.absolute_path), loaded.domain, loaded.success)
+            let domain = load_startup_domain(&path, lib_source)?;
+            let success = domain.doc.is_ok();
+            (Some(path), domain, success)
         }
         StartupDecision::FallbackNote(note) => (None, fallback_domain(note, lib_source), false),
     };
@@ -193,7 +220,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let tx = tx.clone();
         let initial = path.clone();
-        eutectic_gui::open_dialog::spawn_switchable_watcher(initial, rx, tx, move || {
+        eutectic_gui::reload::spawn_switchable_watcher(initial, rx, tx, move || {
             wakeup.wake();
         });
     });
@@ -235,6 +262,26 @@ mod tests {
             ),
             StartupDecision::OpenPath(std::path::PathBuf::from(override_path))
         );
+    }
+
+    #[test]
+    fn explicit_startup_read_failure_is_fatal() {
+        let path = std::env::temp_dir().join(format!(
+            "eutectic-missing-startup-{}-{}.eut",
+            std::process::id(),
+            line!()
+        ));
+        assert!(!path.exists(), "test path must remain absent");
+        let error =
+            match load_startup_domain(&path, LibSource::Fixed(eutectic_core::part::part_library()))
+            {
+                Ok(_) => {
+                    panic!("an explicit unreadable startup path must fail before the host starts")
+                }
+                Err(error) => error,
+            };
+        assert!(error.contains(&path.display().to_string()));
+        assert!(error.contains("reading"));
     }
 
     #[test]
