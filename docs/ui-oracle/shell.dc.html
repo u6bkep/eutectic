@@ -104,7 +104,7 @@
   <!-- ======================= BODY ======================= -->
   <div style="display:flex; flex:1; min-height:0; overflow:hidden;">
 
-    <!-- ---------- LIBRARY BROWSER FLYOUT (sch place-symbol tool active; docked at app's left edge) ---------- -->
+    <!-- ---------- LIBRARY BROWSER FLYOUT (PCB place-part tool active; docked at app's left edge) ---------- -->
     <sc-if value="{{ flyoutOpen }}" hint-placeholder-val="{{ false }}">
       <div style="display:flex; flex-direction:column; width:260px; flex:0 0 260px; background:#0d0d10; border-right:1px solid #212127; overflow:hidden; animation:cs-slidein .15s ease;">
         <div style="display:flex; align-items:center; gap:8px; height:34px; flex:0 0 34px; padding:0 12px; border-bottom:1px solid #212127; background:#111114;">
@@ -117,11 +117,16 @@
         </div>
         <div style="flex:1; overflow-y:auto; padding:4px 0;">
           <sc-for list="{{ libParts }}" as="lp" hint-placeholder-count="8">
-            <div onClick="{{ lp.onClick }}" style="{{ lp.style }}" style-hover="background:#141418;">
-              <span class="cs-icon" style="font-size:15px; color:#52525b;">memory</span>
-              <span style="font-family:'JetBrains Mono',monospace; font-size:12px;">{{ lp.name }}</span>
-              <span style="margin-left:auto; font-family:'JetBrains Mono',monospace; font-size:10.5px; color:#52525b;">{{ lp.lib }}</span>
-            </div>
+            <sc-if value="{{ lp.group }}" hint-placeholder-val="{{ false }}">
+              <div style="padding:8px 12px 3px; color:#71717a; font-size:10.5px; font-weight:600; letter-spacing:.04em; text-transform:uppercase;">{{ lp.name }}</div>
+            </sc-if>
+            <sc-if value="{{ !lp.group }}" hint-placeholder-val="{{ true }}">
+              <div onClick="{{ lp.onClick }}" style="{{ lp.style }}" style-hover="background:#141418;">
+                <span class="cs-icon" style="font-size:15px; color:#52525b;">memory</span>
+                <span style="font-family:'JetBrains Mono',monospace; font-size:12px;">{{ lp.name }}</span>
+                <span style="margin-left:auto; font-family:'JetBrains Mono',monospace; font-size:10.5px; color:#52525b;">{{ lp.lib }}</span>
+              </div>
+            </sc-if>
           </sc-for>
         </div>
         <div style="flex:0 0 auto; padding:10px; border-top:1px solid #212127;">
@@ -1310,7 +1315,7 @@ class Component extends DCLogic {
         row('checklist', 'Findings Panel', false, () => this.toggleSec('findings')),
       ]},
       { id: 'Place', rows: [
-        row('memory', 'Part from Library…', 'P', setTool('sch', 'symbol')),
+        row('inventory_2', 'Part from Library…', 'P', setTool('pcb', 'place')),
         row('polyline', 'Wire', 'W', setTool('sch', 'wire')),
         row('label', 'Net Label', 'L', setTool('sch', 'label')),
         row('bolt', 'Power Symbol', false, setTool('sch', 'power')),
@@ -1429,7 +1434,7 @@ class Component extends DCLogic {
     ];
     if (kind === 'pcb') return [
       { sep: true, tools: shared },
-      { sep: true, tools: [['route', 'route', 'Route trace'], ['via', 'adjust', 'Place via'], ['zone', 'select_all', 'Copper pour'], ['silk', 'draw', 'Silk / graphics'], ['text', 'title', 'Text'], ['dimension', 'architecture', 'Dimension']] },
+      { sep: true, tools: [['place', 'inventory_2', 'Place part'], ['route', 'route', 'Route trace'], ['via', 'adjust', 'Place via'], ['zone', 'select_all', 'Copper pour'], ['silk', 'draw', 'Silk / graphics'], ['text', 'title', 'Text'], ['dimension', 'architecture', 'Dimension']] },
     ];
     if (kind === '3d') return [{ sep: false, tools: [['pan', '3d_rotation', 'Orbit / pan']] }];
     if (kind === 'gerber' || kind === 'diff') return [{ sep: false, tools: [['pan', 'pan_tool', 'Pan']] }];
@@ -1652,12 +1657,20 @@ class Component extends DCLogic {
       { name: 'LED_0603', lib: 'builtin', foot: 'LED_0603' },
       { name: 'TP_1MM', lib: 'builtin', foot: 'TP_1MM' },
     ];
-    const rows = parts.filter(p => !q || p.name.toLowerCase().includes(q)).map(p => ({
-      name: p.name, lib: p.lib,
-      onClick: () => this.setState({ libSel: p.name }),
-      style: 'display:flex;align-items:center;gap:8px;padding:5px 12px;cursor:pointer;' +
-        (st.libSel === p.name ? 'background:rgba(59,130,246,.14);box-shadow:inset 2px 0 0 #3b82f6;' : ''),
-    }));
+    const rows = [];
+    let group = null;
+    for (const p of parts.filter(p => !q || p.name.toLowerCase().includes(q) || p.lib.toLowerCase().includes(q))) {
+      if (p.lib !== group) {
+        group = p.lib;
+        rows.push({ group: true, name: group, lib: '', onClick: () => {}, style: '' });
+      }
+      rows.push({
+        group: false, name: p.name, lib: p.lib,
+        onClick: () => this.setState({ libSel: p.name }),
+        style: 'display:flex;align-items:center;gap:8px;padding:5px 12px;cursor:pointer;' +
+          (st.libSel === p.name ? 'background:rgba(59,130,246,.14);box-shadow:inset 2px 0 0 #3b82f6;' : ''),
+      });
+    }
     const sel = parts.find(p => p.name === st.libSel) || parts[0];
     const perSide = (sel.name.indexOf('STM32') === 0 || sel.name.indexOf('USB') === 0) ? 4 : 1;
     const pins = [];
@@ -1725,7 +1738,7 @@ class Component extends DCLogic {
       filterRows,
 
       // library flyout
-      flyoutOpen: st.tool.sch === 'symbol',
+      flyoutOpen: st.tool.pcb === 'place',
       libQuery: st.libQuery,
       onLibQuery: (e) => this.setState({ libQuery: e.target.value }),
       libParts: flyout.libParts, libPins: flyout.libPins,

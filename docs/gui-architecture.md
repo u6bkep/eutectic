@@ -255,7 +255,11 @@ Binding headlines (details and exact vocabulary live in the oracle):
   Source, Diff/Review (gw-20). A reserved, deliberately inert
   pop-out-to-OS-window header button marks gw-21's future home.
 - **Per-pane overlay tool strips** with per-view-kind tool memory (see the
-  revised structural commitment #4). No app-edge tool rail, ever.
+  revised structural commitment #4). The board strip includes Place Part:
+  its docked library palette arms a free-hover footprint ghost and repeated
+  source-first placement; the schematic Place Symbol authoring vocabulary
+  remains assigned to the schematic-authoring campaign
+  ([d25](log/d25-board-place-tool.md)). No app-edge tool rail, ever.
 - **Menu bar** enumerating the command surface (File/Edit/View/Place/Route/
   Inspect/Tools/Help, including Autoroute), filename + dirty dot, and
   per-source findings chips (DRC/ERC/NET/LIB) — no "Run DRC" button;
@@ -270,7 +274,7 @@ Binding headlines (details and exact vocabulary live in the oracle):
   grid, zoom, focused tool, selection-filter state, active layer, net,
   findings state.
 - Overlays: Ctrl+K command palette (gw-12), Libraries dialog (registry
-  semantics), library-browser flyout on place-symbol (gw-03),
+  semantics), board library-browser palette on Place Part (gw-03),
   selection-filter popover (gw-04).
 
 ## v1 scope (decided)
@@ -304,9 +308,12 @@ command palette (fuzzy jump-to + command registry, gw-12); the inspector edits
 component position/rotation and trace width/layer as permissive source-first
 commands (gw-05's core — reference rename and value editing wait on engine
 schema); board objects delete via Del/menu/tool and rotate via R; and the tool
-strips carry the oracle's enumeration with per-view-kind memory.
+strips carry the oracle's enumeration with per-view-kind memory. The board
+Place Part tool and owned-renderer library browser/preview are delivered
+([d25](log/d25-board-place-tool.md)); placement stays armed for repetition,
+commits canonical source in one undo unit, and never legality-gates an edit.
 
-Everything else — net classes, DRC waivers, library browser, Gerber preview,
+Everything else — net classes, DRC waivers, Gerber preview,
 3D view, diff pairs, length tuning, variants, revision diff/review mode,
 def-instance affordances, multi-window, routing levels 3–4, etc. — is filed
 in `issues/gui-wishlist/`.

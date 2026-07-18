@@ -52,6 +52,7 @@ implemented-on-`main` commit where one was recorded).
 | [d22](d22-route-identity-persists.md) | 2026-07-07 | implemented (`8f7c1ec`) | Route identity persists: small-integer ids serialize in the state zone, lenient parse, one engine allocator |
 | [d23](d23-schematic-features-tier.md) | 2026-07-09 | items 1–4 implemented (`669b2f7`) | The schematic realized-geometry tier: `schematic_features` is the one home for drawing conventions; symbol artwork is a seam; footprints and symbols are one thing in two vocabularies |
 | [d24](d24-ui-usability-rulings.md) | 2026-07-16 | implemented (`8d1d71d`) | UI usability rulings: the oracle owns the tool strips (supersedes Select-only schematic), showcase opens by default, explorer rows show values; wave 1 delivered; the hotkeys-beat-text-inputs gotcha |
+| [d25](d25-board-place-tool.md) | 2026-07-18 | implemented (`5e99bd4`) | The board strip gains Place Part, amending d24; gw-03 is its docked palette with owned-renderer thumbnails, while schematic Place Symbol remains in the schematic-authoring campaign |
 
 ## Analyses, plans, ledgers
 

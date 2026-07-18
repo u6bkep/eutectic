@@ -33,6 +33,12 @@ the chips/status vocabulary (per-source `DRC/ERC/NET/LIB` chips — no "Run DRC"
 color tokens below; the permissive-editing hint ("Edits commit to source · violations become
 findings, never blocks"); the Libraries dialog semantics (per-machine `use NAME` bindings,
 absolute paths never in the document, builtin toy library registered last).
+The board Place Part tool opens a docked, palette-like library browser: every
+successfully resolved registered package appears in registry order, `builtin`
+is last, filtering owns bare typing, rows are grouped by package, and choosing
+a row arms repeated placement without closing the browser. Its preview is a
+fit-once, non-interactive `AppTexture` rendered by the owned board renderer
+(no grid, crosshair, gestures, or overlay).
 
 **Decorative**: the STM32/USB demo data, exact pixel positions, the SVG doodles (iso board,
 symbol preview), the invented `.eut` source text, exact px paddings where damascene has its own
@@ -59,7 +65,7 @@ Outlined ligatures.
 | Kind | Icon | Intent | Tools | Wishlist |
 |---|---|---|---|---|
 | Schematic | `schema` | wires, junction dots, net labels, power symbols; hierarchical sheet breadcrumb lives inside the view | select, pan, measure, delete · wire, net label, place symbol, power | — |
-| PCB Layout | `grid_on` | traces colored by layer, vias, ratsnest, DRC halos, selected-trace vertex handles | select, pan, measure, delete · route, via, copper pour, silk, text, dimension · selection filter | — |
+| PCB Layout | `grid_on` | traces colored by layer, vias, ratsnest, DRC halos, selected-trace vertex handles | select, pan, measure, delete · **place part** · route, via, copper pour, silk, text, dimension · selection filter | — |
 | 3D View | `deployed_code` | extruded board placeholder, orbit hint | orbit/pan | gw-09 |
 | Gerber preview | `layers` | single-layer aperture-flash render of what the fab receives | pan | gw-08 |
 | Source | `code` | read-only `.eut` text with line numbers (text-first architecture; will follow selection) | none | — |
