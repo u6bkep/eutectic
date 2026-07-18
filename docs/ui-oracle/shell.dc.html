@@ -98,7 +98,6 @@
     <div style="display:flex; align-items:center; gap:6px; font-family:'JetBrains Mono',monospace; font-size:11px; color:#a1a1aa;">
       <span onClick="{{ toggleUnits }}" style="padding:5px 9px; border-radius:7px; background:#1a1a1f; border:1px solid #26262c; cursor:pointer;" style-hover="border-color:#3a3a42;">Units: {{ unitsLabel }}</span>
       <span style="padding:5px 9px; border-radius:7px; background:#1a1a1f; border:1px solid #26262c;">Grid: 1.27</span>
-      <span onClick="{{ toggleSnap }}" style="{{ snapChipStyle }}" style-hover="border-color:#3a3a42;">Snap: {{ snapLabel }}</span>
     </div>
   </div>
 
@@ -1305,6 +1304,7 @@ class Component extends DCLogic {
         sep(),
         row('flip', 'Flip Board (bottom view)'),
         row('grain', 'Grid: dots / lines', st.gridStyle, () => this.setState(s => ({ gridStyle: s.gridStyle === 'dots' ? 'lines' : 'dots' }))),
+        row('grid_4x4', 'Snap to Grid', st.snap ? 'on' : 'off', () => this.setState(s => ({ snap: !s.snap }))),
         row('square_foot', 'Units: mm / in', st.units, () => this.setState(s => ({ units: s.units === 'mm' ? 'in' : 'mm' }))),
         sep(),
         row('checklist', 'Findings Panel', false, () => this.toggleSec('findings')),
@@ -1716,9 +1716,6 @@ class Component extends DCLogic {
       toolbarGroups: this.toolbarGroups(),
       unitsLabel: st.units,
       toggleUnits: () => this.setState(s => ({ units: s.units === 'mm' ? 'in' : 'mm' })),
-      snapLabel: st.snap ? 'on' : 'off',
-      toggleSnap: () => this.setState(s => ({ snap: !s.snap })),
-      snapChipStyle: `padding:5px 9px; border-radius:7px; background:#1a1a1f; border:1px solid #26262c; cursor:pointer;${st.snap ? '' : ' color:#52525b;'}`,
 
       // selection filter (the popover itself lives in the PCB pane strips)
       toggleFilter: () => {
