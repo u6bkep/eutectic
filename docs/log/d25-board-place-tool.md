@@ -2,7 +2,7 @@
 id: d25
 title: "Board Place Part tool and owned-renderer library preview"
 date: 2026-07-18
-status: implemented (`5e99bd4`)
+status: implemented (`8a7738d`)
 ---
 
 > Context: this ruling amends the tool-strip enumeration recorded in
@@ -28,3 +28,13 @@ remain live. Choosing a row leaves the palette open and arms repeated
 placement; Escape disarms without leaving Place mode.
 Each authored placement pins its allocated refdes to the matching instance id so
 later insertions cannot renumber already placed parts.
+
+Placement never reorders existing resolution: a part that already resolves in
+the document's union is placed under that resolution (no new `use` line), and a
+genuinely new package's `use` is inserted after the existing use block, so it
+loses every collision against packages the document already uses. One
+documented exception rides the architecture's own rule that real libraries
+shadow toy names (architecture.md §9): authoring a `use` for a package whose
+*other* parts collide with builtin-resolved names rebinds those instances,
+exactly as the same hand-authored `use` line would — the W_LIB_COLLISION
+finding names the shadowing.

@@ -97,9 +97,14 @@ impl EutecticApp {
             return cached.clone();
         }
         let preview = isolated_part_preview(&row.part, &self.domain.catalog_lib);
-        self.library_preview_data
-            .borrow_mut()
-            .insert(key, preview.clone());
+        let mut cache = self.library_preview_data.borrow_mut();
+        // Mirror the GPU texture cache's discipline: entries from superseded
+        // catalog generations are unreachable (the key embeds the generation),
+        // so drop them here rather than letting registry edits accumulate
+        // whole Scenes for the session's lifetime.
+        let generation = self.domain.catalog_generation;
+        cache.retain(|(_, _, cached_generation), _| *cached_generation == generation);
+        cache.insert(key, preview.clone());
         preview
     }
 

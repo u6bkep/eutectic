@@ -525,6 +525,13 @@ impl App for EutecticApp {
                 (rect.x, rect.y, rect.w, rect.h),
                 pos,
             );
+            // Placement respects snap-to-grid like the other commit gestures;
+            // ghost and commit share the snapped point (what you see is what
+            // commits).
+            let point = match self.snap_to_grid().then(|| self.displayed_grid_pitch(pane)) {
+                Some(pitch) => crate::app::snap_point(point, pitch),
+                None => point,
+            };
             self.hover_place_part(pane, point);
             if event.kind == UiEventKind::Click {
                 self.commit_armed_part(point);

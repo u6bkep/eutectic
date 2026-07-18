@@ -65,7 +65,7 @@ Outlined ligatures.
 | Kind | Icon | Intent | Tools | Wishlist |
 |---|---|---|---|---|
 | Schematic | `schema` | wires, junction dots, net labels, power symbols; hierarchical sheet breadcrumb lives inside the view | select, pan, measure, delete · wire, net label, place symbol, power | — |
-| PCB Layout | `grid_on` | traces colored by layer, vias, ratsnest, DRC halos, selected-trace vertex handles | select, pan, measure, delete · **place part**, route, via, copper pour, silk, text, dimension, selection filter | — |
+| PCB Layout | `grid_on` | traces colored by layer, vias, ratsnest, DRC halos, selected-trace vertex handles | select, pan, measure, delete · **place part**, route, via, copper pour, silk, text, dimension · selection filter | — |
 | 3D View | `deployed_code` | extruded board placeholder, orbit hint | orbit/pan | gw-09 |
 | Gerber preview | `layers` | single-layer aperture-flash render of what the fab receives | pan | gw-08 |
 | Source | `code` | read-only `.eut` text with line numbers (text-first architecture; will follow selection) | none | — |

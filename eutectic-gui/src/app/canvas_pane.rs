@@ -633,6 +633,9 @@ impl EutecticApp {
         if let Some(gpu) = self.gpu.borrow_mut().as_mut() {
             gpu.library_previews.clear();
         }
+        // The CPU-side scene/shape cache serves the same palette; leaving
+        // Place retires both tiers together.
+        self.library_preview_data.borrow_mut().clear();
     }
 
     fn paint_library_preview(&self, device: &wgpu::Device, queue: &wgpu::Queue) {
@@ -1330,7 +1333,13 @@ impl EutecticApp {
                 if !busy {
                     // Live previews that track the pointer (free hover makes
                     // these smooth; the event path still updates them too).
-                    self.hover_place_part(pane, p);
+                    // The place ghost snaps exactly like its commit will.
+                    let place_p = match self.snap_to_grid().then(|| self.displayed_grid_pitch(pane))
+                    {
+                        Some(pitch) => crate::app::snap_point(p, pitch),
+                        None => p,
+                    };
+                    self.hover_place_part(pane, place_p);
                     if self.tool_for(ViewKind::Board) == crate::tool::Tool::Measure {
                         self.claim_measure_pane(pane);
                         let mut m = self.measure.get();

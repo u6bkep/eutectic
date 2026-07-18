@@ -206,6 +206,11 @@ impl Registry {
 
     /// Generation of the loaded-package catalog. Successful registry edits
     /// invalidate the catalog and advance this value.
+    ///
+    /// Only stable while THIS instance is mutated in place: `Registry::load`
+    /// starts a fresh instance at 0, so swapping in a freshly loaded registry
+    /// mid-session would alias generation-keyed caches (previews/thumbnails).
+    /// Today the app mutates its one instance for the whole session.
     pub(crate) fn generation(&self) -> u64 {
         self.generation
     }

@@ -666,9 +666,26 @@ fn failing_isolated_preview_is_negative_cached_by_catalog_generation() {
         part: "MissingPreview".to_string(),
     };
     assert!(app.library_preview_data(&row).is_err());
-    let cached = app.library_preview_data.borrow().len();
+    // The Err must actually be STORED — a regression that only caches Ok
+    // results leaves the map empty and both calls re-elaborate every frame.
+    assert_eq!(
+        app.library_preview_data.borrow().len(),
+        1,
+        "failing elaboration is negative-cached"
+    );
     assert!(app.library_preview_data(&row).is_err());
-    assert_eq!(app.library_preview_data.borrow().len(), cached);
+    assert_eq!(app.library_preview_data.borrow().len(), 1);
+    let key = app
+        .library_preview_data
+        .borrow()
+        .keys()
+        .next()
+        .cloned()
+        .expect("one cached entry");
+    assert_eq!(
+        key.2, app.domain.catalog_generation,
+        "cache keys by catalog generation, not doc revision"
+    );
 }
 
 #[test]
@@ -770,4 +787,68 @@ fn escape_while_library_filter_is_active_disarms_place() {
     assert_eq!(app.tool_for(ViewKind::Board), Tool::Place);
     assert!(app.armed_part_name().is_none());
     assert!(app.library_browser_open.get());
+}
+
+#[test]
+fn placement_click_snaps_to_the_displayed_grid_and_raw_when_toggled_off() {
+    let mut app = edit_app();
+    app.set_tool(ViewKind::Board, Tool::Place);
+    let row = app
+        .domain
+        .library_parts
+        .iter()
+        .find(|row| row.part == "Cap")
+        .cloned()
+        .unwrap();
+    let rendered = settle(&mut app);
+    let cx = EventCx::new().with_ui_state(&rendered.ui);
+    let pitch = app.displayed_grid_pitch(PaneId::A);
+    // An off-lattice target: snapped and raw commits must land differently.
+    let target = Point {
+        x: 4 * MM + pitch / 3,
+        y: 5 * MM + pitch / 3,
+    };
+    let px = crate::app::canvas_pane::pane_project(
+        &app.pane_camera(PaneId::A),
+        app.pane_px.get()[0].unwrap(),
+        target,
+    );
+    // The commit sees the px round-trip of `target` (sub-pixel nm error), so
+    // derive expectations from that exact point.
+    let roundtrip = crate::app::canvas_pane::pane_unproject(
+        &app.pane_camera(PaneId::A),
+        app.pane_px.get()[0].unwrap(),
+        px,
+    );
+    let snapped = crate::app::snap_point(roundtrip, pitch);
+    assert_ne!(
+        snapped, roundtrip,
+        "target must be off-lattice at this pitch"
+    );
+
+    assert!(app.snap_to_grid(), "snap defaults on");
+    app.arm_library_part(&row);
+    app.on_event(pointer(UiEventKind::Click, px), &cx);
+    let doc = app.domain.doc.as_ref().unwrap();
+    assert!(
+        doc.components
+            .values()
+            .any(|component| component.pos.value == snapped),
+        "snapped placement commits on the displayed grid lattice"
+    );
+
+    app.on_event(
+        click(crate::chrome::menubar::SNAP_TO_GRID_KEY),
+        &EventCx::new(),
+    );
+    assert!(!app.snap_to_grid());
+    app.arm_library_part(&row);
+    app.on_event(pointer(UiEventKind::Click, px), &cx);
+    let doc = app.domain.doc.as_ref().unwrap();
+    assert!(
+        doc.components
+            .values()
+            .any(|component| component.pos.value == roundtrip),
+        "raw placement commits the unprojected point with snap off"
+    );
 }
