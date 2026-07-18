@@ -244,9 +244,9 @@ impl EutecticApp {
     /// A Route-tool click at board point `p` (m6 slice B, ladder level 1).
     ///
     /// No pending route: a PIN with a net starts one (anchor = the pad's centre
-    /// — the engine stores trace paths as free points, so the snap is realised
+    /// — the engine stores trace paths as free points, so the anchor is realised
     /// as the candidate AABB centre); known-net copper (trace / via / pour)
-    /// starts one anchored at the snapped click point (trace → nearest point on
+    /// starts one anchored at the exact copper point (trace → nearest point on
     /// its centreline, via → its centre, pour → the raw point). Empty space /
     /// netless copper does nothing (a trace needs a net — a data requirement,
     /// not a legality refusal).
@@ -257,7 +257,7 @@ impl EutecticApp {
     /// grid pitch when snapping is enabled.
     fn route_click(&mut self, p: Point, tol: Nm, snap_pitch: Option<Nm>) {
         if self.route.borrow().is_none() {
-            let Some((net, anchor)) = self.route_start_at(p, tol, snap_pitch) else {
+            let Some((net, anchor)) = self.route_start_at(p, tol) else {
                 return;
             };
             let Some(layer) = self.active_layer_name() else {
@@ -306,9 +306,9 @@ impl EutecticApp {
     }
 
     /// Resolve a route START click: the net the new trace belongs to and the
-    /// snapped anchor point. `None` when the click hits nothing routable (empty
+    /// exact anchor point. `None` when the click hits nothing routable (empty
     /// space, or a netless pin — a trace needs a net).
-    fn route_start_at(&self, p: Point, tol: Nm, snap_pitch: Option<Nm>) -> Option<(NetId, Point)> {
+    fn route_start_at(&self, p: Point, tol: Nm) -> Option<(NetId, Point)> {
         let derived = self.derived.borrow();
         let view = derived.board.as_ref()?;
         let hit = pick::resolve(&view.candidates, p, tol, |id| self.layer_id_visible(id))?;
@@ -327,23 +327,13 @@ impl EutecticApp {
             }
             SemanticId::Trace(tid) => {
                 let t = doc.traces.get(tid)?;
-                let anchor = tool::closest_on_path(&t.path, p)?;
-                Some((
-                    t.net.clone(),
-                    snap_pitch.map_or(anchor, |pitch| snap_point(anchor, pitch)),
-                ))
+                Some((t.net.clone(), tool::closest_on_path(&t.path, p)?))
             }
             SemanticId::Via(vid) => {
                 let v = doc.vias.get(vid)?;
-                Some((
-                    v.net.clone(),
-                    snap_pitch.map_or(v.at, |pitch| snap_point(v.at, pitch)),
-                ))
+                Some((v.net.clone(), v.at))
             }
-            SemanticId::Pour { net, .. } => Some((
-                net.clone(),
-                snap_pitch.map_or(p, |pitch| snap_point(p, pitch)),
-            )),
+            SemanticId::Pour { net, .. } => Some((net.clone(), p)),
             _ => None,
         }
     }

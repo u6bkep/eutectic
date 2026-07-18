@@ -532,7 +532,7 @@ impl EutecticApp {
 
     /// The exact integer-nm pitch currently displayed in `pane`.
     pub(crate) fn displayed_grid_pitch(&self, pane: PaneId) -> Nm {
-        let zoom = self.pane_camera(pane).zoom * (self.scale_factor.get() as f64).max(0.1);
+        let zoom = physical_zoom(self.pane_camera(pane).zoom, self.scale_factor.get());
         crate::render::grid_pitch_nm(zoom)
     }
 
@@ -540,6 +540,12 @@ impl EutecticApp {
     pub fn quit_requested(&self) -> bool {
         self.quit_requested.get()
     }
+}
+
+/// Fold device scale into a logical pane zoom. Both grid rendering and editing
+/// snapping use this value so the snap pitch equals the displayed grid pitch.
+pub(crate) fn physical_zoom(logical_zoom: f64, scale_factor: f32) -> f64 {
+    logical_zoom * (scale_factor as f64).max(0.1)
 }
 
 /// Round one integer-nm coordinate to the nearest `pitch` multiple. Exact

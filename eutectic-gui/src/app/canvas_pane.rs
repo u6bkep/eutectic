@@ -767,7 +767,7 @@ impl EutecticApp {
             let cam = self.pane_cams.borrow()[i].glide.current();
             let phys = Camera {
                 center: cam.center,
-                zoom: cam.zoom * scale,
+                zoom: crate::app::physical_zoom(cam.zoom, self.scale_factor.get()),
             };
 
             // Overlay (board only — the schematic pane's dynamic visuals are

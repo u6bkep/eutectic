@@ -25,9 +25,34 @@ fn pin_center(app: &EutecticApp, comp: &str, pin: &str) -> Point {
 }
 
 fn set_zoom(app: &EutecticApp, zoom: f64) {
+    set_pane_zoom(app, PaneId::A, zoom);
+}
+
+fn set_pane_zoom(app: &EutecticApp, pane: PaneId, zoom: f64) {
     let mut cameras = app.pane_cams.borrow_mut();
-    let glide = &mut cameras[pane_index(PaneId::A)].glide;
+    let glide = &mut cameras[pane_index(pane)].glide;
     glide.snap(Camera::new(glide.current().center, zoom));
+}
+
+fn pointer_in(pane: PaneId, kind: UiEventKind, pos: (f32, f32)) -> UiEvent {
+    let mut event = UiEvent::synthetic_click(pane.canvas_key());
+    event.kind = kind;
+    event.pointer = Some(pos);
+    event
+}
+
+fn px_of_board_in(
+    app: &EutecticApp,
+    rendered: &crate::harness::Rendered,
+    pane: PaneId,
+    point: Point,
+) -> (f32, f32) {
+    let rect = rendered.ui.rect_of_key(pane.canvas_key()).expect("pane");
+    crate::app::canvas_pane::pane_project(
+        &app.pane_camera(pane),
+        (rect.x, rect.y, rect.w, rect.h),
+        point,
+    )
 }
 
 fn drag_c1(app: &mut EutecticApp, rendered: &crate::harness::Rendered) -> (Point, Point) {
@@ -83,8 +108,109 @@ fn part_drag_preview_and_commit_snap_and_toggle_off_is_raw() {
     raw.on_event(click(SNAP_TO_GRID_KEY), &EventCx::new());
     assert!(!raw.snap_to_grid());
     let (raw_target, preview_target) = drag_c1(&mut raw, &rendered);
+    let pitch = raw.displayed_grid_pitch(PaneId::A);
+    assert_ne!(
+        (raw_target.x % pitch, raw_target.y % pitch),
+        (0, 0),
+        "raw target is deliberately off the test lattice"
+    );
     assert_eq!(preview_target, raw_target);
     assert_eq!(comp_pos(&raw, &EntityId::new("C1")), raw_target);
+}
+
+#[test]
+fn route_starts_on_exact_unsnapped_trace_and_via_anchors() {
+    use eutectic_core::doc::Provenance;
+    use eutectic_core::id::{NetId, TraceId, ViaId};
+    use eutectic_core::route::{Trace, Via};
+
+    const SOURCE: &str = "\
+inst C1 Cap
+net SIG C1.p1
+place C1 (18mm, 9mm)
+board (0mm, 0mm) (20mm, 0mm) (20mm, 10mm) (0mm, 10mm)
+";
+    let trace_anchor = Point {
+        x: 8_250_000,
+        y: 3_250_000,
+    };
+    let via_anchor = Point {
+        x: 10_250_000,
+        y: 7_250_000,
+    };
+    let domain = DomainState::from_source_with(
+        SOURCE.to_string(),
+        Some("snap-start.eut".to_string()),
+        eutectic_core::part::part_library(),
+        |_| {
+            vec![
+                Command::AddTrace(
+                    TraceId(1),
+                    Trace {
+                        net: NetId::new("SIG"),
+                        layer: "F.Cu".to_string(),
+                        path: vec![
+                            Point {
+                                x: 3_250_000,
+                                y: trace_anchor.y,
+                            },
+                            Point {
+                                x: 13_250_000,
+                                y: trace_anchor.y,
+                            },
+                        ],
+                        width: 250_000,
+                        prov: Provenance::Pinned,
+                    },
+                ),
+                Command::AddVia(
+                    ViaId(1),
+                    Via {
+                        net: NetId::new("SIG"),
+                        at: via_anchor,
+                        span: None,
+                        drill: 300_000,
+                        pad: 600_000,
+                        prov: Provenance::Pinned,
+                    },
+                ),
+            ]
+        },
+    );
+    let mut app = EutecticApp::new(domain);
+    let rendered = settle(&mut app);
+    set_zoom(&app, 1e-5);
+    let pitch = app.displayed_grid_pitch(PaneId::A);
+    let cx = EventCx::new().with_ui_state(&rendered.ui);
+    app.on_event(strip_click(Tool::Route), &cx);
+
+    assert_ne!(trace_anchor, snap_point(trace_anchor, pitch));
+    let trace_click = Point {
+        x: trace_anchor.x,
+        y: trace_anchor.y + 200_000,
+    };
+    app.on_event(
+        pointer(
+            UiEventKind::Click,
+            px_of_board(&app, &rendered, trace_click),
+        ),
+        &cx,
+    );
+    assert_eq!(
+        app.pending_route().expect("trace start").last_point(),
+        trace_anchor
+    );
+
+    app.on_event(escape(), &cx);
+    assert_ne!(via_anchor, snap_point(via_anchor, pitch));
+    app.on_event(
+        pointer(UiEventKind::Click, px_of_board(&app, &rendered, via_anchor)),
+        &cx,
+    );
+    assert_eq!(
+        app.pending_route().expect("via start").last_point(),
+        via_anchor
+    );
 }
 
 #[test]
@@ -232,6 +358,82 @@ fn snap_pitch_follows_the_interaction_pane_zoom() {
     assert_eq!((fine.1.x % fine.0, fine.1.y % fine.0), (0, 0));
     assert_eq!((coarse.1.x % coarse.0, coarse.1.y % coarse.0), (0, 0));
     assert_ne!(fine.1, coarse.1);
+}
+
+#[test]
+fn snap_pitch_follows_each_interaction_pane_in_one_app() {
+    let mut app = dual_boards();
+    let rendered = settle(&mut app);
+    set_pane_zoom(&app, PaneId::A, 1e-5);
+    set_pane_zoom(&app, PaneId::B, 1e-6);
+    let cx = EventCx::new().with_ui_state(&rendered.ui);
+    app.on_event(click(&PaneId::A.strip_key(Tool::Route)), &cx);
+    let start = pin_center(&app, "C1", "p1");
+    let raw_waypoint = Point {
+        x: 7_400_000,
+        y: 8_400_000,
+    };
+
+    let mut committed = Vec::new();
+    for pane in [PaneId::A, PaneId::B] {
+        app.on_event(
+            pointer_in(
+                pane,
+                UiEventKind::Click,
+                px_of_board_in(&app, &rendered, pane, start),
+            ),
+            &cx,
+        );
+        app.on_event(
+            pointer_in(
+                pane,
+                UiEventKind::Click,
+                px_of_board_in(&app, &rendered, pane, raw_waypoint),
+            ),
+            &cx,
+        );
+        committed.push(app.pending_route().expect("route").last_point());
+        app.on_event(escape(), &cx);
+    }
+
+    let fine = app.displayed_grid_pitch(PaneId::A);
+    let coarse = app.displayed_grid_pitch(PaneId::B);
+    assert_eq!((fine, coarse), (1_000_000, 10_000_000));
+    assert_eq!(committed[0], snap_point(raw_waypoint, fine));
+    assert_eq!(committed[1], snap_point(raw_waypoint, coarse));
+    assert_ne!(committed[0], committed[1]);
+}
+
+#[test]
+fn layer_switch_via_drop_is_exactly_the_last_snapped_route_point() {
+    let mut app = edit_app();
+    let rendered = settle(&mut app);
+    set_zoom(&app, 1e-5);
+    let cx = EventCx::new().with_ui_state(&rendered.ui);
+    app.on_event(strip_click(Tool::Route), &cx);
+    let start = pin_center(&app, "C1", "p1");
+    app.on_event(
+        pointer(UiEventKind::Click, px_of_board(&app, &rendered, start)),
+        &cx,
+    );
+    let waypoint_px = px_of_board(
+        &app,
+        &rendered,
+        Point {
+            x: 7_400_000,
+            y: 8_400_000,
+        },
+    );
+    app.on_event(pointer(UiEventKind::Click, waypoint_px), &cx);
+    let last = app.pending_route().expect("route").last_point();
+    let pitch = app.displayed_grid_pitch(PaneId::A);
+    assert_eq!(last, snap_point(last, pitch), "waypoint is already snapped");
+
+    app.on_event(click(&crate::app::pane::active_layer_key("B.Cu")), &cx);
+    let via = app.pending_route().expect("route").vias[0];
+    assert_eq!(via, last);
+    assert_eq!(via.x.to_ne_bytes(), last.x.to_ne_bytes());
+    assert_eq!(via.y.to_ne_bytes(), last.y.to_ne_bytes());
 }
 
 #[test]
