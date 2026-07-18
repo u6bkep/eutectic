@@ -60,6 +60,10 @@ pub(crate) const ROTATE_KEY: &str = "rotate";
 /// View ▸ Snap to Grid's app-wide toggle route.
 pub(crate) const SNAP_TO_GRID_KEY: &str = "display:snap-to-grid:toggle";
 
+/// Place ▸ Part from Library… — select the board Place tool and open its
+/// library-browser palette (the same action as the strip's Place button).
+pub(crate) const PLACE_PART_KEY: &str = "place-part";
+
 /// One menu row. The enumeration is the oracle's; `Wired` rows carry the existing
 /// route key they dispatch to (so a click routes exactly like the retired
 /// toolbar button did), `Disabled` rows are visible-but-inert, `Separator` is a
@@ -262,7 +266,11 @@ pub(crate) fn menu_defs() -> Vec<MenuDef> {
             value: "place",
             label: "Place",
             rows: vec![
-                dis("Part from Library…", Some("P")),
+                Wired {
+                    label: "Part from Library…",
+                    shortcut: None,
+                    action: PLACE_PART_KEY,
+                },
                 dis("Wire", Some("W")),
                 dis("Net Label", Some("L")),
                 dis("Power Symbol", None),
@@ -665,6 +673,7 @@ mod tests {
             LIBRARIES_TOGGLE_KEY,
             OPEN_KEY,
             OPEN_RECENT_KEY,
+            PLACE_PART_KEY,
             QUIT_KEY,
             REDO_KEY,
             REVERT_KEY,

@@ -352,6 +352,14 @@ impl App for EutecticApp {
             return;
         }
 
+        // Place ▸ Part from Library… — the menu door to the same state the
+        // strip's Place button sets (the route table closed the menu already).
+        if event.is_click_or_activate(crate::chrome::menubar::PLACE_PART_KEY) {
+            self.set_tool(ViewKind::Board, Tool::Place);
+            self.open_library_browser();
+            return;
+        }
+
         // The layer panel's set-active affordance (m6 slice B): make that copper
         // slab the active routing layer. While a route is pending this drops a
         // via at the last waypoint and continues on the new layer (the app-side

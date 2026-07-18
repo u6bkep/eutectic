@@ -852,3 +852,15 @@ fn placement_click_snaps_to_the_displayed_grid_and_raw_when_toggled_off() {
         "raw placement commits the unprojected point with snap off"
     );
 }
+
+#[test]
+fn place_menu_row_selects_the_tool_and_opens_the_browser() {
+    let mut app = edit_app();
+    assert_ne!(app.tool_for(ViewKind::Board), Tool::Place);
+    app.on_event(
+        click(crate::chrome::menubar::PLACE_PART_KEY),
+        &EventCx::new(),
+    );
+    assert_eq!(app.tool_for(ViewKind::Board), Tool::Place);
+    assert!(app.library_browser_open.get());
+}
