@@ -165,6 +165,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (path, domain, opened_successfully) = match startup {
         StartupDecision::OpenPath(path) => {
+            // Absolutize before anything downstream records it: the watcher,
+            // save target, and recents (which asserts absoluteness) all key on
+            // this path, and a relative CLI arg / $EUTECTIC_SHOWCASE is
+            // explicitly supported.
+            let path = eutectic_gui::open_dialog::absolute_path(&path);
             let domain = load_startup_domain(&path, lib_source)?;
             let success = domain.doc.is_ok();
             (Some(path), domain, success)

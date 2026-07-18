@@ -81,11 +81,13 @@ mod tests {
     struct Scratch(PathBuf);
 
     impl Scratch {
-        fn new() -> Scratch {
+        // `tag` keeps concurrently-running tests in distinct directories — a
+        // shared dir would be remove_dir_all'd out from under a sibling test
+        // by the first Drop.
+        fn new(tag: &str) -> Scratch {
             let path = std::env::temp_dir().join(format!(
-                "eutectic-recents-test-{}-{}",
-                std::process::id(),
-                line!()
+                "eutectic-recents-test-{}-{tag}",
+                std::process::id()
             ));
             std::fs::create_dir_all(&path).expect("create scratch");
             Scratch(path)
@@ -119,7 +121,7 @@ mod tests {
 
     #[test]
     fn save_load_roundtrip_is_atomic_and_path_injected() {
-        let scratch = Scratch::new();
+        let scratch = Scratch::new("roundtrip");
         let file = scratch.0.join("nested/recent");
         let mut recent = RecentFiles::new();
         recent.push(PathBuf::from("/tmp/one.eut"));
@@ -131,7 +133,7 @@ mod tests {
 
     #[test]
     fn load_skips_invalid_lines_without_discarding_valid_entries() {
-        let scratch = Scratch::new();
+        let scratch = Scratch::new("skip-invalid");
         let file = scratch.0.join("recent");
         std::fs::write(
             &file,

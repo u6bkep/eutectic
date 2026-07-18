@@ -126,7 +126,12 @@ pub fn load_domain(path: &Path, lib_source: LibSource) -> LoadedDomain {
     }
 }
 
-fn absolute_path(path: &Path) -> PathBuf {
+/// Canonicalize where possible, else fall back to a cwd-join for paths that do
+/// not (yet) exist. Every path the app records durably — the document
+/// `source_path` (watcher target, save target) and the recents MRU (which
+/// asserts absoluteness) — must pass through here first, including the startup
+/// CLI / `$EUTECTIC_SHOWCASE` path.
+pub fn absolute_path(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| {
         if path.is_absolute() {
             path.to_path_buf()

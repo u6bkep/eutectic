@@ -467,5 +467,20 @@ mod filter_tests {
             Command::AddVia(_, via) => selected.contains(&via.net),
             _ => false,
         }));
+        // Both nets in two_net_history genuinely need new copper: a regression
+        // that emits commands for only the first filtered net would satisfy the
+        // per-command membership check above, so pin copper-per-net explicitly.
+        let nets_with_traces: BTreeSet<_> = result
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::AddTrace(_, trace) => Some(trace.net.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            nets_with_traces, selected,
+            "every requested net gets at least one trace"
+        );
     }
 }

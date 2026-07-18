@@ -140,6 +140,12 @@ impl EutecticApp {
         }
         match self.open_mailbox.poll() {
             OpenPoll::Empty => {}
+            // NB: a never-launched OpenMailbox polls Disconnected every frame
+            // (its sender starts dropped), so this arm re-clears these cells
+            // until the first launch. Correct only because approval/request-id
+            // are set synchronously in the same frame that launch_open_dialog
+            // replaces the channel — deferring a launch past the frame that
+            // records its approval would wipe the approval here.
             OpenPoll::Disconnected => {
                 self.open_dialog_busy.set(false);
                 self.active_dialog_request_id.set(None);
