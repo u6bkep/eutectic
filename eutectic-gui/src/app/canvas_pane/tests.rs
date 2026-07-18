@@ -11,6 +11,13 @@ use crate::render::state::{FLAG_HOVERED, FLAG_SELECTED};
 use eutectic_core::coord::MM;
 use eutectic_core::id::{EntityId, NetId, TraceId, ViaId};
 
+#[test]
+fn library_preview_texture_uses_device_scale_factor() {
+    assert_eq!(library_preview_physical_size(1.0), (236, 120));
+    assert_eq!(library_preview_physical_size(1.5), (354, 180));
+    assert_eq!(library_preview_physical_size(2.0), (472, 240));
+}
+
 fn mm_pt(x: i64, y: i64) -> Point {
     Point {
         x: x * MM,

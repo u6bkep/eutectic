@@ -25,7 +25,7 @@ use std::cell::RefCell;
 ///   the identity, zero notes.
 /// - [`Registry`](LibSource::Registry): the per-machine name → path registry
 ///   (`docs/architecture.md` §9). Each load parses the source's `use` names and
-///   resolves them through [`registry::resolve`]; `save_path` is where a
+///   resolves them through [`registry::resolve_with_index`]; `save_path` is where a
 ///   Libraries-menu edit persists the registry (`None` = don't persist — tests
 ///   and fixtures). Only `main.rs` computes the real default location.
 pub enum LibSource {
@@ -69,12 +69,16 @@ pub struct DomainState {
     /// every successful (re)load; for a [`LibSource::Fixed`] domain this is
     /// simply that library.
     pub lib: eutectic_core::part::PartLib,
-    /// Browser index over every loadable registry package plus `builtin`,
-    /// retaining each first-wins part's owner. Re-derived on every load.
+    /// Browser index over the document's used packages first, then remaining
+    /// loadable registry packages and `builtin`, retaining each first-wins
+    /// part's owner. Re-derived on every load.
     pub(crate) library_parts: Vec<LibraryPart>,
-    /// First-wins union behind [`library_parts`](Self::library_parts): every
-    /// loadable registry package in registry order, then `builtin`.
+    /// First-wins union behind [`library_parts`](Self::library_parts), with
+    /// document-use order overlaid before the remaining catalog packages.
     pub(crate) catalog_lib: eutectic_core::part::PartLib,
+    /// Identity of the registry generation plus document-use overlay behind
+    /// `catalog_lib`. Thumbnail caches key on this, not document revision.
+    pub(crate) catalog_generation: u64,
     /// The library-resolution notes for the current load (unregistered `use`
     /// names, packages that failed to load, union collisions) — data, not
     /// errors (§9 permissive rule). Merged into the findings panel.
@@ -165,6 +169,7 @@ impl DomainState {
             lib: eutectic_core::part::part_library(),
             library_parts: LibraryPart::from_lib("builtin", &eutectic_core::part::part_library()),
             catalog_lib: eutectic_core::part::part_library(),
+            catalog_generation: 0,
             lib_notes: Vec::new(),
             filename: None,
             selection: RefCell::new(SelectionModel::new()),
@@ -226,6 +231,7 @@ impl DomainState {
             lib_source: LibSource::Fixed(lib.clone()),
             library_parts: LibraryPart::from_lib("builtin", &lib),
             catalog_lib: lib.clone(),
+            catalog_generation: 0,
             lib,
             lib_notes: Vec::new(),
             filename,
@@ -239,7 +245,7 @@ impl DomainState {
 
     /// Load a document from `.eut` source, resolving its `use` names through
     /// the per-machine `registry` (library packages, slice 2 — the windowed
-    /// `main.rs` path). Resolution runs first ([`registry::resolve`]: registry
+    /// `main.rs` path). Resolution runs first ([`registry::resolve_with_index`]: registry
     /// hits unioned in source order, the built-in toy library appended last),
     /// then the source elaborates against the resolved lib. Resolution
     /// failures are notes (`lib_notes`), never load errors.
@@ -249,6 +255,7 @@ impl DomainState {
         registry: Registry,
         save_path: Option<std::path::PathBuf>,
     ) -> Self {
+        let catalog_generation = registry::catalog_generation(&source, &registry);
         let (lib, lib_notes, catalog_lib, library_parts) =
             registry::resolve_with_index(&source, &registry);
         let history = elaborate(&source, &lib, |_| Vec::new());
@@ -266,6 +273,7 @@ impl DomainState {
             },
             library_parts,
             catalog_lib,
+            catalog_generation,
             lib,
             lib_notes,
             filename,
@@ -280,7 +288,7 @@ impl DomainState {
     /// Resolve `source`'s libraries against **this** domain's [`LibSource`] —
     /// the shared resolution step of the initial load and every reload. A
     /// `Fixed` source is the identity (its lib, zero notes); a `Registry`
-    /// source re-runs [`registry::resolve`], because a reload may add or
+    /// source re-runs [`registry::resolve_with_index`], because a reload may add or
     /// remove `use` lines and a registry edit changes what a name binds to.
     pub(crate) fn resolve_lib(
         &self,
@@ -299,6 +307,13 @@ impl DomainState {
                 LibraryPart::from_lib("builtin", lib),
             ),
             LibSource::Registry { registry, .. } => registry::resolve_with_index(source, registry),
+        }
+    }
+
+    pub(crate) fn catalog_generation_for(&self, source: &str) -> u64 {
+        match &self.lib_source {
+            LibSource::Fixed(_) => 0,
+            LibSource::Registry { registry, .. } => registry::catalog_generation(source, registry),
         }
     }
 

@@ -1,5 +1,6 @@
 //! The board Place tool's docked library-browser palette: live text filter,
-//! library-grouped rows, and the owned-renderer preview card.
+//! library-grouped rows, and the owned-renderer preview card. Escape while the
+//! filter is active follows Place-tool semantics: it disarms the part.
 
 use crate::app::EutecticApp;
 use crate::registry::LibraryPart;

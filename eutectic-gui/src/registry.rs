@@ -10,9 +10,9 @@
 //!    files and only `main.rs` computes the real per-machine default
 //!    (`$XDG_CONFIG_HOME/eutectic/libraries`, falling back to
 //!    `$HOME/.config/eutectic/libraries`).
-//! 2. [`resolve`] — the (re)load-time resolution step: parse the source, walk
-//!    its `use` names through the registry, [`eutectic_core::library::load_library`]
-//!    each hit, union them **in source order** with the built-in toy library
+//! 2. [`resolve_with_index`] — the (re)load-time resolution step: parse the source, walk
+//!    its `use` names through a generation-cached package catalog, union them
+//!    **in source order** with the built-in toy library
 //!    appended last (real libraries shadow toy names; a doc with no `use` gets
 //!    exactly the toy lib, unchanged). Every failure — an unregistered name, a
 //!    package that fails to load, a union collision — degrades to a [`LibNote`]
@@ -39,16 +39,29 @@
 
 use eutectic_core::part::PartLib;
 use std::collections::{BTreeMap, BTreeSet};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+
+type LoadedPackages = Vec<(String, Result<PartLib, String>)>;
 
 /// The per-machine name → library-directory registry. Values are absolute
 /// paths (enforced by [`set`](Registry::set) and re-checked on
 /// [`load`](Registry::load)). Held as a `BTreeMap` so iteration — and the
 /// saved file — is deterministic (sorted by name).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 pub struct Registry {
     entries: BTreeMap<String, PathBuf>,
+    generation: u64,
+    loaded: std::cell::RefCell<Option<LoadedPackages>>,
 }
+
+impl PartialEq for Registry {
+    fn eq(&self, other: &Self) -> bool {
+        self.entries == other.entries
+    }
+}
+
+impl Eq for Registry {}
 
 impl Registry {
     /// An empty registry (the first-run state).
@@ -100,7 +113,11 @@ impl Registry {
             // Last wins: a later line overrides an earlier one (documented).
             entries.insert(name.to_string(), path);
         }
-        Ok(Registry { entries })
+        Ok(Registry {
+            entries,
+            generation: 0,
+            loaded: std::cell::RefCell::new(None),
+        })
     }
 
     /// Save the registry to `path` **atomically**: write a temp file in the
@@ -157,12 +174,19 @@ impl Registry {
             ));
         }
         self.entries.insert(name.to_string(), path.to_path_buf());
+        self.generation = self.generation.wrapping_add(1);
+        *self.loaded.borrow_mut() = None;
         Ok(())
     }
 
     /// Remove the entry under `name`; `true` if it existed.
     pub fn remove(&mut self, name: &str) -> bool {
-        self.entries.remove(name).is_some()
+        let removed = self.entries.remove(name).is_some();
+        if removed {
+            self.generation = self.generation.wrapping_add(1);
+            *self.loaded.borrow_mut() = None;
+        }
+        removed
     }
 
     /// Iterate the entries, sorted by name (deterministic).
@@ -178,6 +202,28 @@ impl Registry {
     /// Is the registry empty?
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Generation of the loaded-package catalog. Successful registry edits
+    /// invalidate the catalog and advance this value.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Load every registered package once per registry generation. Resolution
+    /// clones this in-memory snapshot; it never probes a used package a second
+    /// time while constructing the document union.
+    fn loaded_packages(&self) -> LoadedPackages {
+        let mut loaded = self.loaded.borrow_mut();
+        loaded
+            .get_or_insert_with(|| {
+                self.iter()
+                    .map(|(name, dir)| {
+                        (name.to_string(), eutectic_core::library::load_library(dir))
+                    })
+                    .collect()
+            })
+            .clone()
     }
 }
 
@@ -228,9 +274,9 @@ impl LibraryPart {
 }
 
 /// Resolve a source text's `use` names into the [`PartLib`] to elaborate with,
-/// plus the resolution notes. The (re)load-time step shared by the initial load
-/// and every reload — a reload may add or remove `use` lines, so this re-runs
-/// each time.
+/// plus the browser-facing catalog union and ownership index. Package files are
+/// loaded once per [`Registry::generation`]; a source reload only rebuilds the
+/// inexpensive unions and indices from that snapshot.
 ///
 /// - Parse the source ([`eutectic_core::text::parse`]) and take its `use` names in
 ///   source order ([`eutectic_core::library::use_names`]). A source that does not
@@ -246,38 +292,43 @@ impl LibraryPart {
 /// [`load_library`]: eutectic_core::library::load_library
 /// [`union`]: eutectic_core::library::union
 /// [`part_library`]: eutectic_core::part::part_library
-pub fn resolve(source: &str, registry: &Registry) -> (PartLib, Vec<LibNote>) {
-    let (lib, notes, _, _) = resolve_with_index(source, registry);
-    (lib, notes)
-}
-
-/// [`resolve`] plus the browser-facing catalog union and ownership index. The
-/// catalog loads every registered package in registry order, then `builtin`;
-/// the index contains exactly the parts that survive first-wins unioning, so a
-/// shadowed duplicate is listed only under its winning package.
 pub(crate) fn resolve_with_index(
     source: &str,
     registry: &Registry,
 ) -> (PartLib, Vec<LibNote>, PartLib, Vec<LibraryPart>) {
     let mut notes: Vec<LibNote> = Vec::new();
+    let loaded = registry.loaded_packages();
+    let loaded_by_name: BTreeMap<&str, &Result<PartLib, String>> = loaded
+        .iter()
+        .map(|(name, result)| (name.as_str(), result))
+        .collect();
+    for (name, result) in &loaded {
+        if let Err(error) = result {
+            let dir = registry.get(name).expect("cached registry entry");
+            notes.push(LibNote {
+                code: W_LIB_LOAD,
+                message: format!("library `{name}` ({}): {error}", dir.display()),
+            });
+        }
+    }
+
     let mut libs: Vec<(String, PartLib)> = Vec::new();
+    let mut used_names = Vec::new();
 
     if let Ok(parsed) = eutectic_core::text::parse(source) {
         for name in eutectic_core::library::use_names(&parsed.source) {
-            match registry.get(&name) {
+            match loaded_by_name.get(name.as_str()) {
                 None => notes.push(LibNote {
                     code: W_LIB_UNREGISTERED,
                     message: format!(
                         "library `{name}` is not in the registry; register it in the Libraries menu"
                     ),
                 }),
-                Some(dir) => match eutectic_core::library::load_library(dir) {
-                    Ok(lib) => libs.push((name, lib)),
-                    Err(e) => notes.push(LibNote {
-                        code: W_LIB_LOAD,
-                        message: format!("library `{name}` ({}): {e}", dir.display()),
-                    }),
-                },
+                Some(Ok(lib)) => {
+                    used_names.push(name.clone());
+                    libs.push((name, lib.clone()));
+                }
+                Some(Err(_)) => {}
             }
         }
     }
@@ -286,20 +337,38 @@ pub(crate) fn resolve_with_index(
     // real library shadows a toy part of the same name, and a doc with no `use`
     // resolves to exactly the toy lib.
     libs.push(("builtin".to_string(), eutectic_core::part::part_library()));
+    let mut doc_owners = BTreeMap::new();
+    for (library, parts) in &libs {
+        for part in parts.keys() {
+            doc_owners
+                .entry(part.clone())
+                .or_insert_with(|| library.clone());
+        }
+    }
     let (lib, collisions) = eutectic_core::library::union(&libs);
     notes.extend(collisions.into_iter().map(|message| LibNote {
         code: W_LIB_COLLISION,
         message,
     }));
 
-    // The placement catalog is wider than the document's dependency union:
-    // every successfully loaded registry package is discoverable, in registry
-    // order, even before the document has authored `use NAME`. Choosing such a
-    // row adds that declaration in the same source-first placement transaction.
+    // The placement catalog is wider than the dependency union, but starts
+    // with the document's successfully used packages in declaration order.
+    // Thus every name the document already resolves has the same owner and
+    // definition in the browser. Remaining packages follow registry order.
     let mut catalog_libs = Vec::new();
-    for (name, dir) in registry.iter() {
-        if let Ok(parts) = eutectic_core::library::load_library(dir) {
-            catalog_libs.push((name.to_string(), parts));
+    let mut catalog_names = BTreeSet::new();
+    for name in used_names {
+        if catalog_names.insert(name.clone())
+            && let Some(Ok(parts)) = loaded_by_name.get(name.as_str())
+        {
+            catalog_libs.push((name, (*parts).clone()));
+        }
+    }
+    for (name, result) in loaded {
+        if catalog_names.insert(name.clone())
+            && let Ok(parts) = result
+        {
+            catalog_libs.push((name, parts));
         }
     }
     catalog_libs.push(("builtin".to_string(), eutectic_core::part::part_library()));
@@ -307,7 +376,8 @@ pub(crate) fn resolve_with_index(
     let mut index = Vec::new();
     for (library, parts) in &catalog_libs {
         for part in parts.keys() {
-            if seen.insert(part.clone()) {
+            let owner_matches_doc = doc_owners.get(part).is_none_or(|owner| owner == library);
+            if owner_matches_doc && seen.insert(part.clone()) {
                 index.push(LibraryPart {
                     library: library.clone(),
                     part: part.clone(),
@@ -315,8 +385,25 @@ pub(crate) fn resolve_with_index(
             }
         }
     }
-    let (catalog, _) = eutectic_core::library::union(&catalog_libs);
+    let mut catalog = lib.clone();
+    for (_, parts) in &catalog_libs {
+        for (part, def) in parts {
+            catalog.entry(part.clone()).or_insert_with(|| def.clone());
+        }
+    }
     (lib, notes, catalog, index)
+}
+
+/// Stable-within-process identity of the catalog definition overlay: the
+/// registry package generation plus the document's ordered `use` declarations.
+/// Ordinary source edits therefore leave thumbnail inputs unchanged.
+pub(crate) fn catalog_generation(source: &str, registry: &Registry) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    registry.generation().hash(&mut hasher);
+    if let Ok(parsed) = eutectic_core::text::parse(source) {
+        eutectic_core::library::use_names(&parsed.source).hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 // ---------------------------------------------------------------------------
@@ -467,11 +554,16 @@ mod tests {
         a.keys().eq(b.keys())
     }
 
+    fn resolved(source: &str, registry: &Registry) -> (PartLib, Vec<LibNote>) {
+        let (lib, notes, _, _) = resolve_with_index(source, registry);
+        (lib, notes)
+    }
+
     /// Resolution: no `use` lines → exactly the toy lib, zero notes (every
     /// existing doc/fixture unchanged).
     #[test]
     fn resolve_no_use_is_toy_lib() {
-        let (lib, notes) = resolve("inst C1 Cap\n", &Registry::new());
+        let (lib, notes) = resolved("inst C1 Cap\n", &Registry::new());
         assert!(same_parts(&lib, &eutectic_core::part::part_library()));
         assert!(notes.is_empty());
     }
@@ -480,7 +572,7 @@ mod tests {
     /// note; the toy lib still resolves (the doc still loads).
     #[test]
     fn resolve_unregistered_name_notes() {
-        let (lib, notes) = resolve("use nolib\ninst C1 Cap\n", &Registry::new());
+        let (lib, notes) = resolved("use nolib\ninst C1 Cap\n", &Registry::new());
         assert!(same_parts(&lib, &eutectic_core::part::part_library()));
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].code, W_LIB_UNREGISTERED);
@@ -501,7 +593,7 @@ mod tests {
         .unwrap();
         let mut reg = Registry::new();
         reg.set("bad", &dir).unwrap();
-        let (lib, notes) = resolve("use bad\n", &reg);
+        let (lib, notes) = resolved("use bad\n", &reg);
         assert!(
             same_parts(&lib, &eutectic_core::part::part_library()),
             "toy lib still resolves"
@@ -521,13 +613,40 @@ mod tests {
         let poc_parts = poc_parts.canonicalize().expect("poc/parts exists");
         let mut reg = Registry::new();
         reg.set("poc", &poc_parts).unwrap();
-        let (lib, notes) = resolve("use poc\ninst U1 RP2350A\n", &reg);
+        let (lib, notes) = resolved("use poc\ninst U1 RP2350A\n", &reg);
         assert!(lib.contains_key("RP2350A"), "poc parts resolved");
         assert!(
             lib.contains_key("Cap"),
             "toy lib still appended (docs with no use keep working)"
         );
         assert!(notes.is_empty(), "clean resolve has no notes: {notes:?}");
+    }
+
+    #[test]
+    fn package_catalog_is_cached_until_a_registry_edit() {
+        let s = Scratch::new("catalog-cache");
+        let dir = s.path("libdir");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("eutectic.lib"),
+            "part Broken footprint=missing.kicad_mod\n",
+        )
+        .unwrap();
+        let mut reg = Registry::new();
+        reg.set("pkg", &dir).unwrap();
+        let (_, first) = resolved("", &reg);
+        assert!(first.iter().any(|note| note.code == W_LIB_LOAD));
+
+        std::fs::write(dir.join("eutectic.lib"), "").unwrap();
+        let (_, cached) = resolved("", &reg);
+        assert!(
+            cached.iter().any(|note| note.code == W_LIB_LOAD),
+            "filesystem edits do not bypass the registry-generation cache"
+        );
+
+        reg.set("pkg", &dir).unwrap();
+        let (_, refreshed) = resolved("", &reg);
+        assert!(refreshed.is_empty(), "registry edit invalidates the cache");
     }
 
     /// Row status distinguishes missing / broken / ok.

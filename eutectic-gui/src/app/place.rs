@@ -84,13 +84,32 @@ fn format_diagnostics(diags: Vec<eutectic_core::diagnostic::Diagnostic>) -> Stri
 }
 
 impl EutecticApp {
+    pub(crate) fn library_preview_data(
+        &self,
+        row: &LibraryPart,
+    ) -> Result<(Scene, Vec<Shape2D>), String> {
+        let key = (
+            row.part.clone(),
+            row.library.clone(),
+            self.domain.catalog_generation,
+        );
+        if let Some(cached) = self.library_preview_data.borrow().get(&key) {
+            return cached.clone();
+        }
+        let preview = isolated_part_preview(&row.part, &self.domain.catalog_lib);
+        self.library_preview_data
+            .borrow_mut()
+            .insert(key, preview.clone());
+        preview
+    }
+
     /// Arm one browser row. The flyout deliberately stays open (the binding
     /// oracle keeps the list and preview visible beside the canvas).
     pub(crate) fn arm_library_part(&mut self, row: &LibraryPart) {
         let Some(_) = self.domain.catalog_lib.get(&row.part) else {
             return;
         };
-        match isolated_part_preview(&row.part, &self.domain.catalog_lib) {
+        match self.library_preview_data(row) {
             Ok((_, shapes)) => {
                 *self.armed_part.borrow_mut() = Some(ArmedPart::from(row));
                 *self.place_shapes.borrow_mut() = shapes;
@@ -164,9 +183,12 @@ impl EutecticApp {
         // placement. Resolve the staged `use` declaration before asking the
         // held History to elaborate its one LoadText command.
         let (next_lib, next_notes, next_catalog, next_rows) = self.domain.resolve_lib(&text);
+        let next_catalog_generation = self.domain.catalog_generation_for(&text);
         let prior_lib = std::mem::replace(&mut self.domain.lib, next_lib);
         let prior_notes = std::mem::replace(&mut self.domain.lib_notes, next_notes);
         let prior_catalog = std::mem::replace(&mut self.domain.catalog_lib, next_catalog);
+        let prior_catalog_generation =
+            std::mem::replace(&mut self.domain.catalog_generation, next_catalog_generation);
         let prior_rows = std::mem::replace(&mut self.domain.library_parts, next_rows);
         if let Err(error) =
             self.commit_edit(Transaction::one(Command::LoadText(text)), "place part")
@@ -174,6 +196,7 @@ impl EutecticApp {
             self.domain.lib = prior_lib;
             self.domain.lib_notes = prior_notes;
             self.domain.catalog_lib = prior_catalog;
+            self.domain.catalog_generation = prior_catalog_generation;
             self.domain.library_parts = prior_rows;
             self.domain.edit.error = Some(error);
         }
@@ -186,11 +209,13 @@ impl EutecticApp {
             .doc
             .as_ref()
             .map_err(|error| format!("no document to edit: {error}"))?;
-        let def = self
-            .domain
-            .catalog_lib
-            .get(part)
-            .ok_or_else(|| format!("part `{part}` is no longer resolved"))?;
+        let already_resolved = self.domain.lib.contains_key(part);
+        let def = if already_resolved {
+            self.domain.lib.get(part)
+        } else {
+            self.domain.catalog_lib.get(part)
+        }
+        .ok_or_else(|| format!("part `{part}` is no longer resolved"))?;
         let registry = eutectic_core::annotate::registry(&doc.source);
         let class = eutectic_core::annotate::class_of(def);
         let prefix = registry
@@ -221,13 +246,19 @@ impl EutecticApp {
             .ok_or_else(|| format!("reference designator family `{prefix}` is exhausted"))?;
         let id = EntityId::new(&refdes);
         let mut staged = doc.clone();
-        if armed.library != "builtin"
+        if !already_resolved
+            && armed.library != "builtin"
             && !staged.source.iter().any(
                 |directive| matches!(directive, GenDirective::Use { name } if name == &armed.library),
             )
         {
+            let insert_at = staged
+                .source
+                .iter()
+                .rposition(|directive| matches!(directive, GenDirective::Use { .. }))
+                .map_or(0, |index| index + 1);
             staged.source.insert(
-                0,
+                insert_at,
                 GenDirective::Use {
                     name: armed.library.clone(),
                 },
@@ -246,6 +277,8 @@ impl EutecticApp {
                 strength: Strength::Pin,
             },
         );
+        // Pin the allocated refdes to its matching id: auto-annotation is
+        // insertion-unstable, so later placements must not renumber this part.
         staged.refdes_pins.insert(id, refdes);
         Ok(eutectic_core::text::serialize(&staged))
     }
@@ -253,11 +286,12 @@ impl EutecticApp {
     /// Registry/source reloads may remove the armed row. Keep the tool mode,
     /// but disarm stale data before it can commit an unresolved part.
     pub(crate) fn reconcile_armed_part(&self) {
-        let valid = self
-            .armed_part
-            .borrow()
-            .as_ref()
-            .is_none_or(|armed| self.domain.catalog_lib.contains_key(&armed.part));
+        let valid = self.armed_part.borrow().as_ref().is_none_or(|armed| {
+            self.domain
+                .library_parts
+                .iter()
+                .any(|row| row.library == armed.library && row.part == armed.part)
+        });
         if !valid {
             self.disarm_part();
         }

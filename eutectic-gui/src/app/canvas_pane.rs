@@ -540,6 +540,19 @@ struct LibraryPreviewTexture {
     handle: damascene_core::surface::AppTexture,
     _scene: crate::render::SceneBuffers,
     _states: crate::render::SemanticStates,
+    size: (u32, u32),
+}
+
+fn library_preview_physical_size(scale: f32) -> (u32, u32) {
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    (
+        (236.0 * scale).round().max(1.0) as u32,
+        (120.0 * scale).round().max(1.0) as u32,
+    )
 }
 
 /// The app's GPU bundle, created by the host's `gpu_setup` seam on the
@@ -559,7 +572,7 @@ pub(crate) struct GpuState {
     /// and the tables carry every plane key (board slabs + schematic tiers).
     styles: StyleTables,
     panes: [PaneGpu; 2],
-    /// Render-once thumbnail textures keyed by (part, library, doc revision).
+    /// Render-once thumbnail textures keyed by (part, library, catalog generation).
     library_previews: std::collections::BTreeMap<(String, String, u64), LibraryPreviewTexture>,
     last_frame: Option<Instant>,
 }
@@ -610,10 +623,16 @@ impl EutecticApp {
         &self,
     ) -> Option<(damascene_core::surface::AppTexture, (u32, u32))> {
         let row = self.highlighted_library_part()?;
-        let key = (row.part, row.library, self.domain.revision);
+        let key = (row.part, row.library, self.domain.catalog_generation);
         let gpu = self.gpu.borrow();
         let preview = gpu.as_ref()?.library_previews.get(&key)?;
         Some((preview.handle.clone(), (236, 120)))
+    }
+
+    pub(crate) fn clear_library_preview_textures(&self) {
+        if let Some(gpu) = self.gpu.borrow_mut().as_mut() {
+            gpu.library_previews.clear();
+        }
     }
 
     fn paint_library_preview(&self, device: &wgpu::Device, queue: &wgpu::Queue) {
@@ -623,18 +642,20 @@ impl EutecticApp {
         let Some(row) = self.highlighted_library_part() else {
             return;
         };
-        let key = (row.part.clone(), row.library.clone(), self.domain.revision);
-        if self
-            .gpu
-            .borrow()
-            .as_ref()
-            .is_some_and(|gpu| gpu.library_previews.contains_key(&key))
-        {
+        let key = (
+            row.part.clone(),
+            row.library.clone(),
+            self.domain.catalog_generation,
+        );
+        let size = library_preview_physical_size(self.scale_factor.get());
+        if self.gpu.borrow().as_ref().is_some_and(|gpu| {
+            gpu.library_previews
+                .get(&key)
+                .is_some_and(|preview| preview.size == size)
+        }) {
             return;
         }
-        let Ok((scene, _)) =
-            crate::app::place::isolated_part_preview(&row.part, &self.domain.catalog_lib)
-        else {
+        let Ok((scene, _)) = self.library_preview_data(&row) else {
             return;
         };
 
@@ -643,8 +664,7 @@ impl EutecticApp {
             return;
         };
         gpu.library_previews
-            .retain(|(_, _, revision), _| *revision == self.domain.revision);
-        let size = (472, 240);
+            .retain(|(_, _, generation), _| *generation == self.domain.catalog_generation);
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("eutectic.library-preview"),
             size: wgpu::Extent3d {
@@ -691,6 +711,7 @@ impl EutecticApp {
                 handle,
                 _scene: scene_buffers,
                 _states: states,
+                size,
             },
         );
     }

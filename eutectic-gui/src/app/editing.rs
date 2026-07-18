@@ -364,6 +364,7 @@ impl EutecticApp {
     /// (permissive) and the error lands in `domain.reload_error`; returns whether
     /// the swap happened. Never touches the m6 editing state — callers own that.
     pub(crate) fn swap_source(&mut self, source: String) -> bool {
+        let catalog_generation = self.domain.catalog_generation_for(&source);
         let (lib, notes, catalog_lib, library_parts, history) =
             self.domain.elaborate_source(&source);
         match history {
@@ -377,6 +378,7 @@ impl EutecticApp {
                 self.domain.lib = lib;
                 self.domain.lib_notes = notes;
                 self.domain.catalog_lib = catalog_lib;
+                self.domain.catalog_generation = catalog_generation;
                 self.domain.library_parts = library_parts;
                 self.reconcile_armed_part();
                 self.domain.history = Some(history);

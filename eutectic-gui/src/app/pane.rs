@@ -223,6 +223,7 @@ impl EutecticApp {
                 self.clear_place_cursor();
                 if tool != Tool::Place {
                     self.library_browser_open.set(false);
+                    self.clear_library_preview_textures();
                 }
             }
             *self.camera_pan.borrow_mut() = None;

@@ -338,6 +338,10 @@ pub struct EutecticApp {
     /// overlay while the raw cursor is over a board pane.
     pub(crate) place_shapes: RefCell<Vec<eutectic_core::geom::Shape2D>>,
     pub(crate) place_cursor: Cell<Option<(PaneId, eutectic_core::coord::Point)>>,
+    /// CPU-side isolated previews, including failures, keyed only by catalog
+    /// identity. Arm-time and GPU thumbnail rendering share the same result.
+    pub(crate) library_preview_data:
+        RefCell<std::collections::BTreeMap<LibraryPreviewKey, LibraryPreviewResult>>,
 }
 
 /// The trace / via defaults the Route tool commits with, sourced from the same
@@ -428,6 +432,7 @@ impl EutecticApp {
             armed_part: RefCell::new(None),
             place_shapes: RefCell::new(Vec::new()),
             place_cursor: Cell::new(None),
+            library_preview_data: RefCell::new(std::collections::BTreeMap::new()),
         }
     }
 
@@ -628,3 +633,7 @@ pub(crate) fn snap_point(
         y: snap_nm(point.y, pitch),
     }
 }
+
+type LibraryPreviewKey = (String, String, u64);
+type LibraryPreviewResult =
+    Result<(crate::render::Scene, Vec<eutectic_core::geom::Shape2D>), String>;

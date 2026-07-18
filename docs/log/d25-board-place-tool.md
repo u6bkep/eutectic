@@ -26,3 +26,5 @@ The library browser is a docked, palette-like surface, not a modal. Its
 focused filter owns bare typing, while canvas and Ctrl-modified chrome actions
 remain live. Choosing a row leaves the palette open and arms repeated
 placement; Escape disarms without leaving Place mode.
+Each authored placement pins its allocated refdes to the matching instance id so
+later insertions cannot renumber already placed parts.
