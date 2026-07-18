@@ -112,8 +112,33 @@ pub struct AutorouteStats {
     pub pre_verify_vias: usize,
 }
 
-/// Propose a routing transaction for `doc`. Pure: reads facts, returns commands.
+/// Propose a routing transaction for every net in `doc`. Pure: reads facts,
+/// returns commands.
 pub fn autoroute(doc: &Doc, lib: &PartLib, rules: &DesignRules) -> AutorouteResult {
+    autoroute_filtered(doc, lib, rules, None)
+}
+
+/// Propose a routing transaction for only `nets`.
+///
+/// The full document still contributes obstacles and existing-copper seeds; the
+/// filter limits only which nets receive new routing. Unknown and trivial nets
+/// produce no commands or report rows, matching [`autoroute`]'s treatment of
+/// nets with fewer than two reachable pins.
+pub fn autoroute_nets(
+    doc: &Doc,
+    lib: &PartLib,
+    rules: &DesignRules,
+    nets: &BTreeSet<NetId>,
+) -> AutorouteResult {
+    autoroute_filtered(doc, lib, rules, Some(nets))
+}
+
+fn autoroute_filtered(
+    doc: &Doc,
+    lib: &PartLib,
+    rules: &DesignRules,
+    nets: Option<&BTreeSet<NetId>>,
+) -> AutorouteResult {
     let width = rules.min_trace_width;
     let via_pad = 2 * rules.min_trace_width;
     let via_drill = rules.min_trace_width;
@@ -193,6 +218,9 @@ pub fn autoroute(doc: &Doc, lib: &PartLib, rules: &DesignRules) -> AutorouteResu
 
     // Route net by net, in NetId order (deterministic). A net seq id tags ownership.
     for (net_seq, (nid, pads)) in net_pads.iter().enumerate() {
+        if nets.is_some_and(|selected| !selected.contains(nid)) {
+            continue;
+        }
         // Nets with <2 reachable pins are trivially "routed" (nothing to connect).
         if pads.len() < 2 {
             continue;
@@ -355,3 +383,63 @@ use {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+    use crate::command::{Command, Transaction};
+    use crate::coord::Point;
+    use crate::elaborate::{GenDirective as G, board_rect};
+    use crate::history::History;
+
+    #[test]
+    fn autoroute_nets_routes_only_requested_net() {
+        let source = vec![
+            board_rect(Point::mm(-6, -10), Point::mm(18, 10)),
+            G::Instance {
+                path: "reg".into(),
+                part: "LDO".into(),
+                params: BTreeMap::new(),
+                label: None,
+            },
+            G::Instance {
+                path: "dec".into(),
+                part: "Cap".into(),
+                params: BTreeMap::new(),
+                label: None,
+            },
+            G::Place {
+                path: "reg".into(),
+                pos: Point::mm(0, 0),
+            },
+            G::Place {
+                path: "dec".into(),
+                pos: Point::mm(12, 0),
+            },
+            G::ConnectPins {
+                net: "VBUS".into(),
+                pins: vec![("reg".into(), "VOUT".into()), ("dec".into(), "p1".into())],
+            },
+            G::ConnectPins {
+                net: "GND".into(),
+                pins: vec![("reg".into(), "GND".into()), ("dec".into(), "p2".into())],
+            },
+        ];
+        let lib = crate::part::part_library();
+        let mut history = History::new(Doc::default());
+        history
+            .commit(Transaction::one(Command::SetSource(source)), &lib, "load")
+            .expect("source elaborates");
+        let selected = BTreeSet::from([NetId::new("VBUS")]);
+
+        let result = autoroute_nets(history.doc(), &lib, &DesignRules::default(), &selected);
+
+        assert_eq!(result.routed, vec![NetId::new("VBUS")]);
+        assert!(result.unrouted.iter().all(|net| net == &NetId::new("VBUS")));
+        assert!(result.commands.iter().all(|command| match command {
+            Command::AddTrace(_, trace) => trace.net == NetId::new("VBUS"),
+            Command::AddVia(_, via) => via.net == NetId::new("VBUS"),
+            _ => false,
+        }));
+    }
+}
