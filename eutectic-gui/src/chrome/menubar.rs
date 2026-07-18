@@ -711,6 +711,7 @@ mod tests {
             &row,
             "mm",
             "Dots",
+            true,
             MenuAvailability {
                 has_path: true,
                 can_delete: false,
