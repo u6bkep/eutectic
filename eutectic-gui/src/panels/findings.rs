@@ -131,19 +131,13 @@ impl EutecticApp {
         }
     }
 
-    /// The board pane to focus for click-to-zoom: the first pane currently showing a
-    /// board (A preferred), respecting a maximized pane. `None` when no board pane is
-    /// visible (both panes schematic, or the board didn't project).
+    /// The board pane to focus for click-to-zoom: the first visible board leaf
+    /// in tree order, respecting maximize.
     fn focused_board_pane(&self) -> Option<PaneId> {
-        let panes = self.panes.borrow();
         let visible = |id: PaneId| self.maximized.get().map(|m| m == id).unwrap_or(true);
-        for (i, p) in panes.iter().enumerate() {
-            let id = if i == 0 { PaneId::A } else { PaneId::B };
-            if p.view == ViewKind::Board && visible(id) {
-                return Some(id);
-            }
-        }
-        None
+        self.pane_ids()
+            .into_iter()
+            .find(|&id| self.pane_view(id) == ViewKind::Board && visible(id))
     }
 }
 

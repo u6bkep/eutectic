@@ -317,8 +317,14 @@ fn fit_view_command_executes() {
 
     app.on_event(click(&key), &EventCx::new());
 
-    assert_eq!(app.pane_cams.borrow()[0].request, Some(CamRequest::Fit));
-    assert_eq!(app.pane_cams.borrow()[1].request, Some(CamRequest::Fit));
+    assert_eq!(
+        app.pane_cams.borrow()[0].as_ref().unwrap().request,
+        Some(CamRequest::Fit)
+    );
+    assert_eq!(
+        app.pane_cams.borrow()[1].as_ref().unwrap().request,
+        Some(CamRequest::Fit)
+    );
     assert!(!app.palette_open.get());
 }
 
@@ -380,7 +386,7 @@ fn palette_menu_token_gates_canvas_input_until_close() {
     };
 
     app.raw_cursor_moved(pos);
-    assert!(app.cursor_px.get()[0].is_some());
+    assert!(app.cursor_px.borrow()[0].is_some());
     assert!(app.domain.selection.borrow().hovered().next().is_some());
 
     app.set_palette_open(true);
@@ -390,7 +396,7 @@ fn palette_menu_token_gates_canvas_input_until_close() {
     );
     assert!(!app.on_wheel_event(wheel(), &cx));
     app.raw_cursor_moved(pos);
-    assert_eq!(app.cursor_px.get(), [None, None]);
+    assert_eq!(*app.cursor_px.borrow(), vec![None, None]);
     assert!(app.domain.selection.borrow().hovered().next().is_none());
     assert!(!app.raw_middle(true), "middle-drag cannot arm");
     assert_eq!(app.pane_camera(PaneId::A), cam);
@@ -399,7 +405,7 @@ fn palette_menu_token_gates_canvas_input_until_close() {
     assert!(app.open_menu.borrow().is_none(), "the gate token clears");
     assert!(app.on_wheel_event(wheel(), &cx), "wheel gate lifts");
     app.raw_cursor_moved(pos);
-    assert!(app.cursor_px.get()[0].is_some(), "crosshair gate lifts");
+    assert!(app.cursor_px.borrow()[0].is_some(), "crosshair gate lifts");
     assert!(
         app.domain.selection.borrow().hovered().next().is_some(),
         "free-hover gate lifts"

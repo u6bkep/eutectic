@@ -219,10 +219,18 @@ fn dual_cross_highlight_is_lint_clean() {
 }
 
 #[test]
-fn stacked_layout_is_lint_clean() {
-    // Same board|schematic content as the dual scene, stacked orientation.
-    let (app, r) = render_clean("stacked_layout", stacked_layout());
-    harness::assert_content_coverage("stacked_layout", &app, &r, &canvas_keys());
+fn split_down_layout_is_lint_clean() {
+    let (app, r) = render_clean("split_down_layout", split_down_layout());
+    harness::assert_content_coverage(
+        "split_down_layout",
+        &app,
+        &r,
+        &[
+            PaneId::A.canvas_key(),
+            PaneId::B.canvas_key(),
+            PaneId::from_index(2).unwrap().canvas_key(),
+        ],
+    );
 }
 
 #[test]
@@ -298,6 +306,15 @@ fn libraries_menu_is_lint_clean() {
     let app = libraries_menu();
     let (app, r) = render_clean("libraries_menu", app);
     harness::assert_content_coverage("libraries_menu", &app, &r, &[PaneId::A.canvas_key()]);
+}
+
+/// The docked placement browser narrows the pane tree; compact pane headers
+/// must still fit without clipping their split/close controls.
+#[test]
+fn place_flyout_is_lint_clean() {
+    let app = place_flyout();
+    let (app, r) = render_clean("place_flyout", app);
+    harness::assert_content_coverage("place_flyout", &app, &r, &[PaneId::A.canvas_key()]);
 }
 
 /// The drag-in-progress scene (m6): the drag is actually armed and moved (so

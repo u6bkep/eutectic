@@ -74,7 +74,7 @@ pub fn all() -> Vec<(&'static str, EutecticApp)> {
         ("sidebar_findings_expanded", sidebar_findings_expanded()),
         ("measure_in_progress", measure_in_progress()),
         ("dual_cross_highlight", dual_cross_highlight()),
-        ("stacked_layout", stacked_layout()),
+        ("split_down_layout", split_down_layout()),
         ("maximized_pane", maximized_pane()),
         ("dual_boards", dual_boards()),
         ("per_kind_tools", per_kind_tools()),

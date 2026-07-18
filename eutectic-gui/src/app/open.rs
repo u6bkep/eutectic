@@ -2,7 +2,7 @@
 
 use super::canvas_pane::PaneCam;
 use super::domain::DerivedCaches;
-use super::{EutecticApp, PaneId, PaneLayout, PaneState, ViewKind};
+use super::{EutecticApp, PaneId, PaneState, PaneTree, ViewKind};
 use crate::chrome::actions::ChromeNotice;
 use crate::chrome::dialogs::ChromeDialog;
 use crate::open_dialog::{OpenDialogLauncher, OpenMsg, OpenPoll, WakeFn, load_domain};
@@ -214,19 +214,17 @@ impl EutecticApp {
     }
 
     fn reset_for_fresh_open(&self) {
-        *self.panes.borrow_mut() = [
-            PaneState::new(ViewKind::Board),
-            PaneState::new(ViewKind::Schematic),
+        *self.panes.borrow_mut() = vec![
+            Some(PaneState::new(ViewKind::Board)),
+            Some(PaneState::new(ViewKind::Schematic)),
         ];
-        self.layout.set(PaneLayout::Dual);
+        *self.pane_tree.borrow_mut() = PaneTree::default();
         self.maximized.set(None);
-        self.split_weights.set([1.0, 1.0]);
-        *self.split_drag.borrow_mut() = Default::default();
-        self.split_extent.set(0.0);
         self.focused_pane.set(PaneId::A);
-        *self.pane_cams.borrow_mut() = [PaneCam::default(), PaneCam::default()];
-        self.pane_px.set([None, None]);
-        self.strip_px.set([None, None]);
+        *self.pane_cams.borrow_mut() = vec![Some(PaneCam::default()), Some(PaneCam::default())];
+        *self.pane_px.borrow_mut() = vec![None, None];
+        *self.strip_px.borrow_mut() = vec![None, None];
+        self.reset_pane_gpu_slots();
         self.hidden.borrow_mut().clear();
         self.tools.borrow_mut().clear();
         self.measure.set(Default::default());
@@ -234,13 +232,15 @@ impl EutecticApp {
         *self.drag.borrow_mut() = None;
         self.suppress_click.set(false);
         *self.route.borrow_mut() = None;
+        self.route_pane.set(None);
         *self.trace_drag.borrow_mut() = None;
         *self.camera_pan.borrow_mut() = None;
         *self.raw.borrow_mut() = Default::default();
         *self.active_layer.borrow_mut() = None;
         self.cursor_board_mm.set(None);
-        self.cursor_px.set([None, None]);
+        *self.cursor_px.borrow_mut() = vec![None, None];
         self.open_menu.borrow_mut().take();
+        self.pane_view_menu.set(None);
         self.recent_open.set(false);
         self.explorer_filter.borrow_mut().clear();
         *self.explorer_filter_selection.borrow_mut() = Default::default();

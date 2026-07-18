@@ -26,7 +26,7 @@ impl EutecticApp {
     pub(crate) fn pane_under_pointer(&self, cx: &EventCx, pos: (f32, f32)) -> Option<PaneId> {
         let candidates: Vec<PaneId> = match self.maximized.get() {
             Some(m) => vec![m],
-            None => vec![PaneId::A, PaneId::B],
+            None => self.pane_ids(),
         };
         for pane in candidates {
             if let Some(r) = cx.rect_of_key(pane.canvas_key())
@@ -222,7 +222,7 @@ impl EutecticApp {
                 }
             }
             (Tool::Route, UiEventKind::Click) => {
-                self.route_click(p, tol, snap_pitch);
+                self.route_click(pane, p, tol, snap_pitch);
             }
             (
                 Tool::Route,
@@ -255,7 +255,7 @@ impl EutecticApp {
     /// overlap surfaces as DRC findings, never a block) — snaps to that pad's
     /// centre and COMMITS. Anything else appends a waypoint at the displayed
     /// grid pitch when snapping is enabled.
-    fn route_click(&mut self, p: Point, tol: Nm, snap_pitch: Option<Nm>) {
+    fn route_click(&mut self, pane: PaneId, p: Point, tol: Nm, snap_pitch: Option<Nm>) {
         if self.route.borrow().is_none() {
             let Some((net, anchor)) = self.route_start_at(p, tol) else {
                 return;
@@ -264,6 +264,7 @@ impl EutecticApp {
                 return;
             };
             *self.route.borrow_mut() = Some(RouteState::start(net, layer, anchor));
+            self.route_pane.set(Some(pane));
             return;
         }
         match self.pin_snap_at(p, tol) {

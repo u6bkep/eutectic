@@ -28,7 +28,10 @@ use crate::app::EutecticApp;
 use crate::app::autoroute::{AUTOROUTE_BOARD_KEY, AUTOROUTE_NET_KEY};
 use crate::app::libraries::LIBRARIES_TOGGLE_KEY;
 use crate::app::open::{OPEN_KEY, OPEN_RECENT_KEY, RECENT_POPOVER_KEY, recent_item_key};
-use crate::app::pane::{REDO_KEY, SAVE_KEY, UNDO_KEY, findings_chip_key};
+use crate::app::pane::{
+    CLOSE_PANE_KEY, MAX_PANES, REDO_KEY, SAVE_KEY, SPLIT_DOWN_KEY, SPLIT_RIGHT_KEY, UNDO_KEY,
+    findings_chip_key,
+};
 use crate::chrome::actions::{
     EXPORT_GERBERS_KEY, EXPORT_SVG_KEY, FINDINGS_PANEL_KEY, GRID_TOGGLE_KEY, QUIT_KEY,
     UNITS_TOGGLE_KEY, ZOOM_IN_KEY, ZOOM_OUT_KEY,
@@ -217,9 +220,21 @@ pub(crate) fn menu_defs() -> Vec<MenuDef> {
             value: "view",
             label: "View",
             rows: vec![
-                dis("Split Right", None),
-                dis("Split Down", None),
-                dis("Close Pane", None),
+                Wired {
+                    label: "Split Right",
+                    shortcut: None,
+                    action: SPLIT_RIGHT_KEY,
+                },
+                Wired {
+                    label: "Split Down",
+                    shortcut: None,
+                    action: SPLIT_DOWN_KEY,
+                },
+                Wired {
+                    label: "Close Pane",
+                    shortcut: None,
+                    action: CLOSE_PANE_KEY,
+                },
                 dis("Pop Out Pane", Some("roadmap")),
                 Sep,
                 Wired {
@@ -417,8 +432,7 @@ impl EutecticApp {
         let def = menu_defs().into_iter().find(|d| d.value == value)?;
         // Save / Revert need a source path to act on (the m6 save model).
         let has_path = self.domain.source_path.is_some();
-        let focused_kind =
-            self.panes.borrow()[crate::app::pane::pane_index(self.focused_pane.get())].view;
+        let focused_kind = self.pane_view(self.focused_pane.get());
         let board_focused = focused_kind == crate::app::ViewKind::Board;
         let can_delete = board_focused && self.can_delete_selection();
         let can_rotate = board_focused && self.can_rotate_selection();
@@ -430,6 +444,8 @@ impl EutecticApp {
             can_rotate,
             can_autoroute_net,
             has_doc,
+            can_split: self.pane_count() < MAX_PANES,
+            can_close: self.pane_count() > 1,
         };
         let rows: Vec<El> = def
             .rows
@@ -519,6 +535,8 @@ struct MenuAvailability {
     can_rotate: bool,
     can_autoroute_net: bool,
     has_doc: bool,
+    can_split: bool,
+    can_close: bool,
 }
 
 /// Render one [`MenuRow`] into a menu-panel El. Wired rows carry their route key;
@@ -546,7 +564,9 @@ fn menu_row_el(
                 || (action == DELETE_KEY && !available.can_delete)
                 || (action == ROTATE_KEY && !available.can_rotate)
                 || (action == AUTOROUTE_NET_KEY && !available.can_autoroute_net)
-                || (action == AUTOROUTE_BOARD_KEY && !available.has_doc);
+                || (action == AUTOROUTE_BOARD_KEY && !available.has_doc)
+                || (matches!(action, SPLIT_RIGHT_KEY | SPLIT_DOWN_KEY) && !available.can_split)
+                || (action == CLOSE_PANE_KEY && !available.can_close);
             let trailing = match action {
                 UNITS_TOGGLE_KEY => Some(units_label),
                 GRID_TOGGLE_KEY => Some(grid_label),
@@ -665,6 +685,7 @@ mod tests {
             AUTOROUTE_NET_KEY,
             EXPORT_GERBERS_KEY,
             EXPORT_SVG_KEY,
+            CLOSE_PANE_KEY,
             DELETE_KEY,
             FIT_KEY,
             FINDINGS_PANEL_KEY,
@@ -680,6 +701,8 @@ mod tests {
             ROTATE_KEY,
             SNAP_TO_GRID_KEY,
             SAVE_KEY,
+            SPLIT_DOWN_KEY,
+            SPLIT_RIGHT_KEY,
             UNITS_TOGGLE_KEY,
             UNDO_KEY,
             ZOOM_IN_KEY,
@@ -727,6 +750,8 @@ mod tests {
                 can_rotate: false,
                 can_autoroute_net: false,
                 has_doc: true,
+                can_split: true,
+                can_close: true,
             },
         );
 
@@ -768,6 +793,8 @@ mod tests {
                         can_rotate: false,
                         can_autoroute_net: false,
                         has_doc: true,
+                        can_split: true,
+                        can_close: true,
                     },
                 ),
                 "Delete",
@@ -787,6 +814,8 @@ mod tests {
                         can_rotate: false,
                         can_autoroute_net: false,
                         has_doc: true,
+                        can_split: true,
+                        can_close: true,
                     },
                 ),
                 "Rotate",
@@ -806,6 +835,8 @@ mod tests {
                         can_rotate: true,
                         can_autoroute_net: false,
                         has_doc: true,
+                        can_split: true,
+                        can_close: true,
                     },
                 ),
                 "Delete",
@@ -825,6 +856,8 @@ mod tests {
                         can_rotate: true,
                         can_autoroute_net: false,
                         has_doc: true,
+                        can_split: true,
+                        can_close: true,
                     },
                 ),
                 "Rotate",

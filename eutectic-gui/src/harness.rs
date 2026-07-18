@@ -153,20 +153,15 @@ const UNFITTED_ZOOM: f32 = 1.0;
 /// meaning (fitted zoom + real coverage) the viewport-era assertion had.
 pub fn assert_content_coverage(scene: &str, app: &EutecticApp, r: &Rendered, keys: &[&str]) {
     for &key in keys {
-        let pane_id = if key == PaneId::A.canvas_key() {
-            PaneId::A
-        } else {
-            PaneId::B
-        };
+        let pane_id = PaneId::all_slots()
+            .find(|pane| pane.canvas_key() == key)
+            .unwrap_or_else(|| panic!("scene `{scene}`: unknown canvas key `{key}`"));
         let pane =
             r.ui.rect_of_key(key)
                 .unwrap_or_else(|| panic!("scene `{scene}`: canvas `{key}` has no laid-out rect"));
 
         let cam = app.pane_camera(pane_id);
-        let view = {
-            let panes = app.panes.borrow();
-            panes[crate::app::pane::pane_index(pane_id)].view
-        };
+        let view = app.pane_view(pane_id);
         let bounds = app.pane_scene_bounds(pane_id).unwrap_or_else(|| {
             panic!("scene `{scene}`: pane `{key}` ({view:?}) has no renderer scene")
         });
@@ -243,7 +238,7 @@ mod tests {
         let r = render_settled(&mut app, viewport());
         assert!(!app.cameras_pending(), "every visible pane settled");
         assert_eq!(
-            app.panes.borrow()[1].view,
+            app.pane_view(PaneId::B),
             ViewKind::Schematic,
             "pane B is the schematic pane"
         );

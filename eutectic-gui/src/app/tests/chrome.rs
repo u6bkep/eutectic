@@ -242,11 +242,15 @@ fn zoom_targets_only_the_focused_pane_and_clamps() {
     assert!((app.pane_camera_target(PaneId::B).zoom - b0.zoom).abs() < 1e-15);
 
     app.pane_cams.borrow_mut()[1]
+        .as_mut()
+        .unwrap()
         .glide
         .snap(Camera::new((7.0, 9.0), MAX_ZOOM));
     app.on_event(click(ZOOM_IN_KEY), &cx);
     assert_eq!(app.pane_camera_target(PaneId::B).zoom, MAX_ZOOM);
     app.pane_cams.borrow_mut()[1]
+        .as_mut()
+        .unwrap()
         .glide
         .snap(Camera::new((7.0, 9.0), MIN_ZOOM));
     app.on_event(click(ZOOM_OUT_KEY), &cx);

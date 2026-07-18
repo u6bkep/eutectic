@@ -571,7 +571,7 @@ pub(crate) struct GpuState {
     /// One style-table set serves both producers: `resolve` is per-scene,
     /// and the tables carry every plane key (board slabs + schematic tiers).
     styles: StyleTables,
-    panes: [PaneGpu; 2],
+    panes: Vec<Option<PaneGpu>>,
     /// Render-once thumbnail textures keyed by (part, library, catalog generation).
     library_previews: std::collections::BTreeMap<(String, String, u64), LibraryPreviewTexture>,
     last_frame: Option<Instant>,
@@ -599,7 +599,12 @@ impl EutecticApp {
             scenes: SceneCache::new(),
             schematic_scenes: SceneCache::new(),
             styles: StyleTables::board_defaults(true),
-            panes: [PaneGpu::default(), PaneGpu::default()],
+            panes: self
+                .panes
+                .borrow()
+                .iter()
+                .map(|pane| pane.as_ref().map(|_| PaneGpu::default()))
+                .collect(),
             library_previews: std::collections::BTreeMap::new(),
             last_frame: None,
         });
@@ -613,8 +618,40 @@ impl EutecticApp {
         pane: PaneId,
     ) -> Option<(damascene_core::surface::AppTexture, (u32, u32))> {
         let gpu = self.gpu.borrow();
-        let t = gpu.as_ref()?.panes[pane_index(pane)].tex.as_ref()?;
+        let t = gpu
+            .as_ref()?
+            .panes
+            .get(pane_index(pane))?
+            .as_ref()?
+            .tex
+            .as_ref()?;
         Some((t.handle.clone(), t.alloc))
+    }
+
+    pub(crate) fn allocate_pane_gpu(&self, pane: PaneId) {
+        let mut gpu = self.gpu.borrow_mut();
+        let Some(gpu) = gpu.as_mut() else {
+            return;
+        };
+        if pane_index(pane) == gpu.panes.len() {
+            gpu.panes.push(Some(PaneGpu::default()));
+        } else {
+            gpu.panes[pane_index(pane)] = Some(PaneGpu::default());
+        }
+    }
+
+    pub(crate) fn free_pane_gpu(&self, pane: PaneId) {
+        if let Some(gpu) = self.gpu.borrow_mut().as_mut()
+            && let Some(slot) = gpu.panes.get_mut(pane_index(pane))
+        {
+            *slot = None;
+        }
+    }
+
+    pub(crate) fn reset_pane_gpu_slots(&self) {
+        if let Some(gpu) = self.gpu.borrow_mut().as_mut() {
+            gpu.panes = vec![Some(PaneGpu::default()), Some(PaneGpu::default())];
+        }
     }
 
     /// The highlighted row's cached owned-renderer thumbnail, if the GPU paint
@@ -799,7 +836,7 @@ impl EutecticApp {
             gpu.last_frame = Some(now);
             if dt > 0.0 {
                 let mut cams = self.pane_cams.borrow_mut();
-                for c in cams.iter_mut() {
+                for c in cams.iter_mut().flatten() {
                     if !c.glide.settled() {
                         c.glide.step(dt);
                     }
@@ -831,12 +868,12 @@ impl EutecticApp {
             ..
         } = gpu;
 
-        for pane in [PaneId::A, PaneId::B] {
+        for pane in self.pane_ids() {
             let i = pane_index(pane);
             if maximized.is_some_and(|m| m != pane) {
                 continue;
             }
-            let view = self.panes.borrow()[i].view;
+            let view = self.pane_view(pane);
             // The per-view-kind bundle: producer scene + state buffer + grid
             // furniture. The schematic pane keeps the old pane's furniture:
             // no grid, no crosshair.
@@ -852,7 +889,7 @@ impl EutecticApp {
             let Some(scene) = scene.as_ref() else {
                 continue;
             };
-            let Some(rect) = self.pane_px.get()[i] else {
+            let Some(rect) = self.pane_px.borrow()[i] else {
                 continue;
             };
             let needed = (
@@ -860,7 +897,7 @@ impl EutecticApp {
                 ((rect.3 as f64) * scale).round().max(1.0) as u32,
             );
 
-            let pg = &mut pane_gpus[i];
+            let pg = pane_gpus[i].as_mut().expect("live pane GPU slot");
             // Texture lifecycle (hysteresis): reallocation invalidates the
             // damage record — the cached pixels are gone.
             let alloc = tex_alloc(needed, pg.tex.as_ref().map(|t| t.alloc));
@@ -891,7 +928,11 @@ impl EutecticApp {
 
             // The physical camera: pane cameras hold logical px/nm; the
             // texture renders in device px, so fold the scale factor in.
-            let cam = self.pane_cams.borrow()[i].glide.current();
+            let cam = self.pane_cams.borrow()[i]
+                .as_ref()
+                .expect("live pane camera")
+                .glide
+                .current();
             let phys = Camera {
                 center: cam.center,
                 zoom: crate::app::physical_zoom(cam.zoom, self.scale_factor.get()),
@@ -929,7 +970,7 @@ impl EutecticApp {
             // board-furniture input; schematic panes pass none.
             let states = states_cell.borrow();
             let cursor = if grid {
-                self.cursor_px.get()[i]
+                self.cursor_px.borrow()[i]
                     .map(|(x, y)| [(x as f64 * scale) as f32, (y as f64 * scale) as f32])
             } else {
                 None
@@ -968,8 +1009,8 @@ impl EutecticApp {
             // `Renderer::render`'s own encoder + submit rather than batching
             // panes into one frame encoder — the shared frame/plane uniform
             // buffers stage with `queue.write_buffer`, so per-pane submits
-            // give write/submit interleaving for free. At ≤ 2 panes,
-            // damage-gated, the extra submit is noise.
+            // give write/submit interleaving for free. At the six-pane cap,
+            // damage-gated, the extra submits remain bounded.
             let cache = match view {
                 ViewKind::Board => &mut *scenes,
                 ViewKind::Schematic => &mut *schematic_scenes,
@@ -1008,12 +1049,20 @@ impl EutecticApp {
 impl EutecticApp {
     /// A pane's current (possibly mid-glide) camera.
     pub fn pane_camera(&self, pane: PaneId) -> Camera {
-        self.pane_cams.borrow()[pane_index(pane)].glide.current()
+        self.pane_cams.borrow()[pane_index(pane)]
+            .as_ref()
+            .expect("live pane camera")
+            .glide
+            .current()
     }
 
     /// A pane's glide target (tests: where a queued glide is heading).
     pub fn pane_camera_target(&self, pane: PaneId) -> Camera {
-        self.pane_cams.borrow()[pane_index(pane)].glide.target()
+        self.pane_cams.borrow()[pane_index(pane)]
+            .as_ref()
+            .expect("live pane camera")
+            .glide
+            .target()
     }
 
     /// How many times this pane's texture has actually re-rendered — the
@@ -1024,26 +1073,38 @@ impl EutecticApp {
         self.gpu
             .borrow()
             .as_ref()
-            .map_or(0, |g| g.panes[pane_index(pane)].damage.renders)
+            .and_then(|g| g.panes.get(pane_index(pane)))
+            .and_then(Option::as_ref)
+            .map_or(0, |pane| pane.damage.renders)
     }
 
     /// Is any pane's glide mid-flight (continuous redraw needed)?
     /// `pub` for the GPU-tier settle test.
     pub fn glide_active(&self) -> bool {
-        self.pane_cams.borrow().iter().any(|c| !c.glide.settled())
+        self.pane_cams
+            .borrow()
+            .iter()
+            .flatten()
+            .any(|c| !c.glide.settled())
     }
 
     /// Queue a Fit/Reset for a pane, consumed in `build` where the pane rect
     /// is known (hidden panes apply it on first show).
     pub(crate) fn request_pane_cam(&self, pane: PaneId, req: CamRequest) {
-        self.pane_cams.borrow_mut()[pane_index(pane)].request = Some(req);
+        self.pane_cams.borrow_mut()[pane_index(pane)]
+            .as_mut()
+            .expect("live pane camera")
+            .request = Some(req);
     }
 
     /// Glide a pane's camera center to a content point at the current
     /// target zoom (findings click-to-zoom, the old `CenterOn`).
     pub(crate) fn pane_center_on(&self, pane: PaneId, center: (f64, f64)) {
         let mut cams = self.pane_cams.borrow_mut();
-        let g = &mut cams[pane_index(pane)].glide;
+        let g = &mut cams[pane_index(pane)]
+            .as_mut()
+            .expect("live pane camera")
+            .glide;
         let zoom = g.target().zoom;
         g.retarget(Camera::new(center, zoom));
     }
@@ -1057,7 +1118,7 @@ impl EutecticApp {
     pub(crate) fn pane_zoom_at(&self, pane: PaneId, rect: PaneRect, pos: (f32, f32), dy: f32) {
         let i = pane_index(pane);
         let mut cams = self.pane_cams.borrow_mut();
-        let g = &mut cams[i].glide;
+        let g = &mut cams[i].as_mut().expect("live pane camera").glide;
         let cur = g.current();
         let px = ((pos.0 - rect.0) as f64, (pos.1 - rect.1) as f64);
         let vp = (rect.2 as f64, rect.3 as f64);
@@ -1079,7 +1140,10 @@ impl EutecticApp {
     /// wheel path's clamp.
     pub(crate) fn pane_zoom_center(&self, pane: PaneId, factor: f64) {
         let mut cams = self.pane_cams.borrow_mut();
-        let glide = &mut cams[pane_index(pane)].glide;
+        let glide = &mut cams[pane_index(pane)]
+            .as_mut()
+            .expect("live pane camera")
+            .glide;
         let target = glide.target();
         glide.retarget(Camera::new(target.center, clamp_zoom(target.zoom * factor)));
     }
@@ -1088,7 +1152,10 @@ impl EutecticApp {
     /// (direct manipulation tracks the pointer exactly).
     pub(crate) fn pane_snap_center(&self, pane: PaneId, center: (f64, f64)) {
         let mut cams = self.pane_cams.borrow_mut();
-        let g = &mut cams[pane_index(pane)].glide;
+        let g = &mut cams[pane_index(pane)]
+            .as_mut()
+            .expect("live pane camera")
+            .glide;
         let zoom = g.current().zoom;
         g.snap(Camera::new(center, zoom));
     }
@@ -1097,7 +1164,7 @@ impl EutecticApp {
     /// bounds (board scene or schematic scene).
     pub(crate) fn pane_scene_bounds(&self, pane: PaneId) -> Option<(Nm, Nm, Nm, Nm)> {
         let derived = self.derived.borrow();
-        match self.panes.borrow()[pane_index(pane)].view {
+        match self.pane_view(pane) {
             ViewKind::Board => derived.scene.as_ref().map(|s| s.bounds),
             ViewKind::Schematic => derived.schematic_scene.as_ref().map(|s| s.bounds),
         }
@@ -1111,7 +1178,7 @@ impl EutecticApp {
         let i = pane_index(pane);
         let bounds = self.pane_scene_bounds(pane);
         let mut cams = self.pane_cams.borrow_mut();
-        let cam = &mut cams[i];
+        let cam = cams[i].as_mut().expect("live pane camera");
         if let Some(bounds) = bounds
             && rect.2 > 0.0
             && rect.3 > 0.0
@@ -1123,10 +1190,11 @@ impl EutecticApp {
                 c
             };
             let mut panes = self.panes.borrow_mut();
-            if !panes[i].fitted {
+            let pane_state = panes[i].as_mut().expect("live pane state");
+            if !pane_state.fitted {
                 // Fit-on-first-show is a snap, not a glide (initial placement).
                 cam.glide.snap(fit());
-                panes[i].fitted = true;
+                pane_state.fitted = true;
                 cam.request = None;
             } else if let Some(req) = cam.request.take() {
                 match req {
@@ -1145,7 +1213,7 @@ impl EutecticApp {
     /// the camera against a laid-out rect.
     pub fn cameras_pending(&self) -> bool {
         let maximized = self.maximized.get();
-        for pane in [PaneId::A, PaneId::B] {
+        for pane in self.pane_ids() {
             let i = pane_index(pane);
             if maximized.is_some_and(|m| m != pane) {
                 continue;
@@ -1153,8 +1221,14 @@ impl EutecticApp {
             if self.pane_scene_bounds(pane).is_none() {
                 continue; // nothing to frame (placeholder pane)
             }
-            let fitted = self.panes.borrow()[i].fitted;
-            let request = self.pane_cams.borrow()[i].request;
+            let fitted = self.panes.borrow()[i]
+                .as_ref()
+                .expect("live pane state")
+                .fitted;
+            let request = self.pane_cams.borrow()[i]
+                .as_ref()
+                .expect("live pane camera")
+                .request;
             if !fitted || request.is_some() {
                 return true;
             }
@@ -1234,24 +1308,23 @@ impl EutecticApp {
         let inside = |r: (f32, f32, f32, f32)| {
             pos.0 >= r.0 && pos.0 <= r.0 + r.2 && pos.1 >= r.1 && pos.1 <= r.1 + r.3
         };
-        let candidates: [PaneId; 2] = [PaneId::A, PaneId::B];
-        for pane in candidates {
+        for pane in self.pane_ids() {
             let i = pane_index(pane);
             if self.maximized.get().is_some_and(|m| m != pane) {
                 continue;
             }
-            let Some(rect) = self.pane_px.get()[i] else {
+            let Some(rect) = self.pane_px.borrow()[i] else {
                 continue;
             };
             if !inside(rect) {
                 continue;
             }
-            if let Some(strip) = self.strip_px.get()[i]
+            if let Some(strip) = self.strip_px.borrow()[i]
                 && inside(strip)
             {
                 return None;
             }
-            let view = self.panes.borrow()[i].view;
+            let view = self.pane_view(pane);
             return Some((pane, view, rect));
         }
         None
@@ -1260,18 +1333,17 @@ impl EutecticApp {
     /// Update the per-pane crosshair cursor (pane-local logical px; `None`
     /// clears every pane). Returns whether anything changed.
     fn set_crosshair(&self, at: Option<(PaneId, (f32, f32))>) -> bool {
-        let mut cur = self.cursor_px.get();
+        let cur = self.cursor_px.borrow().clone();
         let next = match at {
             Some((pane, local)) => {
-                let mut n = [None, None];
+                let mut n = vec![None; cur.len()];
                 n[pane_index(pane)] = Some(local);
                 n
             }
-            None => [None, None],
+            None => vec![None; cur.len()],
         };
         if cur != next {
-            cur = next;
-            self.cursor_px.set(cur);
+            *self.cursor_px.borrow_mut() = next;
             true
         } else {
             false
@@ -1294,8 +1366,8 @@ impl EutecticApp {
             }
             // The crosshair tracks only over board panes (schematic panes
             // have no crosshair — furniture parity with the old pane).
-            if self.panes.borrow()[pane_index(mp.pane)].view == ViewKind::Board
-                && let Some(rect) = self.pane_px.get()[pane_index(mp.pane)]
+            if self.pane_view(mp.pane) == ViewKind::Board
+                && let Some(rect) = self.pane_px.borrow()[pane_index(mp.pane)]
             {
                 self.set_crosshair(Some((mp.pane, (pos.0 - rect.0, pos.1 - rect.1))));
             }
@@ -1306,6 +1378,7 @@ impl EutecticApp {
         if self.libraries_open.get()
             || self.chrome_dialog.get().is_some()
             || self.open_menu.borrow().is_some()
+            || self.pane_view_menu.get().is_some()
         {
             let mut changed = self.set_crosshair(None);
             changed |= self.clear_place_cursor();
@@ -1315,6 +1388,7 @@ impl EutecticApp {
 
         match self.raw_pane_at(pos) {
             Some((pane, ViewKind::Board, rect)) => {
+                self.focused_pane.set(pane);
                 let local = (pos.0 - rect.0, pos.1 - rect.1);
                 self.set_crosshair(Some((pane, local)));
                 let cam = self.pane_camera(pane);
@@ -1378,7 +1452,8 @@ impl EutecticApp {
             // camera and pick over the schematic candidates — no crosshair,
             // no board-mm readout (furniture parity with the old pane).
             Some((pane, ViewKind::Schematic, rect)) => {
-                let mut changed = self.set_crosshair(None);
+                let mut changed = self.focused_pane.replace(pane) != pane;
+                changed |= self.set_crosshair(None);
                 changed |= self.clear_place_cursor();
                 let busy = {
                     let raw = self.raw.borrow();
@@ -1454,6 +1529,7 @@ impl EutecticApp {
         if self.libraries_open.get()
             || self.chrome_dialog.get().is_some()
             || self.open_menu.borrow().is_some()
+            || self.pane_view_menu.get().is_some()
         {
             return false;
         }
@@ -1468,6 +1544,8 @@ impl EutecticApp {
         // Interrupt any live glide: the pan is direct manipulation.
         let cam = self.pane_camera(pane);
         self.pane_cams.borrow_mut()[pane_index(pane)]
+            .as_mut()
+            .expect("live pane camera")
             .glide
             .snap(cam);
         self.raw.borrow_mut().middle_pan = Some(MiddlePan {

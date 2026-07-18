@@ -1,7 +1,7 @@
 //! Event routing + the [`App`] impl — the interactive half of the app shell:
 //! `build` (root tree + Libraries overlay), `before_build` (mailbox drain + initial
 //! fit), and `on_event` (the whole route table: resize handle, Libraries menu,
-//! layout / view / maximize toggles, findings, explorer, tools, framing, layer
+//! split / close / view / maximize actions, findings, explorer, tools, framing, layer
 //! switches, and pane pointer dispatch). Split out of `app.rs` as pure code
 //! motion; the per-pane pointer handlers live in the [`pointer`] submodule.
 
@@ -12,12 +12,12 @@ pub(crate) use pointer::PICK_TOL_PX;
 use crate::app::libraries::LIBRARIES_TOGGLE_KEY;
 use crate::app::open::{OPEN_RECENT_KEY, RECENT_POPOVER_KEY, recent_item_index};
 use crate::app::pane::{
-    CONFLICT_KEEP_KEY, CONFLICT_RELOAD_KEY, LAYOUT_TOGGLE_KEY, REDO_KEY, SAVE_KEY,
-    SPLIT_HANDLE_KEY, SPLIT_ROW_KEY, SidebarSection, UNDO_KEY, active_layer_of_key,
-    finding_index_of_key, is_canvas_target, is_findings_chip_key, pane_index, section_of_key,
-    strip_target_of_key, switch_key,
+    CLOSE_PANE_KEY, CONFLICT_KEEP_KEY, CONFLICT_RELOAD_KEY, REDO_KEY, SAVE_KEY, SPLIT_DOWN_KEY,
+    SPLIT_RIGHT_KEY, SidebarSection, UNDO_KEY, active_layer_of_key, finding_index_of_key,
+    is_canvas_target, is_findings_chip_key, pane_index, section_of_key, strip_target_of_key,
+    switch_key,
 };
-use crate::app::{EutecticApp, PaneId, PaneLayout, ViewKind};
+use crate::app::{EutecticApp, SplitAxis, ViewKind};
 use crate::chrome::actions::{ZOOM_IN_KEY, ZOOM_OUT_KEY};
 use crate::chrome::menubar::{MENUBAR_KEY, REVERT_KEY, SNAP_TO_GRID_KEY};
 use crate::palette::PALETTE_TOGGLE_KEY;
@@ -31,10 +31,16 @@ impl App for EutecticApp {
         // Reset the captured per-pane rects: only panes actually built this
         // frame re-register (a maximized-away or view-switched board pane
         // must not leave a stale rect for the paint pass / raw hover).
-        self.pane_px.set([None, None]);
-        self.strip_px.set([None, None]);
+        self.pane_px
+            .borrow_mut()
+            .iter_mut()
+            .for_each(|rect| *rect = None);
+        self.strip_px
+            .borrow_mut()
+            .iter_mut()
+            .for_each(|rect| *rect = None);
         let main = match &self.domain.doc {
-            // A loaded doc renders the two-pane viewer (at least one pane always shows
+            // A loaded doc renders the pane-tree viewer (at least one pane always shows
             // something — board or schematic). Even a board-only or schematic-only doc
             // gets panes; the empty side shows a placeholder.
             Ok(_) => page([self.viewer_body(cx)]),
@@ -62,6 +68,7 @@ impl App for EutecticApp {
                 self.chrome_dialog_overlay(),
                 self.menu_overlay(),
                 self.recent_menu_overlay(),
+                self.pane_view_overlay(),
                 self.palette_open.get().then(|| self.palette_modal()),
             ],
         )
@@ -94,15 +101,6 @@ impl App for EutecticApp {
         if self.handle_chrome_dialog_event(&event) {
             return;
         }
-        // Capture the split extent for the weighted resize handler (README idiom).
-        if let Some(r) = cx.rect_of_key(SPLIT_ROW_KEY) {
-            let extent = match self.layout.get() {
-                PaneLayout::Dual => r.w,
-                PaneLayout::Stacked => r.h,
-            };
-            self.split_extent.set(extent);
-        }
-
         // Ctrl+K / the toolbar button toggles the command palette. While open,
         // it owns all routed input (including Escape) ahead of document tools.
         if self.handle_palette_event(&event) {
@@ -116,25 +114,67 @@ impl App for EutecticApp {
             return;
         }
 
-        // Pane-split resize handle (weighted): fold the drag into the split weights.
-        {
-            let mut w = self.split_weights.get();
-            let mut drag = self.split_drag.borrow_mut();
-            let axis = match self.layout.get() {
-                PaneLayout::Dual => Axis::Row,
-                PaneLayout::Stacked => Axis::Column,
+        // Pane view selects are controlled dropdowns. Their menus live at the
+        // root overlay, while the trigger stays inside its leaf header.
+        for pane in self.pane_ids() {
+            let select_key = pane.view_select_key();
+            if event.is_click_or_activate(&select_key) {
+                self.pane_view_menu.set(match self.pane_view_menu.get() {
+                    Some(open) if open == pane => None,
+                    _ => Some(pane),
+                });
+                return;
+            }
+            if event.is_click_or_activate(&format!("{select_key}:dismiss")) {
+                self.pane_view_menu.set(None);
+                return;
+            }
+            for view in ViewKind::all() {
+                if event.is_click_or_activate(&pane.switch_key(view)) {
+                    let mut panes = self.panes.borrow_mut();
+                    let state = panes[pane_index(pane)].as_mut().expect("live pane");
+                    if state.view != view {
+                        if self.measure_pane.get() == pane {
+                            self.measure.set(Default::default());
+                        }
+                        state.view = view;
+                        state.fitted = false;
+                    }
+                    self.pane_view_menu.set(None);
+                    self.focused_pane.set(pane);
+                    return;
+                }
+            }
+        }
+        if event.kind == UiEventKind::Escape && self.pane_view_menu.get().is_some() {
+            self.pane_view_menu.set(None);
+            return;
+        }
+
+        // Every internal node owns an independent weighted divider. Its
+        // container key supplies the nested extent in the same layout frame.
+        let split_ids = self.pane_tree.borrow().split_ids();
+        for id in split_ids {
+            let mut tree = self.pane_tree.borrow_mut();
+            let Some((axis, weights, drag)) = tree.root.split_mut(id) else {
+                continue;
+            };
+            let Some(rect) = cx.rect_of_key(id.container_key()) else {
+                continue;
+            };
+            let extent = match axis {
+                SplitAxis::Horizontal => rect.w,
+                SplitAxis::Vertical => rect.h,
             };
             if resize_handle::apply_event_weights(
-                &mut w,
-                &mut drag,
+                weights,
+                drag,
                 &event,
-                SPLIT_HANDLE_KEY,
-                axis,
-                self.split_extent.get(),
+                id.handle_key(),
+                axis.damascene(),
+                extent,
                 0.15,
             ) {
-                drop(drag);
-                self.split_weights.set(w);
                 return;
             }
         }
@@ -226,6 +266,7 @@ impl App for EutecticApp {
             && !self.palette_open.get()
             && self.chrome_dialog.get().is_none()
             && self.open_menu.borrow().is_none()
+            && self.pane_view_menu.get().is_none()
         {
             if event.is_click_or_activate(SAVE_KEY) || event.is_hotkey(SAVE_KEY) {
                 self.save();
@@ -259,32 +300,35 @@ impl App for EutecticApp {
             return;
         }
 
-        // Dual/stacked layout toggle.
-        if event.is_click_or_activate(LAYOUT_TOGGLE_KEY) {
-            self.layout.set(match self.layout.get() {
-                PaneLayout::Dual => PaneLayout::Stacked,
-                PaneLayout::Stacked => PaneLayout::Dual,
-            });
+        // View-menu split/close commands act on the focused leaf.
+        if event.is_click_or_activate(SPLIT_RIGHT_KEY) {
+            self.split_pane(self.focused_pane.get(), SplitAxis::Horizontal);
+            return;
+        }
+        if event.is_click_or_activate(SPLIT_DOWN_KEY) {
+            self.split_pane(self.focused_pane.get(), SplitAxis::Vertical);
+            return;
+        }
+        if event.is_click_or_activate(CLOSE_PANE_KEY) {
+            self.close_pane(self.focused_pane.get());
             return;
         }
 
-        // Per-pane view switcher + maximize toggle.
-        for pane in [PaneId::A, PaneId::B] {
-            for v in ViewKind::all() {
-                if event.is_click_or_activate(&pane.switch_key(v)) {
-                    let mut panes = self.panes.borrow_mut();
-                    let p = &mut panes[pane_index(pane)];
-                    if p.view != v {
-                        if self.measure_pane.get() == pane {
-                            self.measure.set(Default::default());
-                        }
-                        p.view = v;
-                        p.fitted = false; // re-fit the new view on next build.
-                    }
-                    return;
-                }
+        // Per-pane header actions.
+        for pane in self.pane_ids() {
+            if event.is_click_or_activate(&pane.split_right_key()) {
+                self.split_pane(pane, SplitAxis::Horizontal);
+                return;
             }
-            if event.is_click_or_activate(pane.maximize_key()) {
+            if event.is_click_or_activate(&pane.split_down_key()) {
+                self.split_pane(pane, SplitAxis::Vertical);
+                return;
+            }
+            if event.is_click_or_activate(&pane.close_key()) {
+                self.close_pane(pane);
+                return;
+            }
+            if event.is_click_or_activate(&pane.maximize_key()) {
                 self.maximized.set(match self.maximized.get() {
                     Some(m) if m == pane => None,
                     _ => Some(pane),
@@ -341,7 +385,7 @@ impl App for EutecticApp {
             && let Some(route) = event.route()
             && let Some((pane, tool)) = strip_target_of_key(route)
         {
-            let kind = self.panes.borrow()[pane_index(pane)].view;
+            let kind = self.pane_view(pane);
             if kind.offers_tool(tool) {
                 self.set_tool(kind, tool);
                 self.focused_pane.set(pane);
@@ -398,6 +442,7 @@ impl App for EutecticApp {
             }
             if self.route.borrow().is_some() {
                 *self.route.borrow_mut() = None;
+                self.route_pane.set(None);
                 return;
             }
             if self.tool_for(ViewKind::Board) == Tool::Place && self.armed_part.borrow().is_some() {
@@ -409,8 +454,8 @@ impl App for EutecticApp {
                 return;
             }
             let focused = self.focused_pane.get();
-            let focused_kind = self.panes.borrow()[pane_index(focused)].view;
-            let measure_kind = self.panes.borrow()[pane_index(self.measure_pane.get())].view;
+            let focused_kind = self.pane_view(focused);
+            let measure_kind = self.pane_view(self.measure_pane.get());
             let mut m = self.measure.get();
             if measure_kind == focused_kind
                 && self.tool_for(focused_kind) == Tool::Measure
@@ -430,7 +475,7 @@ impl App for EutecticApp {
         // rect is known — hidden panes apply on first show).
         if event.is_click_or_activate("fit") || event.is_click_or_activate("reset") {
             let fit = event.is_click_or_activate("fit");
-            for id in [PaneId::A, PaneId::B] {
+            for id in self.pane_ids() {
                 self.request_pane_cam(
                     id,
                     if fit {
@@ -523,7 +568,7 @@ impl App for EutecticApp {
         // A pointer touching a pane focuses it (Blender hover-focus): the focused
         // pane's kind's tool slot is the live tool the status bar reads out.
         self.focused_pane.set(pane);
-        let view = self.panes.borrow()[pane_index(pane)].view;
+        let view = self.pane_view(pane);
         if view == ViewKind::Board && self.tool_for(ViewKind::Board) == Tool::Place {
             let Some(rect) = cx.rect_of_key(pane.canvas_key()) else {
                 return;
@@ -566,6 +611,7 @@ impl App for EutecticApp {
             || self.chrome_dialog.get().is_some()
             || self.palette_open.get()
             || self.open_menu.borrow().is_some()
+            || self.pane_view_menu.get().is_some()
         {
             return false;
         }

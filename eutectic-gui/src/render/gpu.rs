@@ -427,7 +427,7 @@ pub struct RenderArgs<'a> {
 }
 
 struct CoverageTargets {
-    /// Allocated texel size — **grow-only** (two panes of different sizes
+    /// Allocated texel size — **grow-only** (panes of different sizes
     /// share these targets per frame; each render clips to its own
     /// sub-viewport instead of reallocating).
     size: (u32, u32),

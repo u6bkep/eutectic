@@ -1,7 +1,8 @@
-//! Pane + layout state — the view-dependent half of `gui-architecture.md`
-//! through-line 3, plus the small key/const vocabulary shared across the app
-//! chrome (route keys, the canvas-target predicate, placeholders). Split out of
-//! `app.rs` as pure code motion.
+//! Pane + recursive split-tree state — the view-dependent half of
+//! `gui-architecture.md` through-line 3, plus the small key/const vocabulary
+//! shared across the app chrome (route keys, the canvas-target predicate,
+//! placeholders). Leaves carry stable pane ids; internal nodes carry their own
+//! weighted H/V divider state.
 
 use super::EutecticApp;
 use crate::tool::{MeasureState, Tool};
@@ -36,6 +37,13 @@ impl ViewKind {
         [ViewKind::Board, ViewKind::Schematic]
     }
 
+    pub(crate) fn token(self) -> &'static str {
+        match self {
+            ViewKind::Board => "board",
+            ViewKind::Schematic => "schematic",
+        }
+    }
+
     /// The tools this kind's per-pane strip offers, grouped for the strip's thin
     /// separators (UI-oracle strip anatomy: the shared pick tools first, then the
     /// kind-specific group). Applicability is STRUCTURAL: a tool that makes no
@@ -62,63 +70,74 @@ impl ViewKind {
     }
 }
 
-/// The two-pane orientation (mockup: the dual/stacked toolbar toggle). `Dual` is side-by-
-/// side (a `row` split), `Stacked` is over/under (a `column` split). A one-split
-/// simplification of the split-tree — fine for v1.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PaneLayout {
-    Dual,
-    Stacked,
-}
+/// Maximum number of live leaves in one split tree (UI oracle ruling).
+pub const MAX_PANES: usize = 6;
 
-/// Which pane a pane index names — `A` (first / left / top) or `B` (second / right /
-/// bottom). The two are symmetric; the enum keeps call sites readable and keys stable.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PaneId {
-    A,
-    B,
-}
+/// A stable pane-slot id. Slots are reused only after their old leaf is closed;
+/// unrelated splits and closes never renumber surviving panes. The first two
+/// constants preserve the original `canvas:a` / `canvas:b` route vocabulary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PaneId(u8);
 
 impl PaneId {
-    /// The canvas viewport El key for this pane — distinct per pane so the two cameras are
-    /// independent in damascene's `UiState` (through-line 3), *even when both panes show
+    pub const A: PaneId = PaneId(0);
+    pub const B: PaneId = PaneId(1);
+
+    pub(crate) fn from_index(index: usize) -> Option<PaneId> {
+        (index < MAX_PANES).then_some(PaneId(index as u8))
+    }
+
+    pub(crate) fn index(self) -> usize {
+        self.0 as usize
+    }
+
+    pub(crate) fn all_slots() -> impl Iterator<Item = PaneId> {
+        (0..MAX_PANES).map(|index| PaneId(index as u8))
+    }
+
+    /// The canvas viewport El key for this pane — distinct per pane so its camera is
+    /// independent in damascene's `UiState` (through-line 3), *even when several panes show
     /// the same view kind*.
     pub(crate) fn canvas_key(self) -> &'static str {
-        match self {
-            PaneId::A => "canvas:a",
-            PaneId::B => "canvas:b",
-        }
+        const KEYS: [&str; MAX_PANES] = [
+            "canvas:a", "canvas:b", "canvas:c", "canvas:d", "canvas:e", "canvas:f",
+        ];
+        KEYS[self.index()]
     }
 
     /// The view-switcher button key for a target view kind in this pane.
     pub(crate) fn switch_key(self, v: ViewKind) -> String {
-        let p = match self {
-            PaneId::A => "a",
-            PaneId::B => "b",
-        };
-        format!(
-            "pane:{p}:view:{}",
-            match v {
-                ViewKind::Board => "board",
-                ViewKind::Schematic => "schematic",
-            }
-        )
+        format!("{}:option:{}", self.view_select_key(), v.token())
+    }
+
+    /// The controlled select key for this pane's view-kind dropdown.
+    pub(crate) fn view_select_key(self) -> String {
+        format!("pane:{}:view", self.tag())
     }
 
     /// The maximize-toggle button key for this pane.
-    pub(crate) fn maximize_key(self) -> &'static str {
-        match self {
-            PaneId::A => "pane:a:max",
-            PaneId::B => "pane:b:max",
-        }
+    pub(crate) fn maximize_key(self) -> String {
+        format!("pane:{}:max", self.tag())
+    }
+
+    /// Header action keys. Menu actions use the unqualified constants below
+    /// and act on the focused leaf.
+    pub(crate) fn split_right_key(self) -> String {
+        format!("pane:{}:split-right", self.tag())
+    }
+
+    pub(crate) fn split_down_key(self) -> String {
+        format!("pane:{}:split-down", self.tag())
+    }
+
+    pub(crate) fn close_key(self) -> String {
+        format!("pane:{}:close", self.tag())
     }
 
     /// This pane's short key tag (`"a"` / `"b"`), for composed route keys.
     fn tag(self) -> &'static str {
-        match self {
-            PaneId::A => "a",
-            PaneId::B => "b",
-        }
+        const TAGS: [&str; MAX_PANES] = ["a", "b", "c", "d", "e", "f"];
+        TAGS[self.index()]
     }
 
     /// The route key of this pane's tool-strip button for `tool`
@@ -134,10 +153,15 @@ impl PaneId {
     /// nowhere, so it is inert chrome. Events outside the panel rect hit the
     /// canvas as usual — the strip never intercepts pan/zoom beyond itself.
     pub(crate) fn strip_panel_key(self) -> &'static str {
-        match self {
-            PaneId::A => "strip:a:panel",
-            PaneId::B => "strip:b:panel",
-        }
+        const KEYS: [&str; MAX_PANES] = [
+            "strip:a:panel",
+            "strip:b:panel",
+            "strip:c:panel",
+            "strip:d:panel",
+            "strip:e:panel",
+            "strip:f:panel",
+        ];
+        KEYS[self.index()]
     }
 }
 
@@ -146,11 +170,7 @@ impl PaneId {
 pub(crate) fn strip_target_of_key(route: &str) -> Option<(PaneId, Tool)> {
     let rest = route.strip_prefix("strip:")?;
     let (tag, tool_key) = rest.split_once(':')?;
-    let pane = match tag {
-        "a" => PaneId::A,
-        "b" => PaneId::B,
-        _ => return None,
-    };
+    let pane = PaneId::all_slots().find(|pane| pane.tag() == tag)?;
     let tool = Tool::all().into_iter().find(|t| t.key() == tool_key)?;
     Some((pane, tool))
 }
@@ -159,7 +179,7 @@ pub(crate) fn strip_target_of_key(route: &str) -> Option<(PaneId, Tool)> {
 /// over the shared [`DomainState`](crate::app::DomainState), with its own camera keyed by
 /// the pane's canvas El key. Milestone 4 makes this real: the pane owns its view kind and
 /// whether it has been fit-to-content yet (the initial framing fires once per pane).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaneState {
     /// The view this pane renders.
     pub view: ViewKind,
@@ -182,12 +202,234 @@ impl Default for PaneState {
     }
 }
 
-/// A pane index into the `panes` array.
-pub(crate) fn pane_index(p: PaneId) -> usize {
-    match p {
-        PaneId::A => 0,
-        PaneId::B => 1,
+/// Divider orientation. Horizontal places the second child to the right;
+/// vertical places it below the first child.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SplitAxis {
+    Horizontal,
+    Vertical,
+}
+
+impl SplitAxis {
+    pub(crate) fn damascene(self) -> Axis {
+        match self {
+            SplitAxis::Horizontal => Axis::Row,
+            SplitAxis::Vertical => Axis::Column,
+        }
     }
+}
+
+/// Stable identity for one internal split. Its key survives changes elsewhere
+/// in the tree, which lets nested divider drags route independently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SplitId(u8);
+
+impl SplitId {
+    fn new(index: u8) -> SplitId {
+        SplitId(index)
+    }
+
+    pub(crate) fn handle_key(self) -> &'static str {
+        const KEYS: [&str; MAX_PANES - 1] = [
+            "pane:split",
+            "pane:split:1",
+            "pane:split:2",
+            "pane:split:3",
+            "pane:split:4",
+        ];
+        KEYS[self.0 as usize]
+    }
+
+    pub(crate) fn container_key(self) -> &'static str {
+        const KEYS: [&str; MAX_PANES - 1] = [
+            "pane:split-row",
+            "pane:split-row:1",
+            "pane:split-row:2",
+            "pane:split-row:3",
+            "pane:split-row:4",
+        ];
+        KEYS[self.0 as usize]
+    }
+}
+
+/// One node in the recursive layout tree.
+#[derive(Clone, Debug)]
+pub enum PaneNode {
+    Leaf(PaneId),
+    Split {
+        id: SplitId,
+        axis: SplitAxis,
+        weights: [f32; 2],
+        drag: ResizeWeightsDrag,
+        first: Box<PaneNode>,
+        second: Box<PaneNode>,
+    },
+}
+
+impl PaneNode {
+    fn leaf_count(&self) -> usize {
+        match self {
+            PaneNode::Leaf(_) => 1,
+            PaneNode::Split { first, second, .. } => first.leaf_count() + second.leaf_count(),
+        }
+    }
+
+    fn collect_leaves(&self, out: &mut Vec<PaneId>) {
+        match self {
+            PaneNode::Leaf(id) => out.push(*id),
+            PaneNode::Split { first, second, .. } => {
+                first.collect_leaves(out);
+                second.collect_leaves(out);
+            }
+        }
+    }
+
+    fn first_leaf(&self) -> PaneId {
+        match self {
+            PaneNode::Leaf(id) => *id,
+            PaneNode::Split { first, .. } => first.first_leaf(),
+        }
+    }
+
+    fn split_leaf(&mut self, source: PaneId, new: PaneId, split: SplitId, axis: SplitAxis) -> bool {
+        match self {
+            PaneNode::Leaf(id) if *id == source => {
+                *self = PaneNode::Split {
+                    id: split,
+                    axis,
+                    weights: [1.0, 1.0],
+                    drag: ResizeWeightsDrag::default(),
+                    first: Box::new(PaneNode::Leaf(source)),
+                    second: Box::new(PaneNode::Leaf(new)),
+                };
+                true
+            }
+            PaneNode::Leaf(_) => false,
+            PaneNode::Split { first, second, .. } => {
+                first.split_leaf(source, new, split, axis)
+                    || second.split_leaf(source, new, split, axis)
+            }
+        }
+    }
+
+    fn close_leaf(&mut self, target: PaneId) -> Option<PaneId> {
+        let PaneNode::Split { first, second, .. } = self else {
+            return None;
+        };
+        if matches!(first.as_ref(), PaneNode::Leaf(id) if *id == target) {
+            let focus = second.first_leaf();
+            *self = (**second).clone();
+            return Some(focus);
+        }
+        if matches!(second.as_ref(), PaneNode::Leaf(id) if *id == target) {
+            let focus = first.first_leaf();
+            *self = (**first).clone();
+            return Some(focus);
+        }
+        first
+            .close_leaf(target)
+            .or_else(|| second.close_leaf(target))
+    }
+
+    fn collect_splits(&self, out: &mut Vec<SplitId>) {
+        if let PaneNode::Split {
+            id, first, second, ..
+        } = self
+        {
+            out.push(*id);
+            first.collect_splits(out);
+            second.collect_splits(out);
+        }
+    }
+
+    pub(crate) fn split_mut(
+        &mut self,
+        target: SplitId,
+    ) -> Option<(SplitAxis, &mut [f32; 2], &mut ResizeWeightsDrag)> {
+        match self {
+            PaneNode::Leaf(_) => None,
+            PaneNode::Split {
+                id,
+                axis,
+                weights,
+                drag,
+                first,
+                second,
+            } => {
+                if *id == target {
+                    Some((*axis, weights, drag))
+                } else {
+                    first.split_mut(target).or_else(|| second.split_mut(target))
+                }
+            }
+        }
+    }
+}
+
+/// The whole recursive pane layout. The default is byte-for-byte the original
+/// board | schematic split geometry: row axis, equal weights, original keys.
+#[derive(Clone, Debug)]
+pub struct PaneTree {
+    pub(crate) root: PaneNode,
+}
+
+impl Default for PaneTree {
+    fn default() -> Self {
+        PaneTree {
+            root: PaneNode::Split {
+                id: SplitId::new(0),
+                axis: SplitAxis::Horizontal,
+                weights: [1.0, 1.0],
+                drag: ResizeWeightsDrag::default(),
+                first: Box::new(PaneNode::Leaf(PaneId::A)),
+                second: Box::new(PaneNode::Leaf(PaneId::B)),
+            },
+        }
+    }
+}
+
+impl PaneTree {
+    pub fn leaf_count(&self) -> usize {
+        self.root.leaf_count()
+    }
+
+    pub fn leaves(&self) -> Vec<PaneId> {
+        let mut out = Vec::with_capacity(self.leaf_count());
+        self.root.collect_leaves(&mut out);
+        out
+    }
+
+    pub(crate) fn split_ids(&self) -> Vec<SplitId> {
+        let mut out = Vec::with_capacity(self.leaf_count().saturating_sub(1));
+        self.root.collect_splits(&mut out);
+        out
+    }
+
+    pub(crate) fn split_leaf(&mut self, source: PaneId, new: PaneId, axis: SplitAxis) -> bool {
+        if self.leaf_count() >= MAX_PANES {
+            return false;
+        }
+        let used = self.split_ids();
+        let Some(index) = (0..MAX_PANES - 1).find(|index| !used.contains(&SplitId(*index as u8)))
+        else {
+            return false;
+        };
+        self.root
+            .split_leaf(source, new, SplitId::new(index as u8), axis)
+    }
+
+    /// Remove a leaf and collapse its parent to the sibling subtree. Returns
+    /// the sibling leaf that should receive focus.
+    pub(crate) fn close_leaf(&mut self, target: PaneId) -> Option<PaneId> {
+        (self.leaf_count() > 1)
+            .then(|| self.root.close_leaf(target))
+            .flatten()
+    }
+}
+
+/// A pane index into stable slot storage.
+pub(crate) fn pane_index(p: PaneId) -> usize {
+    p.index()
 }
 
 impl EutecticApp {
@@ -196,8 +438,7 @@ impl EutecticApp {
     /// cancels the old anchor before the new pane can update its cursor.
     pub(crate) fn claim_measure_pane(&self, pane: PaneId) {
         let previous = self.measure_pane.get();
-        let panes = self.panes.borrow();
-        if panes[pane_index(previous)].view != panes[pane_index(pane)].view {
+        if self.pane_view(previous) != self.pane_view(pane) {
             self.measure.set(MeasureState::default());
         }
         self.measure_pane.set(pane);
@@ -213,12 +454,13 @@ impl EutecticApp {
     /// owned by that kind; board changes also cancel route/refinement previews.
     pub fn set_tool(&self, kind: ViewKind, tool: Tool) {
         if self.tool_for(kind) != tool {
-            let measure_kind = self.panes.borrow()[pane_index(self.measure_pane.get())].view;
+            let measure_kind = self.pane_view(self.measure_pane.get());
             if measure_kind == kind {
                 self.measure.set(MeasureState::default());
             }
             if kind == ViewKind::Board {
                 *self.route.borrow_mut() = None;
+                self.route_pane.set(None);
                 *self.trace_drag.borrow_mut() = None;
                 self.clear_place_cursor();
                 if tool != Tool::Place {
@@ -233,13 +475,15 @@ impl EutecticApp {
 
     /// The focused pane's view-kind tool without changing either kind's memory.
     pub fn live_tool(&self) -> Tool {
-        let kind = self.panes.borrow()[pane_index(self.focused_pane.get())].view;
+        let kind = self.pane_view(self.focused_pane.get());
         self.tool_for(kind)
     }
 }
 
-/// The event-route key of the dual/stacked layout toggle button.
-pub(crate) const LAYOUT_TOGGLE_KEY: &str = "layout:toggle";
+/// Focused-pane View menu actions.
+pub(crate) const SPLIT_RIGHT_KEY: &str = "pane:split-right";
+pub(crate) const SPLIT_DOWN_KEY: &str = "pane:split-down";
+pub(crate) const CLOSE_PANE_KEY: &str = "pane:close";
 /// The toolbar Save button key AND the Ctrl+S hotkey action name (m6 save model).
 pub(crate) const SAVE_KEY: &str = "save";
 /// The toolbar Undo button key AND the Ctrl+Z hotkey action name.
@@ -404,10 +648,6 @@ pub(crate) fn finding_index_of_key(route: &str) -> Option<usize> {
     route.strip_prefix(FINDINGS_ROW_PREFIX)?.parse().ok()
 }
 
-/// The key of the pane-split resize handle + the split row/column (for `rect_of_key`).
-pub(crate) const SPLIT_HANDLE_KEY: &str = "pane:split";
-pub(crate) const SPLIT_ROW_KEY: &str = "pane:split-row";
-
 /// The dark canvas background behind the board — an ECAD-dark near-black.
 pub(crate) const CANVAS_BG: Color = Color::srgb_token("eutectic.canvas.bg", 0x12, 0x14, 0x18, 0xff);
 
@@ -433,16 +673,13 @@ pub(crate) fn active_layer_of_key(route: &str) -> Option<&str> {
 }
 
 /// Is this event target inside a pane canvas? On the owned canvas every
-/// pane's interior is ONE keyed container (`canvas:a` / `canvas:b`) — the
+/// pane's interior is ONE stable keyed container (`canvas:a` … `canvas:f`) — the
 /// viewport-era child Els (`layer:*` / `overlay:*` / `grid:*` /
 /// `schematic:*`) died with the viewport path (WP3), so those keys no longer
 /// occur in the tree. Chrome (toolbar, sidebar, pane headers) is not a
 /// canvas hit.
 pub(crate) fn is_canvas_target(target: Option<&str>) -> bool {
-    match target {
-        Some(k) => k == PaneId::A.canvas_key() || k == PaneId::B.canvas_key(),
-        None => false,
-    }
+    target.is_some_and(|key| PaneId::all_slots().any(|pane| key == pane.canvas_key()))
 }
 
 /// A pane's empty-state placeholder (no board / no schematic to display), filling the

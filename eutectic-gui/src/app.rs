@@ -10,8 +10,8 @@
 //!
 //! - [`domain`] — [`DomainState`] / [`LibSource`] + elaboration/reload plumbing and
 //!   the revised-keyed derived-cache bundle (`DerivedCaches`, `BoardView`, `DocStats`).
-//! - [`pane`] — [`ViewKind`] / [`PaneLayout`] / [`PaneId`] / [`PaneState`], pane/layout
-//!   state, and the shared key vocabulary + canvas-target predicate + placeholders.
+//! - [`pane`] — [`ViewKind`] / [`PaneId`] / [`PaneState`] plus the recursive split
+//!   tree, and the shared key vocabulary + canvas-target predicate + placeholders.
 //! - [`libraries`] — the Libraries modal (UI + event handling + registry editing).
 //! - [`editing`] — the m6 editing engine: reload / undo / redo source transitions,
 //!   the command-commit path, the save model, and the route-commit lowering.
@@ -42,7 +42,7 @@ pub(crate) mod place;
 mod tests;
 
 pub use domain::{DomainState, LibSource};
-pub use pane::{PaneId, PaneLayout, PaneState, ViewKind};
+pub use pane::{PaneId, PaneState, PaneTree, SplitAxis, ViewKind};
 
 // The `EutecticApp` struct fields + `EutecticApp::new`/reload impl reference the derived-cache
 // bundle and the Libraries UI state that were moved to submodules.
@@ -50,7 +50,7 @@ use crate::palette::PaletteUi;
 use crate::panels::library_browser::LibraryBrowserUi;
 use domain::DerivedCaches;
 use libraries::{LibRow, LibUi};
-use pane::{SectionOpen, SidebarSection};
+use pane::{MAX_PANES, SectionOpen, SidebarSection, pane_index};
 use place::ArmedPart;
 // The tests (a child module using `super::*`) reach these moved items through the
 // facade — keep their old flat paths available. Pure code motion: nothing is renamed.
@@ -60,8 +60,8 @@ pub(crate) use libraries::{
 };
 #[cfg(test)]
 pub(crate) use pane::{
-    CONFLICT_KEEP_KEY, CONFLICT_RELOAD_KEY, LAYOUT_TOGGLE_KEY, REDO_KEY, SAVE_KEY, UNDO_KEY,
-    finding_row_key, pane_index,
+    CLOSE_PANE_KEY, CONFLICT_KEEP_KEY, CONFLICT_RELOAD_KEY, REDO_KEY, SAVE_KEY, SPLIT_DOWN_KEY,
+    SPLIT_RIGHT_KEY, UNDO_KEY, finding_row_key,
 };
 
 use crate::findings::Findings;
@@ -163,20 +163,13 @@ use eutectic_core::id::NetId;
 /// [`new`]: EutecticApp::new
 pub struct EutecticApp {
     pub domain: DomainState,
-    /// The two panes (A, B). Milestone 4's split. Defaults to board | schematic. `RefCell`
-    /// because the view-switcher / maximize / initial-fit flips fields in `on_event` /
-    /// `before_build` and reads them in `build`.
-    pub(crate) panes: RefCell<[PaneState; 2]>,
-    /// The two-pane orientation (dual / stacked).
-    pub(crate) layout: Cell<PaneLayout>,
-    /// Which pane, if any, is maximized (the other is hidden). `None` ⇒ the normal split.
+    /// Stable pane slots. A closed leaf leaves `None`; a later split may reuse
+    /// that slot without renumbering any survivor.
+    pub(crate) panes: RefCell<Vec<Option<PaneState>>>,
+    /// Recursive H/V layout over the occupied pane slots.
+    pub(crate) pane_tree: RefCell<PaneTree>,
+    /// Which pane, if any, is maximized (all other leaves hidden).
     pub(crate) maximized: Cell<Option<PaneId>>,
-    /// The split weights `[a, b]` for the resize handle, and its in-flight drag.
-    pub(crate) split_weights: Cell<[f32; 2]>,
-    pub(crate) split_drag: RefCell<ResizeWeightsDrag>,
-    /// The measured split-container main extent (px), captured each frame for the weighted
-    /// resize handler (the README idiom).
-    pub(crate) split_extent: Cell<f32>,
     /// The derived caches (board projection, schematic projection, explorer rows,
     /// findings) — everything computed *from* the doc. Rebuilt as a unit only when the
     /// doc revision changes (a reload). `RefCell` because [`apply_reload`] swaps the
@@ -255,6 +248,8 @@ pub struct EutecticApp {
     /// only to the overlay; commit lowers to AddTrace/AddVia through
     /// [`commit_route`](Self::commit_route).
     pub(crate) route: RefCell<Option<RouteState>>,
+    /// Pane that owns the pending route preview; closing it cancels the route.
+    pub(crate) route_pane: Cell<Option<PaneId>>,
     /// The Select tool's in-flight trace-vertex refinement drag (m6 slice B):
     /// between pointer-down on a selected trace's vertex/segment and pointer-up
     /// (commit as Remove+Add under the same id) / Esc (cancel).
@@ -265,24 +260,24 @@ pub struct EutecticApp {
     /// app-owned camera snaps to `start_center − Δpx/zoom`; pointer-up disarms
     /// (eating the trailing Click iff the gesture moved).
     pub(crate) camera_pan: RefCell<Option<CameraPanState>>,
-    /// The per-pane app-owned cameras (`[A, B]`) — the owned-canvas camera
-    /// state (glide filter + pending Fit/Reset request), one per pane and
+    /// Per-slot app-owned cameras — the owned-canvas camera state (glide
+    /// filter + pending Fit/Reset request), one per live pane and
     /// shared across view kinds (a view switch resets the pane's `fitted`
     /// flag, so the incoming view re-frames).
-    pub(crate) pane_cams: RefCell<[PaneCam; 2]>,
+    pub(crate) pane_cams: RefCell<Vec<Option<PaneCam>>>,
     /// The GPU bundle (renderer + pane textures + scene buffers), created by
     /// the host's `gpu_setup` seam. `None` on the CPU harness path — the
     /// board pane's `build` never requires a device.
     pub(crate) gpu: RefCell<Option<GpuState>>,
     /// Per-pane canvas rects (window-logical px), captured each `build` from
     /// the last layout for the paint pass + raw-event pane resolution.
-    pub(crate) pane_px: Cell<[Option<PaneRect>; 2]>,
+    pub(crate) pane_px: RefCell<Vec<Option<PaneRect>>>,
     /// Per-pane floating tool-strip rects, captured each `build` — free
     /// hover treats a pointer over the strip as chrome, not canvas.
-    pub(crate) strip_px: Cell<[Option<PaneRect>; 2]>,
+    pub(crate) strip_px: RefCell<Vec<Option<PaneRect>>>,
     /// Per-pane crosshair cursor (pane-local logical px), written by the raw
     /// pointer tap; the renderer draws the §4 crosshair from it.
-    pub(crate) cursor_px: Cell<[Option<(f32, f32)>; 2]>,
+    pub(crate) cursor_px: RefCell<Vec<Option<(f32, f32)>>>,
     /// The window's scale factor (physical px per logical px; fractional
     /// DPI), from the host's raw events / build diagnostics.
     pub(crate) scale_factor: Cell<f32>,
@@ -305,6 +300,9 @@ pub struct EutecticApp {
     /// (`palette::PALETTE_MENU_GATE`) to inherit the raw-input gates keyed off an
     /// open menu — see `set_palette_open`.
     pub(crate) open_menu: RefCell<Option<String>>,
+    /// The pane whose view-kind select is open, if any. Its popover is
+    /// composed at the app root so nested pane clips cannot cut it off.
+    pub(crate) pane_view_menu: Cell<Option<PaneId>>,
     /// App-wide chrome display units (session-only; persistence is out of scope).
     pub(crate) display_units: Cell<DisplayUnits>,
     /// Board procedural-grid style (dots by default, or hairline lines).
@@ -367,15 +365,12 @@ impl EutecticApp {
         };
         EutecticApp {
             domain,
-            panes: RefCell::new([
-                PaneState::new(ViewKind::Board),
-                PaneState::new(ViewKind::Schematic),
+            panes: RefCell::new(vec![
+                Some(PaneState::new(ViewKind::Board)),
+                Some(PaneState::new(ViewKind::Schematic)),
             ]),
-            layout: Cell::new(PaneLayout::Dual),
+            pane_tree: RefCell::new(PaneTree::default()),
             maximized: Cell::new(None),
-            split_weights: Cell::new([1.0, 1.0]),
-            split_drag: RefCell::new(ResizeWeightsDrag::default()),
-            split_extent: Cell::new(0.0),
             derived: RefCell::new(derived),
             hidden: RefCell::new(std::collections::HashSet::new()),
             cursor_board_mm: Cell::new(None),
@@ -403,18 +398,20 @@ impl EutecticApp {
             drag: RefCell::new(None),
             suppress_click: Cell::new(false),
             route: RefCell::new(None),
+            route_pane: Cell::new(None),
             trace_drag: RefCell::new(None),
             camera_pan: RefCell::new(None),
-            pane_cams: RefCell::new([PaneCam::default(), PaneCam::default()]),
+            pane_cams: RefCell::new(vec![Some(PaneCam::default()), Some(PaneCam::default())]),
             gpu: RefCell::new(None),
-            pane_px: Cell::new([None, None]),
-            strip_px: Cell::new([None, None]),
-            cursor_px: Cell::new([None, None]),
+            pane_px: RefCell::new(vec![None, None]),
+            strip_px: RefCell::new(vec![None, None]),
+            cursor_px: RefCell::new(vec![None, None]),
             scale_factor: Cell::new(1.0),
             style_rev: Cell::new(0),
             raw: RefCell::new(RawInput::default()),
             active_layer: RefCell::new(None),
             open_menu: RefCell::new(None),
+            pane_view_menu: Cell::new(None),
             display_units: Cell::new(DisplayUnits::default()),
             grid_style: Cell::new(GridStyle::default()),
             snap_to_grid: Cell::new(true),
@@ -535,16 +532,131 @@ impl EutecticApp {
         self.derived.borrow().schematic_scene.is_some()
     }
 
-    /// Set both panes' view kinds — for fixtures that want a canned pane arrangement.
-    pub fn set_pane_views(&self, a: ViewKind, b: ViewKind) {
-        let mut panes = self.panes.borrow_mut();
-        panes[0].view = a;
-        panes[1].view = b;
+    /// Live leaves in visual tree order.
+    pub fn pane_ids(&self) -> Vec<PaneId> {
+        self.pane_tree.borrow().leaves()
     }
 
-    /// Set the pane layout (dual / stacked) — for fixtures.
-    pub fn set_layout(&self, layout: PaneLayout) {
-        self.layout.set(layout);
+    /// The view kind stored in a live pane slot.
+    pub(crate) fn pane_view(&self, pane: PaneId) -> ViewKind {
+        self.panes.borrow()[pane_index(pane)]
+            .as_ref()
+            .expect("pane id must name a live leaf")
+            .view
+    }
+
+    pub(crate) fn pane_count(&self) -> usize {
+        self.pane_tree.borrow().leaf_count()
+    }
+
+    /// Split one leaf, inheriting its view state and exact camera into a newly
+    /// allocated stable slot. Returns the new pane id, or `None` at the cap or
+    /// for a stale source id.
+    pub(crate) fn split_pane(&self, source: PaneId, axis: SplitAxis) -> Option<PaneId> {
+        if self.pane_count() >= MAX_PANES {
+            return None;
+        }
+        let (slot, state) = {
+            let panes = self.panes.borrow();
+            let state = panes.get(pane_index(source))?.as_ref()?.clone();
+            let slot = panes
+                .iter()
+                .position(Option::is_none)
+                .unwrap_or(panes.len());
+            (slot, state)
+        };
+        let pane = PaneId::from_index(slot)?;
+        if !self.pane_tree.borrow_mut().split_leaf(source, pane, axis) {
+            return None;
+        }
+
+        let source_cam = self.pane_cams.borrow()[pane_index(source)].expect("source camera");
+        let mut panes = self.panes.borrow_mut();
+        if slot == panes.len() {
+            panes.push(Some(state));
+            self.pane_cams.borrow_mut().push(Some(source_cam));
+            self.pane_px.borrow_mut().push(None);
+            self.strip_px.borrow_mut().push(None);
+            self.cursor_px.borrow_mut().push(None);
+        } else {
+            panes[slot] = Some(state);
+            self.pane_cams.borrow_mut()[slot] = Some(source_cam);
+            self.pane_px.borrow_mut()[slot] = None;
+            self.strip_px.borrow_mut()[slot] = None;
+            self.cursor_px.borrow_mut()[slot] = None;
+        }
+        drop(panes);
+        self.allocate_pane_gpu(pane);
+        self.maximized.set(None);
+        self.focused_pane.set(pane);
+        Some(pane)
+    }
+
+    /// Close one leaf, collapse its parent, free only its stable slot, and
+    /// move focus to the sibling when the closed pane owned focus.
+    pub(crate) fn close_pane(&self, pane: PaneId) -> bool {
+        let Some(sibling) = self.pane_tree.borrow_mut().close_leaf(pane) else {
+            return false;
+        };
+        self.panes.borrow_mut()[pane_index(pane)] = None;
+        self.pane_cams.borrow_mut()[pane_index(pane)] = None;
+        self.pane_px.borrow_mut()[pane_index(pane)] = None;
+        self.strip_px.borrow_mut()[pane_index(pane)] = None;
+        self.cursor_px.borrow_mut()[pane_index(pane)] = None;
+        self.free_pane_gpu(pane);
+
+        if self.focused_pane.get() == pane {
+            self.focused_pane.set(sibling);
+        }
+        if self.maximized.get() == Some(pane) {
+            self.maximized.set(None);
+        }
+        if self.pane_view_menu.get() == Some(pane) {
+            self.pane_view_menu.set(None);
+        }
+        if self.measure_pane.get() == pane {
+            self.measure.set(MeasureState::default());
+            self.measure_pane.set(sibling);
+        }
+        if self.route_pane.get() == Some(pane) {
+            *self.route.borrow_mut() = None;
+            self.route_pane.set(None);
+        }
+        if self
+            .drag
+            .borrow()
+            .as_ref()
+            .is_some_and(|drag| drag.pane == pane)
+        {
+            *self.drag.borrow_mut() = None;
+        }
+        if self
+            .camera_pan
+            .borrow()
+            .as_ref()
+            .is_some_and(|pan| pan.pane == pane)
+        {
+            *self.camera_pan.borrow_mut() = None;
+        }
+        // Trace refinement currently has no pane-local geometry field; it is
+        // an in-flight preview in the focused board pane, so closure cancels it.
+        *self.trace_drag.borrow_mut() = None;
+        self.raw.borrow_mut().middle_pan = None;
+        if self
+            .place_cursor
+            .get()
+            .is_some_and(|(owner, _)| owner == pane)
+        {
+            self.place_cursor.set(None);
+        }
+        true
+    }
+
+    /// Set the two default leaves' view kinds — for canned review fixtures.
+    pub fn set_pane_views(&self, a: ViewKind, b: ViewKind) {
+        let mut panes = self.panes.borrow_mut();
+        panes[0].as_mut().expect("default pane A").view = a;
+        panes[1].as_mut().expect("default pane B").view = b;
     }
 
     /// Maximize a pane (hide the other) — for fixtures.

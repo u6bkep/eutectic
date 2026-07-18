@@ -1,7 +1,7 @@
 //! Command palette: fuzzy jump-to results plus a data-driven app command registry.
 
 use crate::app::canvas_pane::CamRequest;
-use crate::app::pane::{SidebarSection, pane_index};
+use crate::app::pane::SidebarSection;
 use crate::app::{EutecticApp, PaneId, ViewKind};
 use crate::explorer::component_display;
 use crate::pick::{LayerId, SemanticId};
@@ -346,7 +346,7 @@ impl EutecticApp {
         match action {
             PaletteAction::Jump(id) => self.jump_to(id),
             PaletteAction::FitView => {
-                for pane in [PaneId::A, PaneId::B] {
+                for pane in self.pane_ids() {
                     self.request_pane_cam(pane, CamRequest::Fit);
                 }
             }
@@ -369,19 +369,13 @@ impl EutecticApp {
     fn jump_to(&self, id: SemanticId) {
         self.domain.selection.borrow_mut().select_only(id.clone());
         let focused = self.focused_pane.get();
-        let candidates = [
-            focused,
-            if focused == PaneId::A {
-                PaneId::B
-            } else {
-                PaneId::A
-            },
-        ];
+        let mut candidates = self.pane_ids();
+        candidates.sort_by_key(|pane| *pane != focused);
         for pane in candidates {
             if !self.pane_is_visible(pane) {
                 continue;
             }
-            let kind = self.panes.borrow()[pane_index(pane)].view;
+            let kind = self.pane_view(pane);
             let center = match kind {
                 ViewKind::Board => self.board_semantic_center(&id),
                 ViewKind::Schematic => self.schematic_semantic_center(&id),

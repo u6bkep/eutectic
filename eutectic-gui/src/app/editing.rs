@@ -26,9 +26,7 @@ impl EutecticApp {
         if self.handle_inspector_event(event) {
             return true;
         }
-        let board_focused =
-            self.panes.borrow()[crate::app::pane::pane_index(self.focused_pane.get())].view
-                == crate::app::ViewKind::Board;
+        let board_focused = self.pane_view(self.focused_pane.get()) == crate::app::ViewKind::Board;
         if !board_focused {
             return false;
         }
@@ -36,7 +34,8 @@ impl EutecticApp {
         let modal_chrome_open = self.libraries_open.get()
             || self.chrome_dialog.get().is_some()
             || self.palette_open.get()
-            || self.open_menu.borrow().is_some();
+            || self.open_menu.borrow().is_some()
+            || self.pane_view_menu.get().is_some();
         if event.is_click_or_activate(crate::chrome::menubar::DELETE_KEY)
             || (!modal_chrome_open && window_key == Some(WindowDirectManipKey::Delete))
         {
@@ -392,6 +391,7 @@ impl EutecticApp {
                 // — ids round-trip — but candidate indices do not.)
                 *self.drag.borrow_mut() = None;
                 *self.route.borrow_mut() = None;
+                self.route_pane.set(None);
                 *self.trace_drag.borrow_mut() = None;
                 true
             }
@@ -683,6 +683,7 @@ impl EutecticApp {
             return;
         }
         let route = self.route.borrow_mut().take().expect("checked above");
+        self.route_pane.set(None);
         let (width, drill, pad) = route_defaults();
         let (cmds, first_tid) = {
             let Ok(doc) = &self.domain.doc else {
@@ -781,6 +782,7 @@ impl EutecticApp {
             r.hover(c);
         }
         *self.route.borrow_mut() = Some(r);
+        self.route_pane.set(Some(self.focused_pane.get()));
         true
     }
 

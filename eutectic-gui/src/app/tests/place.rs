@@ -707,7 +707,7 @@ fn board_click_commits_armed_part_and_unarmed_click_is_a_no_op() {
     };
     let px = crate::app::canvas_pane::pane_project(
         &app.pane_camera(PaneId::A),
-        app.pane_px.get()[0].unwrap(),
+        app.pane_px.borrow()[0].unwrap(),
         target,
     );
     let before = app.domain.doc.as_ref().unwrap().components.len();
@@ -810,14 +810,14 @@ fn placement_click_snaps_to_the_displayed_grid_and_raw_when_toggled_off() {
     };
     let px = crate::app::canvas_pane::pane_project(
         &app.pane_camera(PaneId::A),
-        app.pane_px.get()[0].unwrap(),
+        app.pane_px.borrow()[0].unwrap(),
         target,
     );
     // The commit sees the px round-trip of `target` (sub-pixel nm error), so
     // derive expectations from that exact point.
     let roundtrip = crate::app::canvas_pane::pane_unproject(
         &app.pane_camera(PaneId::A),
-        app.pane_px.get()[0].unwrap(),
+        app.pane_px.borrow()[0].unwrap(),
         px,
     );
     let snapped = crate::app::snap_point(roundtrip, pitch);

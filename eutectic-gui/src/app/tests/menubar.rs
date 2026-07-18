@@ -62,7 +62,8 @@ fn fit_row_dispatches_to_the_fit_action() {
 
     app.on_event(click(FIT_KEY), &cx);
     assert!(
-        app.pane_cams.borrow()[0].request == Some(crate::app::canvas_pane::CamRequest::Fit),
+        app.pane_cams.borrow()[0].as_ref().unwrap().request
+            == Some(crate::app::canvas_pane::CamRequest::Fit),
         "the Fit row queued a pane-camera Fit request"
     );
     assert!(app.open_menu.borrow().is_none());

@@ -1,10 +1,9 @@
-//! The pane-tree region — the two-pane split and everything composed inside it:
-//! `viewer_body` (the whole viewer composition), the split + pane headers, the
+//! The pane-tree region — the recursive H/V split tree and everything composed
+//! inside it: `viewer_body` (the whole viewer composition), pane headers, the
 //! board / schematic canvas pane wrappers with their floating tool strips
 //! ([`strip`]), the per-frame board overlay builder, the shared cross-view
 //! highlight projection, and the conflict banner. Moved out of `app/panels.rs`
-//! as pure code motion (gui-module-split); this is the region a future
-//! split-tree rework will own.
+//! as pure code motion (gui-module-split).
 //!
 //! OWNED CANVAS (WP2 board, WP3 schematic): every pane runs on the
 //! app-rendered `surface(AppTexture)` path — one view-generic builder
@@ -16,10 +15,11 @@ pub(crate) mod strip;
 
 use crate::app::canvas_pane::Overlay;
 use crate::app::pane::{
-    CANVAS_BG, CONFLICT_KEEP_KEY, CONFLICT_RELOAD_KEY, SPLIT_HANDLE_KEY, SPLIT_ROW_KEY, pane_index,
+    CANVAS_BG, CONFLICT_KEEP_KEY, CONFLICT_RELOAD_KEY, MAX_PANES, PaneNode, pane_index,
     pane_placeholder,
 };
-use crate::app::{EutecticApp, PaneId, PaneLayout, ViewKind};
+use crate::app::{EutecticApp, PaneId, ViewKind};
+use crate::chrome::icons;
 use crate::findings::Findings;
 use crate::pick::SemanticId;
 use crate::tool::Tool;
@@ -27,13 +27,13 @@ use damascene_core::prelude::*;
 use eutectic_core::id::NetId;
 
 impl EutecticApp {
-    /// The viewer body: the toolbar, the two-pane split (center), the right sidebar
+    /// The viewer body: the split tree (center), the right sidebar
     /// (inspector + explorer + layer panel), and the status bar. Reached when the doc
     /// loaded (at least one pane always renders — a board pane falls back to a placeholder
     /// if its projection failed, a schematic pane if the doc has no components).
     pub(crate) fn viewer_body(&self, cx: &BuildCx) -> El {
-        // The active board pane's zoom drives the toolbar/status readout (whichever pane A
-        // shows a board, else pane B, else 1.0). The cursor readout is set per event.
+        // The first live board pane's zoom drives the toolbar/status readout.
+        // The cursor readout is set per event.
         let zoom = self.readout_zoom();
 
         let split = self.pane_split(cx);
@@ -97,41 +97,53 @@ impl EutecticApp {
     /// legacy px-per-mm scale), else 1.0. Board panes no longer consult
     /// `cx.viewport_view` (WP2: they left the viewport system).
     fn readout_zoom(&self) -> f32 {
-        let panes = self.panes.borrow();
-        for (i, p) in panes.iter().enumerate() {
-            if p.view == ViewKind::Board {
-                let id = if i == 0 { PaneId::A } else { PaneId::B };
+        for id in self.pane_ids() {
+            if self.pane_view(id) == ViewKind::Board {
                 return crate::app::canvas_pane::zoom_px_per_mm(&self.pane_camera(id));
             }
         }
         1.0
     }
 
-    /// The two-pane split (dual = row, stacked = column), with a draggable resize handle
-    /// between the panes — or, when a pane is maximized, that one pane full-bleed.
+    /// The recursive split tree, or one full-bleed leaf while maximized.
     fn pane_split(&self, cx: &BuildCx) -> El {
         if let Some(max) = self.maximized.get() {
             return self.pane_el(cx, max);
         }
-        let a = self.pane_el(cx, PaneId::A);
-        let b = self.pane_el(cx, PaneId::B);
-        let axis = match self.layout.get() {
-            PaneLayout::Dual => Axis::Row,
-            PaneLayout::Stacked => Axis::Column,
-        };
-        let w = self.split_weights.get();
-        let a = a.width(Size::Fill(w[0])).height(Size::Fill(w[0]));
-        let b = b.width(Size::Fill(w[1])).height(Size::Fill(w[1]));
-        let children = [a, resize_handle(SPLIT_HANDLE_KEY, axis), b];
-        let container = match self.layout.get() {
-            PaneLayout::Dual => row(children),
-            PaneLayout::Stacked => column(children),
-        };
-        container
-            .key(SPLIT_ROW_KEY)
-            .gap(tokens::SPACE_2)
-            .width(Size::Fill(1.0))
-            .height(Size::Fill(1.0))
+        self.pane_node_el(cx, &self.pane_tree.borrow().root)
+    }
+
+    fn pane_node_el(&self, cx: &BuildCx, node: &PaneNode) -> El {
+        match node {
+            PaneNode::Leaf(pane) => self.pane_el(cx, *pane),
+            PaneNode::Split {
+                id,
+                axis,
+                weights,
+                first,
+                second,
+                ..
+            } => {
+                let a = self
+                    .pane_node_el(cx, first)
+                    .width(Size::Fill(weights[0]))
+                    .height(Size::Fill(weights[0]));
+                let b = self
+                    .pane_node_el(cx, second)
+                    .width(Size::Fill(weights[1]))
+                    .height(Size::Fill(weights[1]));
+                let children = [a, resize_handle(id.handle_key(), axis.damascene()), b];
+                let container = match axis {
+                    crate::app::SplitAxis::Horizontal => row(children),
+                    crate::app::SplitAxis::Vertical => column(children),
+                };
+                container
+                    .key(id.container_key())
+                    .gap(tokens::SPACE_2)
+                    .width(Size::Fill(1.0))
+                    .height(Size::Fill(1.0))
+            }
+        }
     }
 
     /// One pane: a header row (view-kind label + switcher + maximize toggle) over the
@@ -139,7 +151,7 @@ impl EutecticApp {
     /// overlaid top-left inside the canvas (UI-oracle anatomy). Fill in both axes so
     /// the split weights govern its size.
     fn pane_el(&self, cx: &BuildCx, pane: PaneId) -> El {
-        let view = self.panes.borrow()[pane_index(pane)].view;
+        let view = self.pane_view(pane);
         let canvas = self.canvas_pane_el(cx, pane, view);
         // Stack the strip over the canvas: the strip layer hugs its own rect at
         // the stack's top-left, so pointer events outside it fall through to the
@@ -153,30 +165,56 @@ impl EutecticApp {
             .height(Size::Fill(1.0))
     }
 
-    /// A pane header (mockup anatomy): the view-kind switcher (a segmented control of
-    /// toggle buttons, the active one filled) and a maximize toggle on the right.
+    /// A pane header: view-kind dropdown, split-right/down, close, and
+    /// maximize. Split/close availability is structural.
     fn pane_header(&self, pane: PaneId, view: ViewKind) -> El {
-        let switch_buttons: Vec<El> = ViewKind::all()
-            .into_iter()
-            .map(|v| {
-                let b = button(v.label()).key(pane.switch_key(v));
-                if v == view { b.primary() } else { b }
-            })
-            .collect();
         let max_label = if self.maximized.get() == Some(pane) {
             "Restore"
         } else {
             "Maximize"
         };
+        let can_split = self.pane_count() < MAX_PANES;
+        let can_close = self.pane_count() > 1;
+        let split_right = icon_button(icons::SPLIT_RIGHT.clone());
+        let split_down = icon_button(icons::SPLIT_DOWN.clone());
+        let close = icon_button("x");
         toolbar([
-            row(switch_buttons).gap(tokens::SPACE_1),
-            spacer(),
-            button(max_label).key(pane.maximize_key()),
+            select_trigger(pane.view_select_key(), view.label()).width(Size::Fill(1.0)),
+            if can_split {
+                split_right
+                    .tooltip("Split right")
+                    .key(pane.split_right_key())
+            } else {
+                split_right.disabled()
+            },
+            if can_split {
+                split_down.tooltip("Split down").key(pane.split_down_key())
+            } else {
+                split_down.disabled()
+            },
+            if can_close {
+                close.tooltip("Close pane").key(pane.close_key())
+            } else {
+                close.disabled()
+            },
+            icon_button(icons::FIT.clone())
+                .tooltip(max_label)
+                .key(pane.maximize_key()),
         ])
-        .gap(tokens::SPACE_2)
+        .gap(tokens::SPACE_1)
         .padding(Sides::xy(tokens::SPACE_2, tokens::SPACE_1))
         .width(Size::Fill(1.0))
         .height(Size::Hug)
+    }
+
+    /// Root-level view-kind dropdown for the currently open pane header.
+    pub(crate) fn pane_view_overlay(&self) -> Option<El> {
+        let pane = self.pane_view_menu.get()?;
+        self.panes.borrow().get(pane_index(pane))?.as_ref()?;
+        Some(select_menu(
+            pane.view_select_key(),
+            ViewKind::all().map(|view| (view.token(), view.label())),
+        ))
     }
 
     /// A pane's canvas (owned canvas, WP2+WP3): one keyed container holding
@@ -210,17 +248,12 @@ impl EutecticApp {
         if let Some(d) = cx.diagnostics() {
             self.scale_factor.set(d.scale_factor);
         }
-        let i = pane_index(pane);
         let key = pane.canvas_key();
         let rect = cx.rect_of_key(key).map(|r| (r.x, r.y, r.w, r.h));
-        let mut rects = self.pane_px.get();
-        rects[i] = rect;
-        self.pane_px.set(rects);
-        let mut strips = self.strip_px.get();
-        strips[i] = cx
+        self.pane_px.borrow_mut()[pane_index(pane)] = rect;
+        self.strip_px.borrow_mut()[pane_index(pane)] = cx
             .rect_of_key(pane.strip_panel_key())
             .map(|r| (r.x, r.y, r.w, r.h));
-        self.strip_px.set(strips);
 
         // Settle this pane's camera for the frame: fit-on-first-show plus
         // any pending Fit/Reset request, against the known rect.

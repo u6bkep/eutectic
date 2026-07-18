@@ -807,10 +807,7 @@ fn runtime_delete_and_r_are_inert_with_schematic_pane_focused() {
         .borrow_mut()
         .select_only(SemanticId::Part(c1.clone()));
     app.focused_pane.set(PaneId::B);
-    assert_eq!(
-        app.panes.borrow()[pane_index(PaneId::B)].view,
-        ViewKind::Schematic
-    );
+    assert_eq!(app.pane_view(PaneId::B), ViewKind::Schematic);
     let mut runtime = RunnerCore::new();
     runtime.set_hotkeys(app.hotkeys());
 

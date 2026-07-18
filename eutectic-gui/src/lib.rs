@@ -28,8 +28,8 @@ pub mod selection;
 pub mod tool;
 
 pub use app::{
-    DisplayUnits, DomainState, EutecticApp, GridStyle, LibSource, PaneId, PaneLayout, PaneState,
-    ViewKind,
+    DisplayUnits, DomainState, EutecticApp, GridStyle, LibSource, PaneId, PaneState, PaneTree,
+    SplitAxis, ViewKind,
 };
 pub use registry::{LibNote, Registry};
 pub use reload::{SourceMailbox, SourceMsg};

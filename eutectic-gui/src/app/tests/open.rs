@@ -26,18 +26,15 @@ fn ctrl_o_uses_injected_mailbox_and_fresh_open_resets_workspace() {
         Arc::new(|| {}),
         watch_tx,
     );
-    app.set_layout(PaneLayout::Stacked);
+    app.split_pane(PaneId::B, SplitAxis::Vertical);
     app.set_maximized(Some(PaneId::B));
-    app.split_weights.set([3.0, 1.0]);
-    app.split_drag.borrow_mut().anchor = Some(42.0);
-    app.split_drag.borrow_mut().initial = [3.0, 1.0];
-    app.split_extent.set(900.0);
     app.focused_pane.set(PaneId::B);
-    app.pane_cams.borrow_mut()[0].glide = crate::render::CameraGlide::new(
+    app.pane_cams.borrow_mut()[0].as_mut().unwrap().glide = crate::render::CameraGlide::new(
         crate::render::Camera::new((9_000_000.0, 8_000_000.0), 2e-5),
     );
-    app.pane_cams.borrow_mut()[0].request = Some(crate::app::canvas_pane::CamRequest::Fit);
-    app.pane_cams.borrow_mut()[1].glide = crate::render::CameraGlide::new(
+    app.pane_cams.borrow_mut()[0].as_mut().unwrap().request =
+        Some(crate::app::canvas_pane::CamRequest::Fit);
+    app.pane_cams.borrow_mut()[1].as_mut().unwrap().glide = crate::render::CameraGlide::new(
         crate::render::Camera::new((7_000_000.0, 6_000_000.0), 3e-5),
     );
     app.hidden.borrow_mut().insert("layer:F.Cu".to_string());
@@ -48,7 +45,7 @@ fn ctrl_o_uses_injected_mailbox_and_fresh_open_resets_workspace() {
     app.measure_pane.set(PaneId::B);
     app.set_active_layer("B.Cu");
     app.cursor_board_mm.set(Some((1.0, 2.0)));
-    app.cursor_px.set([Some((3.0, 4.0)), Some((5.0, 6.0))]);
+    *app.cursor_px.borrow_mut() = vec![Some((3.0, 4.0)), Some((5.0, 6.0)), None];
     {
         let mut raw = app.raw.borrow_mut();
         raw.cursor = Some((7.0, 8.0));
@@ -79,17 +76,14 @@ fn ctrl_o_uses_injected_mailbox_and_fresh_open_resets_workspace() {
     app.before_build();
 
     assert_eq!(app.domain.source_path.as_deref(), Some(target.as_path()));
-    assert_eq!(app.layout.get(), PaneLayout::Dual);
     assert_eq!(app.maximized.get(), None);
-    assert_eq!(app.split_weights.get(), [1.0, 1.0]);
-    assert_eq!(app.split_drag.borrow().anchor, None);
-    assert_eq!(app.split_drag.borrow().initial, [0.0, 0.0]);
-    assert_eq!(app.split_extent.get(), 0.0);
+    assert_eq!(app.pane_ids(), vec![PaneId::A, PaneId::B]);
     assert_eq!(app.focused_pane.get(), PaneId::A);
     assert_eq!(
         app.panes
             .borrow()
             .iter()
+            .flatten()
             .map(|pane| (pane.view, pane.fitted))
             .collect::<Vec<_>>(),
         [(ViewKind::Board, false), (ViewKind::Schematic, false)]
@@ -106,10 +100,11 @@ fn ctrl_o_uses_injected_mailbox_and_fresh_open_resets_workspace() {
         app.pane_cams
             .borrow()
             .iter()
+            .flatten()
             .all(|camera| camera.request.is_none())
     );
-    assert_eq!(app.pane_px.get(), [None, None]);
-    assert_eq!(app.strip_px.get(), [None, None]);
+    assert_eq!(*app.pane_px.borrow(), vec![None, None]);
+    assert_eq!(*app.strip_px.borrow(), vec![None, None]);
     assert!(app.hidden.borrow().is_empty());
     assert!(app.tools.borrow().is_empty());
     assert_eq!(app.measure.get(), Default::default());
@@ -121,7 +116,7 @@ fn ctrl_o_uses_injected_mailbox_and_fresh_open_resets_workspace() {
     assert!(app.camera_pan.borrow().is_none());
     assert!(app.active_layer.borrow().is_none());
     assert_eq!(app.cursor_board_mm.get(), None);
-    assert_eq!(app.cursor_px.get(), [None, None]);
+    assert_eq!(*app.cursor_px.borrow(), vec![None, None]);
     assert!(app.open_menu.borrow().is_none());
     assert!(!app.recent_open.get());
     assert!(app.explorer_filter.borrow().is_empty());

@@ -145,8 +145,8 @@ fn wheel_over_schematic_zooms_at_cursor() {
     );
     {
         let mut cams = app.pane_cams.borrow_mut();
-        while !cams[0].glide.settled() {
-            cams[0].glide.step(1.0 / 120.0);
+        while !cams[0].as_ref().unwrap().glide.settled() {
+            cams[0].as_mut().unwrap().glide.step(1.0 / 120.0);
         }
     }
     let cam1 = app.pane_camera(PaneId::A);
@@ -167,14 +167,14 @@ fn wheel_over_schematic_zooms_at_cursor() {
 fn middle_drag_pans_schematic_pane() {
     let mut app = schematic_app();
     let rect = (100.0, 50.0, 800.0, 600.0);
-    app.pane_px.set([Some(rect), None]);
+    *app.pane_px.borrow_mut() = vec![Some(rect), None];
     let _ = app.pane_build_camera(PaneId::A, rect);
 
     let start = (rect.0 + 400.0, rect.1 + 300.0);
     app.raw_cursor_moved(start);
     assert_eq!(
-        app.cursor_px.get(),
-        [None, None],
+        *app.cursor_px.borrow(),
+        vec![None, None],
         "no crosshair over a schematic pane"
     );
     assert!(app.raw_middle(true), "middle press arms over the pane");
@@ -193,7 +193,7 @@ fn middle_drag_pans_schematic_pane() {
 fn schematic_free_hover_picks_symbols() {
     let mut app = schematic_app();
     let rect = (100.0, 50.0, 800.0, 600.0);
-    app.pane_px.set([Some(rect), None]);
+    *app.pane_px.borrow_mut() = vec![Some(rect), None];
     let _ = app.pane_build_camera(PaneId::A, rect);
 
     let cam = app.pane_camera(PaneId::A);

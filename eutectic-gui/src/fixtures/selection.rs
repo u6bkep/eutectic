@@ -3,7 +3,7 @@
 //! Moved verbatim from `fixtures.rs` (gui-module-split).
 
 use super::board_domain;
-use crate::app::{DomainState, EutecticApp, PaneId, PaneLayout, ViewKind};
+use crate::app::{DomainState, EutecticApp, PaneId, SplitAxis, ViewKind};
 
 // ---------------------------------------------------------------------------
 // Milestone-3 scenes: a board with a trace selected (overlay + populated
@@ -110,21 +110,20 @@ fn select_cross_net(app: &EutecticApp) {
     }
 }
 
-/// Dual layout (board | schematic) with a NET selected — the cross-highlight is visible in
+/// Default layout (board | schematic) with a NET selected — the cross-highlight is visible in
 /// both panes' overlays. The headline milestone-4 scene.
 pub fn dual_cross_highlight() -> EutecticApp {
     let app = EutecticApp::new(schematic_domain());
     app.set_pane_views(ViewKind::Board, ViewKind::Schematic);
-    app.set_layout(PaneLayout::Dual);
     select_cross_net(&app);
     app
 }
 
-/// Stacked layout (board over schematic), net selected — the stacked-orientation scene.
-pub fn stacked_layout() -> EutecticApp {
+/// A nested down-split on the schematic leaf, with the inherited kind visible.
+pub fn split_down_layout() -> EutecticApp {
     let app = EutecticApp::new(schematic_domain());
     app.set_pane_views(ViewKind::Board, ViewKind::Schematic);
-    app.set_layout(PaneLayout::Stacked);
+    app.split_pane(PaneId::B, SplitAxis::Vertical);
     select_cross_net(&app);
     app
 }

@@ -30,7 +30,7 @@ fn set_zoom(app: &EutecticApp, zoom: f64) {
 
 fn set_pane_zoom(app: &EutecticApp, pane: PaneId, zoom: f64) {
     let mut cameras = app.pane_cams.borrow_mut();
-    let glide = &mut cameras[pane_index(pane)].glide;
+    let glide = &mut cameras[pane_index(pane)].as_mut().unwrap().glide;
     glide.snap(Camera::new(glide.current().center, zoom));
 }
 

@@ -337,8 +337,8 @@ fn wheel_over_board_zooms_at_cursor_and_is_consumed() {
     // Settle the glide and re-check the anchor.
     {
         let mut cams = app.pane_cams.borrow_mut();
-        while !cams[0].glide.settled() {
-            cams[0].glide.step(1.0 / 120.0);
+        while !cams[0].as_ref().unwrap().glide.settled() {
+            cams[0].as_mut().unwrap().glide.step(1.0 / 120.0);
         }
     }
     let cam1 = app.pane_camera(PaneId::A);

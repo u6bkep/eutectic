@@ -12,7 +12,7 @@
 //! `IconSource::UnknownName`), so the review bundle stays lint-clean.
 //!
 //! Open (`Folder`) and the command palette (`Command`) reuse built-in names; only
-//! the seven glyphs with no faithful built-in live here.
+//! the nine glyphs with no faithful built-in live here.
 
 use damascene_core::prelude::SvgIcon;
 use std::sync::LazyLock;
@@ -79,6 +79,20 @@ pub static FINDINGS: LazyLock<SvgIcon> = LazyLock::new(|| {
     )
 });
 
+/// Pane split with the new leaf on the right.
+pub static SPLIT_RIGHT: LazyLock<SvgIcon> = LazyLock::new(|| {
+    glyph(
+        r#"<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M12 3v18"/><path d="M16 12h4"/><path d="M18 10v4"/>"#,
+    )
+});
+
+/// Pane split with the new leaf below.
+pub static SPLIT_DOWN: LazyLock<SvgIcon> = LazyLock::new(|| {
+    glyph(
+        r#"<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 12h18"/><path d="M10 18h4"/><path d="M12 16v4"/>"#,
+    )
+});
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,7 +103,15 @@ mod tests {
     #[test]
     fn every_toolbar_glyph_parses_nonempty() {
         for g in [
-            &*SAVE, &*UNDO, &*REDO, &*ZOOM_IN, &*ZOOM_OUT, &*FIT, &*FINDINGS,
+            &*SAVE,
+            &*UNDO,
+            &*REDO,
+            &*ZOOM_IN,
+            &*ZOOM_OUT,
+            &*FIT,
+            &*FINDINGS,
+            &*SPLIT_RIGHT,
+            &*SPLIT_DOWN,
         ] {
             // Cloning is the cheap Arc bump the builder does; forcing the
             // LazyLock above already ran `parse_current_color` (which panics on

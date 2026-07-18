@@ -31,7 +31,7 @@ fn mm_pt(x: i64, y: i64) -> Point {
 fn fitted_app() -> (EutecticApp, (f32, f32, f32, f32)) {
     let app = EutecticApp::new(crate::fixtures::edit_board_domain());
     let rect = (100.0, 50.0, 800.0, 600.0);
-    app.pane_px.set([Some(rect), None]);
+    *app.pane_px.borrow_mut() = vec![Some(rect), None];
     let cam = app.pane_build_camera(PaneId::A, rect);
     assert!(cam.zoom > 0.0);
     (app, rect)
@@ -80,7 +80,7 @@ fn zoom_at_cursor_holds_point_through_whole_glide() {
     app.pane_zoom_at(PaneId::A, rect, pos, -50.0); // one tick in
     // Through the glide: step in small increments and re-check the anchor.
     let mut cams = app.pane_cams.borrow_mut();
-    let g = &mut cams[0].glide;
+    let g = &mut cams[0].as_mut().unwrap().glide;
     let mut steps = 0;
     while !g.settled() && steps < 1000 {
         let cam = g.step(1.0 / 240.0);
@@ -178,7 +178,13 @@ fn fit_and_reset_requests_apply_in_build() {
     let t = app.pane_camera_target(PaneId::A);
     assert!((t.zoom - fitted.zoom).abs() / fitted.zoom < 1e-9);
     // The request is consumed exactly once.
-    assert!(app.pane_cams.borrow()[0].request.is_none());
+    assert!(
+        app.pane_cams.borrow()[0]
+            .as_ref()
+            .unwrap()
+            .request
+            .is_none()
+    );
 }
 
 /// Reload never re-fits: the `fitted` flag survives, so a later build leaves
@@ -519,14 +525,14 @@ fn free_hover_resolves_pane_and_picks_with_y_flip() {
         "free hover picked the pad under the cursor"
     );
     // The crosshair tracked (pane-local px).
-    let cross = app.cursor_px.get()[0].expect("crosshair set");
+    let cross = app.cursor_px.borrow()[0].expect("crosshair set");
     assert!((cross.0 - (px.0 - rect.0)).abs() < 1e-3);
 
     // Moving to empty board clears the pick but keeps the crosshair.
     let off = pane_project(&cam, rect, mm_pt(0, 0));
     app.raw_cursor_moved((off.0.max(rect.0 + 1.0), off.1.min(rect.1 + rect.3 - 1.0)));
     assert!(app.domain.selection.borrow().hovered().next().is_none());
-    assert!(app.cursor_px.get()[0].is_some());
+    assert!(app.cursor_px.borrow()[0].is_some());
 
     // Hover again, then leave the pane (chrome): hover clears, crosshair off.
     app.raw_cursor_moved(px);
@@ -536,7 +542,7 @@ fn free_hover_resolves_pane_and_picks_with_y_flip() {
         app.domain.selection.borrow().hovered().next().is_none(),
         "hover clears on leaving the pane"
     );
-    assert_eq!(app.cursor_px.get(), [None, None]);
+    assert_eq!(*app.cursor_px.borrow(), vec![None, None]);
 
     // CursorLeft (window) also clears.
     app.raw_cursor_moved(px);
@@ -579,8 +585,7 @@ fn free_hover_respects_modals_and_strip() {
     let (mut app, rect) = fitted_app();
     let center = (rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0);
     // The strip occupies the pane's top-left corner.
-    app.strip_px
-        .set([Some((rect.0, rect.1, 60.0, 200.0)), None]);
+    *app.strip_px.borrow_mut() = vec![Some((rect.0, rect.1, 60.0, 200.0)), None];
     assert!(
         app.raw_pane_at((rect.0 + 10.0, rect.1 + 10.0)).is_none(),
         "the strip is chrome, not canvas"
@@ -589,7 +594,7 @@ fn free_hover_respects_modals_and_strip() {
     // Modal open: no hover, no crosshair.
     app.set_libraries_open(true);
     app.raw_cursor_moved(center);
-    assert_eq!(app.cursor_px.get(), [None, None]);
+    assert_eq!(*app.cursor_px.borrow(), vec![None, None]);
     app.set_libraries_open(false);
     // Maximizing pane B hides pane A from resolution.
     app.set_maximized(Some(PaneId::B));

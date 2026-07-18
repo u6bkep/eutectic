@@ -14,9 +14,9 @@ use super::*;
 #[test]
 fn reload_good_to_good_bumps_revision_once_and_preserves_state() {
     let mut app = board();
-    // Preserve targets: hide a layer, flip the layout, select the routed trace.
+    // Preserve targets: hide a layer, add a nested split, select the routed trace.
     app.hidden.borrow_mut().insert("layer:F.Cu".to_string());
-    app.layout.set(PaneLayout::Stacked);
+    let extra = app.split_pane(PaneId::B, SplitAxis::Vertical).unwrap();
     let tid = app
         .domain
         .doc
@@ -51,11 +51,7 @@ fn reload_good_to_good_bumps_revision_once_and_preserves_state() {
         app.hidden.borrow().contains("layer:F.Cu"),
         "layer visibility must be preserved across reload"
     );
-    assert_eq!(
-        app.layout.get(),
-        PaneLayout::Stacked,
-        "pane layout must be preserved across reload"
-    );
+    assert_eq!(app.pane_ids(), vec![PaneId::A, PaneId::B, extra]);
     assert_eq!(
         app.domain.selection.borrow().single(),
         Some(&SemanticId::Net(eutectic_core::id::NetId::new("GND"))),
@@ -78,7 +74,12 @@ fn reload_preserves_camera_no_refit() {
     let mut app = board();
     // Settle: the board pane fits (camera snapped, `fitted` set).
     let _ = settle(&mut app);
-    assert!(app.panes.borrow()[pane_index(PaneId::A)].fitted);
+    assert!(
+        app.panes.borrow()[pane_index(PaneId::A)]
+            .as_ref()
+            .unwrap()
+            .fitted
+    );
     // The user reframes: nudge the camera off the fit.
     let fit = app.pane_camera(PaneId::A);
     let framed = crate::render::Camera::new(
@@ -86,6 +87,8 @@ fn reload_preserves_camera_no_refit() {
         fit.zoom * 2.0,
     );
     app.pane_cams.borrow_mut()[pane_index(PaneId::A)]
+        .as_mut()
+        .unwrap()
         .glide
         .snap(framed);
 
@@ -98,7 +101,12 @@ fn reload_preserves_camera_no_refit() {
         framed,
         "a reload must NOT re-fit — the user's framing is sacred"
     );
-    assert!(app.panes.borrow()[pane_index(PaneId::A)].fitted);
+    assert!(
+        app.panes.borrow()[pane_index(PaneId::A)]
+            .as_ref()
+            .unwrap()
+            .fitted
+    );
 }
 
 /// Good → bad reload: the last-good doc STAYS rendered (canvas does not blank), the
