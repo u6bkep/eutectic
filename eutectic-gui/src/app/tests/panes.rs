@@ -162,22 +162,75 @@ fn close_collapses_and_focuses_sibling_while_preserving_survivor_keys() {
     let mut app = EutecticApp::new(schematic_domain());
     let cx = EventCx::new();
     let b_camera = app.pane_camera(PaneId::B);
-    let b_key = PaneId::B.canvas_key();
+    let b_view = app.pane_view(PaneId::B);
     app.on_event(click(&PaneId::A.split_right_key()), &cx);
     let c = app.focused_pane.get();
     assert_ne!(c, PaneId::A);
     assert_eq!(app.pane_camera(PaneId::B), b_camera);
-    assert_eq!(PaneId::B.canvas_key(), b_key);
+    assert_eq!(app.pane_view(PaneId::B), b_view);
 
     app.on_event(click(&c.close_key()), &cx);
     assert_eq!(app.focused_pane.get(), PaneId::A);
     assert_eq!(node_shape(&app.pane_tree.borrow().root), "h(p0,p1)");
     assert!(app.panes.borrow()[pane_index(c)].is_none());
     assert_eq!(app.pane_camera(PaneId::B), b_camera);
+    assert_eq!(app.pane_view(PaneId::B), b_view);
+    // The laid-out UI is the falsifiable form of "survivor keys never moved":
+    // B's canvas is still present under its key, the closed pane's is gone.
+    let rendered = settle(&mut app);
+    assert!(rendered.ui.rect_of_key(PaneId::B.canvas_key()).is_some());
+    assert!(rendered.ui.rect_of_key(c.canvas_key()).is_none());
+    // The settle fitted the visible cameras; re-baseline B for the reuse leg.
+    let b_camera = app.pane_camera(PaneId::B);
 
     app.on_event(click(&PaneId::A.split_down_key()), &cx);
     assert_eq!(app.focused_pane.get(), c, "the freed stable slot is reused");
-    assert_eq!(PaneId::B.canvas_key(), b_key, "survivor key never moved");
+    assert_eq!(app.pane_camera(PaneId::B), b_camera);
+    assert_eq!(app.pane_view(PaneId::B), b_view);
+}
+
+#[test]
+fn sibling_close_leaves_owned_measure_and_route_previews_alive() {
+    let mut app = board();
+    let cx = EventCx::new();
+    let sibling = app.split_pane(PaneId::A, SplitAxis::Horizontal).unwrap();
+    // Arm a measure and a route preview owned by pane A, then close the
+    // SIBLING: ownership guards must leave both untouched (only an owner
+    // close cancels — pinned by closing_owner_cancels_measure_and_route_previews).
+    let mut measure = crate::tool::MeasureState::default();
+    measure.click(Point::mm(1, 1));
+    app.measure.set(measure);
+    app.measure_pane.set(PaneId::A);
+    assert!(app.set_route(&EntityId::new("C1"), "p1", &[], None));
+    app.route_pane.set(Some(PaneId::A));
+
+    app.on_event(click(&sibling.close_key()), &cx);
+    assert_ne!(
+        app.measure.get(),
+        crate::tool::MeasureState::default(),
+        "sibling close must not cancel A's measure"
+    );
+    assert!(
+        app.route.borrow().is_some(),
+        "sibling close must not cancel A's route preview"
+    );
+    assert_eq!(app.route_pane.get(), Some(PaneId::A));
+}
+
+#[test]
+fn strip_click_on_a_dead_slot_is_rejected_not_a_panic() {
+    let mut app = board();
+    let cx = EventCx::new();
+    let before = app.tool_for(ViewKind::Board);
+    // A never-allocated slot tag (only A and B are live at startup)...
+    app.on_event(click("strip:f:route"), &cx);
+    assert_eq!(app.tool_for(ViewKind::Board), before);
+    // ...and a just-closed slot (a stale same-batch click).
+    let c = app.split_pane(PaneId::A, SplitAxis::Horizontal).unwrap();
+    app.on_event(click(&c.close_key()), &cx);
+    app.on_event(click(&c.strip_key(crate::tool::Tool::Route)), &cx);
+    assert_eq!(app.tool_for(ViewKind::Board), before);
+    assert_eq!(app.focused_pane.get(), PaneId::A);
 }
 
 #[test]

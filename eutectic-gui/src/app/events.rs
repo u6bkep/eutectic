@@ -385,7 +385,18 @@ impl App for EutecticApp {
             && let Some(route) = event.route()
             && let Some((pane, tool)) = strip_target_of_key(route)
         {
-            let kind = self.pane_view(pane);
+            // The parser accepts any of the six slot tags; the slot may be
+            // dead by the time the event lands (a stale same-batch click on a
+            // just-closed pane, or a forged key). Reject instead of panicking
+            // in pane_view's live-leaf expect.
+            let Some(kind) = self
+                .panes
+                .borrow()
+                .get(crate::app::pane::pane_index(pane))
+                .and_then(|slot| slot.as_ref().map(|state| state.view))
+            else {
+                return;
+            };
             if kind.offers_tool(tool) {
                 self.set_tool(kind, tool);
                 self.focused_pane.set(pane);
